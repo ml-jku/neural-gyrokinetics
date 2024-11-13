@@ -1,0 +1,13 @@
+batch_size: 14
+n_epochs: 200
+bundle_seq_length: 1
+target_seq_length: 8
+num_workers: 8
+sampler: "trajectory"
+learning_rate: 5e-4
+weight_decay: 1e-8
+predict_delta: False
+pushforward:
+  epochs: [-1, 50, 100, 150]
+  unrolls: [1, 2, 4, 8]
+  probs: [10, 5, 3, 2]

@@ -1,0 +1,5 @@
+name: "fno"
+input_seq_length: 1
+latent_dim: 64
+modes1: 12
+modes2: 12

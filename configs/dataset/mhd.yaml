@@ -1,0 +1,7 @@
+active_keys: ["T", "omega", "Phi", "rho"]
+path: /local00/bioinf/fpaische/MHD_electrostatic/
+normalize: True
+num_normalization_workers: 8
+augment:
+  noise: False
+  noise_std: 1e-5
