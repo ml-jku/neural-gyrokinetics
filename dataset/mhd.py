@@ -8,6 +8,7 @@ import einops
 import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
+from torch.utils.data._utils.collate import default_collate
 from tqdm import tqdm
 
 from concurrent.futures import ProcessPoolExecutor
@@ -264,11 +265,12 @@ class MHDDataset(Dataset):
         )
 
     def collate(self,
-                sample: Dict,
+                samples: List[Dict],
                 augmentations: Optional[List[Callable]] = None,
                 device: torch.DeviceObjType = "cuda",
                 ) -> Annotated[Tuple[torch.Tensor], 4]:
-        x, grid = sample["x"], sample["grid"]
+        batch = default_collate(samples)
+        x, grid = batch["x"], batch["grid"]
 
         x = torch.cat([x[k].unsqueeze(1) for k in x], dim=1)
         if x.ndim == 5:
@@ -285,23 +287,23 @@ class MHDDataset(Dataset):
         # N = grid.shape[1]
         # grid = grid * N
 
-        y = sample.get("y", None)
+        y = batch.get("y", None)
         if y is not None:
             y = torch.cat([y[k].unsqueeze(1) for k in y], dim=1)
             y = y.permute(2, 0, 1, 3, 4)  # (t, b, c, x, y)
 
-        ts = sample.get("ts", None)
+        ts = batch.get("ts", None)
         if ts is not None:
             if not isinstance(ts, torch.Tensor):
                 ts = torch.tensor([ts])
-            ts = ts.to(device)
+            # ts = ts.to(device)
 
         if augmentations is not None:
             for aug_fn in augmentations:
                 x = aug_fn(x)
-            x = x.to(device)
+            # x = x.to(device)
 
-        return x.to(device), grid.to(device), y, ts
+        return x, grid, y, ts
 
 
 class TrajectoryPriorityRandomSampler(Sampler[int]):

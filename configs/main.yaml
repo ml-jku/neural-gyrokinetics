@@ -1,18 +1,18 @@
 defaults:
   - _self_
-  - dataset: random
-  - model: swin5d
-  - logging: wandb
+  - dataset: mhd
+  - model: fno
+  - logging: no_logging
   - training: default
   - validation: default
-  - override hydra/launcher: litai
+  # - override hydra/launcher: litai
 
 experiment_id: test
 seed: 0
 output_path: null
 use_ddp: false
 use_amp: true
-train: true
+mode: "train"
 eval: true
 device: "cuda"
 ckpt_path: null

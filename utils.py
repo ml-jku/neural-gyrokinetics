@@ -3,6 +3,7 @@ import glob
 import zipfile
 import os
 import random
+import importlib
 
 import torch
 from torch import nn
@@ -18,7 +19,7 @@ def wandb_available():
         return False
     return importlib.util.find_spec("wandb") is not None
 
-assert wandb_available, "wandb is not installed but is selected as default for logging, please install via pip install wandb"
+assert wandb_available(), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
 import wandb
 
 class WandbManager:
@@ -64,6 +65,8 @@ def setup_logging(config):
         writer = WandbManager()
         merged_config = OmegaConf.to_container(config)
         writer.setup(merged_config)
+    elif config.logging.writer is None:
+        return None
     else:
         raise NotImplementedError("Specified writer not recognized!")
     return writer
@@ -76,7 +79,10 @@ def save_model_and_config(
     val_loss: float,
     loss_val_min: float,
 ) -> None:
-    ckp_dir = f"{cfg.logging.checkpoint_dir}/{cfg.logging.run_name}"
+    if cfg.ckpt_path is None:
+        ckp_dir = f"{cfg.output_path}"
+    else:
+        ckp_dir = f"{cfg.ckpt_path}"
 
     # create directory if it s not there
     os.makedirs(ckp_dir, exist_ok=True)

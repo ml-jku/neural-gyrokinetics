@@ -25,7 +25,7 @@ from eval import get_rollout, validation_metrics, ssim_tensor
 from utils import load_model_and_config, save_model_and_config
 
 
-def runner(cfg):
+def runner(cfg, writer):
     (_, valset), (trainloader, valloader), augmentations = get_data(cfg)
 
     model = get_model(cfg)
@@ -46,17 +46,6 @@ def runner(cfg):
     model = model.to(device)
 
     if cfg.mode == "train":
-        wandb_run = None
-        if cfg.logging.wandb:
-            wandb_config = OmegaConf.to_container(cfg)
-            wandb_run = wandb.init(
-                project=cfg.logging.wandb_project,
-                entity=cfg.logging.wandb_entity,
-                name=cfg.logging.run_name,
-                config=wandb_config,
-                # save_code=True,
-            )
-
         optimizer = torch.optim.Adam(
             model.parameters(),
             lr=cfg.training.learning_rate,
@@ -90,6 +79,7 @@ def runner(cfg):
                 trainloader = tqdm(trainloader, "Training")
             for sample in trainloader:
                 x, grid, y, ts = sample
+                x, grid, y, ts = x.to(device), grid.to(device), y.to(device), ts.to(device)
 
                 optimizer.zero_grad()
 
@@ -122,6 +112,8 @@ def runner(cfg):
             with torch.no_grad():
                 for idx, sample in enumerate(valloader):
                     x, grid, y, ts = sample
+                    x, grid, y, ts = x.to(device), grid.to(device), y.to(device), ts.to(device)
+
 
                     # get the rolled out validation trajectories
                     x_rollout = get_rollout(
@@ -181,17 +173,17 @@ def runner(cfg):
 
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
-            if wandb_run:
+            if writer:
                 # log epoch details
-                wandb_run.log(epoch_logs, commit=False)
+                writer.log(epoch_logs, commit=False)
                 # log validation trajectory images
                 images = [wandb.Image(graphic) for graphic in traj_plots]
-                wandb_run.log(
+                writer.log(
                     {k: images[idx] for idx, k in enumerate(valset.active_keys)},
                     commit=False,
                 )
                 # log metrics graphs over full validation rollouts
-                wandb_run.log(
+                writer.log(
                     {
                         key: wandb.plot.line(table, "t", key, title=f"{key}test")
                         for key, table in metric_tables.items()
@@ -199,7 +191,7 @@ def runner(cfg):
                     commit=False,
                 )
                 # log power spectra
-                wandb_run.log(
+                writer.log(
                     {
                         "power spectra": wandb.plot.line_series(
                             xs=frequencies,
@@ -216,8 +208,8 @@ def runner(cfg):
                 f"Epoch: {epoch_str}, "
                 f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
             )
-        if wandb_run:
-            wandb_run.finish()
+        if writer:
+            writer.finish()
 
     if cfg.mode == "rollout":
         os.makedirs(cfg.logging.output_dir, exist_ok=True)
