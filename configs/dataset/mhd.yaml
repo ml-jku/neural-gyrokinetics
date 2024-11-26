@@ -1,5 +1,5 @@
 active_keys: ["T", "omega", "Phi", "rho"]
-path: /local00/bioinf/fpaische/MHD_electrostatic/
+path: /system/user/publicdata/ukaea/MHD_electrostatic
 normalize: True
 num_normalization_workers: 8
 augment:

@@ -79,7 +79,7 @@ def get_data(cfg):
         sampler=trainsampler,
         num_workers=cfg.training.num_workers,
         pin_memory=True,
-        collate_fn=partial(trainset.collate, (cfg.device, augmentations)),
+        collate_fn=partial(trainset.collate, device=cfg.device, augmentations=augmentations),
     )
     valloader = DataLoader(
         valset,
@@ -87,7 +87,7 @@ def get_data(cfg):
         sampler=valsampler,
         num_workers=cfg.training.num_workers,
         pin_memory=True,
-        collate_fn=partial(valset.collate, (cfg.device)),
+        collate_fn=partial(valset.collate, device=cfg.device),
     )
 
     return (trainset, valset), (trainloader, valloader), augmentations

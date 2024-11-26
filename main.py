@@ -37,8 +37,8 @@ def main(config: DictConfig):
     compress_src(config.output_path)
 
     try:
-        setup_logging(config)
-        runner(config)
+        logging_writer = setup_logging(config)
+        runner(config, logging_writer)
     except BaseException:
         traceback.print_exc(file=sys.stderr)
         raise
