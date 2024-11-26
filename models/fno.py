@@ -202,8 +202,8 @@ class SpectralConv2d_fast(nn.Module):
         out_ft[:, :, : self.modes1, : self.modes2] = self.compl_mul2d(
             x_ft[:, :, : self.modes1, : self.modes2], self.weights1
         )
-        out_ft[:, :, -self.modes1:, : self.modes2] = self.compl_mul2d(
-            x_ft[:, :, -self.modes1:, : self.modes2], self.weights2
+        out_ft[:, :, -self.modes1 :, : self.modes2] = self.compl_mul2d(
+            x_ft[:, :, -self.modes1 :, : self.modes2], self.weights2
         )
 
         # Return to physical space
@@ -213,13 +213,13 @@ class SpectralConv2d_fast(nn.Module):
 
 class FNO2d(nn.Module):
     def __init__(
-            self,
-            num_channels,
-            modes1=12,
-            modes2=12,
-            width=20,
-            initial_step=10,
-            num_outs: int = 1,
+        self,
+        num_channels,
+        modes1=12,
+        modes2=12,
+        width=20,
+        initial_step=10,
+        num_outs: int = 1,
     ):
         super(FNO2d, self).__init__()
 
@@ -386,14 +386,14 @@ class SpectralConv3d(nn.Module):
         out_ft[:, :, : self.modes1, : self.modes2, : self.modes3] = self.compl_mul3d(
             x_ft[:, :, : self.modes1, : self.modes2, : self.modes3], self.weights1
         )
-        out_ft[:, :, -self.modes1:, : self.modes2, : self.modes3] = self.compl_mul3d(
-            x_ft[:, :, -self.modes1:, : self.modes2, : self.modes3], self.weights2
+        out_ft[:, :, -self.modes1 :, : self.modes2, : self.modes3] = self.compl_mul3d(
+            x_ft[:, :, -self.modes1 :, : self.modes2, : self.modes3], self.weights2
         )
-        out_ft[:, :, : self.modes1, -self.modes2:, : self.modes3] = self.compl_mul3d(
-            x_ft[:, :, : self.modes1, -self.modes2:, : self.modes3], self.weights3
+        out_ft[:, :, : self.modes1, -self.modes2 :, : self.modes3] = self.compl_mul3d(
+            x_ft[:, :, : self.modes1, -self.modes2 :, : self.modes3], self.weights3
         )
-        out_ft[:, :, -self.modes1:, -self.modes2:, : self.modes3] = self.compl_mul3d(
-            x_ft[:, :, -self.modes1:, -self.modes2:, : self.modes3], self.weights4
+        out_ft[:, :, -self.modes1 :, -self.modes2 :, : self.modes3] = self.compl_mul3d(
+            x_ft[:, :, -self.modes1 :, -self.modes2 :, : self.modes3], self.weights4
         )
 
         # Return to physical space
@@ -403,7 +403,7 @@ class SpectralConv3d(nn.Module):
 
 class FNO3d(nn.Module):
     def __init__(
-            self, num_channels, modes1=8, modes2=8, modes3=8, width=20, initial_step=10
+        self, num_channels, modes1=8, modes2=8, modes3=8, width=20, initial_step=10
     ):
         super(FNO3d, self).__init__()
 

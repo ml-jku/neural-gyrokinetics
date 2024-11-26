@@ -4,7 +4,6 @@ from datetime import datetime
 import numpy as np
 import torch
 from tqdm import tqdm
-from omegaconf import OmegaConf
 import wandb
 
 from dataset import get_data
@@ -79,7 +78,12 @@ def runner(cfg, writer):
                 trainloader = tqdm(trainloader, "Training")
             for sample in trainloader:
                 x, grid, y, ts = sample
-                x, grid, y, ts = x.to(device), grid.to(device), y.to(device), ts.to(device)
+                x, grid, y, ts = (
+                    x.to(device),
+                    grid.to(device),
+                    y.to(device),
+                    ts.to(device),
+                )
 
                 optimizer.zero_grad()
 
@@ -112,8 +116,12 @@ def runner(cfg, writer):
             with torch.no_grad():
                 for idx, sample in enumerate(valloader):
                     x, grid, y, ts = sample
-                    x, grid, y, ts = x.to(device), grid.to(device), y.to(device), ts.to(device)
-
+                    x, grid, y, ts = (
+                        x.to(device),
+                        grid.to(device),
+                        y.to(device),
+                        ts.to(device),
+                    )
 
                     # get the rolled out validation trajectories
                     x_rollout = get_rollout(
@@ -121,7 +129,9 @@ def runner(cfg, writer):
                         n_steps=y.shape[0],
                         bundle_steps=cfg.training.bundle_seq_length,
                         predict_delta=cfg.training.predict_delta,
-                    )(model, x, grid, ts0=ts)  # (n_steps, bs, d, h, w)
+                    )(
+                        model, x, grid, ts0=ts
+                    )  # (n_steps, bs, d, h, w)
 
                     y = y.cpu()
 

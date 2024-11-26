@@ -4,6 +4,7 @@ import enum
 
 import einops
 
+
 def damerau_levenshtein_distance(s1: str, s2: str) -> int:
     """
     Calculates the Damerau–Levenshtein distance between two strings for spelling correction.
@@ -25,12 +26,15 @@ def damerau_levenshtein_distance(s1: str, s2: str) -> int:
         for j, s2j in enumerate(s2):
             cost = 0 if s1i == s2j else 1
             d[(i, j)] = min(
-                d[(i - 1, j)] + 1, d[(i, j - 1)] + 1, d[(i - 1, j - 1)] + cost  # deletion  # insertion  # substitution
+                d[(i - 1, j)] + 1,
+                d[(i, j - 1)] + 1,
+                d[(i - 1, j - 1)] + cost,  # deletion  # insertion  # substitution
             )
             if i and j and s1i == s2[j - 1] and s1[i - 1] == s2j:
                 d[(i, j)] = min(d[(i, j)], d[i - 2, j - 2] + cost)  # transposition
 
     return d[string_1_length - 1, string_2_length - 1]
+
 
 def look_up_option(
     opt_str: Hashable,
@@ -104,7 +108,9 @@ def look_up_option(
         if edit_dist <= 3:
             edit_dists[key] = edit_dist
 
-    supported_msg = f"Available options are {set_to_check}.\n" if print_all_options else ""
+    supported_msg = (
+        f"Available options are {set_to_check}.\n" if print_all_options else ""
+    )
     if edit_dists:
         guess_at_spelling = min(edit_dists, key=edit_dists.get)  # type: ignore
         raise ValueError(
@@ -113,6 +119,7 @@ def look_up_option(
             + supported_msg
         )
     raise ValueError(f"Unsupported option '{opt_str}', " + supported_msg)
+
 
 def roll_forward_once(
     model, x, grid, ts, problem_dim: int, bundle_steps: int, predict_delta: bool
@@ -135,8 +142,10 @@ def roll_forward_once(
 
     return x_p, x
 
+
 def unbind_time(x: torch.Tensor, d: int) -> torch.Tensor:
     return einops.rearrange(x, "bs (t d) h w -> bs t d h w", d=d)
+
 
 def bind_time(x: torch.Tensor) -> torch.Tensor:
     return einops.rearrange(x, "bs t d h w -> bs (t d) h w")

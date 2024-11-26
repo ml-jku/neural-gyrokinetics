@@ -68,7 +68,8 @@ def get_data(cfg):
     if cfg.dataset.augment.noise is True:
         augmentations.append(
             noise_transform(
-                std=cfg.dataset.augment.noise_std, window_size=cfg.model.input_seq_length
+                std=cfg.dataset.augment.noise_std,
+                window_size=cfg.model.input_seq_length,
             )
         )
 
@@ -79,7 +80,9 @@ def get_data(cfg):
         sampler=trainsampler,
         num_workers=cfg.training.num_workers,
         pin_memory=True,
-        collate_fn=partial(trainset.collate, device=cfg.device, augmentations=augmentations),
+        collate_fn=partial(
+            trainset.collate, device=cfg.device, augmentations=augmentations
+        ),
     )
     valloader = DataLoader(
         valset,

@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 
 from .losses import autoencoder_loss
 
+
 def pretrain_encoder_decoder(
     model: nn.Module,
     pretrain_epochs: int,
