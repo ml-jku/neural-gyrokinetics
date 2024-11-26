@@ -56,6 +56,24 @@ class LayerNorm(nn.Module):
             nn.init.zeros_(self.bias)
 
 
+def pad_to_shape(
+    x: torch.Tensor, shape: Sequence[int]
+) -> Tuple[torch.Tensor, Sequence[int]]:
+    pad_axes = []
+    if any(x1 != x2 for x1, x2 in zip(x.shape[1:-1], shape)):
+        for i, s in enumerate(shape):
+            assert s >= x.shape[1 + i]
+            pad_axes.append(0)
+            pad_axes.append(s - x.shape[1 + i])  # +1 for batch
+
+        # last tuple first in
+        pad_axes = pad_axes[::-1]
+        if any([p > 0 for p in pad_axes]):
+            x = F.pad(x, (0, 0, *pad_axes))
+
+    return x, pad_axes
+
+
 def pad_to_blocks(
     x: Union[Tuple[int], torch.Tensor], blocks: Sequence[int]
 ) -> Tuple[torch.Tensor, Sequence[int]]:
@@ -214,7 +232,7 @@ class PositionalEmbedding(nn.Module):
         return x
 
 
-class PatchMergingV2(nn.Module):
+class PatchMerging(nn.Module):
     """
     Patch merging layer.
     """
@@ -237,13 +255,13 @@ class PatchMergingV2(nn.Module):
         self.space = space
         self.dim = dim
 
-        self.reduction = nn.Linear(2**space * dim, c_multiplier * dim, bias=False)
         self.norm = norm_layer(2**space * dim)
+        self.reduction = nn.Linear(2**space * dim, c_multiplier * dim, bias=False)
 
-    def forward(self, x):
-        assert all(
-            d % 2 == 0 for d in x.shape[1:-1]
-        ), "TODO: patch count must be even for now"
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # must pad to even shape
+        # TODO for now pad to multiple of 2. can do better?
+        x, _ = pad_to_blocks(x, self.space * (2,))
         x = torch.cat(
             [
                 x[:, *[slice(i, None, 2) for i in idxs], :]
@@ -264,6 +282,7 @@ class PatchUnmerging(nn.Module):
         dim: int,
         grid_size: Sequence[int],
         expand_by: Union[Sequence[int], int],
+        target_grid_size: Optional[Sequence[int]] = None,
         norm_layer: Type[LayerNorm] = LayerNorm,
         c_multiplier: int = 2,
         out_channels: Optional[int] = None,
@@ -279,6 +298,11 @@ class PatchUnmerging(nn.Module):
         self.expand_by = expand_by
         self.flatten = flatten
         self.use_conv = use_conv
+        self.target_grid_size = (
+            target_grid_size
+            if target_grid_size
+            else [g * e for g, e in zip(grid_size, expand_by)]
+        )
 
         # NOTE out_channels overrides c_multiplier
         dim_out = dim // c_multiplier if out_channels is None else out_channels
@@ -314,6 +338,11 @@ class PatchUnmerging(nn.Module):
             x = rearrange(x, "b c ... -> b ... c")
         else:
             x = self.up_proj(x)
+
+        # must unpad beause of patch merging
+        # TODO for now. can do better?
+        _, pad_axes = pad_to_blocks(self.target_grid_size, self.space * (2,))
+        x = unpad(x, pad_axes, self.target_grid_size)
 
         if self.flatten:
             x = rearrange(x, "b ... c -> b (...) c")

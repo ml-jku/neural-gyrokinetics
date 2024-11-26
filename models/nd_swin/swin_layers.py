@@ -14,8 +14,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from einops import rearrange
+from math import ceil
 
-from models.nd_swin.utils import LayerNorm, DropPath
+from models.nd_swin.utils import LayerNorm, DropPath, unpad
 
 
 def window_partition(x, window_size):
@@ -323,7 +324,6 @@ class SwinTransformerBlock(nn.Module):
         super().__init__()
         self.space = space
         self.dim = dim
-        self.resolution = resolution
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.use_checkpoint = use_checkpoint
@@ -332,7 +332,7 @@ class SwinTransformerBlock(nn.Module):
             resolution, window_size, shift_size
         )
 
-        assert len(self.window_size) == len(self.shift_size) == len(resolution) == space
+        assert len(self.window_size) == len(self.shift_size) == space
 
         self.norm1 = norm_layer(dim)
         self.attn = WindowAttention(
@@ -358,6 +358,7 @@ class SwinTransformerBlock(nn.Module):
         )
 
     def forward_part1(self, x, mask_matrix):
+        resolution = x.shape[1:-1]
         # swinv1 attention norm
         x = self.norm1(x)
 
@@ -397,9 +398,7 @@ class SwinTransformerBlock(nn.Module):
         else:
             x = shifted_x
 
-        if any([p > 0 for p in pad_axes]):
-            # unpad to original resolution
-            x = x[:, *[slice(0, r) for r in self.resolution], :].contiguous()
+        x = unpad(x, pad_axes, resolution)
 
         # NOTE swinv2 attention norm
         # x = self.norm1(x)
@@ -518,9 +517,7 @@ class SwinLayer(nn.Module):
             window_size, shift_size = get_window_size(
                 resolution, self.window_size, self.shift_size
             )
-            mask_dims = [
-                int(np.ceil(resolution[i] / w)) * w for i, w in enumerate(window_size)
-            ]
+            mask_dims = [ceil(resolution[i] / w) * w for i, w in enumerate(window_size)]
             attn_mask = compute_mask(mask_dims, window_size, shift_size)
             self.register_buffer("attn_mask", attn_mask)
         else:

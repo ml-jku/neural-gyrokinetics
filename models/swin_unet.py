@@ -5,12 +5,12 @@ from einops import rearrange
 import torch
 from torch import nn
 from functools import partial
+from math import ceil
 
-
-from swin_unet.utils import (
+from models.nd_swin.utils import (
     PositionalEmbedding,
     PatchEmbed,
-    PatchMergingV2,
+    PatchMerging,
     PatchUnmerging,
 )
 from models.nd_swin.swin_layers import SwinLayer, SwinLayerModes
@@ -55,7 +55,7 @@ class SwinBlockDown(nn.Module):
             drop_path=drop_path,
             mlp_ratio=hidden_mlp_ratio,
             use_checkpoint=use_checkpoint,
-            resample=PatchMergingV2 if downsample else None,
+            resample=PatchMerging if downsample else None,
             c_multiplier=c_multiplier,
             mode=SwinLayerModes.DOWNSAMPLE if downsample else SwinLayerModes.SEQUENCE,
         )
@@ -83,7 +83,8 @@ class SwinBlockUp(nn.Module):
         window_size: Sequence[int],
         num_heads: int,
         depth: int,
-        upsample: Sequence[bool],
+        target_grid_size: Optional[Sequence[int]] = None,
+        upsample: bool = False,
         abs_pe: bool = False,
         drop_path: float = 0.1,
         hidden_mlp_ratio: float = 2.0,
@@ -93,7 +94,9 @@ class SwinBlockUp(nn.Module):
     ):
         super().__init__()
 
+        self.space = space
         self.abs_pe = abs_pe
+        self.upsample = upsample
 
         if abs_pe:
             self.pos_embed = PositionalEmbedding(
@@ -101,7 +104,12 @@ class SwinBlockUp(nn.Module):
             )
 
         if upsample:
-            upsample_fn = partial(PatchUnmerging, expand_by=2, grid_size=grid_size)
+            upsample_fn = partial(
+                PatchUnmerging,
+                expand_by=2,
+                grid_size=grid_size,
+                target_grid_size=target_grid_size,
+            )
             mode = SwinLayerModes.UPSAMPLE
             dim_next = dim // c_multiplier  # latent mapped down in upsample
         else:
@@ -136,9 +144,11 @@ class SwinBlockUp(nn.Module):
         Returns:
             Tensor (B, D, H, ..., C)
         """
+
         assert (
             all(x_s == s_s for x_s, s_s in zip(x.shape, s.shape)) and x.ndim == s.ndim
         )
+
         x = torch.cat([x, s], -1)
 
         if self.abs_pe:
@@ -212,7 +222,7 @@ class SwinUnet(nn.Module):
         grid_size = self.patch_embed.grid_size
         acc_multi = [1] + list(np.cumprod(c_multiplier))  # values are pre-downsample
         down_dims = [dim * m for m in acc_multi]
-        grid_sizes = [[g // m for g in grid_size] for m in acc_multi]
+        grid_sizes = [[ceil(g / m) for g in grid_size] for m in acc_multi]
 
         down_blocks = []
         for i in range(num_layers):
@@ -252,8 +262,9 @@ class SwinUnet(nn.Module):
         upsample = downsample[::-1]
         up_dims = down_dims[::-1]
         up_grid_sizes = grid_sizes[::-1]
+        # TODO better place to put patch merging padding
+        # up_grid_sizes = [pad_to_blocks(g, space * (2,))[0] for g in up_grid_sizes]
 
-        # TODO pass these as separate?
         up_depth = up_depth if up_depth is not None else depth[::-1]
         up_num_heads = up_num_heads if up_num_heads is not None else num_heads[::-1]
 
@@ -264,6 +275,7 @@ class SwinUnet(nn.Module):
                     space,
                     up_dims[i],
                     grid_size=up_grid_sizes[i],
+                    target_grid_size=up_grid_sizes[i + 1],
                     window_size=window_size,
                     num_heads=up_num_heads[i],
                     depth=up_depth[i],
@@ -278,7 +290,7 @@ class SwinUnet(nn.Module):
         self.final_unpatch = PatchUnmerging(
             space,
             up_dims[-1],
-            up_grid_sizes[-1],
+            grid_size=up_grid_sizes[-1],
             expand_by=patch_size,
             out_channels=out_channels,
             flatten=False,
@@ -294,7 +306,8 @@ class SwinUnet(nn.Module):
         x = self.patch_embed(x)
 
         # down path
-        feature_maps = []
+        feature_maps = [x]
+
         for blk in self.down_blocks:
             x = blk(x)
             feature_maps.append(x)
