@@ -3,6 +3,7 @@ import torch
 
 SUPPORTED_DROPOUT_MODE = {"vit", "swin", "vista3d"}
 
+
 def get_act_layer(name: tuple | str):
     """
     Create an activation layer instance.
@@ -25,6 +26,8 @@ def get_act_layer(name: tuple | str):
     try:
         act_type = getattr(torch.nn, act_name)
     except AttributeError:
-        raise AttributeError(f"Activation function {name} does not exist, activation name must be called as class "
-                             f"implemented in pytorch!")
+        raise AttributeError(
+            f"Activation function {name} does not exist, activation name must be called as class "
+            f"implemented in pytorch!"
+        )
     return act_type(**act_args)

@@ -1,0 +1,9 @@
+h5py
+jupyter
+kappamodules
+matplotlib
+numpy
+omegaconf
+torch
+einops
+wandb

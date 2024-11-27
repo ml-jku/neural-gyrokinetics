@@ -10,6 +10,7 @@ from torch import nn
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
+
 def wandb_available():
     # any value of WANDB_DISABLED disables wandb
     if os.getenv("WANDB_DISABLED", "").upper():
@@ -19,8 +20,12 @@ def wandb_available():
         return False
     return importlib.util.find_spec("wandb") is not None
 
-assert wandb_available(), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
+
+assert (
+    wandb_available()
+), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
 import wandb
+
 
 class WandbManager:
     def __init__(self) -> None:
@@ -29,18 +34,18 @@ class WandbManager:
     def setup(self, args, **kwargs):
         if not isinstance(args, dict):
             args = args.__dict__
-        project_name = args['logging'].get("project", "debug")
+        project_name = args["logging"].get("project", "debug")
 
         combined_dict = {**args, **kwargs}
         wandb.init(
             # set the wandb project where this run will be logged
             project=project_name,
-            entity=args['logging'].get("entity", None),
+            entity=args["logging"].get("entity", None),
             # track hyperparameters and run metadata
             config=combined_dict,
-            id=args['logging'].get('run_id', None),
-            resume='allow' if args['logging'].get('run_id', None) else False,
-            reinit=False
+            id=args["logging"].get("run_id", None),
+            resume="allow" if args["logging"].get("run_id", None) else False,
+            reinit=False,
         )
         self._initialized = True
 
@@ -55,13 +60,15 @@ class WandbManager:
         for k, v in outputs.items():
             self._wandb.run.summary[k] = v.item()
 
+
 def setup_logging(config):
     if config.logging.writer == "tensorboard":
         from torch.utils.tensorboard import SummaryWriter
+
         writer = SummaryWriter(log_dir=f"./logs/tiger_exp{config['exp_id']}")
     elif config.logging.writer == "wandb":
         if config.logging.mode == "offline":
-            os.environ['WANDB_MODE'] = "offline"
+            os.environ["WANDB_MODE"] = "offline"
         writer = WandbManager()
         merged_config = OmegaConf.to_container(config)
         writer.setup(merged_config)
@@ -70,6 +77,7 @@ def setup_logging(config):
     else:
         raise NotImplementedError("Specified writer not recognized!")
     return writer
+
 
 def save_model_and_config(
     model: nn.Module,
@@ -114,6 +122,7 @@ def save_model_and_config(
 
     return loss_val_min
 
+
 def load_model_and_config(
     ckp_path: str, model: nn.Module, device: torch.DeviceObjType
 ) -> Tuple[nn.Module, Dict, int]:
@@ -131,14 +140,21 @@ def load_model_and_config(
 
     return model, optimizer_state_dict, resume_epoch
 
+
 def compress_src(path):
-    files = glob.glob('**', recursive=True)
+    files = glob.glob("**", recursive=True)
     # Read all directory, subdirectories and list files
-    zf = zipfile.ZipFile(os.path.join(path, "src.zip"), "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9)
+    zf = zipfile.ZipFile(
+        os.path.join(path, "src.zip"),
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    )
     for name in files:
-        if name.endswith('.py') or name.endswith('.yaml'):
+        if name.endswith(".py") or name.endswith(".yaml"):
             zf.write(name, arcname=name)
     zf.close()
+
 
 def set_seed(seed):
     torch.use_deterministic_algorithms(True)

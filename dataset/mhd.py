@@ -264,11 +264,12 @@ class MHDDataset(Dataset):
             self, trajectory_ids, self.n_samples_per_file
         )
 
-    def collate(self,
-                samples: List[Dict],
-                augmentations: Optional[List[Callable]] = None,
-                device: torch.DeviceObjType = "cuda",
-                ) -> Annotated[Tuple[torch.Tensor], 4]:
+    def collate(
+        self,
+        samples: List[Dict],
+        augmentations: Optional[List[Callable]] = None,
+        device: torch.DeviceObjType = "cuda",
+    ) -> Annotated[Tuple[torch.Tensor], 4]:
         batch = default_collate(samples)
         x, grid = batch["x"], batch["grid"]
 
@@ -333,6 +334,7 @@ class TrajectoryPriorityRandomSampler(Sampler[int]):
             for t_id in self.ts_ids:
                 idx = chunk_id * self.n_samples_per_traj + t_id
                 yield idx
+
 
 def denormalize(trajectory, bounds):
     # Denormalize the trajectory from [-1, 1] back to original scale

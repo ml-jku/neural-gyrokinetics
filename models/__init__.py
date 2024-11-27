@@ -8,11 +8,12 @@ def get_model(cfg):
 
     if cfg.model.name == "unet":
         from models import unet
+
         model = unet.UNet(
             n_fields=problem_dim,
             input_timesteps=window_size,
             output_timesteps=bundle_dim,
-            hidden_dim=latent_dim
+            hidden_dim=latent_dim,
         )
 
     if cfg.model.name == "fno":
