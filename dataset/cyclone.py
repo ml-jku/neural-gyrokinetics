@@ -108,7 +108,7 @@ class CycloneDataset(Dataset):
     def _normalize_sample(self, x, y):
         # reshape min_ and max_ to be broadcastable
         min_ = self.bounds[0][:, None, None, None, None, None]
-        max_ = self.bounds[0][:, None, None, None, None, None]
+        max_ = self.bounds[1][:, None, None, None, None, None]
 
         # eps for numerical stability
         eps = 1e-10
