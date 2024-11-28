@@ -1,3 +1,4 @@
+name: mhd
 active_keys: ["T", "omega", "Phi", "rho"]
 path: /system/user/publicdata/ukaea/MHD_electrostatic
 normalize: True
