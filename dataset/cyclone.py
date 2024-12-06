@@ -18,7 +18,7 @@ class CycloneDataset(Dataset):
         random_seed: int = 42,
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
-        in_memory: bool = False
+        in_memory: bool = False,
     ):
         assert split in ["train", "val", "test"]
         self.dtype = torch.float32 if dtype is None else dtype
@@ -38,7 +38,9 @@ class CycloneDataset(Dataset):
         val_idx = random.sample(list(perm), max(1, int(val_ratio * len(self.files))))
         perm = perm - set(val_idx)
         if test_ratio != 0:
-            test_idx = random.sample(list(perm), max(1, int(test_ratio * len(self.files))))
+            test_idx = random.sample(
+                list(perm), max(1, int(test_ratio * len(self.files)))
+            )
             perm = perm - set(test_idx)
         train_idx = list(perm)
 
@@ -67,7 +69,9 @@ class CycloneDataset(Dataset):
                 file_dict = {}
                 with h5py.File(file, "r") as f:
                     # read the 'metadata/timesteps' dataset
-                    timesteps = torch.from_numpy(f["metadata/timesteps"][:]).to(dtype=self.dtype)
+                    timesteps = torch.from_numpy(f["metadata/timesteps"][:]).to(
+                        dtype=self.dtype
+                    )
                     file_dict["metadata/timesteps"] = timesteps
                     # read in all the data points
                     for t_index in range(len(file_dict["metadata/timesteps"])):
@@ -75,7 +79,6 @@ class CycloneDataset(Dataset):
                         x = torch.from_numpy(f[f"data/{name}"][:]).to(dtype=self.dtype)
                         file_dict[f"data/{name}"] = x
                 self.data[file_idx] = file_dict
-
 
     def __getitem__(self, index):
         # calculate file index and remainder for time index in file
@@ -156,6 +159,6 @@ class CycloneDataset(Dataset):
         return self.length
 
 
-if __name__ =="__main__":
+if __name__ == "__main__":
     data = CycloneDataset(in_memory=True, test_ratio=0)
     print(len(data))
