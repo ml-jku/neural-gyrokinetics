@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - dataset: mhd
+  - dataset: cyclone
   - model: fno
   - logging: no_logging
   - training: default

@@ -1,0 +1,3 @@
+name: cyclone
+path: /system/user/publicdata/gyrokinetics_preprocessed
+normalize: True
