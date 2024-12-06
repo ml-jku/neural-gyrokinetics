@@ -35,23 +35,27 @@ def runner(cfg, writer):
     device = cfg.device
     active_keys = valset.active_keys
 
-    optimizer_state_dict = None
+    opt_state_dict = None
     if cfg.ckpt_path is not None:
         # TODO move config loading to here (now in main.py)
-        model, optimizer_state_dict, _ = load_model_and_config(
+        model, opt_state_dict, _ = load_model_and_config(
             cfg.ckpt_path, model=model, device=device
         )
 
     model = model.to(device)
 
     if cfg.mode == "train":
-        optimizer = torch.optim.Adam(
+        n_epochs = cfg.training.n_epochs
+        
+        # optimizer config
+        opt = torch.optim.Adam(
             model.parameters(),
             lr=cfg.training.learning_rate,
             weight_decay=cfg.training.weight_decay,
         )
-        if optimizer_state_dict is not None:
-            optimizer.load_state_dict(optimizer_state_dict)
+        if opt_state_dict is not None:
+            opt.load_state_dict(opt_state_dict)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs, 1e-6)
 
         # configure loss
         loss_fn = get_base_train_loss(
@@ -68,11 +72,10 @@ def runner(cfg, writer):
                 bundle_steps=cfg.training.bundle_seq_length,
             )
 
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.8)
         loss_val_min = torch.inf
         use_tqdm = cfg.logging.tqdm
 
-        for epoch in range(cfg.training.n_epochs):
+        for epoch in range(n_epochs):
             train_mse = 0
             if use_tqdm:
                 trainloader = tqdm(trainloader, "Training")
@@ -85,14 +88,14 @@ def runner(cfg, writer):
                     ts.to(device),
                 )
 
-                optimizer.zero_grad()
-
                 if pushforward_fn:
                     x, grid, y, ts = pushforward_fn(model, x, grid, y, ts, epoch)
 
                 loss = loss_fn(model, x, grid, y, ts)
+                
+                opt.zero_grad()
                 loss.backward()
-                optimizer.step()
+                opt.step()
 
                 train_mse += loss.item()
 
@@ -171,7 +174,7 @@ def runner(cfg, writer):
             # Save model if validation loss improves
             loss_val_min = save_model_and_config(
                 model,
-                optimizer,
+                opt,
                 cfg,
                 epoch,
                 # TODO decide target metric
@@ -179,7 +182,7 @@ def runner(cfg, writer):
                 loss_val_min=loss_val_min,
             )
 
-            # scheduler.step()
+            sched.step()
 
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict

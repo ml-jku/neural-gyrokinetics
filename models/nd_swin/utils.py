@@ -1,4 +1,4 @@
-from typing import Type, Optional, Sequence, Callable, Union, Tuple
+from typing import Type, Optional, Sequence, Union, Tuple
 
 from itertools import product
 from math import ceil
@@ -80,8 +80,8 @@ def pad_to_blocks(
     x_shp = x.shape if isinstance(x, torch.Tensor) else (None, *x)
     pad_axes = []
     for i, w in enumerate(blocks):
-        pad_axes.append(0)
         pad_axes.append((w - x_shp[1 + i] % w) % w)  # +1 for batch
+        pad_axes.append(0)
 
     if isinstance(x, torch.Tensor):
         # pad tensor
@@ -109,14 +109,16 @@ def unpad(
 class PatchEmbed(nn.Module):
     def __init__(
         self,
+        space: int,
         img_size: Sequence[int],
         patch_size: Sequence[int],
         in_chans: int = 2,
         embed_dim: int = 24,
-        norm_layer: Callable = None,
+        norm_layer: nn.Module = None,
         flatten: bool = True,
         use_conv: bool = False,
-        space: int = 2,
+        act_fn: nn.Module = nn.LeakyReLU,
+        mlp_ratio: float = 8.0,
     ):
         assert len(img_size) == space, f"Image size must be {space}D"
         assert len(patch_size) == space, f"Patch size must be {space}D"
@@ -131,19 +133,29 @@ class PatchEmbed(nn.Module):
         self.space = space
         self.in_chans = in_chans
 
-        if use_conv:
-            from convNd.convNd import convNd  # noqa
+        hidden_dim = int(embed_dim * mlp_ratio)
 
-            self.patch = convNd(
+        if use_conv:
+            if space == 2:
+                Conv = nn.Conv2d
+            elif space == 3:
+                Conv = nn.Conv3d
+            else:
+                raise NotImplementedError
+
+            self.patch = Conv(
                 in_chans,
                 embed_dim,
-                num_dims=space,
                 kernel_size=patch_size,
                 stride=patch_size,
-                padding=0,
+                bias=False,
             )
         else:
-            self.patch = nn.Linear(in_chans * np.prod(patch_size), embed_dim)
+            self.patch = nn.Sequential(
+                nn.Linear(in_chans * np.prod(patch_size), hidden_dim),
+                act_fn(),
+                nn.Linear(hidden_dim, embed_dim, bias=False),
+            )
 
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
@@ -199,11 +211,10 @@ class PositionalEmbedding(nn.Module):
         self, dim: int, grid_size: tuple, learnable: bool = False, init: str = "sincos"
     ) -> None:
         super().__init__()
-        d, h, w, u, v = grid_size
         self.grid_size = grid_size
 
         if init == "rand":
-            pos_embed = torch.zeros(1, dim, d, h, w, u, v)
+            pos_embed = torch.zeros(1, dim, *grid_size)
             nn.init.trunc_normal_(pos_embed, std=0.02)
         if init == "sincos":
             try:
@@ -261,7 +272,7 @@ class PatchMerging(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # must pad to even shape
         # TODO for now pad to multiple of 2. can do better?
-        x, _ = pad_to_blocks(x, self.space * (2,))
+        # x, _ = pad_to_blocks(x, self.space * (2,))
         x = torch.cat(
             [
                 x[:, *[slice(i, None, 2) for i in idxs], :]
@@ -288,6 +299,9 @@ class PatchUnmerging(nn.Module):
         out_channels: Optional[int] = None,
         flatten: bool = False,
         use_conv: bool = False,
+        act_fn: nn.Module = nn.LeakyReLU,
+        mlp_ratio: float = 8.0,
+        patch_skip: bool = False
     ):
         super().__init__()
         self.space = space
@@ -304,27 +318,31 @@ class PatchUnmerging(nn.Module):
             else [g * e for g, e in zip(grid_size, expand_by)]
         )
 
+        hidden_dim = int(np.prod(expand_by) * mlp_ratio)
+
         # NOTE out_channels overrides c_multiplier
         dim_out = dim // c_multiplier if out_channels is None else out_channels
 
         if use_conv:
-            from convNd.convNd import convNd
+            if space == 2:
+                Conv = nn.ConvTranspose2d
+            elif space == 3:
+                Conv = nn.ConvTranspose3d
+            else:
+                raise NotImplementedError
 
-            self.expansion = convNd(
-                dim,
-                dim_out,
-                num_dims=space,
-                kernel_size=tuple(grid_size),
-                stride=tuple(grid_size),
-                padding=(0,) * space,
-                is_transposed=True,
-                use_bias=False,
+            self.expansion = Conv(
+                dim, dim_out, kernel_size=grid_size, stride=grid_size, bias=False
             )
         else:
-            self.expansion = nn.Linear(dim, np.prod(expand_by) * dim_out, bias=False)
+            self.expansion = nn.Sequential(
+                nn.Linear(dim * (2 if patch_skip else 1), hidden_dim),
+                nn.LeakyReLU(),
+                nn.Linear(hidden_dim, np.prod(expand_by) * dim_out),
+            )
 
         if norm_layer is not None:
-            self.norm = norm_layer(dim // c_multiplier)
+            self.norm = norm_layer(dim_out)
 
     def forward(self, x):
         ndim = x.ndim
@@ -341,8 +359,8 @@ class PatchUnmerging(nn.Module):
 
         # must unpad beause of patch merging
         # TODO for now. can do better?
-        _, pad_axes = pad_to_blocks(self.target_grid_size, self.space * (2,))
-        x = unpad(x, pad_axes, self.target_grid_size)
+        # _, pad_axes = pad_to_blocks(self.target_grid_size, self.space * (2,))
+        # x = unpad(x, pad_axes, self.target_grid_size)
 
         if self.flatten:
             x = rearrange(x, "b ... c -> b (...) c")

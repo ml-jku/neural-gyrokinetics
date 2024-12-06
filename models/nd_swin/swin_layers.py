@@ -16,7 +16,7 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 from math import ceil
 
-from models.nd_swin.utils import LayerNorm, DropPath, unpad
+from swin_unet.utils import LayerNorm, DropPath, unpad, pad_to_blocks
 
 
 def window_partition(x, window_size):
@@ -171,8 +171,7 @@ class WindowAttention(nn.Module):
         self.dim = dim
         self.window_size = window_size
         self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim**-0.5
+        self.head_dim = dim // num_heads
         self.attn_drop = attn_drop
         space = len(window_size)
 
@@ -188,7 +187,7 @@ class WindowAttention(nn.Module):
         # RPB from swinv2
         self.cpb_mlp = nn.Sequential(
             nn.Linear(space, 512),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(512, num_heads, bias=False),
         )
         # get relative_coords_table
@@ -249,8 +248,8 @@ class WindowAttention(nn.Module):
         rpb = rpb[self.rpb_idx.flatten()].view(sl, sl, self.num_heads)
         rpb = 16 * torch.sigmoid(rpb)
 
-        # # rpb from swinv1
-        # rpb = self.rpb[self.rpb_idx[:sl, :sl]]
+        # # # rpb from swinv1
+        # # rpb = self.rpb[self.rpb_idx[:sl, :sl]]
 
         rpb = rearrange(rpb, "slx sly h -> h slx sly").unsqueeze(0).contiguous()
 
@@ -259,11 +258,11 @@ class WindowAttention(nn.Module):
             mask = mask.unsqueeze(1)  # head dimension
             # TODO do with broadcasting
             mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)  # batch dimension
-        q = q * self.scale
-        # TODO find better way to add rpb
+        # q = q * (self.head_dim**-0.5)
+        # TODO find better way to add rpb -> easy OOM here!
         mask = mask + rpb if mask is not None else rpb
-        with nn.attention.sdpa_kernel(nn.attention.SDPBackend.EFFICIENT_ATTENTION):
-            x = F.scaled_dot_product_attention(q, k, v, rpb, dropout_p=self.attn_drop)
+        # with nn.attention.sdpa_kernel(nn.attention.SDPBackend.CUDNN_ATTENTION):
+        x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=self.attn_drop)
 
         # # swinv2 cosine similarity attention
         # attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
@@ -305,6 +304,7 @@ class SwinTransformerBlock(nn.Module):
         drop_path: float = 0.0,
         norm_layer: Type[LayerNorm] = nn.LayerNorm,
         use_checkpoint: bool = False,
+        act_fn: nn.Module = nn.GELU,
     ) -> None:
         """
         Args:
@@ -352,7 +352,7 @@ class SwinTransformerBlock(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_hidden_dim),
             mlp_drop,
-            nn.GELU(),
+            act_fn(),
             nn.Linear(mlp_hidden_dim, dim),
             mlp_drop,
         )
@@ -363,15 +363,7 @@ class SwinTransformerBlock(nn.Module):
         x = self.norm1(x)
 
         # TODO check if padding is needed and replace with pad_to_blocks
-        pad_axes = []
-        for i, w in enumerate(self.window_size):
-            pad_axes.append(0)
-            pad_axes.append((w - x.shape[1 + i] % w) % w)  # +1 for batch
-
-        # last tuple first in
-        pad_axes = pad_axes[::-1]
-        if any([p > 0 for p in pad_axes]):
-            x = F.pad(x, (0, 0, *pad_axes))
+        x, pad_axes = pad_to_blocks(x, self.window_size)
 
         if any(i > 0 for i in self.shift_size):
             shifted_x = torch.roll(
@@ -405,10 +397,10 @@ class SwinTransformerBlock(nn.Module):
         return x
 
     def forward_part2(self, x):
-        # NOTE swinv2 mlp norm
-        # x = self.drop_path(self.norm2(self.mlp(x)))
         # swinv1 mlp norm
         x = self.drop_path(self.mlp(self.norm2(x)))
+        # NOTE swinv2 mlp norm
+        # x = self.drop_path(self.norm2(self.mlp(x)))
         return x
 
     def forward(self, x, mask_matrix):
@@ -456,6 +448,7 @@ class SwinLayer(nn.Module):
         c_multiplier: int = 2,
         resample: Optional[nn.Module] = None,
         use_checkpoint: bool = False,
+        act_fn: nn.Module = nn.GELU,
     ) -> None:
         """
         Args:
@@ -506,6 +499,7 @@ class SwinLayer(nn.Module):
                     drop_path=drop_path[i],
                     norm_layer=norm_layer,
                     use_checkpoint=use_checkpoint,
+                    act_fn=act_fn
                 )
                 for i in range(depth)
             ]

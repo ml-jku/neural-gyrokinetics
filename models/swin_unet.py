@@ -7,14 +7,16 @@ from torch import nn
 from functools import partial
 from math import ceil
 
-from models.nd_swin.utils import (
+from models.nd_swin import (
     PositionalEmbedding,
     PatchEmbed,
     PatchMerging,
     PatchUnmerging,
+    SwinLayer,
+    SwinLayerModes,
+    pad_to_blocks,
+    unpad
 )
-from models.nd_swin.swin_layers import SwinLayer, SwinLayerModes
-from models.nd_swin.utils import pad_to_blocks, unpad
 
 
 class SwinBlockDown(nn.Module):
@@ -33,11 +35,13 @@ class SwinBlockDown(nn.Module):
         hidden_mlp_ratio: float = 2.0,
         learnable_pos_embed: bool = False,
         use_checkpoint: bool = True,
+        act_fn: nn.Module = nn.GELU
     ):
         super().__init__()
 
         self.window_size = window_size
         self.abs_pe = abs_pe
+        self.dim = dim
         self.grid_size = grid_size
 
         if abs_pe:
@@ -58,6 +62,7 @@ class SwinBlockDown(nn.Module):
             resample=PatchMerging if downsample else None,
             c_multiplier=c_multiplier,
             mode=SwinLayerModes.DOWNSAMPLE if downsample else SwinLayerModes.SEQUENCE,
+            act_fn=act_fn
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -91,12 +96,16 @@ class SwinBlockUp(nn.Module):
         c_multiplier: int = 2,
         learnable_pos_embed: bool = False,
         use_checkpoint: bool = False,
+        act_fn: nn.Module = nn.GELU,
+        patching_hidden_ratio: float = 8.0,
     ):
         super().__init__()
 
         self.space = space
         self.abs_pe = abs_pe
+        self.dim = dim
         self.upsample = upsample
+        self.grid_size = grid_size
 
         if abs_pe:
             self.pos_embed = PositionalEmbedding(
@@ -109,6 +118,8 @@ class SwinBlockUp(nn.Module):
                 expand_by=2,
                 grid_size=grid_size,
                 target_grid_size=target_grid_size,
+                mlp_ratio=patching_hidden_ratio,
+                act_fn=act_fn
             )
             mode = SwinLayerModes.UPSAMPLE
             dim_next = dim // c_multiplier  # latent mapped down in upsample
@@ -130,8 +141,9 @@ class SwinBlockUp(nn.Module):
                 resample=upsample_fn,
                 c_multiplier=c_multiplier,
                 use_checkpoint=use_checkpoint,
+                act_fn=act_fn
             ),
-            nn.GELU(),
+            act_fn(),
             nn.Linear(2 * dim_next, dim_next, bias=False),  # project down
         )
 
@@ -144,6 +156,8 @@ class SwinBlockUp(nn.Module):
         Returns:
             Tensor (B, D, H, ..., C)
         """
+        # TODO not ideal and not the right place (solves patch merging padding)
+        # s, _ = pad_to_shape(s, x.shape[1:-1])
 
         assert (
             all(x_s == s_s for x_s, s_s in zip(x.shape, s.shape)) and x.ndim == s.ndim
@@ -183,6 +197,9 @@ class SwinUnet(nn.Module):
         hidden_mlp_ratio: float = 2.0,
         abs_pe: bool = False,
         use_checkpoint: bool = False,
+        patching_hidden_ratio: float = 8.0,
+        act_fn: nn.Module = nn.GELU,
+        expand_act_fn: nn.Module = nn.LeakyReLU,
     ):
         super().__init__()
 
@@ -208,13 +225,15 @@ class SwinUnet(nn.Module):
         assert len(downsample) == num_layers
 
         self.patch_embed = PatchEmbed(
+            space=space,
             img_size=padded_img_size,
             patch_size=patch_size,
             in_chans=in_channels,
             embed_dim=dim,
             flatten=False,
             use_conv=conv_patch,
-            space=space,
+            mlp_ratio=patching_hidden_ratio,
+            act_fn=act_fn
         )
 
         # down
@@ -235,8 +254,12 @@ class SwinUnet(nn.Module):
                     window_size=window_size,
                     num_heads=num_heads[i],
                     downsample=downsample[i],
+                    abs_pe=abs_pe,
+                    drop_path=drop_path,
                     learnable_pos_embed=learnable_pos_embed,
                     use_checkpoint=use_checkpoint,
+                    hidden_mlp_ratio=hidden_mlp_ratio,
+                    act_fn=act_fn
                 )
             )
         self.down_blocks = nn.ModuleList(down_blocks)
@@ -254,9 +277,10 @@ class SwinUnet(nn.Module):
             mlp_ratio=hidden_mlp_ratio,
             mode=SwinLayerModes.SEQUENCE,
             use_checkpoint=use_checkpoint,
+            act_fn=act_fn
         )
         if abs_pe:
-            self.middle_pe = PositionalEmbedding(down_dims[-1], grid_size=[-1])
+            self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
 
         # up
         upsample = downsample[::-1]
@@ -280,33 +304,43 @@ class SwinUnet(nn.Module):
                     num_heads=up_num_heads[i],
                     depth=up_depth[i],
                     upsample=upsample[i],
+                    abs_pe=abs_pe,
+                    drop_path=drop_path,
                     learnable_pos_embed=learnable_pos_embed,
+                    hidden_mlp_ratio=hidden_mlp_ratio,
                     use_checkpoint=use_checkpoint,
+                    patching_hidden_ratio=patching_hidden_ratio,
+                    act_fn=act_fn
                 )
             )
 
         self.up_blocks = nn.ModuleList(up_blocks)
 
-        self.final_unpatch = PatchUnmerging(
+        self.unpatch = PatchUnmerging(
             space,
             up_dims[-1],
             grid_size=up_grid_sizes[-1],
             expand_by=patch_size,
             out_channels=out_channels,
             flatten=False,
+            use_conv=conv_patch,
             norm_layer=None,
+            mlp_ratio=patching_hidden_ratio,
+            act_fn=expand_act_fn,
+            patch_skip=True
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # pad to patch blocks
         x = rearrange(x, "b c ... -> b ... c")
         x, pad_axes = pad_to_blocks(x, self.patch_size)
 
         # linear flat patch embedding
         x = self.patch_embed(x)
+        # patch_skip = x
 
         # down path
-        feature_maps = [x]
+        feature_maps = []
 
         for blk in self.down_blocks:
             x = blk(x)
@@ -323,10 +357,21 @@ class SwinUnet(nn.Module):
             x = blk(x, s=feature_maps[i])
 
         # expand patches to original size
-        x = self.final_unpatch(x)
+        x = self.unpatch(x) # torch.cat([x, patch_skip], -1))
 
         # unpad output
         x = unpad(x, pad_axes, self.img_size)
         # return as image
+        x = rearrange(x, "b ... c -> b c ...")
+        return x
+
+    def autoencoder(self, x: torch.Tensor) -> torch.Tensor:
+        x = rearrange(x, "b c ... -> b ... c")
+        x, pad_axes = pad_to_blocks(x, self.patch_size)
+
+        z = self.patch_embed(x)
+        x = self.unpatch(z)
+
+        x = unpad(x, pad_axes, self.img_size)
         x = rearrange(x, "b ... c -> b c ...")
         return x
