@@ -94,7 +94,6 @@ class CycloneDataset(Dataset):
             # read the gt output (next timestep)
             name_gt = "timestep_" + str(t_index + 1).zfill(2)
             gt = self.data[file_index][f"data/{name_gt}"]
-
         else:
             with h5py.File(self.files[file_index], "r") as f:
                 # read the 'metadata/timesteps' dataset
