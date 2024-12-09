@@ -61,10 +61,14 @@ def get_data(cfg):
 
         # IO efficient samplers
         trainsampler = (
-            trainset.trajectory_sampler() if cfg.training.sampler == "trajectory" else None
+            trainset.trajectory_sampler()
+            if cfg.training.sampler == "trajectory"
+            else None
         )
         valsampler = (
-            valset.trajectory_sampler() if cfg.training.sampler == "trajectory" else None
+            valset.trajectory_sampler()
+            if cfg.training.sampler == "trajectory"
+            else None
         )
 
         augmentations = []

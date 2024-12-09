@@ -33,7 +33,7 @@ def get_model(cfg):
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet
-        
+
         # TODO?
         space = 5 if cfg.dataset.name == "cyclone" else 2
         patch_size = cfg.model.swin.patch_size
@@ -43,11 +43,11 @@ def get_model(cfg):
         depth = cfg.model.swin.depth
         num_layers = cfg.model.swin.num_layers
         gradient_checkpoint = cfg.model.swin.gradient_checkpoint
-        
+
         model = SwinUnet(
             space=space,
             dim=latent_dim,
-            in_channels=problem_dim, 
+            in_channels=problem_dim,
             out_channels=problem_dim,
             patch_size=patch_size,
             window_size=window_size,

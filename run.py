@@ -46,7 +46,7 @@ def runner(cfg, writer):
 
     if cfg.mode == "train":
         n_epochs = cfg.training.n_epochs
-        
+
         # optimizer config
         opt = torch.optim.Adam(
             model.parameters(),
@@ -92,7 +92,7 @@ def runner(cfg, writer):
                     x, grid, y, ts = pushforward_fn(model, x, grid, y, ts, epoch)
 
                 loss = loss_fn(model, x, grid, y, ts)
-                
+
                 opt.zero_grad()
                 loss.backward()
                 opt.step()

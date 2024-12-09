@@ -15,7 +15,7 @@ from models.nd_swin import (
     SwinLayer,
     SwinLayerModes,
     pad_to_blocks,
-    unpad
+    unpad,
 )
 
 
@@ -35,7 +35,7 @@ class SwinBlockDown(nn.Module):
         hidden_mlp_ratio: float = 2.0,
         learnable_pos_embed: bool = False,
         use_checkpoint: bool = True,
-        act_fn: nn.Module = nn.GELU
+        act_fn: nn.Module = nn.GELU,
     ):
         super().__init__()
 
@@ -62,7 +62,7 @@ class SwinBlockDown(nn.Module):
             resample=PatchMerging if downsample else None,
             c_multiplier=c_multiplier,
             mode=SwinLayerModes.DOWNSAMPLE if downsample else SwinLayerModes.SEQUENCE,
-            act_fn=act_fn
+            act_fn=act_fn,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -119,7 +119,7 @@ class SwinBlockUp(nn.Module):
                 grid_size=grid_size,
                 target_grid_size=target_grid_size,
                 mlp_ratio=patching_hidden_ratio,
-                act_fn=act_fn
+                act_fn=act_fn,
             )
             mode = SwinLayerModes.UPSAMPLE
             dim_next = dim // c_multiplier  # latent mapped down in upsample
@@ -141,7 +141,7 @@ class SwinBlockUp(nn.Module):
                 resample=upsample_fn,
                 c_multiplier=c_multiplier,
                 use_checkpoint=use_checkpoint,
-                act_fn=act_fn
+                act_fn=act_fn,
             ),
             act_fn(),
             nn.Linear(2 * dim_next, dim_next, bias=False),  # project down
@@ -233,7 +233,7 @@ class SwinUnet(nn.Module):
             flatten=False,
             use_conv=conv_patch,
             mlp_ratio=patching_hidden_ratio,
-            act_fn=act_fn
+            act_fn=act_fn,
         )
 
         # down
@@ -259,7 +259,7 @@ class SwinUnet(nn.Module):
                     learnable_pos_embed=learnable_pos_embed,
                     use_checkpoint=use_checkpoint,
                     hidden_mlp_ratio=hidden_mlp_ratio,
-                    act_fn=act_fn
+                    act_fn=act_fn,
                 )
             )
         self.down_blocks = nn.ModuleList(down_blocks)
@@ -277,7 +277,7 @@ class SwinUnet(nn.Module):
             mlp_ratio=hidden_mlp_ratio,
             mode=SwinLayerModes.SEQUENCE,
             use_checkpoint=use_checkpoint,
-            act_fn=act_fn
+            act_fn=act_fn,
         )
         if abs_pe:
             self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
@@ -310,7 +310,7 @@ class SwinUnet(nn.Module):
                     hidden_mlp_ratio=hidden_mlp_ratio,
                     use_checkpoint=use_checkpoint,
                     patching_hidden_ratio=patching_hidden_ratio,
-                    act_fn=act_fn
+                    act_fn=act_fn,
                 )
             )
 
@@ -327,7 +327,7 @@ class SwinUnet(nn.Module):
             norm_layer=None,
             mlp_ratio=patching_hidden_ratio,
             act_fn=expand_act_fn,
-            patch_skip=True
+            patch_skip=True,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -357,7 +357,7 @@ class SwinUnet(nn.Module):
             x = blk(x, s=feature_maps[i])
 
         # expand patches to original size
-        x = self.unpatch(x) # torch.cat([x, patch_skip], -1))
+        x = self.unpatch(x)  # torch.cat([x, patch_skip], -1))
 
         # unpad output
         x = unpad(x, pad_axes, self.img_size)

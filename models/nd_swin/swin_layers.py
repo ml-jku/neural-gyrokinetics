@@ -499,7 +499,7 @@ class SwinLayer(nn.Module):
                     drop_path=drop_path[i],
                     norm_layer=norm_layer,
                     use_checkpoint=use_checkpoint,
-                    act_fn=act_fn
+                    act_fn=act_fn,
                 )
                 for i in range(depth)
             ]

@@ -301,7 +301,7 @@ class PatchUnmerging(nn.Module):
         use_conv: bool = False,
         act_fn: nn.Module = nn.LeakyReLU,
         mlp_ratio: float = 8.0,
-        patch_skip: bool = False
+        patch_skip: bool = False,
     ):
         super().__init__()
         self.space = space
