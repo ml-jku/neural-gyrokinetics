@@ -16,7 +16,7 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 from math import ceil
 
-from swin_unet.utils import LayerNorm, DropPath, unpad, pad_to_blocks
+from models.nd_swin.utils import LayerNorm, DropPath, unpad, pad_to_blocks
 
 
 def window_partition(x, window_size):

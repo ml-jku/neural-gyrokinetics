@@ -1,5 +1,5 @@
 import torch
-from typing import Tuple, Hashable, Collection, Any, Mapping
+from typing import Hashable, Collection, Any, Mapping
 import enum
 
 import einops
@@ -121,31 +121,9 @@ def look_up_option(
     raise ValueError(f"Unsupported option '{opt_str}', " + supported_msg)
 
 
-def roll_forward_once(
-    model, x, grid, ts, problem_dim: int, bundle_steps: int, predict_delta: bool
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    # TODO
-    x_p = model(x, grid, ts)
-    if x_p.ndim == 4:
-        x_p = unbind_time(x_p, d=problem_dim)
-
-    x = unbind_time(x, d=problem_dim)
-    window_in = x.shape[1]
-    # shift input window forward
-    tail_idx = torch.arange(bundle_steps, window_in)
-    tgt_idx = torch.arange(window_in - bundle_steps, window_in)
-    if predict_delta:
-        # add to last bundle if predicting deltas
-        x_p = x_p + x[:, tgt_idx, ...]
-    x = torch.cat([x[:, tail_idx, ...], x_p], dim=1)
-    x = x.flatten(1, 2)
-
-    return x_p, x
-
-
 def unbind_time(x: torch.Tensor, d: int) -> torch.Tensor:
-    return einops.rearrange(x, "bs (t d) h w -> bs t d h w", d=d)
+    return einops.rearrange(x, "bs (t d) ... -> bs t d ...", d=d)
 
 
 def bind_time(x: torch.Tensor) -> torch.Tensor:
-    return einops.rearrange(x, "bs t d h w -> bs (t d) h w")
+    return einops.rearrange(x, "bs t d ... -> bs (t d) ...")

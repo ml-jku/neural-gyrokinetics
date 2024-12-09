@@ -33,15 +33,15 @@ def ssim_tensor(x, y):
     bs = x.shape[1]
     xn, yn = x.detach().cpu().numpy(), y.detach().cpu().numpy()
     tsteps = xn.shape[0]
-    out = torch.zeros((bs, tsteps))
+    out = torch.zeros((tsteps, bs))
     for batch in range(bs):
         for t in range(tsteps):
             val = ssim(
-                xn[t][batch],
-                yn[t][batch],
+                xn[t, batch],
+                yn[t, batch],
                 channel_axis=0,
-                data_range=xn[t][batch].max() - yn[t][batch].min(),
+                data_range=xn[t, batch].max() - yn[t, batch].min(),  # TODO why x and y?
             )
-            out[batch, t] = torch.tensor(val)
+            out[t, batch] = torch.tensor(val)
     # average batches
-    return torch.mean(out, dim=0)
+    return torch.mean(out, dim=1)

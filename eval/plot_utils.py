@@ -287,7 +287,7 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
 
     for i, j in comb:
         other = tuple([o for o in range(5) if o != i and o != j])
-        
+
         if average:
             x1_plot = x1[0].mean(other)
             x2_plot = x2[0].mean(other)

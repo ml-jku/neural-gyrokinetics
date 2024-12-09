@@ -1,3 +1,2 @@
-full_rollouts: True
 batch_size: 2
-extra_eval_steps: 1
+n_eval_steps: 1

@@ -6,7 +6,7 @@ from models.nd_swin.utils import (
     pad_to_blocks,
     unpad,
 )
-from models.nd_swin import SwinLayer, SwinLayerModes
+from models.nd_swin.swin_layers import SwinLayer, SwinLayerModes
 
 
 __all__ = [

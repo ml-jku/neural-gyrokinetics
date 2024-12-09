@@ -7,3 +7,4 @@ omegaconf
 torch
 einops
 wandb
+hydra-core

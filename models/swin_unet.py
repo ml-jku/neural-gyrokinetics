@@ -327,10 +327,14 @@ class SwinUnet(nn.Module):
             norm_layer=None,
             mlp_ratio=patching_hidden_ratio,
             act_fn=expand_act_fn,
-            patch_skip=True,
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        cond = kwargs.get("timestep")
+        if cond is not None:
+            # TODO timestep conditioning
+            pass
+
         # pad to patch blocks
         x = rearrange(x, "b c ... -> b ... c")
         x, pad_axes = pad_to_blocks(x, self.patch_size)
