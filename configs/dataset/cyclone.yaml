@@ -1,6 +1,7 @@
 name: cyclone
 path: /system/user/publicdata/gyrokinetics_preprocessed
 normalize: True
+in_memory: True
 active_keys: ["re", "im"]
 
 augment:

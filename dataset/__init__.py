@@ -22,7 +22,7 @@ def get_data(cfg):
             split="train",
             random_seed=cfg.seed,
             test_ratio=0.0,
-            in_memory=False,
+            in_memory=cfg.dataset.in_memory,
         )
 
         valset = CycloneDataset(
@@ -30,7 +30,8 @@ def get_data(cfg):
             split="val",
             random_seed=cfg.seed,
             test_ratio=0.0,
-            in_memory=False,
+            in_memory=cfg.dataset.in_memory,
+            n_eval_steps=cfg.validation.n_eval_steps,
         )
 
         # testset = CycloneDataset(
@@ -53,6 +54,7 @@ def get_data(cfg):
             valset,
             cfg.validation.batch_size,
             num_workers=cfg.training.num_workers,
+            shuffle=False
         )
 
     return (trainset, valset), (trainloader, valloader), augmentations

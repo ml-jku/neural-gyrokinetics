@@ -8,14 +8,24 @@ import numpy as np
 from dataset.cyclone import CycloneDataset
 
 
-def relative_norm_mse(x, y):
-    y = y.flatten(1)
-    diff = x.flatten(1) - y
-    diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
-    y_norms = torch.linalg.norm(y, ord=2, dim=-1)
-    diff_norms, y_norms = diff_norms**2, y_norms**2
-    # sum over timesteps and mean over examples in batch
-    return torch.mean(diff_norms / y_norms)
+def relative_norm_mse(x, y, dim_to_keep=None):
+    if dim_to_keep is None:
+        y = y.flatten(1)
+        diff = x.flatten(1) - y
+        diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
+        y_norms = torch.linalg.norm(y, ord=2, dim=-1)
+        diff_norms, y_norms = diff_norms**2, y_norms**2
+        # sum over timesteps and mean over examples in batch
+        return torch.mean(diff_norms / y_norms)
+    else:
+        # TODO: Check if this is necessary
+        y = y.flatten(2)
+        diff = x.flatten(2) - y
+        diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
+        y_norms = torch.linalg.norm(y, ord=2, dim=-1)
+        diff_norms, y_norms = diff_norms**2, y_norms**2
+        dims = [i for i in range(len(y_norms.shape))][dim_to_keep + 1:]
+        return torch.mean(diff_norms / y_norms, dim=dims)
 
 
 def get_pushforward_trick(

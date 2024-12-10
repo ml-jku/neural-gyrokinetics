@@ -26,6 +26,9 @@ def get_rollout(
                 if predict_delta:
                     x_p = xt + x_p
 
+                # update model input
+                xt = x_p.clone()
+
                 # concatenate rollout
                 x_rollout[
                     :, :, i * bundle_steps : (i + 1) * bundle_steps, ...
@@ -55,7 +58,7 @@ def validation_metrics(
 
     n_steps = rollout.shape[0]
 
-    # construct target y (NOTE: can use a lot of RAM with large n_steps)
+    # construct target y (NOTE: can use a lot of RAM with large n_steps and takes a lot of time)
     y = torch.stack(
         [dataset.get_at_time(file_idx, t)[2] for t in range(n_steps)], dim=0
     )
@@ -63,5 +66,4 @@ def validation_metrics(
     for idx, value in enumerate(metrics_fns.values()):
         value_result = value(rollout, y)
         metrics[idx, ...] = value_result
-
     return metrics
