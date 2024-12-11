@@ -8,9 +8,8 @@ from functools import partial
 from math import ceil
 
 from models.nd_swin.swin_layers import SwinLayer, ModulatedSwinLayer, SwinLayerModes
-
-from models.nd_swin.utils import (
-    PositionalEmbedding,
+from models.nd_swin.positional import PositionalEmbedding
+from models.nd_swin.patching import (
     PatchEmbed,
     PatchMerging,
     PatchUnmerging,

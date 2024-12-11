@@ -11,6 +11,6 @@ def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: in
             sequence_noise = torch.cumsum(sequence_noise, dim=1)
             return (x + sequence_noise).flatten(1, 2)
         else:
-            return x + torch.normal(0, std, size=(x.shape))
+            return x + torch.normal(0, std, size=(x.shape), device=x.device)
 
     return _noise

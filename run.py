@@ -73,7 +73,8 @@ def runner(cfg, writer):
                     sample[1].to(device),
                     sample[2].to(device),
                 )
-
+                
+                # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
                     for aug_fn in augmentations:
                         x = aug_fn(x)
@@ -101,7 +102,7 @@ def runner(cfg, writer):
 
             log_metric_dict = {}
             val_plots = {}
-            if epoch % cfg.validation.validate_every_n_epochs == 0:
+            if epoch % cfg.validation.validate_every_n_epochs == 0 or epoch == 1:
                 # Validation loop
                 model.eval()
                 # TODO configurable metric list

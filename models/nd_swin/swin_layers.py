@@ -16,7 +16,8 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 from math import ceil
 
-from models.nd_swin.utils import LayerNorm, DropPath, unpad, pad_to_blocks
+from models.nd_swin.drop import DropPath
+from models.nd_swin.patching import unpad, pad_to_blocks
 from models.utils import Film
 
 
@@ -303,7 +304,7 @@ class SwinTransformerBlock(nn.Module):
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
-        norm_layer: Type[LayerNorm] = nn.LayerNorm,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
     ) -> None:
@@ -445,7 +446,7 @@ class SwinLayer(nn.Module):
         qkv_bias: bool = False,
         drop: float = 0.0,
         attn_drop: float = 0.0,
-        norm_layer: Type[LayerNorm] = nn.LayerNorm,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
         c_multiplier: int = 2,
         resample: Optional[nn.Module] = None,
         use_checkpoint: bool = False,
