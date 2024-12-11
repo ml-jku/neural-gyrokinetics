@@ -2,8 +2,9 @@ from typing import List, Callable
 
 import torch
 from torch import nn
-
 import numpy as np
+
+from concurrent.futures import ThreadPoolExecutor
 
 from dataset.cyclone import CycloneDataset
 
@@ -62,6 +63,26 @@ def get_pushforward_trick(
             # TODO check if fetching correct target!
             # get unrolled y lazily (too large to load otherwise)
             _, _, y_unrolled, _ = dataset.get_at_time(file_idx, ts_unrolled.cpu())
+        
+        # get unrolled target in a non-blocking way
+        def fetch_target(dataset, file_idx, ts_unrolled):
+            return dataset.get_at_time(file_idx, ts_unrolled.cpu())
+
+        executor = ThreadPoolExecutor(max_workers=1)
+
+        with torch.no_grad():
+            ts_unrolled = ts + unroll_steps - 1
+            future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
+            
+            xt = x
+            for i in range(unroll_steps - 1):
+                x_p = model(x, timestep=(ts + i))
+
+                if predict_delta:
+                    x_p = x + x_p
+
+            # Get the result when needed
+            _, _, y_unrolled, _ = future.result()
 
         # have to clone xt to avoid view mode grad runtime error
         return xt.clone(), ts_unrolled, y_unrolled.to(x.device)
