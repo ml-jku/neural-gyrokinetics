@@ -49,8 +49,8 @@ class WandbManager:
         )
         self._initialized = True
 
-    def log(self, logs):
-        wandb.log(logs)
+    def log(self, logs, commit=True):
+        wandb.log(logs, commit=commit)
 
     def close(self):
         pass

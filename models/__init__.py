@@ -18,7 +18,7 @@ def get_model(cfg):
         num_layers = cfg.model.num_layers
         gradient_checkpoint = cfg.model.swin.gradient_checkpoint
         patching_hidden_ratio = cfg.model.swin.patching_hidden_ratio
-        
+
         cond_fn = None
         if cfg.model.swin.timestep_conditioning:
             cond_fn = IntegerConditionEmbed(32, 51)
@@ -50,7 +50,7 @@ def get_model(cfg):
             hidden_mlp_ratio=6.0,
             patching_hidden_ratio=patching_hidden_ratio,
             middle_depth=8,
-            conditioning=cond_fn
+            conditioning=cond_fn,
         )
 
     try:

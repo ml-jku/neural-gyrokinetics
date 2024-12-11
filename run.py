@@ -1,17 +1,14 @@
 from datetime import datetime
 
+from functools import partial
 import torch
 from tqdm import tqdm
-import wandb
-import torch.nn.functional as F
 
 from dataset import get_data
 from models import get_model
-from eval.plot_utils import (
-    get_wandb_tables,
-)
+
 from train import get_pushforward_trick, relative_norm_mse
-from eval import get_rollout, validation_metrics, ssim_tensor
+from eval import get_rollout, validation_metrics, distribution_5D, plot4x4_sided
 from utils import load_model_and_config, save_model_and_config
 
 
@@ -101,94 +98,99 @@ def runner(cfg, writer):
             train_mse /= len(trainloader)
             train_losses_dict = {"train/relative_norm_mse": train_mse}
 
-            # Validation loop
-            model.eval()
-            # TODO configurable metric list
-            metric_fn_list = {
-                "mse": F.mse_loss,
-                "ssim": ssim_tensor,
-            }
-            # TODO initialize dictionary with torch tensors initialized to 0 and without grad with 1 dimension of size tsteps
-            # OR initialize tensor of metric with shape [n_metrics, n_timesteps]
-            # metric_dict = defaultdict(lambda: 0.0)
-            if use_tqdm:
-                valloader = tqdm(valloader, "Validation")
-            with torch.no_grad():
-                for idx, sample in enumerate(valloader):
-                    x, ts, y, file_idx = (
-                        sample[0].to(device),
-                        sample[1].to(device),
-                        sample[2].to(device),
-                        sample[3],
-                    )
-
-                    # cap eval steps
-                    n_eval_steps = min(
-                        [
-                            min(
-                                valset.num_ts(f_idx) - int(ts[i]),
-                                cfg.validation.n_eval_steps,
-                            )
-                            for i, f_idx in enumerate(file_idx.tolist())
-                        ]
-                    )
-
-                    # get the rolled out validation trajectories
-                    x_rollout = get_rollout(
-                        problem_dim=len(active_keys),
-                        n_steps=n_eval_steps,
-                        bundle_steps=cfg.model.bundle_seq_length,
-                        predict_delta=cfg.training.predict_delta,
-                    )(model, x, ts0=ts)
-
-                    if idx == 0:
-                        # initialize metrics tensor
-                        metrics = validation_metrics(
-                            x_rollout, file_idx, valset, metric_fn_list
-                        )
-                        # TODO reintroduce
-                        # frequencies, power_pred, power_gt = get_power_spectra(
-                        #     x_rollout, y
-                        # )
-                        # get images of trajectories
-                        # traj_plots = get_val_trajectory_plots(
-                        #     x_rollout, y, [1, 5, 10, 25, 50]
-                        # )
-
-                    else:
-                        # get all validation metrics for the rollout
-                        # metrics tensor will have shape [number_of_metrics, n_timesteps]
-                        metrics += validation_metrics(
-                            x_rollout, file_idx, valset, metric_fn_list
-                        )
-                        # _, _power_pred, _power_gt = get_power_spectra(x_rollout, y)
-                        # power_pred += _power_pred
-                        # power_gt += _power_gt
-
-            metrics = metrics / len(valloader)
-            # power_pred = power_pred / len(valloader)
-            # power_gt = power_gt / len(valloader)
-
-            # create mse/ssim/mae tables for logging
-            metric_tables = get_wandb_tables(metrics, list(metric_fn_list.keys()))
-            # subsample to keep only 3 values
             log_metric_dict = {}
-            rollout_len = y.shape[0]
-            for idx, metric_name in enumerate(metric_fn_list):
-                vals = metrics[idx, ...]
-                for t in [0, int(0.5 * rollout_len) - 1, rollout_len - 1]:
-                    log_metric_dict["val/" + metric_name + f"x{t+1}"] = vals[t]
+            val_plots = {}
+            if epoch % cfg.validation.validate_every_n_epochs == 0:
+                # Validation loop
+                model.eval()
+                # TODO configurable metric list
+                metric_fn_list = {
+                    "relative_norm_mse": partial(
+                        relative_norm_mse, dim_to_keep=0
+                    ),  # to average across all dimensions except timesteps
+                    # TODO: add more useful metrics
+                }
+                # TODO initialize dictionary with torch tensors initialized to 0 and without grad with 1 dimension of size tsteps
+                # OR initialize tensor of metric with shape [n_metrics, n_timesteps]
+                # metric_dict = defaultdict(lambda: 0.0)
+                if use_tqdm:
+                    valloader = tqdm(valloader, "Validation")
+                with torch.no_grad():
+                    for idx, sample in enumerate(valloader):
+                        x, ts, y, file_idx = (
+                            sample[0].to(device),
+                            sample[1].to(device),
+                            sample[2].to(device),
+                            sample[3],
+                        )
 
-            # Save model if validation loss improves
-            loss_val_min = save_model_and_config(
-                model,
-                opt,
-                cfg,
-                epoch,
-                # TODO decide target metric
-                val_loss=log_metric_dict["val/msex1"],
-                loss_val_min=loss_val_min,
-            )
+                        n_eval_steps = cfg.validation.n_eval_steps
+
+                        # get the rolled out validation trajectories
+                        x_rollout = get_rollout(
+                            problem_dim=len(active_keys),
+                            n_steps=n_eval_steps,
+                            bundle_steps=cfg.model.bundle_seq_length,
+                            predict_delta=cfg.training.predict_delta,
+                        )(model, x, ts0=ts)
+
+                        if idx == 0:
+                            # initialize metrics tensor
+                            metrics = validation_metrics(
+                                x_rollout, file_idx, valset, metric_fn_list
+                            )
+                            val_plots[
+                                f"GT vs Pred at time {ts[0].item():.2f} (Linear Phase)"
+                            ] = plot4x4_sided(
+                                y[0, ...].to("cpu"),
+                                x_rollout[0, 0, ...],  # first timestep and batch
+                            )
+                            val_plots[
+                                f"Pred at time {ts[0].item():.2f} (Linear Phase)"
+                            ] = distribution_5D(
+                                x_rollout[0, 0, ...]  # first timestep and batch
+                            )
+
+                        elif idx == 5:
+                            # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
+                            # metrics tensor will have shape [number_of_metrics, n_timesteps]
+                            metrics += validation_metrics(
+                                x_rollout, file_idx, valset, metric_fn_list
+                            )
+                            val_plots[
+                                f"GT vs Pred at time {ts[0].item():.2f} (Saturated Phase)"
+                            ] = plot4x4_sided(
+                                y[0, ...].to("cpu"),
+                                x_rollout[0, 0, ...],  # first timestep and batch
+                            )
+                            val_plots[
+                                f"Pred at time {ts[0].item():.2f} (Saturated Phase)"
+                            ] = distribution_5D(
+                                x_rollout[0, 0, ...]  # first timestep and batch
+                            )
+                        else:
+                            # metrics tensor will have shape [number_of_metrics, n_timesteps]
+                            metrics += validation_metrics(
+                                x_rollout, file_idx, valset, metric_fn_list
+                            )
+
+                metrics = metrics / len(valloader)
+
+                for idx, metric_name in enumerate(metric_fn_list):
+                    vals = metrics[idx, ...]
+                    for t in range(n_eval_steps):
+                        log_metric_dict["val/" + metric_name + f"x{t+1}"] = vals[t]
+
+                # Save model if validation loss improves
+                loss_val_min = save_model_and_config(
+                    model,
+                    opt,
+                    cfg,
+                    epoch,
+                    # TODO decide target metric
+                    val_loss=log_metric_dict["val/relative_norm_msex1"],
+                    loss_val_min=loss_val_min,
+                )
 
             sched.step()
 
@@ -196,33 +198,11 @@ def runner(cfg, writer):
             epoch_logs = train_losses_dict | log_metric_dict
             if writer:
                 # log epoch details
-                writer.log(epoch_logs, commit=False)
-                # log validation trajectory images
-                # images = [wandb.Image(graphic) for graphic in traj_plots]
-                # writer.log(
-                #     {k: images[idx] for idx, k in enumerate(active_keys)},
-                #     commit=False,
-                # )
-                # log metrics graphs over full validation rollouts
-                writer.log(
-                    {
-                        key: wandb.plot.line(table, "t", key, title=f"{key}test")
-                        for key, table in metric_tables.items()
-                    },
-                    commit=False,
-                )
-                # log power spectra
-                # writer.log(
-                #     {
-                #         "power spectra": wandb.plot.line_series(
-                #             xs=frequencies,
-                #             ys=[power_pred, power_gt],
-                #             keys=["predicted", "groundtruth"],
-                #             title="Power Spectrum",
-                #             xname="frequency",
-                #         )
-                #     }
-                # )
+                if not val_plots:
+                    writer.log(epoch_logs)
+                else:
+                    writer.log(epoch_logs, commit=False)
+                    writer.log(val_plots)
 
             epoch_str = str(epoch).zfill(len(str(int(cfg.training.n_epochs))))
             print(

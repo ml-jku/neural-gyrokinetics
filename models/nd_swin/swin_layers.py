@@ -543,14 +543,14 @@ class SwinLayer(nn.Module):
 
 
 class ModulatedSwinLayer(SwinLayer):
-    
+
     def __init__(self, *args, cond_dim: int, **kwargs):
         super().__init__(*args, **kwargs)
-        
+
         self.conditioning = nn.ModuleList(
             [Film(cond_dim, self.dim) for _ in range(len(self.blocks))]
         )
-    
+
     def forward(self, x, condition):
         # dims = x.shape[2:]
 

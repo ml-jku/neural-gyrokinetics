@@ -36,7 +36,7 @@ class SwinBlockDown(nn.Module):
         learnable_pos_embed: bool = False,
         use_checkpoint: bool = True,
         act_fn: nn.Module = nn.GELU,
-        swin_attention_layer: Type = SwinLayer
+        swin_attention_layer: Type = SwinLayer,
     ):
         super().__init__()
 
@@ -49,7 +49,7 @@ class SwinBlockDown(nn.Module):
             self.pos_embed = PositionalEmbedding(
                 dim, grid_size, learnable=learnable_pos_embed
             )
-        
+
         self.swin_att = swin_attention_layer(
             space,
             dim,
@@ -99,7 +99,7 @@ class SwinBlockUp(nn.Module):
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         patching_hidden_ratio: float = 8.0,
-        swin_attention_layer: Type = SwinLayer
+        swin_attention_layer: Type = SwinLayer,
     ):
         super().__init__()
 
@@ -129,7 +129,7 @@ class SwinBlockUp(nn.Module):
             upsample_fn = None
             mode = SwinLayerModes.SEQUENCE
             dim_next = dim  # no latent map down
-        
+
         self.swin_att = swin_attention_layer(
             space,
             2 * dim,  # concat skip connection
@@ -145,10 +145,9 @@ class SwinBlockUp(nn.Module):
             use_checkpoint=use_checkpoint,
             act_fn=act_fn,
         )
-        
+
         self.project_down = nn.Sequential(
-            act_fn(),
-            nn.Linear(2 * dim_next, dim_next, bias=False)
+            act_fn(), nn.Linear(2 * dim_next, dim_next, bias=False)
         )
 
     def forward(self, x: torch.Tensor, s: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -230,12 +229,14 @@ class SwinUnet(nn.Module):
             depth = [depth] * num_layers
 
         assert len(downsample) == num_layers
-        
+
         # set conditioning and layer type
         SwinAttentionLayer = SwinLayer
         self.cond_embed = conditioning
         if self.cond_embed is not None:
-            SwinAttentionLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
+            SwinAttentionLayer = partial(
+                ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim
+            )
 
         self.patch_embed = PatchEmbed(
             space=space,
@@ -273,7 +274,7 @@ class SwinUnet(nn.Module):
                     use_checkpoint=use_checkpoint,
                     hidden_mlp_ratio=hidden_mlp_ratio,
                     act_fn=act_fn,
-                    swin_attention_layer=SwinAttentionLayer
+                    swin_attention_layer=SwinAttentionLayer,
                 )
             )
         self.down_blocks = nn.ModuleList(down_blocks)
@@ -325,7 +326,7 @@ class SwinUnet(nn.Module):
                     use_checkpoint=use_checkpoint,
                     patching_hidden_ratio=patching_hidden_ratio,
                     act_fn=act_fn,
-                    swin_attention_layer=SwinAttentionLayer
+                    swin_attention_layer=SwinAttentionLayer,
                 )
             )
 

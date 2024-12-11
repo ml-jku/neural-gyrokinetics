@@ -1,8 +1,8 @@
 defaults:
   - _self_
   - dataset: cyclone
-  - model: fno
-  - logging: no_logging
+  - model: swin5d
+  - logging: wandb
   - training: default
   - validation: default
   # - override hydra/launcher: litai

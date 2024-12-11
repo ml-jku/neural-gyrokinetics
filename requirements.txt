@@ -8,3 +8,4 @@ torch
 einops
 wandb
 hydra-core
+tqdm

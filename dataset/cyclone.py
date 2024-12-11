@@ -19,6 +19,7 @@ class CycloneDataset(Dataset):
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         in_memory: bool = False,
+        n_eval_steps: int = 1,
     ):
         assert split in ["train", "val", "test"]
         self.dtype = torch.float32 if dtype is None else dtype
@@ -29,7 +30,6 @@ class CycloneDataset(Dataset):
         self.files = [
             os.path.join(self.dir, f_name) for f_name in self.trajectories_fnames
         ]
-
         # shuffle and split files into training and validation sets
         random.seed(random_seed)
         random.shuffle(self.files)
@@ -46,8 +46,11 @@ class CycloneDataset(Dataset):
 
         if split == "train":
             self.files = [self.files[i] for i in train_idx]
+            # 1 step training
+            self.n_eval_steps = 1
         if split == "val":
             self.files = [self.files[i] for i in val_idx]
+            self.n_eval_steps = n_eval_steps
         if split == "test":
             self.files = [self.files[i] for i in test_idx]
 
@@ -56,7 +59,7 @@ class CycloneDataset(Dataset):
         with h5py.File(self.files[0], "r") as f:
             # read the timesteps
             timesteps = f["metadata/timesteps"][:]
-            n_timesteps = len(timesteps) - 1
+            n_timesteps = len(timesteps) - self.n_eval_steps
 
         self.length = int(n_timesteps) * len(self.files)
         self.n_samples_per_file = n_timesteps
@@ -69,14 +72,12 @@ class CycloneDataset(Dataset):
                 file_dict = {}
                 with h5py.File(file, "r") as f:
                     # read the 'metadata/timesteps' dataset
-                    timesteps = torch.from_numpy(f["metadata/timesteps"][:]).to(
-                        dtype=self.dtype
-                    )
+                    timesteps = f["metadata/timesteps"][:]
                     file_dict["metadata/timesteps"] = timesteps
                     # read in all the data points
                     for t_index in range(len(file_dict["metadata/timesteps"])):
                         name = "timestep_" + str(t_index).zfill(2)
-                        x = torch.from_numpy(f[f"data/{name}"][:]).to(dtype=self.dtype)
+                        x = f[f"data/{name}"][:]
                         file_dict[f"data/{name}"] = x
                 self.data[file_idx] = file_dict
 
@@ -128,4 +129,4 @@ class CycloneDataset(Dataset):
         return self.length
 
     def num_ts(self, file_id: int):
-        return 49  # TODO can change?
+        return 50 - self.n_eval_steps
