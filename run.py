@@ -184,9 +184,6 @@ def runner(cfg, writer):
                         log_metric_dict["val/" + metric_name + f"x{t+1}"] = vals[t]
 
                 if cfg.ckpt_path is not None:
-                    warnings.warn(
-                        "`cfg.ckpt_path` is not set: checkpoints will not be stored"
-                    )
                     # Save model if validation loss improves
                     loss_val_min = save_model_and_config(
                         model,
@@ -197,7 +194,11 @@ def runner(cfg, writer):
                         val_loss=log_metric_dict["val/relative_norm_msex1"],
                         loss_val_min=loss_val_min,
                     )
-
+                else:
+                    warnings.warn(
+                        "`cfg.ckpt_path` is not set: checkpoints will not be stored"
+                    )
+            
             sched.step()
 
             # log to wandb
