@@ -17,6 +17,7 @@ from einops import rearrange
 from math import ceil
 
 from models.nd_swin.utils import LayerNorm, DropPath, unpad, pad_to_blocks
+from models.utils import Film
 
 
 def window_partition(x, window_size):
@@ -477,6 +478,7 @@ class SwinLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.mode = mode
+        self.dim = dim
 
         assert dim % num_heads == 0
 
@@ -530,6 +532,30 @@ class SwinLayer(nn.Module):
         # dims = x.shape[2:]
 
         for blk in self.blocks:
+            x = blk(x, self.attn_mask)
+
+        # x = x.view(b, *dims, -1)
+
+        if self.resample is not None:
+            x = self.resample(x)
+
+        return x
+
+
+class ModulatedSwinLayer(SwinLayer):
+    
+    def __init__(self, *args, cond_dim: int, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        self.conditioning = nn.ModuleList(
+            [Film(cond_dim, self.dim) for _ in range(len(self.blocks))]
+        )
+    
+    def forward(self, x, condition):
+        # dims = x.shape[2:]
+
+        for blk, cond in zip(self.blocks, self.conditioning):
+            x = cond(x, condition)
             x = blk(x, self.attn_mask)
 
         # x = x.view(b, *dims, -1)

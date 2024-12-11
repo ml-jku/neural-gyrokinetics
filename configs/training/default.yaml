@@ -1,5 +1,5 @@
-batch_size: 2
-n_epochs: 200
+batch_size: 3
+n_epochs: 500
 num_workers: 8
 sampler: "trajectory"
 learning_rate: 5e-4
@@ -7,6 +7,6 @@ final_learning_rate: 1e-6
 weight_decay: 1e-8
 predict_delta: False
 pushforward:
-  epochs: [-1, 50, 100, 150]
-  unrolls: [2, 2, 4, 8]
-  probs: [10, 5, 3, 2]
+  epochs: [-1, 150, 300]
+  unrolls: [1, 2, 3]
+  probs: [10, 2, 1]

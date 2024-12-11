@@ -6,6 +6,7 @@ def get_model(cfg):
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet
+        from models.utils import IntegerConditionEmbed
 
         space = 5
         patch_size = cfg.model.swin.patch_size
@@ -16,11 +17,14 @@ def get_model(cfg):
         depth = cfg.model.swin.depth
         num_layers = cfg.model.num_layers
         gradient_checkpoint = cfg.model.swin.gradient_checkpoint
-
         patching_hidden_ratio = cfg.model.swin.patching_hidden_ratio
+        
+        cond_fn = None
+        if cfg.model.swin.timestep_conditioning:
+            cond_fn = IntegerConditionEmbed(32, 51)
 
         bundle_steps = cfg.model.bundle_seq_length
-        if bundle_steps > 1:  # time dimension!
+        if bundle_steps > 1:  # TODO investigate time dimension!
             space = space + 1
             # extend patching for time dimension
             patch_size = [1] + patch_size
@@ -46,6 +50,7 @@ def get_model(cfg):
             hidden_mlp_ratio=6.0,
             patching_hidden_ratio=patching_hidden_ratio,
             middle_depth=8,
+            conditioning=cond_fn
         )
 
     try:
