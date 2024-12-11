@@ -87,15 +87,10 @@ def save_model_and_config(
     val_loss: float,
     loss_val_min: float,
 ) -> None:
-    if cfg.ckpt_path is None:
-        ckp_dir = f"{cfg.output_path}"
-    else:
-        ckp_dir = f"{cfg.ckpt_path}"
-
     # create directory if it s not there
-    os.makedirs(ckp_dir, exist_ok=True)
+    os.makedirs(cfg.ckpt_path, exist_ok=True)
 
-    with open(os.path.join(ckp_dir, "config.yaml"), "w") as f:
+    with open(os.path.join(cfg.ckpt_path, "config.yaml"), "w") as f:
         OmegaConf.save(config=cfg, f=f.name)
 
     torch.save(
@@ -105,7 +100,7 @@ def save_model_and_config(
             "optimizer_state_dict": optimizer.state_dict(),
             "loss": val_loss,
         },
-        f"{ckp_dir}/ckp.pth",
+        f"{cfg.ckpt_path}/ckp.pth",
     )
 
     if val_loss < loss_val_min:
@@ -117,7 +112,7 @@ def save_model_and_config(
                 "optimizer_state_dict": optimizer.state_dict(),
                 "loss": val_loss,
             },
-            f"{ckp_dir}/best.pth",
+            f"{cfg.ckpt_path}/best.pth",
         )
 
     return loss_val_min

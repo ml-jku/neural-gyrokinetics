@@ -2,6 +2,7 @@ from datetime import datetime
 
 from functools import partial
 import torch
+import warnings
 from tqdm import tqdm
 
 from dataset import get_data
@@ -24,7 +25,7 @@ def runner(cfg, writer):
     active_keys = cfg.dataset.active_keys
 
     opt_state_dict = None
-    if cfg.ckpt_path is not None:
+    if cfg.load_ckp is True and cfg.ckpt_path is not None:
         # TODO move config loading to here (now in main.py)
         model, opt_state_dict, _ = load_model_and_config(
             cfg.ckpt_path, model=model, device=device
@@ -62,7 +63,7 @@ def runner(cfg, writer):
         loss_val_min = torch.inf
         use_tqdm = cfg.logging.tqdm
 
-        for epoch in range(n_epochs):
+        for epoch in range(1, n_epochs + 1):
             train_mse = 0
             if use_tqdm:
                 trainloader = tqdm(trainloader, "Training")
@@ -181,16 +182,20 @@ def runner(cfg, writer):
                     for t in range(n_eval_steps):
                         log_metric_dict["val/" + metric_name + f"x{t+1}"] = vals[t]
 
-                # Save model if validation loss improves
-                loss_val_min = save_model_and_config(
-                    model,
-                    opt,
-                    cfg,
-                    epoch,
-                    # TODO decide target metric
-                    val_loss=log_metric_dict["val/relative_norm_msex1"],
-                    loss_val_min=loss_val_min,
-                )
+                if cfg.ckpt_path is not None:
+                    warnings.warn(
+                        "`cfg.ckpt_path` is not set: checkpoints will not be stored"
+                    )
+                    # Save model if validation loss improves
+                    loss_val_min = save_model_and_config(
+                        model,
+                        opt,
+                        cfg,
+                        epoch,
+                        # TODO decide target metric
+                        val_loss=log_metric_dict["val/relative_norm_msex1"],
+                        loss_val_min=loss_val_min,
+                    )
 
             sched.step()
 

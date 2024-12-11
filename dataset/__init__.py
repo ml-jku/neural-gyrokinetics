@@ -17,6 +17,9 @@ def get_data(cfg):
         )
 
     if cfg.dataset.name == "cyclone":
+        if cfg.dataset.in_memory:
+            print("Loading dataset in memory!")
+
         trainset = CycloneDataset(
             path=cfg.dataset.path,
             split="train",

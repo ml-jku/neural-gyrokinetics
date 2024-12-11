@@ -54,7 +54,6 @@ class CycloneDataset(Dataset):
         if split == "test":
             self.files = [self.files[i] for i in test_idx]
 
-        print(self.files)
         # get total number of samples (assuming no bundling or pushforward and assuming constant number of timesteps accross files)
         with h5py.File(self.files[0], "r") as f:
             # read the timesteps
@@ -87,27 +86,10 @@ class CycloneDataset(Dataset):
         t_index = int(index % self.n_samples_per_file)
 
         if self.in_memory:
-            timestep = self.data[file_index]["metadata/timesteps"][t_index]
-            # read the input
-            name = "timestep_" + str(t_index).zfill(2)
-            x = self.data[file_index][f"data/{name}"]
-
-            # read the gt output (next timestep)
-            name_gt = "timestep_" + str(t_index + 1).zfill(2)
-            gt = self.data[file_index][f"data/{name_gt}"]
+            x, timestep, gt = self._load_data(self.data[file_index], t_index)
         else:
             with h5py.File(self.files[file_index], "r") as f:
-                # read the 'metadata/timesteps' dataset
-                # timestep = f["metadata/timesteps"][t_index]
-                timestep = t_index
-
-                # read the input
-                name = "timestep_" + str(t_index).zfill(2)
-                x = f[f"data/{name}"][:]
-
-                # read the gt output (next timestep)
-                name_gt = "timestep_" + str(t_index + 1).zfill(2)
-                gt = f[f"data/{name_gt}"][:]
+                x, timestep, gt = self._load_data(f, t_index)
 
         # TODO find better way!
         if self.normalize:
@@ -120,6 +102,21 @@ class CycloneDataset(Dataset):
             torch.tensor(gt).type(self.dtype),
             torch.tensor(file_index).type(self.dtype),  # accessory information
         )
+
+    def _load_data(self, data, t_index):
+        # TODO what timestep to return? probably not too important
+        # timestep = f["metadata/timesteps"][t_index]
+        timestep = t_index
+
+        # read the input
+        name = "timestep_" + str(t_index).zfill(2)
+        x = data[f"data/{name}"][:]
+
+        # read the gt output (next timestep)
+        name_gt = "timestep_" + str(t_index + 1).zfill(2)
+        gt = data[f"data/{name_gt}"][:]
+
+        return x, timestep, gt
 
     def get_at_time(self, file_idx: torch.Tensor, timestep: torch.Tensor):
         updated_index = (file_idx * self.n_samples_per_file + timestep).long()

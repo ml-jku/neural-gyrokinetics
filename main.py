@@ -19,8 +19,11 @@ def main(config: DictConfig):
     os.environ["HYDRA_FULL_ERROR"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    print(config)
     set_seed(config.seed)
+
+    print("#" * 89, "\nStarting Cyclone with configs:")
+    print(OmegaConf.to_yaml(config))
+    print("#" * 89, "\n")
 
     hydra_cfg = HydraConfig.get()
     launcher = hydra_cfg["runtime"]["choices"]["hydra/launcher"]
