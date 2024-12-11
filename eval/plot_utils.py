@@ -1,6 +1,7 @@
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import wandb
 
 import torch
 
@@ -41,7 +42,9 @@ def distribution_5D(x):
         for j in range(5):
             if [i, j] not in comb:
                 ax[i, j].remove()
-    return fig
+    img = wandb.Image(fig)
+    plt.close(fig)
+    return img
 
 
 def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
@@ -106,4 +109,6 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
         force_aspect(ax1)
         force_aspect(ax2)
 
-    return fig
+    img = wandb.Image(fig)
+    plt.close(fig)
+    return img
