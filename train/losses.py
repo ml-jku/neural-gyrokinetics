@@ -3,6 +3,7 @@ from typing import List, Callable
 import torch
 from torch import nn
 import numpy as np
+from tqdm import tqdm
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -98,3 +99,59 @@ def get_pushforward_trick(
         return xt.clone(), ts_unrolled, y_unrolled.to(x.device)
 
     return _loss_fn
+
+
+def pretrain_autoencoder(model, cfg, trainloader, valloader):
+    AE_n_epochs = 20  # TODO
+
+    AE_opt = torch.optim.Adam(
+        list(model.patch_embed.parameters()) + list(model.unpatch.parameters()),
+        lr=5e-4,
+        weight_decay=cfg.training.weight_decay,
+    )
+
+    for epoch in range(1, AE_n_epochs + 1):
+        train_mse = 0
+        if cfg.logging.tqdm:
+            trainloader = tqdm(trainloader, "AE pretraining")
+        for sample in trainloader:
+            x = sample[0].to(cfg.device)
+            # TODO
+            x = x + torch.normal(0, 0.25, size=(x.shape), device=x.device)
+            pred_x = model.autoencoder(x)
+            if cfg.training.predict_delta:
+                pred_x = x + pred_x
+            loss = relative_norm_mse(pred_x, x)
+            AE_opt.zero_grad()
+            loss.backward()
+            AE_opt.step()
+            train_mse += loss.item()
+        train_mse = train_mse / len(trainloader)
+
+        val_log = ""
+        if (epoch % 10) == 0 or epoch == 1:
+            val_mse = 0
+            if cfg.logging.tqdm:
+                valloader = tqdm(valloader, "AE evaluation")
+            for sample in valloader:
+                x = sample[0].to(cfg.device)
+                pred_x = model.autoencoder(x)
+                if cfg.training.predict_delta:
+                    pred_x = x + pred_x
+                loss = relative_norm_mse(pred_x, x)
+                val_mse += loss.item()
+            val_mse = val_mse / len(valloader)
+            val_log = f", val/relative_norm_mse: {val_mse:.4f}"
+
+        epoch_str = str(epoch).zfill(len(str(int(AE_n_epochs))))
+        print(
+            f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
+        )
+
+    # freeze patching
+    model.patch_embed.requires_grad_ = False
+    model.unpatch.requires_grad_ = False
+
+    print("Pretraining done!\n\n")
+
+    return model

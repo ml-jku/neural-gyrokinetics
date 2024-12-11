@@ -8,7 +8,7 @@ from tqdm import tqdm
 from dataset import get_data
 from models import get_model
 
-from train import get_pushforward_trick, relative_norm_mse
+from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
 from eval import get_rollout, validation_metrics, distribution_5D, plot4x4_sided
 from utils import load_model_and_config, save_model_and_config
 
@@ -61,8 +61,11 @@ def runner(cfg, writer):
             )
 
         loss_val_min = torch.inf
-        use_tqdm = cfg.logging.tqdm
 
+        if cfg.training.pretraining:
+            model = pretrain_autoencoder(model, cfg, trainloader, valloader)
+
+        use_tqdm = cfg.logging.tqdm
         for epoch in range(1, n_epochs + 1):
             train_mse = 0
             if use_tqdm:
@@ -73,7 +76,7 @@ def runner(cfg, writer):
                     sample[1].to(device),
                     sample[2].to(device),
                 )
-                
+
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
                     for aug_fn in augmentations:
@@ -102,7 +105,7 @@ def runner(cfg, writer):
 
             log_metric_dict = {}
             val_plots = {}
-            if epoch % cfg.validation.validate_every_n_epochs == 0 or epoch == 1:
+            if (epoch % cfg.validation.validate_every_n_epochs) == 0 or epoch == 1:
                 # Validation loop
                 model.eval()
                 # TODO configurable metric list
@@ -198,7 +201,7 @@ def runner(cfg, writer):
                     warnings.warn(
                         "`cfg.ckpt_path` is not set: checkpoints will not be stored"
                     )
-            
+
             sched.step()
 
             # log to wandb
@@ -211,7 +214,7 @@ def runner(cfg, writer):
                     writer.log(epoch_logs, commit=False)
                     writer.log(val_plots)
 
-            epoch_str = str(epoch).zfill(len(str(int(cfg.training.n_epochs))))
+            epoch_str = str(epoch).zfill(len(str(int(n_epochs))))
             print(
                 f"Epoch: {epoch_str}, "
                 f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
