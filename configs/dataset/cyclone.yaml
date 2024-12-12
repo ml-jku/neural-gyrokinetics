@@ -1,9 +1,9 @@
 name: cyclone
 path: /system/user/publicdata/gyrokinetics_preprocessed
-normalize: True
-in_memory: True
+normalize: true
+in_memory: true
 active_keys: ["re", "im"]
 
 augment:
-  noise: False
-  noise_std: 1e-5
+  noise: true
+  noise_std: 1e-3

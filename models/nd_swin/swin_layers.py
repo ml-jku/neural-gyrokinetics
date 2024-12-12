@@ -142,6 +142,8 @@ def compute_mask(dims, window_size, shift_size):
     attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100))
     attn_mask = attn_mask.masked_fill(attn_mask == 0, float(0.0))
 
+    mask_windows = window_partition(img_mask, window_size)
+
     return attn_mask
 
 
@@ -258,8 +260,8 @@ class WindowAttention(nn.Module):
         # swinv1 normal sdpa attention
         if mask is not None:
             mask = mask.unsqueeze(1)  # head dimension
-            # TODO do with broadcasting
-            mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)  # batch dimension
+            # TODO with broadcasting
+            mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)
         # q = q * (self.head_dim**-0.5)
         # TODO find better way to add rpb -> easy OOM here!
         mask = mask + rpb if mask is not None else rpb
@@ -296,7 +298,7 @@ class SwinTransformerBlock(nn.Module):
         space: int,
         dim: int,
         num_heads: int,
-        resolution: Sequence[int],
+        grid_size: Sequence[int],
         window_size: Sequence[int],
         shift_size: Sequence[int],
         mlp_ratio: float = 2.0,
@@ -331,7 +333,7 @@ class SwinTransformerBlock(nn.Module):
         self.use_checkpoint = use_checkpoint
 
         self.window_size, self.shift_size = get_window_size(
-            resolution, window_size, shift_size
+            grid_size, window_size, shift_size
         )
 
         assert len(self.window_size) == len(self.shift_size) == space
@@ -360,7 +362,7 @@ class SwinTransformerBlock(nn.Module):
         )
 
     def forward_part1(self, x, mask_matrix):
-        resolution = x.shape[1:-1]
+        grid_size = x.shape[1:-1]
         # swinv1 attention norm
         x = self.norm1(x)
 
@@ -392,7 +394,7 @@ class SwinTransformerBlock(nn.Module):
         else:
             x = shifted_x
 
-        x = unpad(x, pad_axes, resolution)
+        x = unpad(x, pad_axes, grid_size)
 
         # NOTE swinv2 attention norm
         # x = self.norm1(x)
@@ -439,7 +441,7 @@ class SwinLayer(nn.Module):
         depth: int,
         num_heads: int,
         window_size: Sequence[int],
-        resolution: Sequence[int],
+        grid_size: Sequence[int],
         drop_path: Union[Sequence[float], float],
         mode: SwinLayerModes,
         mlp_ratio: float = 4.0,
@@ -492,7 +494,7 @@ class SwinLayer(nn.Module):
                     space,
                     dim=dim,
                     num_heads=num_heads,
-                    resolution=resolution,
+                    grid_size=grid_size,
                     window_size=window_size,
                     shift_size=self.no_shift if (i % 2 == 0) else self.shift_size,
                     mlp_ratio=mlp_ratio,
@@ -512,22 +514,26 @@ class SwinLayer(nn.Module):
         # TODO can further improve by caching
         if any([s > 0 for s in self.shift_size]):
             window_size, shift_size = get_window_size(
-                resolution, self.window_size, self.shift_size
+                grid_size, self.window_size, self.shift_size
             )
-            mask_dims = [ceil(resolution[i] / w) * w for i, w in enumerate(window_size)]
+            mask_dims = [ceil(grid_size[i] / w) * w for i, w in enumerate(window_size)]
             attn_mask = compute_mask(mask_dims, window_size, shift_size)
             self.register_buffer("attn_mask", attn_mask)
         else:
             self.attn_mask = None
 
+        self.resampled_grid_size = grid_size
         self.resample = resample
         if callable(self.resample):
             self.resample = resample(
                 space=space,
                 dim=dim,
+                grid_size=grid_size,
                 norm_layer=norm_layer,
                 c_multiplier=c_multiplier,
             )
+            # TODO move one level up
+            self.resampled_grid_size = self.resample.target_grid_size
 
     def forward(self, x):
         # dims = x.shape[2:]

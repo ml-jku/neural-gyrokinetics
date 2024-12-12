@@ -44,20 +44,19 @@ def pad_to_blocks(
             x = F.pad(x, (0, 0, *pad_axes))
     else:
         # compute padded shape
-        x = tuple([x[i] + pad_axes[1 + i * 2] for i in range(len(x))])
+        x = tuple([x[i] + pad_axes[i * 2] for i in range(len(x))])
 
     return x, pad_axes
 
 
 def unpad(
-    x: torch.Tensor, pad_axes: Sequence[int], base_resolution: Sequence[int]
+    x: torch.Tensor, pad_axes: Sequence[int], base_grid: Sequence[int]
 ) -> torch.Tensor:
     if any([p > 0 for p in pad_axes]):
         # unpad to original resolution
-        x = x[:, *[slice(0, r) for r in base_resolution], :].contiguous()
+        x = x[:, *[slice(0, r) for r in base_grid], :].contiguous()
 
     return x
-
 
 
 class PatchEmbed(nn.Module):
@@ -165,6 +164,7 @@ class PatchMerging(nn.Module):
         self,
         space: int,
         dim: int,
+        grid_size: Sequence[int],
         norm_layer: Type[nn.LayerNorm] = nn.LayerNorm,
         c_multiplier: int = 2,
     ) -> None:
@@ -179,20 +179,38 @@ class PatchMerging(nn.Module):
         self.space = space
         self.dim = dim
 
-        self.norm = norm_layer(2**space * dim)
-        self.reduction = nn.Linear(2**space * dim, c_multiplier * dim, bias=False)
+        # NOTE only merge those with more than two patches -> otherwise risk of nans
+        self.merge_subspace = [g > 2 for g in grid_size]
+        self.grid_size = grid_size
+        # grid resolution after patch merging
+        self.target_grid_size = [
+            ceil(g / 2) if m else g for g, m in zip(grid_size, self.merge_subspace)
+        ]
+
+        n_merges = sum(self.merge_subspace)
+        self.norm = norm_layer(2**n_merges * dim) if norm_layer else nn.Identity()
+        self.reduction = nn.Linear(2**n_merges * dim, c_multiplier * dim, bias=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # must pad to even shape
         # TODO for now pad to multiple of 2. can do better?
-        # x, _ = pad_to_blocks(x, self.space * (2,))
-        x = torch.cat(
-            [
-                x[:, *[slice(i, None, 2) for i in idxs], :]
-                for idxs in product(*[range(2) for _ in range(self.space)])
-            ],
-            -1,
-        )
+        x, _ = pad_to_blocks(x, self.space * (2,))
+
+        # even/odd shifted patch selection along all axes (only for accepted subspaces)
+        subspaces01 = []
+        for sub in product(*[[0, 1] if sub else [0] for sub in self.merge_subspace]):
+            merge_axis = []
+            for i, s in enumerate(sub):
+                if self.merge_subspace[i]:
+                    # alternated slice
+                    merge_axis.append(slice(s, None, 2))
+                else:
+                    # cannot split this patch
+                    merge_axis.append(slice(0, None))
+            subspaces01.append(merge_axis)
+
+        x = torch.cat([x[:, *merge_ax, :] for merge_ax in subspaces01], -1)
+
         x = self.norm(x)
         x = self.reduction(x)
 
@@ -205,7 +223,7 @@ class PatchUnmerging(nn.Module):
         space: int,
         dim: int,
         grid_size: Sequence[int],
-        expand_by: Union[Sequence[int], int],
+        expand_by: Optional[Union[Sequence[int], int]] = None,
         target_grid_size: Optional[Sequence[int]] = None,
         norm_layer: Type[nn.LayerNorm] = nn.LayerNorm,
         c_multiplier: int = 2,
@@ -217,19 +235,25 @@ class PatchUnmerging(nn.Module):
         patch_skip: bool = False,
     ):
         super().__init__()
+        assert expand_by is not None or target_grid_size is not None
+
         self.space = space
         self.dim = dim
         self.grid_size = grid_size
+        self.flatten = flatten
+        self.use_conv = use_conv
+
+        if target_grid_size is not None:
+            self.target_grid_size = target_grid_size
+            # target_grid_size overwrites expand_by (uncudes padding from patch merging)
+            expand_by = [ceil(t / g) for g, t in zip(grid_size, target_grid_size)]
+
         if isinstance(expand_by, int):
             expand_by = (expand_by,) * space
         self.expand_by = expand_by
-        self.flatten = flatten
-        self.use_conv = use_conv
-        self.target_grid_size = (
-            target_grid_size
-            if target_grid_size
-            else [g * e for g, e in zip(grid_size, expand_by)]
-        )
+
+        if target_grid_size is None:
+            self.target_grid_size = [g * e for g, e in zip(grid_size, expand_by)]
 
         hidden_dim = int(np.prod(expand_by) * mlp_ratio)
 
@@ -254,8 +278,7 @@ class PatchUnmerging(nn.Module):
                 nn.Linear(hidden_dim, np.prod(expand_by) * dim_out),
             )
 
-        if norm_layer is not None:
-            self.norm = norm_layer(dim_out)
+        self.norm = norm_layer(dim_out) if norm_layer else nn.Identity()
 
     def forward(self, x):
         ndim = x.ndim
@@ -272,14 +295,13 @@ class PatchUnmerging(nn.Module):
 
         # must unpad beause of patch merging
         # TODO for now. can do better?
-        # _, pad_axes = pad_to_blocks(self.target_grid_size, self.space * (2,))
-        # x = unpad(x, pad_axes, self.target_grid_size)
+        _, pad_axes = pad_to_blocks(self.target_grid_size, self.space * (2,))
+        x = unpad(x, pad_axes, self.target_grid_size)
 
         if self.flatten:
             x = rearrange(x, "b ... c -> b (...) c")
 
-        if hasattr(self, "norm"):
-            x = self.norm(x)
+        x = self.norm(x)
 
         return x
 
