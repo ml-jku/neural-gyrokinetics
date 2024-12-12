@@ -21,9 +21,7 @@ def wandb_available():
     return importlib.util.find_spec("wandb") is not None
 
 
-assert (
-    wandb_available()
-), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
+assert wandb_available(), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
 import wandb
 
 
@@ -59,6 +57,10 @@ class WandbManager:
         # add values to the wandb summary => only works for scalars
         for k, v in outputs.items():
             self._wandb.run.summary[k] = v.item()
+
+    def finish(self):
+        # End the W&B run
+        wandb.finish()
 
 
 def setup_logging(config):

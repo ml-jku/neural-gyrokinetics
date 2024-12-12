@@ -40,6 +40,7 @@ def get_pushforward_trick(
         model: nn.Module,
         x: torch.Tensor,
         ts: torch.Tensor,
+        ts_idx: torch.Tensor,
         y: torch.Tensor,
         file_idx: torch.Tensor,
         epoch: int,
@@ -53,7 +54,7 @@ def get_pushforward_trick(
         # cap the unroll steps depending on the current max timestep
         unroll_steps = min(
             [
-                min(dataset.num_ts(f_idx) - int(ts[i]), unroll_steps)
+                min(dataset.num_ts(f_idx) - int(ts_idx[i]), unroll_steps)
                 for i, f_idx in enumerate(file_idx.tolist())
             ]
         )
@@ -61,40 +62,34 @@ def get_pushforward_trick(
         if unroll_steps < 2:
             return x, ts, y
 
-        with torch.no_grad():
-            xt = x
-            for i in range(unroll_steps - 1):
-                x_p = model(x, timestep=(ts + i))
-
-                if predict_delta:
-                    x_p = x + x_p
-            ts_unrolled = ts + unroll_steps - 1
-
-            # TODO check if fetching correct target!
-            # get unrolled y lazily (too large to load otherwise)
-            _, _, y_unrolled, _ = dataset.get_at_time(file_idx, ts_unrolled.cpu())
+        # get timesteps for unrolling
+        ts_idxs = [
+            [i for i in range(int(ts_idx_start), int(ts_idx_start) + unroll_steps - 1)]
+            for ts_idx_start in ts_idx.tolist()
+        ]
+        tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
 
         # get unrolled target in a non-blocking way
         def fetch_target(dataset, file_idx, ts_unrolled):
-            return dataset.get_at_time(file_idx, ts_unrolled.cpu())
+            return dataset.get_at_time(file_idx.cpu(), ts_unrolled.cpu())
 
         executor = ThreadPoolExecutor(max_workers=1)
 
         with torch.no_grad():
-            ts_unrolled = ts + unroll_steps - 1
+            ts_unrolled = ts_idx + unroll_steps - 1
             future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
 
             xt = x
             for i in range(unroll_steps - 1):
-                x_p = model(x, timestep=(ts + i))
-
+                # TODO: currenlty only integer conditioning. Remove that line if floats are possible
+                x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
                 if predict_delta:
-                    x_p = x + x_p
-
+                    x_p = xt + x_p
+                xt = x_p.clone()
             # Get the result when needed
-            _, _, y_unrolled, _ = future.result()
+            unrolled = future.result()
 
         # have to clone xt to avoid view mode grad runtime error
-        return xt.clone(), ts_unrolled, y_unrolled.to(x.device)
+        return xt.clone(), unrolled.timestep.to(x.device), unrolled.y.to(x.device)
 
     return _loss_fn

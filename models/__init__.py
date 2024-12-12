@@ -21,7 +21,7 @@ def get_model(cfg):
 
         cond_fn = None
         if cfg.model.swin.timestep_conditioning:
-            cond_fn = IntegerConditionEmbed(32, 51)
+            cond_fn = IntegerConditionEmbed(32, 270)
 
         bundle_steps = cfg.model.bundle_seq_length
         if bundle_steps > 1:  # TODO investigate time dimension!

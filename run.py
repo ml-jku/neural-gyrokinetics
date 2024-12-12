@@ -68,12 +68,10 @@ def runner(cfg, writer):
             if use_tqdm:
                 trainloader = tqdm(trainloader, "Training")
             for sample in trainloader:
-                x, ts, y = (
-                    sample[0].to(device),
-                    sample[1].to(device),
-                    sample[2].to(device),
-                )
-                
+                x = sample.x.to(device)
+                ts = sample.timestep.to(device)
+                y = sample.y.to(device)
+
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
                     for aug_fn in augmentations:
@@ -81,10 +79,14 @@ def runner(cfg, writer):
 
                 if pushforward_fn:
                     # accessory information for pf (to retreive unrolled target)
-                    file_idx = sample[-1]
-                    x, ts, y = pushforward_fn(model, x, ts, y, file_idx, epoch)
+                    file_idx = sample.file_index.to(device)
+                    ts_index = sample.timestep_index.to(device)
+                    x, ts, y = pushforward_fn(
+                        model, x, ts, ts_index, y, file_idx, epoch
+                    )
 
-                pred_x = model(x, timestep=ts)
+                # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
+                pred_x = model(x, timestep=torch.ceil(ts))
 
                 if predict_delta:
                     pred_x = x + pred_x
@@ -119,12 +121,11 @@ def runner(cfg, writer):
                     valloader = tqdm(valloader, "Validation")
                 with torch.no_grad():
                     for idx, sample in enumerate(valloader):
-                        x, ts, y, file_idx = (
-                            sample[0].to(device),
-                            sample[1].to(device),
-                            sample[2].to(device),
-                            sample[3],
-                        )
+                        x = sample.x.to(device)
+                        ts = sample.timestep.to(device)
+                        y = sample.y.to(device)
+                        file_idx = sample.file_index.to(device)
+                        ts_index = sample.timestep_index.to(device)
 
                         n_eval_steps = cfg.validation.n_eval_steps
 
@@ -133,13 +134,14 @@ def runner(cfg, writer):
                             problem_dim=len(active_keys),
                             n_steps=n_eval_steps,
                             bundle_steps=cfg.model.bundle_seq_length,
+                            dataset=valset,
                             predict_delta=cfg.training.predict_delta,
-                        )(model, x, ts0=ts)
+                        )(model, x, file_idx=file_idx, ts_index_0=ts_index)
 
                         if idx == 0:
                             # initialize metrics tensor
                             metrics = validation_metrics(
-                                x_rollout, file_idx, valset, metric_fn_list
+                                x_rollout, file_idx, ts_index, valset, metric_fn_list
                             )
                             val_plots[
                                 f"GT vs Pred at time {ts[0].item():.2f} (Linear Phase)"
@@ -157,7 +159,7 @@ def runner(cfg, writer):
                             # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
                             # metrics tensor will have shape [number_of_metrics, n_timesteps]
                             metrics += validation_metrics(
-                                x_rollout, file_idx, valset, metric_fn_list
+                                x_rollout, file_idx, ts_index, valset, metric_fn_list
                             )
                             val_plots[
                                 f"GT vs Pred at time {ts[0].item():.2f} (Saturated Phase)"
@@ -173,7 +175,7 @@ def runner(cfg, writer):
                         else:
                             # metrics tensor will have shape [number_of_metrics, n_timesteps]
                             metrics += validation_metrics(
-                                x_rollout, file_idx, valset, metric_fn_list
+                                x_rollout, file_idx, ts_index, valset, metric_fn_list
                             )
 
                 metrics = metrics / len(valloader)
@@ -198,7 +200,7 @@ def runner(cfg, writer):
                     warnings.warn(
                         "`cfg.ckpt_path` is not set: checkpoints will not be stored"
                     )
-            
+
             sched.step()
 
             # log to wandb

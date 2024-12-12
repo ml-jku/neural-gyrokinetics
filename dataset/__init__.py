@@ -52,12 +52,14 @@ def get_data(cfg):
             cfg.training.batch_size,
             num_workers=cfg.training.num_workers,
             shuffle=True,
+            collate_fn=trainset.collate,
         )
         valloader = DataLoader(
             valset,
             cfg.validation.batch_size,
             num_workers=cfg.training.num_workers,
             shuffle=False,
+            collate_fn=valset.collate,
         )
 
     return (trainset, valset), (trainloader, valloader), augmentations
