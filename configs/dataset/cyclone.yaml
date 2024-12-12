@@ -5,5 +5,5 @@ in_memory: true
 active_keys: ["re", "im"]
 
 augment:
-  noise: true
+  noise: false
   noise_std: 1e-3

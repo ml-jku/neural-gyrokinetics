@@ -29,7 +29,7 @@ def get_model(cfg):
             # extend patching for time dimension
             patch_size = [1] + patch_size
             window_size = [bundle_steps] + window_size
-            img_size = [bundle_steps] + img_size
+            img_size = (bundle_steps,) + img_size
 
         model = SwinUnet(
             space=space,

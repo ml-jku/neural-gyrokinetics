@@ -26,6 +26,8 @@ def get_data(cfg):
             random_seed=cfg.seed,
             test_ratio=0.0,
             in_memory=cfg.dataset.in_memory,
+            input_sequence_length=cfg.model.input_seq_length,
+            target_sequence_length=cfg.model.bundle_seq_length,
         )
 
         valset = CycloneDataset(
@@ -35,6 +37,8 @@ def get_data(cfg):
             test_ratio=0.0,
             in_memory=cfg.dataset.in_memory,
             n_eval_steps=cfg.validation.n_eval_steps,
+            input_sequence_length=cfg.model.input_seq_length,
+            target_sequence_length=cfg.model.bundle_seq_length,
         )
 
         # testset = CycloneDataset(

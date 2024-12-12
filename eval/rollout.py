@@ -14,7 +14,7 @@ def get_rollout(
     predict_delta: bool = False,
 ) -> Callable:
     # correct step size by adding last bundle
-    n_steps_ = n_steps + bundle_steps - 1
+    # n_steps_ = n_steps + bundle_steps - 1
 
     def _rollout(
         model: nn.Module,
@@ -23,31 +23,35 @@ def get_rollout(
         ts_index_0: torch.Tensor,
     ) -> torch.Tensor:
         xt = x0.clone()
-        x_rollout = torch.zeros((xt.shape[0], problem_dim, n_steps_, *xt.shape[2:]))
+        if xt.ndim == 7:
+            x_rollout = torch.zeros((xt.shape[0], problem_dim, n_steps*bundle_steps, *xt.shape[2:]))
+        elif xt.ndim == 8:
+            x_rollout = torch.zeros((xt.shape[0], problem_dim, n_steps*bundle_steps, *xt.shape[3:]))
+        else:
+            raise ("x should have 7 (b, c, v1, v2, s, x, y) or 8 (b, c, t, v1, v2, s, x, y) dimensions!")
 
         # get corresponding timesteps
         ts_idxs = [
-            [i for i in range(int(ts_idx_start), int(ts_idx_start) + n_steps)]
+            [i for i in range(int(ts_idx_start), int(ts_idx_start) + n_steps*bundle_steps, bundle_steps)]
             for ts_idx_start in ts_index_0.tolist()
         ]
         tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
         with torch.no_grad():
             # move bundles forward, rollout in blocks
-            for i in range(0, n_steps, bundle_steps):
+            for i in range(0, n_steps):
                 x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
                 if predict_delta:
                     x_p = xt + x_p
                 # update model input
                 xt = x_p.clone()
-
                 # concatenate rollout
                 x_rollout[:, :, i * bundle_steps : (i + 1) * bundle_steps, ...] = (
-                    x_p.cpu().unsqueeze(2)
+                    x_p.cpu().unsqueeze(2) if x_p.ndim == 7 else x_p.cpu()
                 )
 
         # only return desired size
         x_rollout = rearrange(x_rollout, "b c t ... -> t b c ...")
-        return x_rollout[:n_steps, :, ...]
+        return x_rollout[:n_steps*bundle_steps, :, ...]
 
     return _rollout
 
@@ -56,6 +60,7 @@ def validation_metrics(
     rollout: torch.Tensor,
     file_idx: torch.Tensor,
     ts_index: torch.Tensor,
+    bundle_steps: int,
     dataset,
     metrics_fns: Dict[str, Callable] = None,
 ) -> Union[
@@ -67,12 +72,20 @@ def validation_metrics(
     ), "Pleas provide some metrics function for the validation metrics."
 
     n_steps = rollout.shape[0]
+    # n_steps = rollout.shape[0] // bundle_steps
     # TODO: optimize: if valset is not shuffled, we can only return every second, since the next input is the previous' target (maybe handle in the dataset not sure)
     # construct target y (NOTE: can use a lot of RAM with large n_steps and takes a lot of time)
-    y = torch.stack(
-        [dataset.get_at_time(file_idx, ts_index + t).y for t in range(n_steps)], dim=0
-    )
+    if bundle_steps == 1:
+        y = torch.stack(
+            [dataset.get_at_time(file_idx, ts_index + t).y for t in range(0, n_steps, bundle_steps)], dim=0
+        )
+    else:
+        y = torch.concat(
+            [dataset.get_at_time(file_idx, ts_index + t).y for t in range(0, n_steps, bundle_steps)], dim=2
+        )
+        y = rearrange(y, "b c t ... -> t b c ...")
     metrics = torch.zeros((len(metrics_fns), n_steps))
+    assert y.shape == rollout.shape
     for idx, value in enumerate(metrics_fns.values()):
         value_result = value(rollout, y)
         metrics[idx, ...] = value_result

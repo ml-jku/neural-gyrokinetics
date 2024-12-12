@@ -31,6 +31,8 @@ class CycloneDataset(Dataset):
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         in_memory: bool = False,
+        input_sequence_length: int = 1,
+        target_sequence_length: int = 1,
         n_eval_steps: int = 1,
     ):
         assert split in ["train", "val", "test"]
@@ -38,11 +40,15 @@ class CycloneDataset(Dataset):
         self.normalize = normalize
         self.in_memory = in_memory
         self.dir = path
+        self.input_sequence_length = input_sequence_length
+        self.target_sequence_length = target_sequence_length
+        assert (
+            self.input_sequence_length == self.target_sequence_length
+        ), "Currently, only same length of input and target is supported!"
         self.trajectories_fnames = os.listdir(path)
         self.files = [
             os.path.join(self.dir, f_name) for f_name in self.trajectories_fnames
         ]
-        self.files = self.files[:2]
         # shuffle and split files into training and validation sets
         random.seed(random_seed)
         random.shuffle(self.files)
@@ -60,10 +66,10 @@ class CycloneDataset(Dataset):
         if split == "train":
             self.files = [self.files[i] for i in train_idx]
             # 1 step training
-            self.n_eval_steps = 1
+            self.n_eval_steps = 1 * self.target_sequence_length
         if split == "val":
             self.files = [self.files[i] for i in val_idx]
-            self.n_eval_steps = n_eval_steps
+            self.n_eval_steps = n_eval_steps * self.target_sequence_length
         if split == "test":
             self.files = [self.files[i] for i in test_idx]
 
@@ -71,12 +77,12 @@ class CycloneDataset(Dataset):
         with h5py.File(self.files[0], "r") as f:
             # read the timesteps
             timesteps = f["metadata/timesteps"][:]
-            n_timesteps = len(timesteps) - self.n_eval_steps
+            self.n_samples_per_file_val = len(timesteps)
+            n_timesteps = len(timesteps) - self.n_eval_steps - self.input_sequence_length + 1  # TODO: check if this is correct, we should return a sample like [b, c, t, ...]
 
-        self.length = int(n_timesteps) * len(self.files)
+        self.length = n_timesteps * len(self.files)
         self.n_samples_per_file = n_timesteps
         # needed to access the last few targets when doing validation
-        self.n_samples_per_file_val = n_timesteps + self.n_eval_steps
 
         if self.in_memory:
             # load all timesteps into a dict of dicts
@@ -114,12 +120,6 @@ class CycloneDataset(Dataset):
             x = (x - x.mean()) / x.std()
             gt = (gt - gt.mean()) / gt.std()
 
-        # return (
-        #     torch.tensor(x).type(self.dtype),
-        #     torch.tensor(timestep).type(self.dtype),
-        #     torch.tensor(gt).type(self.dtype),
-        #     torch.tensor(file_index).type(self.dtype),  # accessory information
-        # )
         return CycloneSample(
             x=torch.tensor(x, dtype=self.dtype),
             y=torch.tensor(gt, dtype=self.dtype),
@@ -130,15 +130,24 @@ class CycloneDataset(Dataset):
 
     def _load_data(self, data, t_index):
         timestep = data["metadata/timesteps"][t_index]
-
-        # read the input
-        name = "timestep_" + str(t_index).zfill(2)
-        x = data[f"data/{name}"][:]
-
-        # read the gt output (next timestep)
-        name_gt = "timestep_" + str(t_index + 1).zfill(2)
-        gt = data[f"data/{name_gt}"][:]
-
+        x = []
+        gt = []
+        for i in range(self.input_sequence_length):
+            # read the input
+            name = "timestep_" + str(t_index + i).zfill(2)
+            x.append(data[f"data/{name}"][:])
+        for i in range(self.target_sequence_length):
+            # read the gt output (next timestep)
+            name_gt = "timestep_" + str(t_index + self.input_sequence_length + i).zfill(2)
+            gt.append(data[f"data/{name_gt}"][:])
+        
+        # stack to shape (c, t, v1, v2, s, x, y)
+        x = np.stack(x, axis=1)
+        gt = np.stack(gt, axis=1)
+        if self.input_sequence_length == 1 and self.target_sequence_length == 1:
+            # sqeeze out time if we only have 1 timestep
+            x = x.squeeze(axis=1)
+            gt = gt.squeeze(axis=1)
         return x, timestep, gt
 
     def get_at_time(self, file_idx: torch.Tensor, timestep_idx: torch.Tensor):
@@ -171,7 +180,9 @@ class CycloneDataset(Dataset):
 
         # Compute the linear index
         updated_index = (
+            # flat_file_idx * self.n_samples_per_file + flat_timestep_idx * self.target_sequence_length
             flat_file_idx * self.n_samples_per_file + flat_timestep_idx
+
         ).long()
 
         timesteps_list = []

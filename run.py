@@ -58,6 +58,7 @@ def runner(cfg, writer):
                 schecule=pf_cfg.epochs,
                 predict_delta=predict_delta,
                 dataset=trainset,
+                bundle_steps=cfg.model.bundle_seq_length
             )
 
         loss_val_min = torch.inf
@@ -144,12 +145,12 @@ def runner(cfg, writer):
                         if idx == 0:
                             # initialize metrics tensor
                             metrics = validation_metrics(
-                                x_rollout, file_idx, ts_index, valset, metric_fn_list
+                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
                             )
                             val_plots[
                                 f"GT vs Pred at time {ts[0].item():.2f} (Linear Phase)"
                             ] = plot4x4_sided(
-                                y[0, ...].to("cpu"),
+                                y[0, ...].to("cpu") if y.ndim == 7 else y[0, 0, ...].to("cpu"),
                                 x_rollout[0, 0, ...],  # first timestep and batch
                             )
                             val_plots[
@@ -162,12 +163,12 @@ def runner(cfg, writer):
                             # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
                             # metrics tensor will have shape [number_of_metrics, n_timesteps]
                             metrics += validation_metrics(
-                                x_rollout, file_idx, ts_index, valset, metric_fn_list
+                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
                             )
                             val_plots[
                                 f"GT vs Pred at time {ts[0].item():.2f} (Saturated Phase)"
                             ] = plot4x4_sided(
-                                y[0, ...].to("cpu"),
+                                y[0, ...].to("cpu") if y.ndim == 7 else y[0, 0, ...].to("cpu"),
                                 x_rollout[0, 0, ...],  # first timestep and batch
                             )
                             val_plots[
@@ -178,14 +179,14 @@ def runner(cfg, writer):
                         else:
                             # metrics tensor will have shape [number_of_metrics, n_timesteps]
                             metrics += validation_metrics(
-                                x_rollout, file_idx, ts_index, valset, metric_fn_list
+                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
                             )
 
                 metrics = metrics / len(valloader)
 
                 for idx, metric_name in enumerate(metric_fn_list):
                     vals = metrics[idx, ...]
-                    for t in range(n_eval_steps):
+                    for t in range(n_eval_steps * cfg.model.bundle_seq_length):
                         log_metric_dict["val/" + metric_name + f"x{t+1}"] = vals[t]
 
                 if cfg.ckpt_path is not None:

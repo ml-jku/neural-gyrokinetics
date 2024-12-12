@@ -36,6 +36,7 @@ def get_pushforward_trick(
     schecule: List[float],
     predict_delta: bool,
     dataset: CycloneDataset,
+    bundle_steps: int,
 ) -> Callable:
     def _loss_fn(
         model: nn.Module,
@@ -65,10 +66,15 @@ def get_pushforward_trick(
 
         # get timesteps for unrolling
         ts_idxs = [
-            [i for i in range(int(ts_idx_start), int(ts_idx_start) + unroll_steps - 1)]
+            [i for i in range(int(ts_idx_start), int(ts_idx_start) + (unroll_steps - 1) * bundle_steps)]
             for ts_idx_start in ts_idx.tolist()
         ]
         tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
+        # ts_idxs = [
+        #     [i for i in range(int(ts_idx_start), int(ts_idx_start) + n_steps*bundle_steps, bundle_steps)]
+        #     for ts_idx_start in ts_index_0.tolist()
+        # ]
+        # tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
 
         # get unrolled target in a non-blocking way
         def fetch_target(dataset, file_idx, ts_unrolled):
@@ -77,7 +83,7 @@ def get_pushforward_trick(
         executor = ThreadPoolExecutor(max_workers=1)
 
         with torch.no_grad():
-            ts_unrolled = ts_idx + unroll_steps - 1
+            ts_unrolled = ts_idx + (unroll_steps - 1) * bundle_steps
             future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
 
             xt = x
@@ -110,7 +116,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader):
         if cfg.logging.tqdm:
             trainloader = tqdm(trainloader, "AE pretraining")
         for sample in trainloader:
-            x = sample[0].to(cfg.device)
+            x = sample.x.to(cfg.device)
             # TODO
             x = x + torch.normal(0, 0.25, size=(x.shape), device=x.device)
             pred_x = model.autoencoder(x)
@@ -129,7 +135,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader):
             if cfg.logging.tqdm:
                 valloader = tqdm(valloader, "AE evaluation")
             for sample in valloader:
-                x = sample[0].to(cfg.device)
+                x = sample.x.to(cfg.device)
                 pred_x = model.autoencoder(x)
                 if cfg.training.predict_delta:
                     pred_x = x + pred_x
