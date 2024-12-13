@@ -222,8 +222,8 @@ class WindowAttention(nn.Module):
         self.register_buffer("rpb_idx", dists.sum(0))
 
         # for swinv2 cosine similarity attention
-        self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))))
-        self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
+        # self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))))
+        # self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         # self.attn_drop = nn.Dropout(attn_drop)
@@ -482,6 +482,7 @@ class SwinLayer(nn.Module):
         self.use_checkpoint = use_checkpoint
         self.mode = mode
         self.dim = dim
+        self.grid_size = grid_size
 
         assert dim % num_heads == 0
 
@@ -523,8 +524,7 @@ class SwinLayer(nn.Module):
             self.attn_mask = None
 
         self.resampled_grid_size = grid_size
-        self.resample = resample
-        if callable(self.resample):
+        if callable(resample):
             self.resample = resample(
                 space=space,
                 dim=dim,
@@ -535,7 +535,7 @@ class SwinLayer(nn.Module):
             # TODO move one level up
             self.resampled_grid_size = self.resample.target_grid_size
 
-    def forward(self, x):
+    def forward(self, x, *, return_skip: bool = False):
         # dims = x.shape[2:]
 
         for blk in self.blocks:
@@ -543,8 +543,13 @@ class SwinLayer(nn.Module):
 
         # x = x.view(b, *dims, -1)
 
-        if self.resample is not None:
-            x = self.resample(x)
+        if hasattr(self, "resample"):
+            # return skip connection also
+            if return_skip:
+                # TODO check how expensive!!
+                x = (self.resample(x), x)
+            else:
+                x = self.resample(x)
 
         return x
 

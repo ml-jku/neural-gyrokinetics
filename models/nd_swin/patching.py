@@ -120,6 +120,7 @@ class PatchEmbed(nn.Module):
         Returns:
             Tensor (B, ..., C)
         """
+        assert all([xs == res for xs, res in zip(x.shape[1:-1], self.img_size)])
         x = self.proj(x)
         if self.flatten:
             x = rearrange(x, "b ... c -> b (...) c")
@@ -269,7 +270,7 @@ class PatchUnmerging(nn.Module):
                 raise NotImplementedError
 
             self.expansion = Conv(
-                dim, dim_out, kernel_size=grid_size, stride=grid_size, bias=False
+                dim, dim_out, kernel_size=expand_by, stride=expand_by, bias=False
             )
         else:
             self.expansion = nn.Sequential(

@@ -26,7 +26,6 @@ class SwinBlockDown(nn.Module):
         window_size: Sequence[int],
         num_heads: int,
         depth: int,
-        downsample: bool = False,
         c_multiplier: int = 2,
         abs_pe: bool = False,
         drop_path: float = 0.1,
@@ -39,7 +38,6 @@ class SwinBlockDown(nn.Module):
         super().__init__()
 
         self.window_size = window_size
-        self.abs_pe = abs_pe
         self.dim = dim
         self.grid_size = grid_size
 
@@ -47,7 +45,7 @@ class SwinBlockDown(nn.Module):
             self.pos_embed = PositionalEmbedding(
                 dim, grid_size, learnable=learnable_pos_embed
             )
-
+        # TODO move downsample here?
         self.swin_att = swin_attention_layer(
             space,
             dim,
@@ -58,9 +56,9 @@ class SwinBlockDown(nn.Module):
             drop_path=drop_path,
             mlp_ratio=hidden_mlp_ratio,
             use_checkpoint=use_checkpoint,
-            resample=PatchMerging if downsample else None,
+            resample=PatchMerging,
             c_multiplier=c_multiplier,
-            mode=SwinLayerModes.DOWNSAMPLE if downsample else SwinLayerModes.SEQUENCE,
+            mode=SwinLayerModes.DOWNSAMPLE,
             act_fn=act_fn,
         )
 
@@ -72,10 +70,10 @@ class SwinBlockDown(nn.Module):
         Returns:
             Tensor (B, D, H, ..., C)
         """
-        if self.abs_pe:
+        if hasattr(self, "pos_embed"):
             x = self.pos_embed(x)
 
-        return self.swin_att(x, **kwargs)
+        return self.swin_att(x, **kwargs, return_skip=True)
 
 
 class SwinBlockUp(nn.Module):
@@ -88,7 +86,6 @@ class SwinBlockUp(nn.Module):
         num_heads: int,
         depth: int,
         target_grid_size: Optional[Sequence[int]] = None,
-        upsample: bool = False,
         abs_pe: bool = False,
         drop_path: float = 0.1,
         hidden_mlp_ratio: float = 2.0,
@@ -98,13 +95,13 @@ class SwinBlockUp(nn.Module):
         act_fn: nn.Module = nn.GELU,
         patching_hidden_ratio: float = 8.0,
         swin_attention_layer: Type = SwinLayer,
+        conv_upsample: bool = False,
+        mode: SwinLayerModes = SwinLayerModes.UPSAMPLE,
     ):
         super().__init__()
 
         self.space = space
-        self.abs_pe = abs_pe
         self.dim = dim
-        self.upsample = upsample
         self.grid_size = grid_size
 
         if abs_pe:
@@ -112,25 +109,23 @@ class SwinBlockUp(nn.Module):
                 dim, grid_size, learnable=learnable_pos_embed
             )
 
-        if upsample:
+        if mode == SwinLayerModes.UPSAMPLE:
             upsample_fn = partial(
                 PatchUnmerging,
                 expand_by=2,
                 target_grid_size=target_grid_size,
                 mlp_ratio=patching_hidden_ratio,
                 act_fn=act_fn,
+                use_conv=conv_upsample,
             )
-            mode = SwinLayerModes.UPSAMPLE
-            dim_next = dim // c_multiplier  # latent mapped down in upsample
-        else:
+        elif mode == SwinLayerModes.SEQUENCE:
             upsample_fn = None
-            mode = SwinLayerModes.SEQUENCE
-            dim_next = dim  # no latent map down
-
+        # NOTE: project down concat dimension first to save params
+        self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
+        # TODO move upsample here?
         self.swin_att = swin_attention_layer(
             space,
-            2 * dim,  # concat skip connection
-            mode=mode,
+            dim,
             num_heads=num_heads,
             depth=depth,
             drop_path=drop_path,
@@ -141,10 +136,7 @@ class SwinBlockUp(nn.Module):
             c_multiplier=c_multiplier,
             use_checkpoint=use_checkpoint,
             act_fn=act_fn,
-        )
-
-        self.project_down = nn.Sequential(
-            act_fn(), nn.Linear(2 * dim_next, dim_next, bias=False)
+            mode=mode,
         )
 
     def forward(self, x: torch.Tensor, s: torch.Tensor, **kwargs) -> torch.Tensor:
@@ -161,14 +153,13 @@ class SwinBlockUp(nn.Module):
         )
 
         x = torch.cat([x, s], -1)
+        # concat to hidden dim
+        x = self.proj_concat(x)
 
-        if self.abs_pe:
+        if hasattr(self, "pos_embed"):
             x = self.pos_embed(x)
-        x = self.swin_att(x, **kwargs)
-        # back to hidden dim
-        x = self.project_down(x)
 
-        return x
+        return self.swin_att(x, **kwargs)
 
 
 class SwinUnet(nn.Module):
@@ -187,7 +178,6 @@ class SwinUnet(nn.Module):
         out_channels: int = 3,
         num_layers: int = 4,
         learnable_pos_embed: bool = False,
-        downsample: Union[Sequence[bool], bool] = False,
         c_multiplier: int = 2,
         conv_patch: bool = False,
         drop_path: float = 0.1,
@@ -211,18 +201,15 @@ class SwinUnet(nn.Module):
 
         self.patch_size = patch_size
         self.window_size = window_size
-        self.abs_pe = abs_pe
         self.img_size = img_size
         padded_img_size, _ = pad_to_blocks(img_size, patch_size)
 
-        if isinstance(downsample, bool):
-            downsample = [downsample] * num_layers
         if isinstance(num_heads, int):
             num_heads = [num_heads] * num_layers
         if isinstance(depth, int):
             depth = [depth] * num_layers
 
-        assert len(downsample) == num_layers
+        assert len(num_heads) == len(depth) == num_layers
 
         # set conditioning and layer type
         SwinAttentionLayer = SwinLayer
@@ -244,12 +231,14 @@ class SwinUnet(nn.Module):
             act_fn=act_fn,
         )
 
-        # down # TODO fix grids with new merging
-        c_multiplier = [c_multiplier if downsample[i] else 1 for i in range(num_layers)]
-        acc_multi = [1] + list(np.cumprod(c_multiplier))  # values are pre-downsample
+        # down
+        acc_multi = [1] + list(np.cumprod([c_multiplier] * num_layers))
+        # pre-downsample dims
         down_dims = [dim * m for m in acc_multi]
-        grid_sizes = [self.patch_embed.grid_size]
 
+        assert all([(d % h) == 0 for d, h in zip(down_dims, num_heads)])
+
+        grid_sizes = [self.patch_embed.grid_size]
         down_blocks = []
         for i in range(num_layers):
             block = SwinBlockDown(
@@ -259,7 +248,6 @@ class SwinUnet(nn.Module):
                 depth=depth[i],
                 window_size=window_size,
                 num_heads=num_heads[i],
-                downsample=downsample[i],
                 abs_pe=abs_pe,
                 drop_path=drop_path,
                 learnable_pos_embed=learnable_pos_embed,
@@ -270,7 +258,9 @@ class SwinUnet(nn.Module):
             )
             down_blocks.append(block)
             grid_sizes.append(block.swin_att.resampled_grid_size)
+
         self.down_blocks = nn.ModuleList(down_blocks)
+        self.grid_sizes = grid_sizes
 
         # middle
         self.middle = SwinAttentionLayer(
@@ -287,13 +277,23 @@ class SwinUnet(nn.Module):
             use_checkpoint=use_checkpoint,
             act_fn=act_fn,
         )
+
         if abs_pe:
             self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
 
+        self.middle_upscale = PatchUnmerging(
+            space=space,
+            dim=down_dims[-1],
+            grid_size=grid_sizes[-1],
+            target_grid_size=grid_sizes[-2],
+            mlp_ratio=patching_hidden_ratio,
+            act_fn=act_fn,
+            use_conv=conv_patch,
+        )
+
         # up
-        upsample = downsample[::-1]
-        up_dims = down_dims[::-1]
-        up_grid_sizes = grid_sizes[::-1]
+        up_dims = down_dims[::-1][1:]
+        up_grid_sizes = grid_sizes[::-1][1:]
         # patch merging padding
         # up_grid_sizes = [pad_to_blocks(g, space * (2,))[0] for g in up_grid_sizes]
 
@@ -301,7 +301,7 @@ class SwinUnet(nn.Module):
         up_num_heads = up_num_heads if up_num_heads is not None else num_heads[::-1]
 
         up_blocks = []
-        for i in range(num_layers):
+        for i in range(num_layers - 1):
             up_blocks.append(
                 SwinBlockUp(
                     space,
@@ -311,7 +311,6 @@ class SwinUnet(nn.Module):
                     window_size=window_size,
                     num_heads=up_num_heads[i],
                     depth=up_depth[i],
-                    upsample=upsample[i],
                     abs_pe=abs_pe,
                     drop_path=drop_path,
                     learnable_pos_embed=learnable_pos_embed,
@@ -320,11 +319,31 @@ class SwinUnet(nn.Module):
                     patching_hidden_ratio=patching_hidden_ratio,
                     act_fn=act_fn,
                     swin_attention_layer=SwinAttentionLayer,
+                    conv_upsample=conv_patch,
                 )
             )
-
+        # last up block (no upsample)
+        up_blocks.append(
+            SwinBlockUp(
+                space,
+                up_dims[-1],
+                grid_size=up_grid_sizes[-1],
+                window_size=window_size,
+                num_heads=up_num_heads[-1],
+                depth=up_depth[-1],
+                abs_pe=abs_pe,
+                drop_path=drop_path,
+                learnable_pos_embed=learnable_pos_embed,
+                hidden_mlp_ratio=hidden_mlp_ratio,
+                use_checkpoint=use_checkpoint,
+                act_fn=act_fn,
+                swin_attention_layer=SwinAttentionLayer,
+                mode=SwinLayerModes.SEQUENCE,
+            )
+        )
         self.up_blocks = nn.ModuleList(up_blocks)
 
+        # unpatch
         self.unpatch = PatchUnmerging(
             space,
             up_dims[-1],
@@ -339,12 +358,13 @@ class SwinUnet(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+
         cond = kwargs.get("timestep")
         if cond is not None and self.cond_embed is not None:
             # embed conditioning is e.g. sincos
-            cond = self.cond_embed(cond)
+            cond = {"condition": self.cond_embed(cond)}
         else:
-            cond = None
+            cond = {}
 
         # pad to patch blocks
         x = rearrange(x, "b c ... -> b ... c")
@@ -357,18 +377,20 @@ class SwinUnet(nn.Module):
         feature_maps = []
 
         for blk in self.down_blocks:
-            x = blk(x, condition=cond)
-            feature_maps.append(x)
+            x, x_pre = blk(x, **cond)
+            feature_maps.append(x_pre)
 
         # middle block
-        if self.abs_pe:
+        if hasattr(self, "middle_pe"):
             x = self.middle_pe(x)
-        x = self.middle(x, condition=cond)
+        x = self.middle(x, **cond)
+
+        x = self.middle_upscale(x)
 
         # down path
         feature_maps = feature_maps[::-1]
         for i, blk in enumerate(self.up_blocks):
-            x = blk(x, s=feature_maps[i], condition=cond)
+            x = blk(x, s=feature_maps[i], **cond)
 
         # expand patches to original size
         x = self.unpatch(x)
