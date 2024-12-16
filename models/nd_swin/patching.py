@@ -9,27 +9,18 @@ import torch.nn.functional as F
 from torch import nn
 
 
-def pad_to_shape(
-    x: torch.Tensor, shape: Sequence[int]
-) -> Tuple[torch.Tensor, Sequence[int]]:
-    pad_axes = []
-    if any(x1 != x2 for x1, x2 in zip(x.shape[1:-1], shape)):
-        for i, s in enumerate(shape):
-            assert s >= x.shape[1 + i]
-            pad_axes.append(0)
-            pad_axes.append(s - x.shape[1 + i])  # +1 for batch
-
-        # last tuple first in
-        pad_axes = pad_axes[::-1]
-        if any([p > 0 for p in pad_axes]):
-            x = F.pad(x, (0, 0, *pad_axes))
-
-    return x, pad_axes
-
-
 def pad_to_blocks(
     x: Union[Tuple[int], torch.Tensor], blocks: Sequence[int]
 ) -> Tuple[torch.Tensor, Sequence[int]]:
+    """Pad a tensor or a shape to a block size so that the shape is divisible by blocks.
+
+    Args:
+        x (tuple | torch.Tensor): Input shape or tensor.
+        blocks (tuple): Block sizes per axis.
+
+    Returns:
+        tuple (torch.Tensor, tuple): Padded tensor and padding sequence.
+    """
     x_shp = x.shape if isinstance(x, torch.Tensor) else (None, *x)
     pad_axes = []
     for i, w in enumerate(blocks):
@@ -52,6 +43,16 @@ def pad_to_blocks(
 def unpad(
     x: torch.Tensor, pad_axes: Sequence[int], base_grid: Sequence[int]
 ) -> torch.Tensor:
+    """Unpads a tensor to a base resolution, given the padding sequence.
+
+    Args:
+        x (torch.Tensor): Input tensor.
+        pad_axes (tuple): Padding sequence.
+        base_grid (tuple): base grid resolution.
+
+    Returns:
+        x (torch.Tensor): Unpadded tensor.
+    """
     if any([p > 0 for p in pad_axes]):
         # unpad to original resolution
         x = x[:, *[slice(0, r) for r in base_grid], :].contiguous()
@@ -60,31 +61,48 @@ def unpad(
 
 
 class PatchEmbed(nn.Module):
+    """ViT-style patch embedding for n- dimensional grid data.
+
+    Args:
+        space (int): Number of input/output dimensions.
+        base_resolution (tuple(int)): Input image size.
+        patch_size (int | tuple(int)): Patch size. Default is 5 (across all dimensions).
+        embed_dim (int): Latent dimension.
+        in_channels (int): Number of input channels. Default is 2.
+        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
+        flatten (bool): Flatten output patches. Default is False.
+        use_conv (bool): Use convolutions to patch (only 2D or 3D). Default is False.
+        mlp_ratio (float): Expansion rate for patching MLPs. Default is 8.0
+        act_fn (callable): Activation function. Default is nn.LeakyReLU.
+    """
+
     def __init__(
         self,
         space: int,
-        img_size: Sequence[int],
+        base_resolution: Sequence[int],
         patch_size: Sequence[int],
-        in_chans: int = 2,
-        embed_dim: int = 24,
+        embed_dim: int,
+        in_channels: int = 2,
         norm_layer: nn.Module = None,
         flatten: bool = True,
         use_conv: bool = False,
         act_fn: nn.Module = nn.LeakyReLU,
         mlp_ratio: float = 8.0,
     ):
-        assert len(img_size) == space, f"Image size must be {space}D"
+        assert len(base_resolution) == space, f"Image size must be {space}D"
         assert len(patch_size) == space, f"Patch size must be {space}D"
 
         super().__init__()
-        self.img_size = img_size
+        self.base_resolution = base_resolution
         self.patch_size = patch_size
-        self.grid_size = [ceil(img_size[i] / patch_size[i]) for i in range(space)]
+        self.grid_size = [
+            ceil(base_resolution[i] / patch_size[i]) for i in range(space)
+        ]
         self.embed_dim = embed_dim
         self.flatten = flatten
         self.use_conv = use_conv
         self.space = space
-        self.in_chans = in_chans
+        self.in_channels = in_channels
 
         hidden_dim = int(embed_dim * mlp_ratio)
 
@@ -97,7 +115,7 @@ class PatchEmbed(nn.Module):
                 raise NotImplementedError
 
             self.patch = Conv(
-                in_chans,
+                in_channels,
                 embed_dim,
                 kernel_size=patch_size,
                 stride=patch_size,
@@ -105,7 +123,7 @@ class PatchEmbed(nn.Module):
             )
         else:
             self.patch = nn.Sequential(
-                nn.Linear(in_chans * np.prod(patch_size), hidden_dim),
+                nn.Linear(in_channels * np.prod(patch_size), hidden_dim),
                 act_fn(),
                 nn.Linear(hidden_dim, embed_dim, bias=False),
             )
@@ -120,6 +138,7 @@ class PatchEmbed(nn.Module):
         Returns:
             Tensor (B, ..., C)
         """
+        assert all([xs == res for xs, res in zip(x.shape[1:-1], self.base_resolution)])
         x = self.proj(x)
         if self.flatten:
             x = rearrange(x, "b ... c -> b (...) c")
@@ -156,8 +175,17 @@ class PatchEmbed(nn.Module):
 
 
 class PatchMerging(nn.Module):
-    """
-    Patch merging layer.
+    """Smart swin-like patch merging layer for n- dimensional grid data.
+
+    Concatenates odd/even patches across all dimensions and projects them down, reducing
+    the grid size by 1/2. It is ONLY applied to axes that have >2 elements.
+
+    Args:
+        space (int): Number of input/output dimensions.
+        dim (int): Latent dimension.
+        grid_size (tuple(int)): Input grid size.
+        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
+        c_multiplier (int): Latent dimensions expansions after merging. Default is 2.
     """
 
     def __init__(
@@ -168,13 +196,6 @@ class PatchMerging(nn.Module):
         norm_layer: Type[nn.LayerNorm] = nn.LayerNorm,
         c_multiplier: int = 2,
     ) -> None:
-        """
-        Args:
-            space: spatial dimensionality.
-            dim: number of feature channels.
-            norm_layer: normalization layer.
-        """
-
         super().__init__()
         self.space = space
         self.dim = dim
@@ -218,6 +239,22 @@ class PatchMerging(nn.Module):
 
 
 class PatchUnmerging(nn.Module):
+    """Patch expansion/unmerging for n- dimensional grid data.
+
+    Args:
+        space (int): Number of input/output dimensions.
+        dim (int): Latent dimension.
+        grid_size (tuple(int)): Input grid size.
+        expand_by (int | tuple(int)): Per-axis spatial expantion ratio.
+        target_grid_size (tuple(int)): Grid size after unmerging. Overrides `expand_by`.
+        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
+        c_multiplier (int): Latent dimensions expansions after merging. Default is 2.
+        flatten (bool): Flatten output patches. Default is False.
+        use_conv (bool): Use convolutions to patch (only 2D or 3D). Default is False.
+        act_fn (callable): Activation function. Default is nn.LeakyReLU.
+        mlp_ratio (float): Expansion rate for patching MLPs. Default is 8.0
+    """
+
     def __init__(
         self,
         space: int,
@@ -269,12 +306,12 @@ class PatchUnmerging(nn.Module):
                 raise NotImplementedError
 
             self.expansion = Conv(
-                dim, dim_out, kernel_size=grid_size, stride=grid_size, bias=False
+                dim, dim_out, kernel_size=expand_by, stride=expand_by, bias=False
             )
         else:
             self.expansion = nn.Sequential(
                 nn.Linear(dim * (2 if patch_skip else 1), hidden_dim),
-                nn.LeakyReLU(),
+                act_fn(),
                 nn.Linear(hidden_dim, np.prod(expand_by) * dim_out),
             )
 

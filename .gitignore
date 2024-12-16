@@ -6,3 +6,4 @@
 .outputs/
 .vscode/
 *.out
+tmp/

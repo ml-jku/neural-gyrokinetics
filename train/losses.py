@@ -119,7 +119,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader):
             x = sample.x.to(cfg.device)
             # TODO
             x = x + torch.normal(0, 0.25, size=(x.shape), device=x.device)
-            pred_x = model.autoencoder(x)
+            pred_x = model.patching_autoencoder(x)
             if cfg.training.predict_delta:
                 pred_x = x + pred_x
             loss = relative_norm_mse(pred_x, x)
