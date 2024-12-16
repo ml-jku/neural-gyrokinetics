@@ -11,8 +11,7 @@ def get_model(cfg):
         space = 5
         patch_size = cfg.model.swin.patch_size
         window_size = cfg.model.swin.window_size
-        img_size = (32, 8, 16, 167, 21)  # TODO
-        downsample = cfg.model.swin.downsample
+        base_resolution = (32, 8, 16, 167, 21)  # TODO
         num_heads = cfg.model.swin.num_heads
         depth = cfg.model.swin.depth
         num_layers = cfg.model.num_layers
@@ -29,19 +28,18 @@ def get_model(cfg):
             # extend patching for time dimension
             patch_size = [1] + patch_size
             window_size = [bundle_steps] + window_size
-            img_size = (bundle_steps,) + img_size
+            base_resolution = (bundle_steps,) + base_resolution
 
         model = SwinUnet(
             space=space,
             dim=latent_dim,
-            in_channels=problem_dim,
-            out_channels=problem_dim,
+            base_resolution=base_resolution,  # TODO
             patch_size=patch_size,
             window_size=window_size,
-            img_size=img_size,  # TODO
             depth=depth,
             num_heads=num_heads,
-            downsample=downsample,
+            in_channels=problem_dim,
+            out_channels=problem_dim,
             num_layers=num_layers,
             use_checkpoint=gradient_checkpoint,
             drop_path=0.1,

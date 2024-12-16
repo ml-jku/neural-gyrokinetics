@@ -18,6 +18,28 @@ from models.nd_swin.patching import (
 
 
 class SwinBlockDown(nn.Module):
+    """N-dimensional shifted window transformer downsample block.
+
+    `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`
+    (arxiv.org/pdf/2103.14030)
+
+    Args:
+        space (int): Number of input/output dimensions.
+        dim (int): latent dimension. Divided by `c_multiplier` at output.
+        grid_size (tuple(int)): Input resolution.
+        window_size (int | tuple(int)): Window size for the shifted window attention.
+        depth (int): Number of swin transformer layers.
+        num_heads (int): Number of attention heads in the swin layers.
+        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
+        learnable_pos_embed (bool): Learnable APE (if abs_pe is set). Default is False.
+        drop_path (float): Stochastic depth drop rate. Default is 1/10.
+        hidden_mlp_ratio (float): Expansion rate for transformer MLPs. Default is 2.0
+        c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
+        use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
+        act_fn (callable): Activation function. Default is nn.GELU.
+        swin_attention_layer (nn.Module): Type for the swin attention layer.
+    """
+
     def __init__(
         self,
         space: int,
@@ -26,11 +48,11 @@ class SwinBlockDown(nn.Module):
         window_size: Sequence[int],
         num_heads: int,
         depth: int,
-        c_multiplier: int = 2,
         abs_pe: bool = False,
+        learnable_pos_embed: bool = False,
         drop_path: float = 0.1,
         hidden_mlp_ratio: float = 2.0,
-        learnable_pos_embed: bool = False,
+        c_multiplier: int = 2,
         use_checkpoint: bool = True,
         act_fn: nn.Module = nn.GELU,
         swin_attention_layer: Type = SwinLayer,
@@ -56,7 +78,7 @@ class SwinBlockDown(nn.Module):
             drop_path=drop_path,
             mlp_ratio=hidden_mlp_ratio,
             use_checkpoint=use_checkpoint,
-            resample=PatchMerging,
+            resample_fn=PatchMerging,
             c_multiplier=c_multiplier,
             mode=SwinLayerModes.DOWNSAMPLE,
             act_fn=act_fn,
@@ -77,20 +99,46 @@ class SwinBlockDown(nn.Module):
 
 
 class SwinBlockUp(nn.Module):
+    """N-dimensional shifted window transformer upscale block.
+
+    `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`
+    (arxiv.org/pdf/2103.14030)
+
+    Args:
+        space (int): Number of input/output dimensions.
+        dim (int): latent dimension. Divided by `c_multiplier` at output.
+        grid_size (tuple(int)): Input resolution.
+        window_size (int | tuple(int)): Window size for the shifted window attention.
+        depth (int): Number of swin transformer layers.
+        num_heads (int): Number of attention heads in the swin layers.
+        target_grid_size (tuple(int)): Output resolution (after upsample).
+        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
+        learnable_pos_embed (bool): Learnable APE (if abs_pe is set). Default is False.
+        drop_path (float): Stochastic depth drop rate. Default is 1/10.
+        hidden_mlp_ratio (float): Expansion rate for transformer MLPs. Default is 2.0
+        c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
+        use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
+        act_fn (callable): Activation function. Default is nn.GELU.
+        patching_hidden_ratio (float): Expansion rate for patching MLPs. Default is 8.0
+        swin_attention_layer (nn.Module): Type for the swin attention layer.
+        conv_upsample (bool): Use transposed convolutions to unpatch. Default is False.
+        mode (SwinLayerModes): Specify which operation to perform in the up-layer.
+    """
+
     def __init__(
         self,
         space: int,
         dim: int,
         grid_size: Sequence[int],
         window_size: Sequence[int],
-        num_heads: int,
         depth: int,
+        num_heads: int,
         target_grid_size: Optional[Sequence[int]] = None,
         abs_pe: bool = False,
+        learnable_pos_embed: bool = False,
         drop_path: float = 0.1,
         hidden_mlp_ratio: float = 2.0,
         c_multiplier: int = 2,
-        learnable_pos_embed: bool = False,
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         patching_hidden_ratio: float = 8.0,
@@ -132,7 +180,7 @@ class SwinBlockUp(nn.Module):
             grid_size=grid_size,
             mlp_ratio=hidden_mlp_ratio,
             window_size=window_size,
-            resample=upsample_fn,
+            resample_fn=upsample_fn,
             c_multiplier=c_multiplier,
             use_checkpoint=use_checkpoint,
             act_fn=act_fn,
@@ -163,28 +211,66 @@ class SwinBlockUp(nn.Module):
 
 
 class SwinUnet(nn.Module):
+    """N-dimensional shifted window transformer UNet implementation (v1/v2). The number
+    of spatial/temporal dimensions is set with the argument `space` and the model is
+    built accordingly.
+
+    `Swin Transformer: Hierarchical Vision Transformer using Shifted Windows`
+    (arxiv.org/pdf/2103.14030)
+
+    Args:
+        space (int): Number of input/output dimensions.
+        dim (int): latent dimension. Multiplied by `c_multiplier` for every downsample.
+        base_resolution (tuple(int)): Input grid size.
+        patch_size (int | tuple(int)): Patch size. Default is 4 (across all dimensions).
+        window_size (int | tuple(int)): Window size for the shifted window attention.
+                        Default is 5 (across all dimensions).
+        depth (int | tuple(int)): Depth at each (down/up) Swin Transformer layer.
+        up_depth (int | tuple(int)): Depth at each UP Swin Transformer layer.
+        num_heads (int | tuple(int)): Number of attention heads in each swin layer.
+        up_num_heads (int | tuple(int)): Number of attention heads in each UP layer.
+        in_channels (int): Number of input channels. Default is 2.
+        out_channels (int): Number of output channels. Default is 2.
+        num_layers (int): Number of down/up layers. Each layer applies a down/up-sample.
+                        Default is 4.
+        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
+        c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
+        conv_patch (bool): Use convolutions to patch and unpatch (only 2D or 3D).
+                        Default is False.
+        drop_path (float): Stochastic depth drop rate. Default is 1/10.
+        middle_depth (int): Number of layers in the bottleneck. Default is 4.
+        middle_num_heads (int): Attention heads in the bottleneck. Default is 8.
+        hidden_mlp_ratio (float): Expansion rate for transformer MLPs. Default is 2.0
+        use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
+        patching_hidden_ratio (float): Expansion rate for patching MLPs. Default is 2.0
+        conditioning (bool): Allow (Film) conditioning of swin layers. Default is False.
+                        If set, a `timestep` must be passed to the forward call.
+        act_fn (callable): Activation function. Default is nn.GELU.
+        expand_act_fn (callable): Activation function for the patch expansion. Default
+                        is nn.LeakyRelu. Better if nonzero in the negative regime.
+    """
+
     def __init__(
         self,
         space: int,
         dim: int,
-        img_size: Sequence[int],
+        base_resolution: Sequence[int],
         patch_size: Union[Sequence[int], int] = 4,
         window_size: Union[Sequence[int], int] = 5,
         depth: Union[Sequence[int], int] = 2,
         up_depth: Optional[Union[Sequence[int], int]] = None,
         num_heads: Union[Sequence[int], int] = 4,
         up_num_heads: Optional[Union[Sequence[int], int]] = None,
-        in_channels: int = 3,
-        out_channels: int = 3,
+        in_channels: int = 2,
+        out_channels: int = 2,
         num_layers: int = 4,
-        learnable_pos_embed: bool = False,
+        abs_pe: bool = False,
         c_multiplier: int = 2,
         conv_patch: bool = False,
         drop_path: float = 0.1,
         middle_depth: int = 4,
         middle_num_heads: int = 8,
         hidden_mlp_ratio: float = 2.0,
-        abs_pe: bool = False,
         use_checkpoint: bool = False,
         patching_hidden_ratio: float = 8.0,
         conditioning: Optional[nn.Module] = None,
@@ -201,8 +287,8 @@ class SwinUnet(nn.Module):
 
         self.patch_size = patch_size
         self.window_size = window_size
-        self.img_size = img_size
-        padded_img_size, _ = pad_to_blocks(img_size, patch_size)
+        self.base_resolution = base_resolution
+        padded_base_resolution, _ = pad_to_blocks(base_resolution, patch_size)
 
         if isinstance(num_heads, int):
             num_heads = [num_heads] * num_layers
@@ -221,9 +307,9 @@ class SwinUnet(nn.Module):
 
         self.patch_embed = PatchEmbed(
             space=space,
-            img_size=padded_img_size,
+            base_resolution=padded_base_resolution,
             patch_size=patch_size,
-            in_chans=in_channels,
+            in_channels=in_channels,
             embed_dim=dim,
             flatten=False,
             use_conv=conv_patch,
@@ -250,7 +336,7 @@ class SwinUnet(nn.Module):
                 num_heads=num_heads[i],
                 abs_pe=abs_pe,
                 drop_path=drop_path,
-                learnable_pos_embed=learnable_pos_embed,
+                learnable_pos_embed=False,
                 use_checkpoint=use_checkpoint,
                 hidden_mlp_ratio=hidden_mlp_ratio,
                 act_fn=act_fn,
@@ -270,7 +356,7 @@ class SwinUnet(nn.Module):
             depth=middle_depth,
             num_heads=middle_num_heads,
             window_size=window_size,
-            resample=None,
+            resample_fn=None,
             drop_path=drop_path,
             mlp_ratio=hidden_mlp_ratio,
             mode=SwinLayerModes.SEQUENCE,
@@ -313,7 +399,6 @@ class SwinUnet(nn.Module):
                     depth=up_depth[i],
                     abs_pe=abs_pe,
                     drop_path=drop_path,
-                    learnable_pos_embed=learnable_pos_embed,
                     hidden_mlp_ratio=hidden_mlp_ratio,
                     use_checkpoint=use_checkpoint,
                     patching_hidden_ratio=patching_hidden_ratio,
@@ -333,7 +418,6 @@ class SwinUnet(nn.Module):
                 depth=up_depth[-1],
                 abs_pe=abs_pe,
                 drop_path=drop_path,
-                learnable_pos_embed=learnable_pos_embed,
                 hidden_mlp_ratio=hidden_mlp_ratio,
                 use_checkpoint=use_checkpoint,
                 act_fn=act_fn,
@@ -396,12 +480,12 @@ class SwinUnet(nn.Module):
         x = self.unpatch(x)
 
         # unpad output
-        x = unpad(x, pad_axes, self.img_size)
+        x = unpad(x, pad_axes, self.base_resolution)
         # return as image
         x = rearrange(x, "b ... c -> b c ...")
         return x
 
-    def autoencoder(self, x: torch.Tensor) -> torch.Tensor:
+    def patching_autoencoder(self, x: torch.Tensor) -> torch.Tensor:
         # pad to patch blocks
         x = rearrange(x, "b c ... -> b ... c")
         x, pad_axes = pad_to_blocks(x, self.patch_size)
@@ -413,7 +497,7 @@ class SwinUnet(nn.Module):
         x = self.unpatch(x)
 
         # unpad output
-        x = unpad(x, pad_axes, self.img_size)
+        x = unpad(x, pad_axes, self.base_resolution)
         # return as image
         x = rearrange(x, "b ... c -> b c ...")
 
