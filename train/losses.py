@@ -136,7 +136,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader):
                 valloader = tqdm(valloader, "AE evaluation")
             for sample in valloader:
                 x = sample.x.to(cfg.device)
-                pred_x = model.autoencoder(x)
+                pred_x = model.patching_autoencoder(x)
                 if cfg.training.predict_delta:
                     pred_x = x + pred_x
                 loss = relative_norm_mse(pred_x, x)
