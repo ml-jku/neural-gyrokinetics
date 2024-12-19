@@ -1,9 +1,9 @@
 *__pycache__*
 .idea/
-# not sure why this is needed
 *wandb*
 .wandb/
-# not sure why this is needed
 *outputs*
 .outputs/
 .vscode/
+*.out
+tmp/

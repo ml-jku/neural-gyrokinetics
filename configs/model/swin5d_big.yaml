@@ -1,15 +1,15 @@
 name: swin
 input_seq_length: 1
 bundle_seq_length: 1
-latent_dim: 32
+latent_dim: 128
 num_layers: 3
 
 swin:
   patch_size: [4, 2, 2, 6, 4]
   window_size: [4, 2, 4, 14, 3]
   downsample: [false, true, false]
-  num_heads: [2, 4, 8]
-  depth: [2, 4, 8]
+  num_heads: [2, 4, 16]
+  depth: [2, 8, 12]
   gradient_checkpoint: false
-  patching_hidden_ratio: 12.0
+  patching_hidden_ratio: 16.0
   timestep_conditioning: true

@@ -4,10 +4,9 @@ Swin Transformer: Hierarchical Vision Transformer using Shifted Windows
 <https://arxiv.org/abs/2103.14030>"
 """
 
-from typing import Optional, Type, Sequence, Union
+from typing import Optional, Type, Sequence, Union, Tuple
 
 import numpy as np
-from enum import Enum
 from itertools import product
 import torch
 import torch.nn as nn
@@ -16,16 +15,19 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 from math import ceil
 
-from models.nd_swin.utils import LayerNorm, DropPath, unpad
+from models.nd_vit.vit_layers import LayerModes
+from models.nd_vit.drop import DropPath
+from models.nd_vit.patching import unpad, pad_to_blocks
+from models.utils import Film
 
 
 def window_partition(x, window_size):
-    """Window partition operation.
+    """Window partition operation is n- dimensions.
 
     Partition tokens into their respective windows
 
      Args:
-        x: input tensor (B, D, H, W, U, V, C)
+        x: input tensor (B, H, W, ..., C)
 
         window_size: local window size.
 
@@ -57,15 +59,15 @@ def window_partition(x, window_size):
 
 
 def window_reverse(windows, window_size, dims):
-    """Window reconstruction/reverse operation.
+    """Window reconstruction/reverse operation in n- dimensions.
 
      Args:
         windows: windows tensor (B * num_windows, window_size[0], ..., C)
         window_size: local window size.
-        dims: dimension (b, d, h ...).
+        dims: dimension (B, H, W, ...).
 
     Returns:
-        x: (B, D, H, W, U, V, C)
+        x: (B, H, W, ..., C)
     """
 
     space = len(window_size)
@@ -114,12 +116,16 @@ def get_window_size(x_size, window_size, shift_size=None):
 
 
 def compute_mask(dims, window_size, shift_size):
-    """Computing region masks.
+    """Computing region masks for n- dimension shifted windows.
 
     Args:
        dims: dimension values.
        window_size: local window size.
        shift_size: shift size.
+
+    Returns:
+        attn_mask: (B * num_windows, window_size ** space, C), window-wise attention
+                    masks to account for shifted rolled masks outside the frame.
     """
 
     img_mask = torch.zeros((1, *dims, 1))
@@ -140,12 +146,22 @@ def compute_mask(dims, window_size, shift_size):
     attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100))
     attn_mask = attn_mask.masked_fill(attn_mask == 0, float(0.0))
 
+    mask_windows = window_partition(img_mask, window_size)
+
     return attn_mask
 
 
 class WindowAttention(nn.Module):
     """
     Window based multi-head self attention module with relative position bias.
+
+    Args:
+        dim (int): Number of latent channels.
+        num_heads (int): Number of attention heads.
+        window_size (int | tuple(int)): Local window size.
+        qkv_bias (bool): Add a learnable bias to query, key, value. Default is False.
+        attn_drop (float): Attention dropout rate. Default is 0.
+        proj_drop (float): Dropout rate of output. Default is 0.
     """
 
     def __init__(
@@ -157,22 +173,12 @@ class WindowAttention(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
     ) -> None:
-        """
-        Args:
-            dim: number of feature channels.
-            num_heads: number of attention heads.
-            window_size: local window size.
-            qkv_bias: add a learnable bias to query, key, value.
-            attn_drop: attention dropout rate.
-            proj_drop: dropout rate of output.
-        """
 
         super().__init__()
         self.dim = dim
         self.window_size = window_size
         self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = head_dim**-0.5
+        self.head_dim = dim // num_heads
         self.attn_drop = attn_drop
         space = len(window_size)
 
@@ -188,7 +194,7 @@ class WindowAttention(nn.Module):
         # RPB from swinv2
         self.cpb_mlp = nn.Sequential(
             nn.Linear(space, 512),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(512, num_heads, bias=False),
         )
         # get relative_coords_table
@@ -219,11 +225,11 @@ class WindowAttention(nn.Module):
         self.register_buffer("rpb_idx", dists.sum(0))
 
         # for swinv2 cosine similarity attention
-        self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))))
-        self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
+        # self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))))
+        # self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
+        # self.attn_drop = nn.Dropout(attn_drop)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        # self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
@@ -249,21 +255,21 @@ class WindowAttention(nn.Module):
         rpb = rpb[self.rpb_idx.flatten()].view(sl, sl, self.num_heads)
         rpb = 16 * torch.sigmoid(rpb)
 
-        # # rpb from swinv1
-        # rpb = self.rpb[self.rpb_idx[:sl, :sl]]
+        # # # rpb from swinv1
+        # # rpb = self.rpb[self.rpb_idx[:sl, :sl]]
 
         rpb = rearrange(rpb, "slx sly h -> h slx sly").unsqueeze(0).contiguous()
 
         # swinv1 normal sdpa attention
         if mask is not None:
             mask = mask.unsqueeze(1)  # head dimension
-            # TODO do with broadcasting
-            mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)  # batch dimension
-        q = q * self.scale
-        # TODO find better way to add rpb
+            # TODO with broadcasting
+            mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)
+        # q = q * (self.head_dim**-0.5)
+        # TODO find better way to add rpb -> easy OOM here!
         mask = mask + rpb if mask is not None else rpb
-        with nn.attention.sdpa_kernel(nn.attention.SDPBackend.EFFICIENT_ATTENTION):
-            x = F.scaled_dot_product_attention(q, k, v, rpb, dropout_p=self.attn_drop)
+        # with nn.attention.sdpa_kernel(nn.attention.SDPBackend.CUDNN_ATTENTION):
+        x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=self.attn_drop)
 
         # # swinv2 cosine similarity attention
         # attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
@@ -288,6 +294,25 @@ class WindowAttention(nn.Module):
 class SwinTransformerBlock(nn.Module):
     """
     Swin Transformer block.
+
+    Handles shifts and window partitions, applies window-wise attention with the
+    configured roll attention mask, reverses the windows and undoes the roll and shift,
+    and applies the output MLP.
+
+
+    Args:
+        dim (int): Number of hidden channels.
+        num_heads (int): Number of attention heads.
+        window_size (tuple(int)): Local window size.
+        shift_size (tuple(int)): Window shift size (for each dimension).
+        mlp_ratio (float): Expansion ratio of the mlp hidden dimension. Default is 2.
+        qkv_bias (bool): Add a learnable bias to query, key, value. Default is False.
+        drop (float): Attention output dropout rate. Detault is 0.
+        attn_drop (float): Attention dropout rate. Default is 0.
+        drop_path (float): Stochastic depth drop rate. Default is 0.
+        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
+        use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
+        act_fn (callable): Activation function. Default is nn.GELU.
     """
 
     def __init__(
@@ -295,7 +320,7 @@ class SwinTransformerBlock(nn.Module):
         space: int,
         dim: int,
         num_heads: int,
-        resolution: Sequence[int],
+        grid_size: Sequence[int],
         window_size: Sequence[int],
         shift_size: Sequence[int],
         mlp_ratio: float = 2.0,
@@ -303,23 +328,10 @@ class SwinTransformerBlock(nn.Module):
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
-        norm_layer: Type[LayerNorm] = nn.LayerNorm,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
         use_checkpoint: bool = False,
+        act_fn: nn.Module = nn.GELU,
     ) -> None:
-        """
-        Args:
-            dim: number of feature channels.
-            num_heads: number of attention heads.
-            window_size: local window size.
-            shift_size: window shift size.
-            mlp_ratio: ratio of mlp hidden dim to embedding dim.
-            qkv_bias: add a learnable bias to query, key, value.
-            drop: dropout rate.
-            attn_drop: attention dropout rate.
-            drop_path: stochastic depth rate.
-            norm_layer: normalization layer.
-            use_checkpoint: use gradient checkpointing for reduced memory usage.
-        """
 
         super().__init__()
         self.space = space
@@ -329,7 +341,7 @@ class SwinTransformerBlock(nn.Module):
         self.use_checkpoint = use_checkpoint
 
         self.window_size, self.shift_size = get_window_size(
-            resolution, window_size, shift_size
+            grid_size, window_size, shift_size
         )
 
         assert len(self.window_size) == len(self.shift_size) == space
@@ -352,26 +364,18 @@ class SwinTransformerBlock(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_hidden_dim),
             mlp_drop,
-            nn.GELU(),
+            act_fn(),
             nn.Linear(mlp_hidden_dim, dim),
             mlp_drop,
         )
 
     def forward_part1(self, x, mask_matrix):
-        resolution = x.shape[1:-1]
+        grid_size = x.shape[1:-1]
         # swinv1 attention norm
         x = self.norm1(x)
 
         # TODO check if padding is needed and replace with pad_to_blocks
-        pad_axes = []
-        for i, w in enumerate(self.window_size):
-            pad_axes.append(0)
-            pad_axes.append((w - x.shape[1 + i] % w) % w)  # +1 for batch
-
-        # last tuple first in
-        pad_axes = pad_axes[::-1]
-        if any([p > 0 for p in pad_axes]):
-            x = F.pad(x, (0, 0, *pad_axes))
+        x, pad_axes = pad_to_blocks(x, self.window_size)
 
         if any(i > 0 for i in self.shift_size):
             shifted_x = torch.roll(
@@ -398,17 +402,17 @@ class SwinTransformerBlock(nn.Module):
         else:
             x = shifted_x
 
-        x = unpad(x, pad_axes, resolution)
+        x = unpad(x, pad_axes, grid_size)
 
         # NOTE swinv2 attention norm
         # x = self.norm1(x)
         return x
 
     def forward_part2(self, x):
-        # NOTE swinv2 mlp norm
-        # x = self.drop_path(self.norm2(self.mlp(x)))
         # swinv1 mlp norm
         x = self.drop_path(self.mlp(self.norm2(x)))
+        # NOTE swinv2 mlp norm
+        # x = self.drop_path(self.norm2(self.mlp(x)))
         return x
 
     def forward(self, x, mask_matrix):
@@ -427,15 +431,31 @@ class SwinTransformerBlock(nn.Module):
         return x
 
 
-class SwinLayerModes(Enum):
-    DOWNSAMPLE = "Downsample"
-    UPSAMPLE = "Upsample"
-    SEQUENCE = "Sequence"
-
-
 class SwinLayer(nn.Module):
     """
-    Basic Swin Transformer layer in one stage.
+    Basic Swin Transformer layer.
+
+    Pre-computes attention mask, applies swin attention and applies an optional down/up-
+    sample layer.
+
+    Args:
+        space (int): Number of input/output dimensions.
+        dim (int): Number of hidden channels.
+        depth (int): Number of swin transformer layers.
+        num_heads (int): Number of attention heads.
+        grid_size (tuple(int)): Input resolution.
+        window_size (tuple(int)): Local window size.
+        mode (LayerModes): Mark layer operation.
+        mlp_ratio (float): Expansion ratio of the mlp hidden dimension. Default is 2.
+        qkv_bias (bool): Add a learnable bias to query, key, value. Default is False.
+        drop_path (float | tuple(float)): Stochastic depth drop rate. Default is 0.
+        drop (float): Attention output dropout rate. Detault is 0.
+        attn_drop (float): Attention dropout rate. Default is 0.
+        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
+        c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
+        resample_fn (nn.Module): Optional resampling layer, applied after attention.
+        use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
+        act_fn (callable): Activation function. Default is nn.GELU.
     """
 
     def __init__(
@@ -444,34 +464,20 @@ class SwinLayer(nn.Module):
         dim: int,
         depth: int,
         num_heads: int,
+        grid_size: Sequence[int],
         window_size: Sequence[int],
-        resolution: Sequence[int],
-        drop_path: Union[Sequence[float], float],
-        mode: SwinLayerModes,
+        mode: LayerModes,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = False,
+        drop_path: Union[Sequence[float], float] = 0.0,
         drop: float = 0.0,
         attn_drop: float = 0.0,
-        norm_layer: Type[LayerNorm] = nn.LayerNorm,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
         c_multiplier: int = 2,
-        resample: Optional[nn.Module] = None,
+        resample_fn: Optional[nn.Module] = None,
         use_checkpoint: bool = False,
+        act_fn: nn.Module = nn.GELU,
     ) -> None:
-        """
-        Args:
-            dim: number of feature channels.
-            depth: number of layers in each stage.
-            num_heads: number of attention heads.
-            window_size: local window size.
-            drop_path: stochastic depth rate.
-            mlp_ratio: ratio of mlp hidden dim to embedding dim.
-            qkv_bias: add a learnable bias to query, key, value.
-            drop: dropout rate.
-            attn_drop: attention dropout rate.
-            norm_layer: normalization layer.
-            resample: an optional downsampling layer at the end of the layer.
-            use_checkpoint: use gradient checkpointing for reduced memory usage.
-        """
 
         super().__init__()
         self.window_size = window_size
@@ -484,6 +490,8 @@ class SwinLayer(nn.Module):
         self.depth = depth
         self.use_checkpoint = use_checkpoint
         self.mode = mode
+        self.dim = dim
+        self.grid_size = grid_size
 
         assert dim % num_heads == 0
 
@@ -496,7 +504,7 @@ class SwinLayer(nn.Module):
                     space,
                     dim=dim,
                     num_heads=num_heads,
-                    resolution=resolution,
+                    grid_size=grid_size,
                     window_size=window_size,
                     shift_size=self.no_shift if (i % 2 == 0) else self.shift_size,
                     mlp_ratio=mlp_ratio,
@@ -506,6 +514,7 @@ class SwinLayer(nn.Module):
                     drop_path=drop_path[i],
                     norm_layer=norm_layer,
                     use_checkpoint=use_checkpoint,
+                    act_fn=act_fn,
                 )
                 for i in range(depth)
             ]
@@ -515,32 +524,66 @@ class SwinLayer(nn.Module):
         # TODO can further improve by caching
         if any([s > 0 for s in self.shift_size]):
             window_size, shift_size = get_window_size(
-                resolution, self.window_size, self.shift_size
+                grid_size, self.window_size, self.shift_size
             )
-            mask_dims = [ceil(resolution[i] / w) * w for i, w in enumerate(window_size)]
+            mask_dims = [ceil(grid_size[i] / w) * w for i, w in enumerate(window_size)]
             attn_mask = compute_mask(mask_dims, window_size, shift_size)
             self.register_buffer("attn_mask", attn_mask)
         else:
             self.attn_mask = None
 
-        self.resample = resample
-        if callable(self.resample):
-            self.resample = resample(
+        self.resampled_grid_size = grid_size
+        if callable(resample_fn):
+            self.resample = resample_fn(
                 space=space,
                 dim=dim,
+                grid_size=grid_size,
                 norm_layer=norm_layer,
                 c_multiplier=c_multiplier,
             )
+            # TODO move one level up
+            self.resampled_grid_size = self.resample.target_grid_size
 
-    def forward(self, x):
-        # dims = x.shape[2:]
-
+    def forward(
+        self, x: torch.Tensor, *, return_skip: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
         for blk in self.blocks:
             x = blk(x, self.attn_mask)
 
-        # x = x.view(b, *dims, -1)
+        if hasattr(self, "resample"):
+            # return skip connection also
+            if return_skip:
+                # TODO check how expensive!!
+                x = (self.resample(x), x)
+            else:
+                x = self.resample(x)
 
-        if self.resample is not None:
-            x = self.resample(x)
+        return x
+
+
+class ModulatedSwinLayer(SwinLayer):
+    """Film-conditioned Swin Transformer layer."""
+
+    def __init__(self, *args, cond_dim: int, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.conditioning = nn.ModuleList(
+            [Film(cond_dim, self.dim) for _ in range(len(self.blocks))]
+        )
+
+    def forward(
+        self, x: torch.Tensor, condition: torch.Tensor, *, return_skip: bool = False
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
+        for blk, cond in zip(self.blocks, self.conditioning):
+            x = cond(x, condition)
+            x = blk(x, self.attn_mask)
+
+        if hasattr(self, "resample"):
+            # return skip connection also
+            if return_skip:
+                # TODO check how expensive!!
+                x = (self.resample(x), x)
+            else:
+                x = self.resample(x)
 
         return x

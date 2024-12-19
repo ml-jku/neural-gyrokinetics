@@ -1,33 +1,42 @@
-from ..utils import split_args
-import torch
-
-SUPPORTED_DROPOUT_MODE = {"vit", "swin", "vista3d"}
+from torch import nn
+from kappamodules.functional.pos_embed import get_sincos_1d_from_seqlen
 
 
-def get_act_layer(name: tuple | str):
-    """
-    Create an activation layer instance.
-
-    For example, to create activation layers:
-
-    .. code-block:: python
-
-        from monai.networks.layers import get_act_layer
-
-        s_layer = get_act_layer(name="swish")
-        p_layer = get_act_layer(name=("prelu", {"num_parameters": 1, "init": 0.25}))
-
-    Args:
-        name: an activation type string or a tuple of type string and parameters.
-    """
-    if name == "":
-        return torch.nn.Identity()
-    act_name, act_args = split_args(name)
-    try:
-        act_type = getattr(torch.nn, act_name)
-    except AttributeError:
-        raise AttributeError(
-            f"Activation function {name} does not exist, activation name must be called as class "
-            f"implemented in pytorch!"
+class IntegerConditionEmbed(nn.Module):
+    def __init__(self, dim, max_size):
+        super().__init__()
+        cond_dim = dim * 4
+        self.max_size = max_size
+        self.dim = dim
+        self.cond_dim = cond_dim
+        self.register_buffer(
+            "cond_embed",
+            get_sincos_1d_from_seqlen(seqlen=max_size, dim=dim),
         )
-    return act_type(**act_args)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, cond_dim),
+            nn.SiLU(),
+        )
+
+    def forward(self, condition):
+        # checks + preprocess
+        assert condition.numel() == len(condition)
+        condition = condition.flatten().long()
+        return self.mlp(self.cond_embed[condition])
+
+
+class Film(nn.Module):
+    def __init__(self, cond_dim, dim_out):
+        super().__init__()
+
+        self.dim_cond = cond_dim
+        self.dim_out = dim_out
+        self.modulation = nn.Linear(cond_dim, dim_out * 2)
+
+    def forward(self, x, cond):
+        mod = self.modulation(cond)
+        # broadcast to x
+        scale, shift = mod.reshape(
+            mod.shape[0], *(1,) * (x.ndim - cond.ndim), *mod.shape[1:]
+        ).chunk(2, dim=-1)
+        return x * (scale + 1) + shift

@@ -1,88 +1,33 @@
-from typing import List, Optional, Callable
+from typing import List, Callable
 
 import torch
-import torch.nn.functional as F
 from torch import nn
-
 import numpy as np
+from tqdm import tqdm
 
-from .utils import roll_forward_once, unbind_time
+from concurrent.futures import ThreadPoolExecutor
 
-
-def mse_timesteps(x, y):
-    mse = F.mse_loss(x, y, reduction="none")
-    # average over everything except the timesteps
-    return torch.mean(mse, dim=[1, 2, 3, 4])
+from dataset.cyclone import CycloneDataset
 
 
-def relative_norm_mse(x, y):
-    n_ts, bs = x.shape[0], x.shape[1]
-    y = y[:n_ts]
-    diff = x.reshape(n_ts, bs, -1) - y.reshape(n_ts, bs, -1)
-    diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
-    y_norms = torch.linalg.norm(y.reshape(n_ts, bs, -1), ord=2, dim=-1)
-    diff_norms, y_norms = diff_norms**2, y_norms**2
-    # sum over timesteps and mean over examples in batch
-    return torch.mean(torch.sum(diff_norms / y_norms, dim=0))
-
-
-def mae_timesteps(x, y):
-    mae = F.l1_loss(x, y, reduction="none")
-    # average over everything except the timesteps
-    return torch.mean(mae, dim=[1, 2, 3, 4])
-
-
-def autoencoder_loss(
-    encoder: nn.Module,
-    decoder: nn.Module,
-    x: torch.Tensor,
-    grid: torch.Tensor,
-    ts: torch.Tensor,
-    conditioner: Optional[nn.Module] = None,
-) -> List[float]:
-    if conditioner is not None:
-        cond = conditioner(ts)
-
-    grid = grid.flatten(1, 2)
-    z = encoder(x, grid, condition=cond)
-    pred_x = decoder(z, grid, condition=cond)
-
-    lossz = F.mse_loss(pred_x, x)
-    return lossz
-
-
-def get_base_train_loss(
-    predict_delta: bool, bundle_steps: Optional[int] = None
-) -> Callable:
-    def _loss_fn(
-        model: nn.Module,
-        x: torch.Tensor,
-        grid: torch.Tensor,
-        ys: torch.Tensor,
-        ts: torch.Tensor,
-        epoch: Optional[int] = None,
-    ) -> List[float]:
-        del epoch
-
-        extra_steps = ys.shape[0] if bundle_steps is None else bundle_steps
-        problem_dim = ys.shape[2]
-
-        pred_x = model(x, grid, ts)
-        if pred_x.ndim == 4:
-            pred_x = unbind_time(pred_x, d=problem_dim)
-
-        if predict_delta:
-            x_ = unbind_time(x, d=problem_dim)
-            tail_idx = torch.arange(x_.shape[1] - extra_steps, x_.shape[1])
-            pred_x = pred_x + x_[:, tail_idx, ...]
-
-        pred_x = pred_x.transpose(1, 0)
-
-        loss = relative_norm_mse(pred_x, ys)
-
-        return loss
-
-    return _loss_fn
+def relative_norm_mse(x, y, dim_to_keep=None):
+    if dim_to_keep is None:
+        y = y.flatten(1)
+        diff = x.flatten(1) - y
+        diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
+        y_norms = torch.linalg.norm(y, ord=2, dim=-1)
+        diff_norms, y_norms = diff_norms**2, y_norms**2
+        # sum over timesteps and mean over examples in batch
+        return torch.mean(diff_norms / y_norms)
+    else:
+        # TODO: Check if this is necessary
+        y = y.flatten(2)
+        diff = x.flatten(2) - y
+        diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
+        y_norms = torch.linalg.norm(y, ord=2, dim=-1)
+        diff_norms, y_norms = diff_norms**2, y_norms**2
+        dims = [i for i in range(len(y_norms.shape))][dim_to_keep + 1 :]
+        return torch.mean(diff_norms / y_norms, dim=dims)
 
 
 def get_pushforward_trick(
@@ -90,14 +35,16 @@ def get_pushforward_trick(
     probs: List[float],
     schecule: List[float],
     predict_delta: bool,
-    bundle_steps: Optional[int] = None,
+    dataset: CycloneDataset,
+    bundle_steps: int,
 ) -> Callable:
     def _loss_fn(
         model: nn.Module,
         x: torch.Tensor,
-        grid: torch.Tensor,
-        ys: torch.Tensor,
         ts: torch.Tensor,
+        ts_idx: torch.Tensor,
+        y: torch.Tensor,
+        file_idx: torch.Tensor,
         epoch: int,
     ) -> List[float]:
         # pushforward scheduler with epoch
@@ -105,21 +52,107 @@ def get_pushforward_trick(
         # sample number of steps
         curr_probs = [p / sum(probs[:idx]) for p in probs[:idx]]
         unroll_steps = np.random.choice(unrolls[:idx], p=curr_probs)
-        extra_steps = ys.shape[0] if bundle_steps is None else bundle_steps
-        problem_dim = ys.shape[2]
+
+        # cap the unroll steps depending on the current max timestep
+        unroll_steps = min(
+            [
+                min(dataset.num_ts(f_idx) - int(ts_idx[i]) - bundle_steps + 1, unroll_steps)
+                for i, f_idx in enumerate(file_idx.tolist())
+            ]
+        )
 
         if unroll_steps < 2:
-            return x, grid, ys, ts
+            return x, ts, y
+
+        # get timesteps for unrolling
+        ts_idxs = [
+            [i for i in range(int(ts_idx_start), int(ts_idx_start) + (unroll_steps - 1) * bundle_steps)]
+            for ts_idx_start in ts_idx.tolist()
+        ]
+        tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
+        # ts_idxs = [
+        #     [i for i in range(int(ts_idx_start), int(ts_idx_start) + n_steps*bundle_steps, bundle_steps)]
+        #     for ts_idx_start in ts_index_0.tolist()
+        # ]
+        # tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
+
+        # get unrolled target in a non-blocking way
+        def fetch_target(dataset, file_idx, ts_unrolled):
+            return dataset.get_at_time(file_idx.cpu(), ts_unrolled.cpu())
+
+        executor = ThreadPoolExecutor(max_workers=1)
 
         with torch.no_grad():
+            ts_unrolled = ts_idx + (unroll_steps - 1) * bundle_steps
+            future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
+
             xt = x
             for i in range(unroll_steps - 1):
-                _, xt = roll_forward_once(
-                    model, xt, grid, ts + i, problem_dim, extra_steps, predict_delta
-                )
+                # TODO: currenlty only integer conditioning. Remove that line if floats are possible
+                x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
+                if predict_delta:
+                    x_p = xt + x_p
+                xt = x_p.clone()
+            # Get the result when needed
+            unrolled = future.result()
 
-        ys_slice = ys[(unroll_steps - 1) * bundle_steps : unroll_steps * bundle_steps]
         # have to clone xt to avoid view mode grad runtime error
-        return xt.clone(), grid, ys_slice, ts + unroll_steps
+        return xt.clone(), unrolled.timestep.to(x.device), unrolled.y.to(x.device)
 
     return _loss_fn
+
+
+def pretrain_autoencoder(model, cfg, trainloader, valloader):
+    AE_n_epochs = 20  # TODO
+
+    AE_opt = torch.optim.Adam(
+        list(model.patch_embed.parameters()) + list(model.unpatch.parameters()),
+        lr=5e-4,
+        weight_decay=cfg.training.weight_decay,
+    )
+
+    for epoch in range(1, AE_n_epochs + 1):
+        train_mse = 0
+        if cfg.logging.tqdm:
+            trainloader = tqdm(trainloader, "AE pretraining")
+        for sample in trainloader:
+            x = sample.x.to(cfg.device)
+            # TODO
+            x = x + torch.normal(0, 0.25, size=(x.shape), device=x.device)
+            pred_x = model.patching_autoencoder(x)
+            if cfg.training.predict_delta:
+                pred_x = x + pred_x
+            loss = relative_norm_mse(pred_x, x)
+            AE_opt.zero_grad()
+            loss.backward()
+            AE_opt.step()
+            train_mse += loss.item()
+        train_mse = train_mse / len(trainloader)
+
+        val_log = ""
+        if (epoch % 10) == 0 or epoch == 1:
+            val_mse = 0
+            if cfg.logging.tqdm:
+                valloader = tqdm(valloader, "AE evaluation")
+            for sample in valloader:
+                x = sample.x.to(cfg.device)
+                pred_x = model.patching_autoencoder(x)
+                if cfg.training.predict_delta:
+                    pred_x = x + pred_x
+                loss = relative_norm_mse(pred_x, x)
+                val_mse += loss.item()
+            val_mse = val_mse / len(valloader)
+            val_log = f", val/relative_norm_mse: {val_mse:.4f}"
+
+        epoch_str = str(epoch).zfill(len(str(int(AE_n_epochs))))
+        print(
+            f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
+        )
+
+    # freeze patching
+    model.patch_embed.requires_grad_ = False
+    model.unpatch.requires_grad_ = False
+
+    print("Pretraining done!\n\n")
+
+    return model

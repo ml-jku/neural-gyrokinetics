@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: cyclone
-  - model: fno
+  - model: swin5d
   - logging: no_logging
   - training: default
   - validation: default
@@ -15,4 +15,5 @@ use_amp: true
 mode: "train"
 eval: true
 device: "cuda"
-ckpt_path: null
+ckpt_path: "/system/user/publicworks/gyrokinetics_checkpoints/cyclone4_2_swin_ckp"
+load_ckp: false

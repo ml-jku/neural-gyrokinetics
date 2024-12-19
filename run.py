@@ -1,31 +1,20 @@
-import os
 from datetime import datetime
 
-import numpy as np
+from functools import partial
 import torch
+import warnings
 from tqdm import tqdm
-import wandb
 
 from dataset import get_data
 from models import get_model
-from eval.plot_utils import (
-    get_gifs3x3,
-    get_val_trajectory_plots,
-    get_wandb_tables,
-    get_power_spectra,
-)
-from train import (
-    mse_timesteps,
-    mae_timesteps,
-    get_pushforward_trick,
-    get_base_train_loss,
-)
-from eval import get_rollout, validation_metrics, ssim_tensor
+
+from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
+from eval import get_rollout, validation_metrics, distribution_5D, plot4x4_sided
 from utils import load_model_and_config, save_model_and_config
 
 
 def runner(cfg, writer):
-    (_, valset), (trainloader, valloader), augmentations = get_data(cfg)
+    (trainset, valset), (trainloader, valloader), augmentations = get_data(cfg)
 
     model = get_model(cfg)
 
@@ -33,30 +22,33 @@ def runner(cfg, writer):
     cfg.logging.run_name = f"{cfg.model.name}_{data_and_time}"
 
     device = cfg.device
-    active_keys = valset.active_keys
+    active_keys = cfg.dataset.active_keys
 
-    optimizer_state_dict = None
-    if cfg.ckpt_path is not None:
+    opt_state_dict = None
+    if cfg.load_ckp is True and cfg.ckpt_path is not None:
         # TODO move config loading to here (now in main.py)
-        model, optimizer_state_dict, _ = load_model_and_config(
+        model, opt_state_dict, _ = load_model_and_config(
             cfg.ckpt_path, model=model, device=device
         )
 
     model = model.to(device)
 
     if cfg.mode == "train":
-        optimizer = torch.optim.Adam(
+        n_epochs = cfg.training.n_epochs
+
+        # optimizer config
+        opt = torch.optim.Adam(
             model.parameters(),
             lr=cfg.training.learning_rate,
             weight_decay=cfg.training.weight_decay,
         )
-        if optimizer_state_dict is not None:
-            optimizer.load_state_dict(optimizer_state_dict)
+        if opt_state_dict is not None:
+            opt.load_state_dict(opt_state_dict)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs, 1e-6)
 
         # configure loss
-        loss_fn = get_base_train_loss(
-            cfg.training.predict_delta, cfg.training.bundle_seq_length
-        )
+        predict_delta = cfg.training.predict_delta
+        # and pushforward
         pf_cfg = cfg.training.pushforward
         pushforward_fn = None
         if sum(pf_cfg.unrolls) > 0:
@@ -64,156 +56,168 @@ def runner(cfg, writer):
                 pf_cfg.unrolls,
                 pf_cfg.probs,
                 schecule=pf_cfg.epochs,
-                predict_delta=cfg.training.predict_delta,
-                bundle_steps=cfg.training.bundle_seq_length,
+                predict_delta=predict_delta,
+                dataset=trainset,
+                bundle_steps=cfg.model.bundle_seq_length
             )
 
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.8)
         loss_val_min = torch.inf
-        use_tqdm = cfg.logging.tqdm
 
-        for epoch in range(cfg.training.n_epochs):
+        if cfg.training.pretraining:
+            model = pretrain_autoencoder(model, cfg, trainloader, valloader)
+
+        use_tqdm = cfg.logging.tqdm
+        for epoch in range(1, n_epochs + 1):
             train_mse = 0
             if use_tqdm:
                 trainloader = tqdm(trainloader, "Training")
             for sample in trainloader:
-                x, grid, y, ts = sample
-                x, grid, y, ts = (
-                    x.to(device),
-                    grid.to(device),
-                    y.to(device),
-                    ts.to(device),
-                )
+                x = sample.x.to(device)
+                ts = sample.timestep.to(device)
+                y = sample.y.to(device)
 
-                optimizer.zero_grad()
+                # TODO should augmentations take place before moving to GPU?
+                if augmentations is not None:
+                    for aug_fn in augmentations:
+                        x = aug_fn(x)
 
                 if pushforward_fn:
-                    x, grid, y, ts = pushforward_fn(model, x, grid, y, ts, epoch)
+                    # accessory information for pf (to retreive unrolled target)
+                    file_idx = sample.file_index.to(device)
+                    ts_index = sample.timestep_index.to(device)
+                    x, ts, y = pushforward_fn(
+                        model, x, ts, ts_index, y, file_idx, epoch
+                    )
 
-                loss = loss_fn(model, x, grid, y, ts)
+                # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
+                pred_x = model(x, timestep=torch.ceil(ts))
+
+                if predict_delta:
+                    pred_x = x + pred_x
+
+                loss = relative_norm_mse(pred_x, y)
+
+                opt.zero_grad()
                 loss.backward()
-                optimizer.step()
+                opt.step()
 
                 train_mse += loss.item()
 
             train_mse /= len(trainloader)
             train_losses_dict = {"train/relative_norm_mse": train_mse}
 
-            # Validation loop
-            model.eval()
-            # TODO configurable metric list
-            # non_averaging_mse = partial(F.mse_loss(reduction="none"))
-            metric_fn_list = {
-                "mse": mse_timesteps,
-                "ssim": ssim_tensor,
-                "mae": mae_timesteps,
-            }
-            # TODO initialize dictionary with torch tensors initialized to 0 and without grad with 1 dimension of size tsteps
-            # OR initialize tensor of metric with shape [n_metrics, n_timesteps]
-            # metric_dict = defaultdict(lambda: 0.0)
-            if use_tqdm:
-                valloader = tqdm(valloader, "Validation")
-            with torch.no_grad():
-                for idx, sample in enumerate(valloader):
-                    x, grid, y, ts = sample
-                    x, grid, y, ts = (
-                        x.to(device),
-                        grid.to(device),
-                        y.to(device),
-                        ts.to(device),
+            log_metric_dict = {}
+            val_plots = {}
+            if (epoch % cfg.validation.validate_every_n_epochs) == 0 or epoch == 1:
+                # Validation loop
+                model.eval()
+                # TODO configurable metric list
+                metric_fn_list = {
+                    "relative_norm_mse": partial(
+                        relative_norm_mse, dim_to_keep=0
+                    ),  # to average across all dimensions except timesteps
+                    # TODO: add more useful metrics
+                }
+                # TODO initialize dictionary with torch tensors initialized to 0 and without grad with 1 dimension of size tsteps
+                # OR initialize tensor of metric with shape [n_metrics, n_timesteps]
+                # metric_dict = defaultdict(lambda: 0.0)
+                if use_tqdm:
+                    valloader = tqdm(valloader, "Validation")
+                with torch.no_grad():
+                    for idx, sample in enumerate(valloader):
+                        x = sample.x.to(device)
+                        ts = sample.timestep.to(device)
+                        y = sample.y.to(device)
+                        file_idx = sample.file_index.to(device)
+                        ts_index = sample.timestep_index.to(device)
+
+                        n_eval_steps = cfg.validation.n_eval_steps
+
+                        # get the rolled out validation trajectories
+                        x_rollout = get_rollout(
+                            problem_dim=len(active_keys),
+                            n_steps=n_eval_steps,
+                            bundle_steps=cfg.model.bundle_seq_length,
+                            dataset=valset,
+                            predict_delta=cfg.training.predict_delta,
+                        )(model, x, file_idx=file_idx, ts_index_0=ts_index)
+
+                        if idx == 0:
+                            # initialize metrics tensor
+                            metrics = validation_metrics(
+                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
+                            )
+                            val_plots[
+                                f"GT vs Pred at time {ts[0].item():.2f} (Linear Phase)"
+                            ] = plot4x4_sided(
+                                y[0, ...].to("cpu") if y.ndim == 7 else y[0, 0, ...].to("cpu"),
+                                x_rollout[0, 0, ...],  # first timestep and batch
+                            )
+                            val_plots[
+                                f"Pred at time {ts[0].item():.2f} (Linear Phase)"
+                            ] = distribution_5D(
+                                x_rollout[0, 0, ...]  # first timestep and batch
+                            )
+
+                        elif idx == 5:
+                            # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
+                            # metrics tensor will have shape [number_of_metrics, n_timesteps]
+                            metrics += validation_metrics(
+                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
+                            )
+                            val_plots[
+                                f"GT vs Pred at time {ts[0].item():.2f} (Saturated Phase)"
+                            ] = plot4x4_sided(
+                                y[0, ...].to("cpu") if y.ndim == 7 else y[0, 0, ...].to("cpu"),
+                                x_rollout[0, 0, ...],  # first timestep and batch
+                            )
+                            val_plots[
+                                f"Pred at time {ts[0].item():.2f} (Saturated Phase)"
+                            ] = distribution_5D(
+                                x_rollout[0, 0, ...]  # first timestep and batch
+                            )
+                        else:
+                            # metrics tensor will have shape [number_of_metrics, n_timesteps]
+                            metrics += validation_metrics(
+                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
+                            )
+
+                metrics = metrics / len(valloader)
+
+                for idx, metric_name in enumerate(metric_fn_list):
+                    vals = metrics[idx, ...]
+                    for t in range(n_eval_steps * cfg.model.bundle_seq_length):
+                        log_metric_dict["val/" + metric_name + f"x{t+1}"] = vals[t]
+
+                if cfg.ckpt_path is not None:
+                    # Save model if validation loss improves
+                    loss_val_min = save_model_and_config(
+                        model,
+                        opt,
+                        cfg,
+                        epoch,
+                        # TODO decide target metric
+                        val_loss=log_metric_dict["val/relative_norm_msex1"],
+                        loss_val_min=loss_val_min,
+                    )
+                else:
+                    warnings.warn(
+                        "`cfg.ckpt_path` is not set: checkpoints will not be stored"
                     )
 
-                    # get the rolled out validation trajectories
-                    x_rollout = get_rollout(
-                        problem_dim=len(active_keys),
-                        n_steps=y.shape[0],
-                        bundle_steps=cfg.training.bundle_seq_length,
-                        predict_delta=cfg.training.predict_delta,
-                    )(
-                        model, x, grid, ts0=ts
-                    )  # (n_steps, bs, d, h, w)
-
-                    y = y.cpu()
-
-                    if idx == 0:
-                        # initialize metrics tensor (y has shape [n_steps, bs, d, h, w])
-                        metrics = validation_metrics(x_rollout, y, metric_fn_list)
-                        frequencies, power_pred, power_gt = get_power_spectra(
-                            x_rollout, y
-                        )
-                        # get images of trajectories
-                        traj_plots = get_val_trajectory_plots(
-                            x_rollout, y, [1, 5, 10, 25, 50]
-                        )
-
-                    else:
-                        # get all validation metrics for the rollout
-                        # metrics tensor will have shape [number_of_metrics, n_timesteps]
-                        metrics += validation_metrics(x_rollout, y, metric_fn_list)
-                        _, _power_pred, _power_gt = get_power_spectra(x_rollout, y)
-                        power_pred += _power_pred
-                        power_gt += _power_gt
-
-            metrics = metrics / len(valloader)
-            power_pred = power_pred / len(valloader)
-            power_gt = power_gt / len(valloader)
-
-            # create mse/ssim/mae tables for logging
-            metric_tables = get_wandb_tables(metrics, list(metric_fn_list.keys()))
-            # subsample to keep only 3 values
-            log_metric_dict = {}
-            rollout_len = y.shape[0]
-            for idx, metric_name in enumerate(metric_fn_list):
-                vals = metrics[idx, ...]
-                for t in [0, int(0.5 * rollout_len) - 1, rollout_len - 1]:
-                    log_metric_dict["val/" + metric_name + f"x{t+1}"] = vals[t]
-
-            # Save model if validation loss improves
-            loss_val_min = save_model_and_config(
-                model,
-                optimizer,
-                cfg,
-                epoch,
-                # TODO decide target metric
-                val_loss=log_metric_dict["val/msex1"],
-                loss_val_min=loss_val_min,
-            )
-
-            # scheduler.step()
+            sched.step()
 
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
             if writer:
                 # log epoch details
-                writer.log(epoch_logs, commit=False)
-                # log validation trajectory images
-                images = [wandb.Image(graphic) for graphic in traj_plots]
-                writer.log(
-                    {k: images[idx] for idx, k in enumerate(valset.active_keys)},
-                    commit=False,
-                )
-                # log metrics graphs over full validation rollouts
-                writer.log(
-                    {
-                        key: wandb.plot.line(table, "t", key, title=f"{key}test")
-                        for key, table in metric_tables.items()
-                    },
-                    commit=False,
-                )
-                # log power spectra
-                writer.log(
-                    {
-                        "power spectra": wandb.plot.line_series(
-                            xs=frequencies,
-                            ys=[power_pred, power_gt],
-                            keys=["predicted", "groundtruth"],
-                            title="Power Spectrum",
-                            xname="frequency",
-                        )
-                    }
-                )
+                if not val_plots:
+                    writer.log(epoch_logs)
+                else:
+                    writer.log(epoch_logs, commit=False)
+                    writer.log(val_plots)
 
-            epoch_str = str(epoch).zfill(len(str(int(cfg.training.n_epochs))))
+            epoch_str = str(epoch).zfill(len(str(int(n_epochs))))
             print(
                 f"Epoch: {epoch_str}, "
                 f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
@@ -222,45 +226,4 @@ def runner(cfg, writer):
             writer.finish()
 
     if cfg.mode == "rollout":
-        os.makedirs(cfg.logging.output_dir, exist_ok=True)
-
-        run_dir = f"{cfg.logging.output_dir}/{cfg.logging.run_name}"
-
-        trajs = list(valset.trajectory_tags())
-        n_rollout_traj = min(cfg.rollout.n_rollout_traj, len(trajs))
-        window_len = cfg.model.input_seq_length
-        rollout_steps = cfg.rollout.rollout_steps
-
-        rollout_fn = get_rollout(
-            problem_dim=len(active_keys),
-            n_steps=rollout_steps,
-            bundle_steps=cfg.training.bundle_seq_length,
-            predict_delta=cfg.training.predict_delta,
-        )
-
-        for run_n in range(n_rollout_traj):
-            val_traj, grid = valset.get_traj(trajs[run_n])
-
-            traj_x = {
-                k: torch.from_numpy(
-                    np.array([v[i] for i in range(window_len)])  # add window of inputs
-                ).unsqueeze(0)
-                for k, v in val_traj.items()
-            }
-            sample = {"x": traj_x, "grid": grid.unsqueeze(0)}
-            x, grid, _, _ = sample
-
-            pred_rollout = rollout_fn(model, x, grid, ts0=0)  # (t, bs, c, h, w)
-            pred_rollout_dict = {k: [] for k in active_keys}
-
-            for c, k in enumerate(active_keys):
-                for t in range(rollout_steps):
-                    xt_c = pred_rollout.squeeze()[t, c, ...].detach().cpu().numpy()
-                    pred_rollout_dict[k].append(xt_c)
-
-            pred_rollout = {
-                k: np.array(pred_rollout_dict[k]).squeeze() for k in pred_rollout_dict
-            }
-            gt_rollout = {k: val_traj[k][:rollout_steps] for k in val_traj}
-            # TODO pickle rollouts
-            get_gifs3x3(pred_rollout, gt_rollout, f"{run_dir}_{run_n}")
+        raise NotImplementedError("TODO")
