@@ -7,7 +7,6 @@ Swin Transformer: Hierarchical Vision Transformer using Shifted Windows
 from typing import Optional, Type, Sequence, Union, Tuple
 
 import numpy as np
-from enum import Enum
 from itertools import product
 import torch
 import torch.nn as nn
@@ -16,8 +15,9 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 from math import ceil
 
-from models.nd_swin.drop import DropPath
-from models.nd_swin.patching import unpad, pad_to_blocks
+from models.nd_vit.vit_layers import LayerModes
+from models.nd_vit.drop import DropPath
+from models.nd_vit.patching import unpad, pad_to_blocks
 from models.utils import Film
 
 
@@ -431,12 +431,6 @@ class SwinTransformerBlock(nn.Module):
         return x
 
 
-class SwinLayerModes(Enum):
-    DOWNSAMPLE = "Downsample"
-    UPSAMPLE = "Upsample"
-    SEQUENCE = "Sequence"
-
-
 class SwinLayer(nn.Module):
     """
     Basic Swin Transformer layer.
@@ -451,7 +445,7 @@ class SwinLayer(nn.Module):
         num_heads (int): Number of attention heads.
         grid_size (tuple(int)): Input resolution.
         window_size (tuple(int)): Local window size.
-        mode (SwinLayerModes): Mark layer operation.
+        mode (LayerModes): Mark layer operation.
         mlp_ratio (float): Expansion ratio of the mlp hidden dimension. Default is 2.
         qkv_bias (bool): Add a learnable bias to query, key, value. Default is False.
         drop_path (float | tuple(float)): Stochastic depth drop rate. Default is 0.
@@ -472,7 +466,7 @@ class SwinLayer(nn.Module):
         num_heads: int,
         grid_size: Sequence[int],
         window_size: Sequence[int],
-        mode: SwinLayerModes,
+        mode: LayerModes,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = False,
         drop_path: Union[Sequence[float], float] = 0.0,

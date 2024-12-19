@@ -21,7 +21,9 @@ def wandb_available():
     return importlib.util.find_spec("wandb") is not None
 
 
-assert wandb_available(), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
+assert (
+    wandb_available()
+), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
 import wandb
 
 

@@ -112,3 +112,17 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
     img = wandb.Image(fig)
     plt.close(fig)
     return img
+
+
+def mse_time_histogram(losses):
+    fig, ax = plt.subplots(1, 1, figsize=(10, 5))
+    times = sorted(losses.keys())
+    losses_mean = [np.mean(losses[t]) for t in times]
+    losses_std = [np.std(losses[t]) for t in times]
+    # Bar plot with error bars
+    ax.bar(times, losses_mean, yerr=losses_std, alpha=0.7, capsize=5, color="blue")
+    ax.set_xlabel("Time Step")
+    ax.set_ylabel("Mean Squared Error")
+    ax.set_title("MSE by Time Step")
+    ax.grid(True)
+    return fig
