@@ -1,6 +1,6 @@
 import os
 import h5py
-from typing import Type
+from typing import Type, List
 from dataclasses import dataclass
 
 import torch
@@ -25,6 +25,7 @@ class CycloneDataset(Dataset):
         self,
         path: str = "/system/user/publicdata/gyrokinetics_preprocessed",
         split: str = "train",
+        trajectories: List = None,
         normalize: bool = True,
         dtype: Type = None,
         random_seed: int = 42,
@@ -45,33 +46,43 @@ class CycloneDataset(Dataset):
         assert (
             self.input_sequence_length == self.target_sequence_length
         ), "Currently, only same length of input and target is supported!"
-        self.trajectories_fnames = os.listdir(path)
-        self.files = [
-            os.path.join(self.dir, f_name) for f_name in self.trajectories_fnames
-        ]
-        # shuffle and split files into training and validation sets
-        random.seed(random_seed)
-        random.shuffle(self.files)
-        # ensure at least one sample in validation and test sets
-        perm = set(np.random.permutation(len(self.files)))
-        val_idx = random.sample(list(perm), max(1, int(val_ratio * len(self.files))))
-        perm = perm - set(val_idx)
-        if test_ratio != 0:
-            test_idx = random.sample(
-                list(perm), max(1, int(test_ratio * len(self.files)))
-            )
-            perm = perm - set(test_idx)
-        train_idx = list(perm)
+        if trajectories is None:
+            self.trajectories_fnames = os.listdir(path)
+            self.files = [
+                os.path.join(self.dir, f_name) for f_name in self.trajectories_fnames
+            ]
+            # shuffle and split files into training and validation sets
+            random.seed(random_seed)
+            random.shuffle(self.files)
+            # ensure at least one sample in validation and test sets
+            perm = set(np.random.permutation(len(self.files)))
+            val_idx = random.sample(list(perm), max(1, int(val_ratio * len(self.files))))
+            perm = perm - set(val_idx)
+            if test_ratio != 0:
+                test_idx = random.sample(
+                    list(perm), max(1, int(test_ratio * len(self.files)))
+                )
+                perm = perm - set(test_idx)
+            train_idx = list(perm)
 
-        if split == "train":
-            self.files = [self.files[i] for i in train_idx]
-            # 1 step training
-            self.n_eval_steps = 1 * self.target_sequence_length
-        if split == "val":
-            self.files = [self.files[i] for i in val_idx]
-            self.n_eval_steps = n_eval_steps * self.target_sequence_length
-        if split == "test":
-            self.files = [self.files[i] for i in test_idx]
+            if split == "train":
+                self.files = [self.files[i] for i in train_idx]
+                # 1 step training
+                self.n_eval_steps = 1 * self.target_sequence_length
+            if split == "val":
+                self.files = [self.files[i] for i in val_idx]
+                self.n_eval_steps = n_eval_steps * self.target_sequence_length
+            if split == "test":
+                self.files = [self.files[i] for i in test_idx]
+        else:
+            self.files = [
+                os.path.join(self.dir, f_name) for f_name in trajectories
+            ]
+            if split == "train":
+                # 1 step training
+                self.n_eval_steps = 1 * self.target_sequence_length
+            if split == "val":
+                self.n_eval_steps = n_eval_steps * self.target_sequence_length
 
         # get total number of samples (assuming no bundling or pushforward and assuming constant number of timesteps accross files)
         with h5py.File(self.files[0], "r") as f:

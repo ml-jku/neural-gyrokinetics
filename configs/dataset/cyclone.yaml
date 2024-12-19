@@ -3,6 +3,8 @@ path: /system/user/publicdata/gyrokinetics_preprocessed
 normalize: true
 in_memory: true
 active_keys: ["re", "im"]
+training_trajectories: null
+validation_trajectories: null
 
 augment:
   noise: false
