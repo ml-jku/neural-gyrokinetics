@@ -56,7 +56,7 @@ def get_pushforward_trick(
         # cap the unroll steps depending on the current max timestep
         unroll_steps = min(
             [
-                min(dataset.num_ts(f_idx) - int(ts_idx[i]), unroll_steps)
+                min(dataset.num_ts(f_idx) - int(ts_idx[i]) - bundle_steps + 1, unroll_steps)
                 for i, f_idx in enumerate(file_idx.tolist())
             ]
         )
