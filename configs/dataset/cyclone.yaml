@@ -3,9 +3,9 @@ path: /system/user/publicdata/gyrokinetics_preprocessed
 normalize: true
 in_memory: true
 active_keys: ["re", "im"]
-training_trajectories: null
-validation_trajectories: null
+training_trajectories: ["cyclone5.h5", "cyclone6.h5"]
+validation_trajectories: ["cyclone4.h5"]
 
 augment:
-  noise: false
-  noise_std: 1e-3
+  noise: true
+  noise_std: 1e-4

@@ -117,9 +117,10 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader):
             trainloader = tqdm(trainloader, "AE pretraining")
         for sample in trainloader:
             x = sample.x.to(cfg.device)
+            z, pad_ax = model.patch_encode(x)
             # TODO
-            x = x + torch.normal(0, 0.25, size=(x.shape), device=x.device)
-            pred_x = model.patching_autoencoder(x)
+            z = z + torch.normal(0, 1e-3, size=(z.shape), device=z.device)
+            pred_x = model.patch_decode(z, pad_ax)
             if cfg.training.predict_delta:
                 pred_x = x + pred_x
             loss = relative_norm_mse(pred_x, x)
@@ -136,7 +137,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader):
                 valloader = tqdm(valloader, "AE evaluation")
             for sample in valloader:
                 x = sample.x.to(cfg.device)
-                pred_x = model.patching_autoencoder(x)
+                pred_x = model.patch_decode(*model.patch_encode(x))
                 if cfg.training.predict_delta:
                     pred_x = x + pred_x
                 loss = relative_norm_mse(pred_x, x)
