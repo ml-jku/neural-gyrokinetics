@@ -6,9 +6,9 @@ import torch
 from torch import nn
 from functools import partial
 
-from models.nd_swin.swin_layers import SwinLayer, ModulatedSwinLayer, SwinLayerModes
-from models.nd_swin.positional import PositionalEmbedding
-from models.nd_swin.patching import (
+from models.nd_vit.swin_layers import SwinLayer, ModulatedSwinLayer, LayerModes
+from models.nd_vit.positional import PositionalEmbedding
+from models.nd_vit.patching import (
     PatchEmbed,
     PatchMerging,
     PatchUnmerging,
@@ -80,7 +80,7 @@ class SwinBlockDown(nn.Module):
             use_checkpoint=use_checkpoint,
             resample_fn=PatchMerging,
             c_multiplier=c_multiplier,
-            mode=SwinLayerModes.DOWNSAMPLE,
+            mode=LayerModes.DOWNSAMPLE,
             act_fn=act_fn,
         )
 
@@ -122,7 +122,7 @@ class SwinBlockUp(nn.Module):
         patching_hidden_ratio (float): Expansion rate for patching MLPs. Default is 8.0
         swin_attention_layer (nn.Module): Type for the swin attention layer.
         conv_upsample (bool): Use transposed convolutions to unpatch. Default is False.
-        mode (SwinLayerModes): Specify which operation to perform in the up-layer.
+        mode (LayerModes): Specify which operation to perform in the up-layer.
     """
 
     def __init__(
@@ -144,7 +144,7 @@ class SwinBlockUp(nn.Module):
         patching_hidden_ratio: float = 8.0,
         swin_attention_layer: Type = SwinLayer,
         conv_upsample: bool = False,
-        mode: SwinLayerModes = SwinLayerModes.UPSAMPLE,
+        mode: LayerModes = LayerModes.UPSAMPLE,
     ):
         super().__init__()
 
@@ -157,7 +157,7 @@ class SwinBlockUp(nn.Module):
                 dim, grid_size, learnable=learnable_pos_embed
             )
 
-        if mode == SwinLayerModes.UPSAMPLE:
+        if mode == LayerModes.UPSAMPLE:
             upsample_fn = partial(
                 PatchUnmerging,
                 expand_by=2,
@@ -166,7 +166,7 @@ class SwinBlockUp(nn.Module):
                 act_fn=act_fn,
                 use_conv=conv_upsample,
             )
-        elif mode == SwinLayerModes.SEQUENCE:
+        elif mode == LayerModes.SEQUENCE:
             upsample_fn = None
         # NOTE: project down concat dimension first to save params
         self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
@@ -359,7 +359,7 @@ class SwinUnet(nn.Module):
             resample_fn=None,
             drop_path=drop_path,
             mlp_ratio=hidden_mlp_ratio,
-            mode=SwinLayerModes.SEQUENCE,
+            mode=LayerModes.SEQUENCE,
             use_checkpoint=use_checkpoint,
             act_fn=act_fn,
         )
@@ -422,7 +422,7 @@ class SwinUnet(nn.Module):
                 use_checkpoint=use_checkpoint,
                 act_fn=act_fn,
                 swin_attention_layer=SwinAttentionLayer,
-                mode=SwinLayerModes.SEQUENCE,
+                mode=LayerModes.SEQUENCE,
             )
         )
         self.up_blocks = nn.ModuleList(up_blocks)
@@ -485,16 +485,18 @@ class SwinUnet(nn.Module):
         x = rearrange(x, "b ... c -> b c ...")
         return x
 
-    def patching_autoencoder(self, x: torch.Tensor) -> torch.Tensor:
+    def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         # pad to patch blocks
         x = rearrange(x, "b c ... -> b ... c")
         x, pad_axes = pad_to_blocks(x, self.patch_size)
 
         # linear flat patch embedding
         x = self.patch_embed(x)
+        return x, pad_axes
 
+    def patch_decode(self, z: torch.Tensor, pad_axes: torch.Tensor) -> torch.Tensor:
         # expand patches to original size
-        x = self.unpatch(x)
+        x = self.unpatch(z)
 
         # unpad output
         x = unpad(x, pad_axes, self.base_resolution)
