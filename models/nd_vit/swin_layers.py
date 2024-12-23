@@ -185,7 +185,7 @@ class WindowAttention(nn.Module):
         # relative position bias (RPB) to learn token distances
         # for hierarchical vision better than absolute PEs
 
-        # RPB from swin v1
+        # # RPB from swin v1
         # self.rpb = nn.Parameter(
         #     torch.zeros((np.prod([(2 * w - 1) for w in window_size]), num_heads))
         # )
@@ -205,7 +205,7 @@ class WindowAttention(nn.Module):
         rpb = torch.stack(torch.meshgrid(*coords_nd, indexing="ij"))
         for i in range(space):
             rpb[i] = rpb[i] / (window_size[i] - 1)
-        rpb = rpb.transpose(0, -1).unsqueeze(0)
+        rpb = rearrange(rpb, "d ... -> ... d").unsqueeze(0)
         # normalize to -8, 8
         rpb = 8 * rpb
         rpb = torch.sign(rpb) * torch.log2(torch.abs(rpb) + 1.0) / np.log2(8)
@@ -249,14 +249,14 @@ class WindowAttention(nn.Module):
 
         sl = q.shape[2]
 
+        # # rpb from swinv1
+        # rpb = self.rpb[self.rpb_idx[:sl, :sl]]
+
         # compute relative position bias
         # rpb from swinv2
         rpb = self.cpb_mlp(self.rpb).view(-1, self.num_heads)
         rpb = rpb[self.rpb_idx.flatten()].view(sl, sl, self.num_heads)
         rpb = 16 * torch.sigmoid(rpb)
-
-        # # # rpb from swinv1
-        # # rpb = self.rpb[self.rpb_idx[:sl, :sl]]
 
         rpb = rearrange(rpb, "slx sly h -> h slx sly").unsqueeze(0).contiguous()
 
