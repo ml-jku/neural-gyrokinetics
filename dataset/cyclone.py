@@ -4,6 +4,7 @@ from typing import Type, Optional, List, Tuple
 from dataclasses import dataclass
 import warnings
 
+from einops import rearrange
 import torch
 import numpy as np
 from torch.utils.data import Dataset
@@ -209,11 +210,33 @@ class CycloneDataset(Dataset):
 
         return x
 
-    def get_at_time(self, file_idx: torch.Tensor, timestep_idx: torch.Tensor):
+    def get_at_time(
+        self,
+        file_idx: torch.Tensor,
+        timestep_idx: torch.Tensor,
+        to_fourier: bool = True,
+    ):
         updated_index = (file_idx * self.n_samples_per_file + timestep_idx).long()
-        return self.collate(
+        sample = self.collate(
             [self.__getitem__(idx, validating=True) for idx in updated_index.tolist()]
         )
+        # TODO move somewhere else?
+        if self.spatial_ifft and to_fourier:
+            if sample.y.ndim == 8:
+                sample.y = rearrange(sample.y, "t b c ... -> c t b ...")
+            else:
+                sample.y = rearrange(sample.y, "b c ... -> c b ...")
+
+            sample.y = torch.complex(real=sample.y[0], imag=sample.y[1])
+            sample.y = torch.fft.fftn(sample.y, dim=(-2, -1))
+            sample.y = torch.stack([sample.y.real, sample.y.imag]).squeeze()
+
+            if sample.y.ndim == 8:
+                sample.y = rearrange(sample.y, "c t b ... -> t b c ...")
+            else:
+                sample.y = rearrange(sample.y, "c b ... -> b c ...")
+
+        return sample
 
     def get_timesteps_only(self, file_idx: torch.Tensor, timestep_idx: torch.Tensor):
         # file_idx: (B,)

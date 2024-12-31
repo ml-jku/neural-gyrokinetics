@@ -15,7 +15,7 @@ class PositionalEmbedding(nn.Module):
         self.grid_size = grid_size
 
         if init == "rand":
-            pos_embed = torch.zeros(1, dim, *grid_size)
+            pos_embed = torch.zeros(1, *grid_size, dim)
             nn.init.trunc_normal_(pos_embed, std=0.02)
         if init == "sincos":
             try:

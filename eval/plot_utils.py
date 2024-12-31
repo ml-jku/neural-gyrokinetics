@@ -125,4 +125,6 @@ def mse_time_histogram(losses):
     ax.set_ylabel("Mean Squared Error")
     ax.set_title("MSE by Time Step")
     ax.grid(True)
-    return fig
+    img = wandb.Image(fig)
+    plt.close(fig)
+    return img
