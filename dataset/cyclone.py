@@ -123,6 +123,8 @@ class CycloneDataset(Dataset):
                     # read the 'metadata/timesteps' dataset
                     timesteps = f["metadata/timesteps"][:]
                     file_dict["metadata/timesteps"] = timesteps
+                    fluxes = f["metadata/fluxes"][:]
+                    file_dict["metadata/fluxes"] = fluxes
                     # read in all the data points
                     for t_index in range(len(file_dict["metadata/timesteps"])):
                         name = "timestep_" + str(t_index).zfill(2)
