@@ -1,11 +1,11 @@
-batch_size: 6
+batch_size: 1
 n_epochs: 100
 num_workers: 8
 learning_rate: 1e-3
 final_learning_rate: 1e-6
 weight_decay: 1e-5
 predict_delta: false
-pretraining: true
+pretraining: false
 pushforward:
   epochs: [-1, 40, 70]
   unrolls: [1, 2, 3]

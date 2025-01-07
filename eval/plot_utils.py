@@ -1,4 +1,7 @@
+import io
+from PIL import Image as PILImage
 import matplotlib
+import matplotlib.ticker as tkr
 import matplotlib.pyplot as plt
 import numpy as np
 import wandb
@@ -12,8 +15,18 @@ def force_aspect(ax, aspect=1):
     ax.set_aspect(abs((extent[1] - extent[0]) / (extent[3] - extent[2])) / aspect)
 
 
-def distribution_5D(x):
-    labels = ["v1", "v2", "s", "x", "y"]
+def plt_to_wandb_image(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, bbox_inches="tight")
+    buf.seek(0)
+    img = PILImage.open(buf)
+    plt.close(fig)
+    return wandb.Image(img)
+
+
+def distribution_5D(x, **kwargs):
+    _ = kwargs
+    labels = ["vpar", "vmu", "s", "x", "y"]
 
     if isinstance(x, torch.Tensor):
         x = x.cpu().detach().numpy()
@@ -21,6 +34,11 @@ def distribution_5D(x):
     comb = torch.combinations(torch.arange(5), 2).tolist()
 
     fig, ax = plt.subplots(5, 5, figsize=(20, 20))
+    for i in range(5):
+        for j in range(5):
+            if [i, j] not in comb:
+                ax[i, j].remove()
+
     c_map = matplotlib.colormaps["coolwarm"]
     c_map.set_bad("k")
 
@@ -38,20 +56,14 @@ def distribution_5D(x):
 
         force_aspect(ax[i, j])
 
-    for i in range(5):
-        for j in range(5):
-            if [i, j] not in comb:
-                ax[i, j].remove()
-    img = wandb.Image(fig)
-    plt.close(fig)
-    return img
+    return plt_to_wandb_image(fig)
 
 
 def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
-    labels = ["v1", "v2", "s", "x", "y"]
+    labels = ["vpar", "vmu", "s", "x", "y"]
     comb = torch.combinations(torch.arange(5), 2).tolist()
 
-    fig, ax = plt.subplots(5, 5, figsize=(30, 12))
+    fig, ax = plt.subplots(5, 5, figsize=(30, 14))
     for i in range(5):
         for j in range(5):
             ax[i, j].remove()
@@ -84,34 +96,42 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
         pos = ax_ij.get_position()
 
         # Create two new axes within the same space as the original subplot
-        width = pos.width / 2  # Split the width into two halves
+        displ = pos.width / 2
+        width = 0.92 * (displ)  # Split the width into two halves
         ax1 = fig.add_axes([pos.x0, pos.y0, width, pos.height])
-        ax2 = fig.add_axes([pos.x0 + width, pos.y0, width, pos.height])
+        ax2 = fig.add_axes([pos.x0 + displ, pos.y0, width, pos.height])
 
         # Plot x1 and xp side by side
         im1 = ax1.matshow(x1_plot, cmap=c_map)
         im2 = ax2.matshow(x2_plot, cmap=c_map)
 
-        fig.colorbar(im1, ax=ax1)
-        fig.colorbar(im2, ax=ax2)
+        cbar1 = fig.colorbar(im1, ax=ax1, format=tkr.FormatStrFormatter("%.2g"))
+        cbar2 = fig.colorbar(im2, ax=ax2, format=tkr.FormatStrFormatter("%.2g"))
+
+        cbar1.set_ticks([x1_plot.min(), x1_plot.max()])
+        cbar2.set_ticks([x2_plot.min(), x2_plot.max()])
 
         if i == 0:
             # Set axis labels
-            ax1.set_title("GT")
-            ax2.set_title("PRED")
+            ax1.set_title("PRED")
+            ax2.set_title("GT")
 
         ax1.set_xlabel(labels[j])
         ax1.set_ylabel(labels[i])
         ax2.set_xlabel(labels[j])
-        ax2.set_ylabel(labels[i])
+        # ax2.set_ylabel(labels[i])
 
         # Force aspect ratio
         force_aspect(ax1)
         force_aspect(ax2)
 
-    img = wandb.Image(fig)
-    plt.close(fig)
-    return img
+        # Set only one tick at the maximum value for both axes
+        ax1.set_xticks([x1_plot.shape[1] - 1])
+        ax1.set_yticks([x1_plot.shape[0] - 1])
+        ax2.set_xticks([x2_plot.shape[1] - 1])
+        ax2.set_yticks([x2_plot.shape[0] - 1])
+
+    return plt_to_wandb_image(fig)
 
 
 def mse_time_histogram(losses):

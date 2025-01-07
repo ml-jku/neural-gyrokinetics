@@ -2,11 +2,14 @@ from datetime import datetime
 
 from functools import partial
 import torch
+from torch.cuda import reset_peak_memory_stats, max_memory_allocated
 from einops import rearrange
 import warnings
 from tqdm import tqdm
+from time import perf_counter_ns
+from collections import defaultdict
 
-from dataset import get_data
+from dataset import get_data, CycloneSample
 from models import get_model
 
 from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
@@ -17,7 +20,8 @@ from utils import load_model_and_config, save_model_and_config
 def runner(cfg, writer):
     (trainset, valset), (trainloader, valloader), augmentations = get_data(cfg)
 
-    model = get_model(cfg)
+    # TODO currently only support one resolution for all cyclones
+    model = get_model(cfg, dataset=trainset)
 
     data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
     cfg.logging.run_name = f"{cfg.model.name}_{data_and_time}"
@@ -70,49 +74,70 @@ def runner(cfg, writer):
         use_tqdm = cfg.logging.tqdm
         for epoch in range(1, n_epochs + 1):
             train_mse = 0
+            model.train()
+            info_dict = defaultdict(list)
+            t_start_data = perf_counter_ns()
+
             if use_tqdm:
                 trainloader = tqdm(trainloader, "Training")
             for sample in trainloader:
+                reset_peak_memory_stats(device)
+
+                sample: CycloneSample
                 x = sample.x.to(device)
                 ts = sample.timestep.to(device)
                 y = sample.y.to(device)
-
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
                     for aug_fn in augmentations:
                         x = aug_fn(x)
 
+                # dataloading timings
+                info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
+
                 if pushforward_fn:
+                    start_pf = perf_counter_ns()
                     # accessory information for pf (to retreive unrolled target)
                     file_idx = sample.file_index.to(device)
                     ts_index = sample.timestep_index.to(device)
                     x, ts, y = pushforward_fn(
                         model, x, ts, ts_index, y, file_idx, epoch
                     )
+                    info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
 
+                t_start_fwd = perf_counter_ns()
                 # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
                 pred_x = model(x, timestep=torch.ceil(ts))
 
+                # compute loss
                 if predict_delta:
                     pred_x = x + pred_x
-
                 loss = relative_norm_mse(pred_x, y)
+
+                # forward timing
+                info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
+                t_start_bkd = perf_counter_ns()
 
                 opt.zero_grad()
                 loss.backward()
                 opt.step()
-
                 train_mse += loss.item()
+
+                info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
+                info_dict["memory_mb"].append(max_memory_allocated(device) / 1024**2)
+                t_start_data = perf_counter_ns()
 
             train_mse /= len(trainloader)
             train_losses_dict = {"train/relative_norm_mse": train_mse}
+            info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
+            # Validation loop
             log_metric_dict = {}
             val_plots = {}
             if (epoch % cfg.validation.validate_every_n_epochs) == 0 or epoch == 1:
-                # Validation loop
                 model.eval()
                 # TODO configurable metric list
+                metrics = None
                 metric_fn_list = {
                     "relative_norm_mse": partial(
                         relative_norm_mse, dim_to_keep=0
@@ -126,6 +151,7 @@ def runner(cfg, writer):
                     valloader = tqdm(valloader, "Validation")
                 with torch.no_grad():
                     for idx, sample in enumerate(valloader):
+                        sample: CycloneSample
                         x = sample.x.to(device)
                         ts = sample.timestep.to(device)
                         y = sample.y.to(device)
@@ -143,94 +169,40 @@ def runner(cfg, writer):
                             predict_delta=cfg.training.predict_delta,
                         )(model, x, file_idx=file_idx, ts_index_0=ts_index)
 
-                        # TODO move somewhere else?
+                        # back to fourier for plotting
                         if cfg.dataset.spatial_ifft:
-                            # back to fourier for plotting
-                            x_rollout = rearrange(x_rollout, "t b c ... -> c t b ...")
-                            x_rollout = torch.complex(
-                                real=x_rollout[0], imag=x_rollout[1]
-                            )
-                            x_rollout = torch.fft.fftn(x_rollout, dim=(-2, -1))
-                            x_rollout = torch.stack(
-                                [x_rollout.real, x_rollout.imag]
-                            ).squeeze()
-                            x_rollout = rearrange(x_rollout, "c t b ... -> t b c ...")
+                            # TODO move somewhere else
+                            x_rollout, y = to_fourier_for_val(x_rollout, y)
 
-                            if y.ndim == 8:
-                                y = rearrange(y, "t b c ... -> c t b ...")
-                            else:
-                                y = rearrange(y, "b c ... -> c b ...")
+                        # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
+                        # metrics tensor will have shape [number_of_metrics, n_timesteps]
+                        metrics_i = validation_metrics(
+                            x_rollout,
+                            file_idx,
+                            ts_index,
+                            cfg.model.bundle_seq_length,
+                            valset,
+                            metric_fn_list,
+                        )
 
-                            y = torch.complex(real=y[0], imag=y[1])
-                            y = torch.fft.fftn(y, dim=(-2, -1))
-                            y = torch.stack([y.real, y.imag]).squeeze()
-
-                            if y.ndim == 8:
-                                y = rearrange(y, "c t b ... -> t b c ...")
-                            else:
-                                y = rearrange(y, "c b ... -> b c ...")
-
-                        if idx == 0:
-                            # initialize metrics tensor
-                            metrics = validation_metrics(
-                                x_rollout,
-                                file_idx,
-                                ts_index,
-                                cfg.model.bundle_seq_length,
-                                valset,
-                                metric_fn_list,
-                            )
-                            val_plots[
-                                f"GT vs Pred at time {ts[0].item():.2f} (Linear Phase)"
-                            ] = plot4x4_sided(
-                                (
-                                    y[0, ...].to("cpu")
-                                    if y.ndim == 7
-                                    else y[0, 0, ...].to("cpu")
-                                ),
-                                x_rollout[0, 0, ...],  # first timestep and batch
-                            )
-                            val_plots[
-                                f"Pred at time {ts[0].item():.2f} (Linear Phase)"
-                            ] = distribution_5D(
-                                x_rollout[0, 0, ...]  # first timestep and batch
-                            )
-
-                        elif idx == 5:
-                            # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
-                            # metrics tensor will have shape [number_of_metrics, n_timesteps]
-                            metrics += validation_metrics(
-                                x_rollout,
-                                file_idx,
-                                ts_index,
-                                cfg.model.bundle_seq_length,
-                                valset,
-                                metric_fn_list,
-                            )
-                            val_plots[
-                                f"GT vs Pred at time {ts[0].item():.2f} (Saturated Phase)"
-                            ] = plot4x4_sided(
-                                (
-                                    y[0, ...].to("cpu")
-                                    if y.ndim == 7
-                                    else y[0, 0, ...].to("cpu")
-                                ),
-                                x_rollout[0, 0, ...],  # first timestep and batch
-                            )
-                            val_plots[
-                                f"Pred at time {ts[0].item():.2f} (Saturated Phase)"
-                            ] = distribution_5D(
-                                x_rollout[0, 0, ...]  # first timestep and batch
-                            )
+                        if metrics is None:
+                            metrics = metrics_i
                         else:
-                            # metrics tensor will have shape [number_of_metrics, n_timesteps]
-                            metrics += validation_metrics(
-                                x_rollout,
-                                file_idx,
-                                ts_index,
-                                cfg.model.bundle_seq_length,
-                                valset,
-                                metric_fn_list,
+                            metrics += metrics_i
+
+                        if idx in [0, 5]:
+                            phase = "Linear Phase" if idx == 0 else "Saturated Phase"
+                            val_plots_dict = {
+                                f"pred (T={ts[0].item():.2f}, {phase})": plot4x4_sided,
+                                f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
+                            }
+
+                        for name, plot_fn in val_plots_dict.items():
+                            # first timestep and batch
+                            y_first = (y[0] if y.ndim == 7 else y[0, 0]).to("cpu")
+                            val_plots[name] = plot_fn(
+                                x_rollout[0, 0],
+                                x2=y_first,
                             )
 
                 metrics = metrics / len(valloader)
@@ -244,9 +216,9 @@ def runner(cfg, writer):
                     # Save model if validation loss improves
                     loss_val_min = save_model_and_config(
                         model,
-                        opt,
-                        cfg,
-                        epoch,
+                        optimizer=opt,
+                        cfg=cfg,
+                        epoch=epoch,
                         # TODO decide target metric
                         val_loss=log_metric_dict["val/relative_norm_msex1"],
                         loss_val_min=loss_val_min,
@@ -261,20 +233,53 @@ def runner(cfg, writer):
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
             if writer:
+                wandb_logs = epoch_logs | info_dict
                 # log epoch details
                 if not val_plots:
-                    writer.log(epoch_logs)
+                    writer.log(wandb_logs)
                 else:
-                    writer.log(epoch_logs, commit=False)
+                    writer.log(wandb_logs, commit=False)
                     writer.log(val_plots)
 
             epoch_str = str(epoch).zfill(len(str(int(n_epochs))))
+            total_time = (
+                info_dict["info/forward_ms"]
+                + info_dict["info/backward_ms"]
+                + info_dict["info/data_ms"]
+                + info_dict["info/pf_ms"]
+            )
             print(
                 f"Epoch: {epoch_str}, "
                 f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
+                f", epoch time: {total_time:.2f}ms"
             )
         if writer:
             writer.finish()
 
     if cfg.mode == "rollout":
         raise NotImplementedError("TODO")
+
+
+def to_fourier_for_val(x_rollout, y):
+    # TODO tmp, move somewhere else
+    x_rollout = rearrange(x_rollout, "t b c ... -> c t b ...")
+    x_rollout = torch.complex(real=x_rollout[0], imag=x_rollout[1])
+    x_rollout = torch.fft.fftn(x_rollout, dim=(-2, -1))
+    x_rollout = torch.stack([x_rollout.real, x_rollout.imag]).squeeze()
+    x_rollout = rearrange(x_rollout, "c t b ... -> t b c ...")
+
+    if y.ndim == 8:
+        y = rearrange(y, "t b c ... -> c t b ...")
+    else:
+        y = rearrange(y, "b c ... -> c b ...")
+
+    y = torch.complex(real=y[0], imag=y[1])
+    y = torch.fft.fftn(y, dim=(-2, -1))
+    y = torch.stack([y.real, y.imag]).squeeze()
+
+    if y.ndim == 8:
+        y = rearrange(y, "c t b ... -> t b c ...")
+    else:
+        y = rearrange(y, "c b ... -> b c ...")
+
+    return x_rollout, y

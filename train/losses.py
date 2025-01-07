@@ -56,7 +56,10 @@ def get_pushforward_trick(
         # cap the unroll steps depending on the current max timestep
         unroll_steps = min(
             [
-                min(dataset.num_ts(f_idx) - int(ts_idx[i]) - bundle_steps + 1, unroll_steps)
+                min(
+                    dataset.num_ts(f_idx) - int(ts_idx[i]) - bundle_steps + 1,
+                    unroll_steps,
+                )
                 for i, f_idx in enumerate(file_idx.tolist())
             ]
         )
@@ -66,7 +69,13 @@ def get_pushforward_trick(
 
         # get timesteps for unrolling
         ts_idxs = [
-            [i for i in range(int(ts_idx_start), int(ts_idx_start) + (unroll_steps - 1) * bundle_steps)]
+            [
+                i
+                for i in range(
+                    int(ts_idx_start),
+                    int(ts_idx_start) + (unroll_steps - 1) * bundle_steps,
+                )
+            ]
             for ts_idx_start in ts_idx.tolist()
         ]
         tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))

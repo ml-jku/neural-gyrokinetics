@@ -2,10 +2,10 @@ name: cyclone
 path: /system/user/publicdata/gyrokinetics/preprocessed
 normalization: zscore
 spatial_ifft: false
-in_memory: true
+in_memory: false
 active_keys: ["re", "im"]
-training_trajectories: ["cyclone4_2.h5"]
-validation_trajectories: ["cyclone4_2.h5"]
+training_trajectories: ["cyclone4.h5"]
+validation_trajectories: ["cyclone4.h5"]
 
 augment:
   noise: false
