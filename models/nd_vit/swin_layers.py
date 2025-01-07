@@ -224,7 +224,7 @@ class WindowAttention(nn.Module):
 
         self.register_buffer("rpb_idx", dists.sum(0))
 
-        # for swinv2 cosine similarity attention
+        # # for swinv2 cosine similarity attention
         # self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))))
         # self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
         # self.attn_drop = nn.Dropout(attn_drop)

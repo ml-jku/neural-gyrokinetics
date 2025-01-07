@@ -320,7 +320,7 @@ class SwinUnet(nn.Module):
         # down
         acc_multi = [1] + list(np.cumprod([c_multiplier] * num_layers))
         # pre-downsample dims
-        down_dims = [dim * m for m in acc_multi]
+        down_dims = [int(dim * m) for m in acc_multi]
 
         assert all([(d % h) == 0 for d, h in zip(down_dims, num_heads)])
 

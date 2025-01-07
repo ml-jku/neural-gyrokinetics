@@ -21,26 +21,32 @@ def get_data(cfg):
             print("Loading dataset in memory!")
 
         trainset = CycloneDataset(
+            active_keys=cfg.dataset.active_keys,
             path=cfg.dataset.path,
             split="train",
             random_seed=cfg.seed,
             test_ratio=0.0,
+            normalization=cfg.dataset.normalization,
+            spatial_ifft=cfg.dataset.spatial_ifft,
             in_memory=cfg.dataset.in_memory,
-            input_sequence_length=cfg.model.input_seq_length,
-            target_sequence_length=cfg.model.bundle_seq_length,
-            trajectories=cfg.dataset.training_trajectories
+            input_seq_length=cfg.model.input_seq_length,
+            target_seq_length=cfg.model.bundle_seq_length,
+            trajectories=cfg.dataset.training_trajectories,
         )
 
         valset = CycloneDataset(
+            active_keys=cfg.dataset.active_keys,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
             test_ratio=0.0,
+            normalization=cfg.dataset.normalization,
+            spatial_ifft=cfg.dataset.spatial_ifft,
             in_memory=cfg.dataset.in_memory,
             n_eval_steps=cfg.validation.n_eval_steps,
-            input_sequence_length=cfg.model.input_seq_length,
-            target_sequence_length=cfg.model.bundle_seq_length,
-            trajectories=cfg.dataset.validation_trajectories
+            input_seq_length=cfg.model.input_seq_length,
+            target_seq_length=cfg.model.bundle_seq_length,
+            trajectories=cfg.dataset.validation_trajectories,
         )
 
         # testset = CycloneDataset(

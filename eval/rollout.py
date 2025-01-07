@@ -24,15 +24,29 @@ def get_rollout(
     ) -> torch.Tensor:
         xt = x0.clone()
         if xt.ndim == 7:
-            x_rollout = torch.zeros((xt.shape[0], problem_dim, n_steps*bundle_steps, *xt.shape[2:]))
+            x_rollout = torch.zeros(
+                (xt.shape[0], problem_dim, n_steps * bundle_steps, *xt.shape[2:])
+            )
         elif xt.ndim == 8:
-            x_rollout = torch.zeros((xt.shape[0], problem_dim, n_steps*bundle_steps, *xt.shape[3:]))
+            x_rollout = torch.zeros(
+                (xt.shape[0], problem_dim, n_steps * bundle_steps, *xt.shape[3:])
+            )
         else:
-            raise ("x should have 7 (b, c, v1, v2, s, x, y) or 8 (b, c, t, v1, v2, s, x, y) dimensions!")
+            raise (
+                "x should have 7 (b, c, v1, v2, s, x, y) "
+                "or 8 (b, c, t, v1, v2, s, x, y) dimensions!"
+            )
 
         # get corresponding timesteps
         ts_idxs = [
-            [i for i in range(int(ts_idx_start), int(ts_idx_start) + n_steps*bundle_steps, bundle_steps)]
+            [
+                i
+                for i in range(
+                    int(ts_idx_start),
+                    int(ts_idx_start) + n_steps * bundle_steps,
+                    bundle_steps,
+                )
+            ]
             for ts_idx_start in ts_index_0.tolist()
         ]
         tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
@@ -51,7 +65,7 @@ def get_rollout(
 
         # only return desired size
         x_rollout = rearrange(x_rollout, "b c t ... -> t b c ...")
-        return x_rollout[:n_steps*bundle_steps, :, ...]
+        return x_rollout[: n_steps * bundle_steps, :, ...]
 
     return _rollout
 
@@ -77,13 +91,22 @@ def validation_metrics(
     # construct target y (NOTE: can use a lot of RAM with large n_steps and takes a lot of time)
     if bundle_steps == 1:
         y = torch.stack(
-            [dataset.get_at_time(file_idx, ts_index + t).y for t in range(0, n_steps, bundle_steps)], dim=0
+            [
+                dataset.get_at_time(file_idx, ts_index + t).y
+                for t in range(0, n_steps, bundle_steps)
+            ],
+            dim=0,
         )
     else:
         y = torch.concat(
-            [dataset.get_at_time(file_idx, ts_index + t).y for t in range(0, n_steps, bundle_steps)], dim=2
+            [
+                dataset.get_at_time(file_idx, ts_index + t).y
+                for t in range(0, n_steps, bundle_steps)
+            ],
+            dim=2,
         )
         y = rearrange(y, "b c t ... -> t b c ...")
+
     metrics = torch.zeros((len(metrics_fns), n_steps))
     assert y.shape == rollout.shape
     for idx, value in enumerate(metrics_fns.values()):

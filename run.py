@@ -2,6 +2,7 @@ from datetime import datetime
 
 from functools import partial
 import torch
+from einops import rearrange
 import warnings
 from tqdm import tqdm
 
@@ -58,7 +59,7 @@ def runner(cfg, writer):
                 schecule=pf_cfg.epochs,
                 predict_delta=predict_delta,
                 dataset=trainset,
-                bundle_steps=cfg.model.bundle_seq_length
+                bundle_steps=cfg.model.bundle_seq_length,
             )
 
         loss_val_min = torch.inf
@@ -142,15 +143,51 @@ def runner(cfg, writer):
                             predict_delta=cfg.training.predict_delta,
                         )(model, x, file_idx=file_idx, ts_index_0=ts_index)
 
+                        # TODO move somewhere else?
+                        if cfg.dataset.spatial_ifft:
+                            # back to fourier for plotting
+                            x_rollout = rearrange(x_rollout, "t b c ... -> c t b ...")
+                            x_rollout = torch.complex(
+                                real=x_rollout[0], imag=x_rollout[1]
+                            )
+                            x_rollout = torch.fft.fftn(x_rollout, dim=(-2, -1))
+                            x_rollout = torch.stack(
+                                [x_rollout.real, x_rollout.imag]
+                            ).squeeze()
+                            x_rollout = rearrange(x_rollout, "c t b ... -> t b c ...")
+
+                            if y.ndim == 8:
+                                y = rearrange(y, "t b c ... -> c t b ...")
+                            else:
+                                y = rearrange(y, "b c ... -> c b ...")
+
+                            y = torch.complex(real=y[0], imag=y[1])
+                            y = torch.fft.fftn(y, dim=(-2, -1))
+                            y = torch.stack([y.real, y.imag]).squeeze()
+
+                            if y.ndim == 8:
+                                y = rearrange(y, "c t b ... -> t b c ...")
+                            else:
+                                y = rearrange(y, "c b ... -> b c ...")
+
                         if idx == 0:
                             # initialize metrics tensor
                             metrics = validation_metrics(
-                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
+                                x_rollout,
+                                file_idx,
+                                ts_index,
+                                cfg.model.bundle_seq_length,
+                                valset,
+                                metric_fn_list,
                             )
                             val_plots[
                                 f"GT vs Pred at time {ts[0].item():.2f} (Linear Phase)"
                             ] = plot4x4_sided(
-                                y[0, ...].to("cpu") if y.ndim == 7 else y[0, 0, ...].to("cpu"),
+                                (
+                                    y[0, ...].to("cpu")
+                                    if y.ndim == 7
+                                    else y[0, 0, ...].to("cpu")
+                                ),
                                 x_rollout[0, 0, ...],  # first timestep and batch
                             )
                             val_plots[
@@ -163,12 +200,21 @@ def runner(cfg, writer):
                             # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
                             # metrics tensor will have shape [number_of_metrics, n_timesteps]
                             metrics += validation_metrics(
-                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
+                                x_rollout,
+                                file_idx,
+                                ts_index,
+                                cfg.model.bundle_seq_length,
+                                valset,
+                                metric_fn_list,
                             )
                             val_plots[
                                 f"GT vs Pred at time {ts[0].item():.2f} (Saturated Phase)"
                             ] = plot4x4_sided(
-                                y[0, ...].to("cpu") if y.ndim == 7 else y[0, 0, ...].to("cpu"),
+                                (
+                                    y[0, ...].to("cpu")
+                                    if y.ndim == 7
+                                    else y[0, 0, ...].to("cpu")
+                                ),
                                 x_rollout[0, 0, ...],  # first timestep and batch
                             )
                             val_plots[
@@ -179,7 +225,12 @@ def runner(cfg, writer):
                         else:
                             # metrics tensor will have shape [number_of_metrics, n_timesteps]
                             metrics += validation_metrics(
-                                x_rollout, file_idx, ts_index, cfg.model.bundle_seq_length, valset, metric_fn_list
+                                x_rollout,
+                                file_idx,
+                                ts_index,
+                                cfg.model.bundle_seq_length,
+                                valset,
+                                metric_fn_list,
                             )
 
                 metrics = metrics / len(valloader)
