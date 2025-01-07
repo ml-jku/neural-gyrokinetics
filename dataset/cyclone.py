@@ -2,7 +2,7 @@ import os
 import h5py
 from typing import Type, Optional, List, Tuple
 from dataclasses import dataclass
-import warnings
+from warnings import warn
 
 from einops import rearrange
 import torch
@@ -16,6 +16,7 @@ import random
 class CycloneSample:
     x: torch.Tensor
     y: torch.Tensor
+    y_poten: torch.Tensor
     y_flux: torch.Tensor
     timestep: torch.Tensor
     file_index: torch.Tensor
@@ -37,8 +38,8 @@ class CycloneDataset(Dataset):
         val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         in_memory: bool = False,
-        input_sequence_length: int = 1,
-        target_sequence_length: int = 1,
+        input_seq_length: int = 1,
+        target_seq_length: int = 1,
         n_eval_steps: int = 1,
     ):
         assert split in ["train", "val", "test"]
@@ -52,15 +53,15 @@ class CycloneDataset(Dataset):
 
         self.spatial_ifft = spatial_ifft
         if spatial_ifft and not in_memory:
-            warnings.warn("`spatial_ifft` is only applied when `in_memory=True`.")
+            warn("`spatial_ifft` is only applied when `in_memory=True`.")
 
         self.in_memory = in_memory
         self.dir = path
 
-        self.input_sequence_length = input_sequence_length
-        self.target_sequence_length = target_sequence_length
+        self.input_seq_length = input_seq_length
+        self.target_seq_length = target_seq_length
         assert (
-            self.input_sequence_length == self.target_sequence_length
+            self.input_seq_length == self.target_seq_length
         ), "Currently, only same length of input and target is supported!"
 
         if trajectories is None:
@@ -87,19 +88,19 @@ class CycloneDataset(Dataset):
             if split == "train":
                 self.files = [self.files[i] for i in train_idx]
                 # 1 step training
-                self.n_eval_steps = 1 * self.target_sequence_length
+                self.n_eval_steps = 1 * self.target_seq_length
             if split == "val":
                 self.files = [self.files[i] for i in val_idx]
-                self.n_eval_steps = n_eval_steps * self.target_sequence_length
+                self.n_eval_steps = n_eval_steps * self.target_seq_length
             if split == "test":
                 self.files = [self.files[i] for i in test_idx]
         else:
             self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
             if split == "train":
                 # 1 step training
-                self.n_eval_steps = 1 * self.target_sequence_length
+                self.n_eval_steps = 1 * self.target_seq_length
             if split == "val":
-                self.n_eval_steps = n_eval_steps * self.target_sequence_length
+                self.n_eval_steps = n_eval_steps * self.target_seq_length
 
         # get total number of samples (assuming no bundling or pushforward and assuming constant number of timesteps accross files)
         with h5py.File(self.files[0], "r") as f:
@@ -107,7 +108,7 @@ class CycloneDataset(Dataset):
             timesteps = f["metadata/timesteps"][:]
             self.n_samples_per_file_val = len(timesteps)
             n_timesteps = (
-                len(timesteps) - self.n_eval_steps - self.input_sequence_length + 1
+                len(timesteps) - self.n_eval_steps - self.input_seq_length + 1
             )  # TODO: check if this is correct, we should return a sample like [b, c, t, ...]
 
         self.length = n_timesteps * len(self.files)
@@ -127,16 +128,19 @@ class CycloneDataset(Dataset):
                     file_dict["metadata/fluxes"] = fluxes
                     # read in all the data points
                     for t_index in range(len(file_dict["metadata/timesteps"])):
-                        name = "timestep_" + str(t_index).zfill(2)
-                        x = f[f"data/{name}"][:]
+                        k_name = "timestep_" + str(t_index).zfill(5)
+                        poten_name = "poten_" + str(t_index).zfill(5)
+                        k_data = f[f"data/{k_name}"][:]
+                        poten_data = f[f"data/{poten_name}"][:]
                         if self.spatial_ifft:
                             # invert fft on spatial
-                            x = np.moveaxis(x, 0, -1)
-                            x = x.copy().view(dtype=np.complex64)
-                            x = np.fft.ifftn(x, axes=(3, 4))
-                            x = np.stack([x.real, x.imag]).squeeze()
+                            k_data = np.moveaxis(k_data, 0, -1)
+                            k_data = k_data.copy().view(dtype=np.complex64)
+                            k_data = np.fft.ifftn(k_data, axes=(3, 4))
+                            k_data = np.stack([k_data.real, k_data.imag]).squeeze()
                         # cache samples
-                        file_dict[f"data/{name}"] = x
+                        file_dict[f"data/{k_name}"] = k_data
+                        file_dict[f"data/{poten_name}"] = poten_data
                 self.data[file_idx] = file_dict
 
     def __getitem__(self, index, validating=False):
@@ -149,10 +153,12 @@ class CycloneDataset(Dataset):
             t_index = int(index % self.n_samples_per_file_val)
 
         if self.in_memory:
-            x, timestep, gt_flux, gt = self._load_data(self.data[file_index], t_index)
+            x, timestep, gt_poten, gt_flux, gt = self._load_data(
+                self.data[file_index], t_index
+            )
         else:
             with h5py.File(self.files[file_index], "r") as f:
-                x, timestep, gt_flux, gt = self._load_data(f, t_index)
+                x, timestep, gt_poten, gt_flux, gt = self._load_data(f, t_index)
 
         if self.normalization is not None:
             x = self._normalize(x)
@@ -161,6 +167,7 @@ class CycloneDataset(Dataset):
         return CycloneSample(
             x=torch.tensor(x, dtype=self.dtype),
             y=torch.tensor(gt, dtype=self.dtype),
+            y_poten=torch.tensor(gt_poten, dtype=self.dtype),
             y_flux=torch.tensor(gt_flux, dtype=self.dtype),
             timestep=torch.tensor(timestep, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=self.dtype),
@@ -171,33 +178,40 @@ class CycloneDataset(Dataset):
         timestep = data["metadata/timesteps"][t_index]
         x = []
         gt = []
+        gt_poten = []
         gt_flux = []
-        for i in range(self.input_sequence_length):
+        for i in range(self.input_seq_length):
             # read the input
-            name = "timestep_" + str(t_index + i).zfill(2)
-            f = data[f"data/{name}"][:]
+            k_name = "timestep_" + str(t_index + i).zfill(5)
+            poten_name = "poten_" + str(t_index).zfill(5)
+            k = data[f"data/{k_name}"][:]
+            poten = data[f"data/{poten_name}"][:]
             # select only re/im parts
-            x.append(f[self.active_keys])
-        for i in range(self.target_sequence_length):
+            x.append(k[self.active_keys])
+        for i in range(self.target_seq_length):
             # read the gt output (next timestep)
-            name_gt = "timestep_" + str(t_index + self.input_sequence_length + i).zfill(
-                2
-            )
-            f_gt = data[f"data/{name_gt}"][:]
+            k_name_gt = "timestep_" + str(t_index + self.input_seq_length + i).zfill(5)
+            poten_name_gt = "poten_" + str(t_index + self.input_seq_length + i).zfill(5)
+            k_gt = data[f"data/{k_name_gt}"][:]
+            poten_gt = data[f"data/{poten_name_gt}"][:]
             # select only re/im parts
-            gt.append(f_gt[self.active_keys])
-            flux = data["metadata/fluxes"][t_index + self.input_sequence_length + i]
+            gt.append(k_gt[self.active_keys])
+            gt_poten.append(poten_gt)
+            flux = data["metadata/fluxes"][t_index + self.input_seq_length + i]
+
             gt_flux.append(flux)
 
         # stack to shape (c, t, v1, v2, s, x, y)
         x = np.stack(x, axis=1)
         gt = np.stack(gt, axis=1)
+        # stack to shape (x, s, y)
+        gt_poten = np.stack(gt_poten, axis=0)
         gt_flux = np.array(gt_flux).squeeze()
-        if self.input_sequence_length == 1 and self.target_sequence_length == 1:
+        if self.input_seq_length == 1 and self.target_seq_length == 1:
             # sqeeze out time if we only have 1 timestep
             x = x.squeeze(axis=1)
             gt = gt.squeeze(axis=1)
-        return x, timestep, gt_flux, gt
+        return x, timestep, gt_poten, gt_flux, gt
 
     def _normalize(self, x):
         # TODO proper normalization
@@ -264,7 +278,7 @@ class CycloneDataset(Dataset):
 
         # Compute the linear index
         updated_index = (
-            # flat_file_idx * self.n_samples_per_file + flat_timestep_idx * self.target_sequence_length
+            # flat_file_idx * self.n_samples_per_file + flat_timestep_idx * self.target_seq_length
             flat_file_idx * self.n_samples_per_file
             + flat_timestep_idx
         ).long()
@@ -306,6 +320,7 @@ class CycloneDataset(Dataset):
         return CycloneSample(
             x=torch.stack([sample.x for sample in batch]),
             y=torch.stack([sample.y for sample in batch]),
+            y_poten=torch.stack([sample.y_poten for sample in batch]),
             y_flux=torch.stack([sample.y_flux for sample in batch]),
             timestep=torch.stack([sample.timestep for sample in batch]),
             file_index=torch.stack([sample.file_index for sample in batch]),
