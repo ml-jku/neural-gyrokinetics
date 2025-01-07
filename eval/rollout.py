@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple, Callable, Union
+from typing import Dict, Callable
 
 from einops import rearrange
 import torch
@@ -77,10 +77,7 @@ def validation_metrics(
     bundle_steps: int,
     dataset,
     metrics_fns: Dict[str, Callable] = None,
-) -> Union[
-    Dict[str, List[float]],
-    Tuple[Dict[str, List[float]], Dict[int, Tuple[torch.Tensor, torch.Tensor]]],
-]:
+) -> torch.Tensor:
     assert (
         metrics_fns is not None
     ), "Pleas provide some metrics function for the validation metrics."

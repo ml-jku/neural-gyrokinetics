@@ -1,4 +1,4 @@
-def get_model(cfg):
+def get_model(cfg, dataset):
     # TODO need to standardize modules everywhere (eg for different inputs)
 
     latent_dim = cfg.model.latent_dim
@@ -11,7 +11,9 @@ def get_model(cfg):
         space = 5
         patch_size = cfg.model.swin.patch_size
         window_size = cfg.model.swin.window_size
-        base_resolution = (32, 8, 16, 167, 21)  # TODO
+        # TODO currently only support one resolution for all cyclones
+        # TODO should move away from needing a fixed grid size
+        base_resolution = dataset.resolution
         num_heads = cfg.model.swin.num_heads
         depth = cfg.model.swin.depth
         num_layers = cfg.model.num_layers

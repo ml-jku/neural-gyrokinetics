@@ -1,7 +1,7 @@
 from torch.utils.data.dataloader import DataLoader
 
 from dataset.augment import noise_transform
-from dataset.cyclone import CycloneDataset
+from dataset.cyclone import CycloneDataset, CycloneSample
 
 
 def get_data(cfg):
@@ -75,3 +75,6 @@ def get_data(cfg):
         )
 
     return (trainset, valset), (trainloader, valloader), augmentations
+
+
+__all__ = ["get_data", "CycloneDataset", "CycloneSample"]

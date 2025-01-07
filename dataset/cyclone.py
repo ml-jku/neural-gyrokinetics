@@ -143,6 +143,9 @@ class CycloneDataset(Dataset):
                         file_dict[f"data/{poten_name}"] = poten_data
                 self.data[file_idx] = file_dict
 
+        with h5py.File(self.files[0], "r") as f:
+            self.resolution = f["metadata/resolution"][:]
+
     def __getitem__(self, index, validating=False):
         # calculate file index and remainder for time index in file
         if not validating:
@@ -183,10 +186,8 @@ class CycloneDataset(Dataset):
         for i in range(self.input_seq_length):
             # read the input
             k_name = "timestep_" + str(t_index + i).zfill(5)
-            poten_name = "poten_" + str(t_index).zfill(5)
             k = data[f"data/{k_name}"][:]
-            poten = data[f"data/{poten_name}"][:]
-            # select only re/im parts
+            # select only active re/im parts
             x.append(k[self.active_keys])
         for i in range(self.target_seq_length):
             # read the gt output (next timestep)
@@ -194,7 +195,7 @@ class CycloneDataset(Dataset):
             poten_name_gt = "poten_" + str(t_index + self.input_seq_length + i).zfill(5)
             k_gt = data[f"data/{k_name_gt}"][:]
             poten_gt = data[f"data/{poten_name_gt}"][:]
-            # select only re/im parts
+            # select only active re/im parts
             gt.append(k_gt[self.active_keys])
             gt_poten.append(poten_gt)
             flux = data["metadata/fluxes"][t_index + self.input_seq_length + i]
