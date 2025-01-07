@@ -1,4 +1,4 @@
-from typing import Sequence, Union, Optional, Type
+from typing import Sequence, Union, Optional, Type, Tuple
 
 import numpy as np
 from einops import rearrange
@@ -37,6 +37,7 @@ class SwinBlockDown(nn.Module):
         c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
         use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
         act_fn (callable): Activation function. Default is nn.GELU.
+        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
         swin_attention_layer (nn.Module): Type for the swin attention layer.
     """
 
@@ -55,6 +56,7 @@ class SwinBlockDown(nn.Module):
         c_multiplier: int = 2,
         use_checkpoint: bool = True,
         act_fn: nn.Module = nn.GELU,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
         swin_attention_layer: Type = SwinLayer,
     ):
         super().__init__()
@@ -67,7 +69,7 @@ class SwinBlockDown(nn.Module):
             self.pos_embed = PositionalEmbedding(
                 dim, grid_size, learnable=learnable_pos_embed
             )
-        # TODO move downsample here?
+
         self.swin_att = swin_attention_layer(
             space,
             dim,
@@ -77,14 +79,26 @@ class SwinBlockDown(nn.Module):
             window_size=window_size,
             drop_path=drop_path,
             mlp_ratio=hidden_mlp_ratio,
+            norm_layer=norm_layer,
             use_checkpoint=use_checkpoint,
-            resample_fn=PatchMerging,
-            c_multiplier=c_multiplier,
             mode=LayerModes.DOWNSAMPLE,
             act_fn=act_fn,
         )
 
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        self.resampled_grid_size = grid_size
+        self.downsample = PatchMerging(
+            space=space,
+            dim=dim,
+            grid_size=grid_size,
+            norm_layer=norm_layer,
+            c_multiplier=c_multiplier,
+        )
+        # TODO move one level up
+        self.resampled_grid_size = self.downsample.target_grid_size
+
+    def forward(
+        self, x: torch.Tensor, return_skip: bool = True, **kwargs
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
         """
         Args:
             x: Tensor (B, D, H, ..., C)
@@ -95,7 +109,12 @@ class SwinBlockDown(nn.Module):
         if hasattr(self, "pos_embed"):
             x = self.pos_embed(x)
 
-        return self.swin_att(x, **kwargs, return_skip=True)
+        x = self.swin_att(x, **kwargs)
+
+        x_merged = self.downsample(x)
+        # return skip connection
+        x = (x_merged, x) if return_skip else x_merged
+        return x
 
 
 class SwinBlockUp(nn.Module):
@@ -120,8 +139,9 @@ class SwinBlockUp(nn.Module):
         use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
         act_fn (callable): Activation function. Default is nn.GELU.
         patching_hidden_ratio (float): Expansion rate for patching MLPs. Default is 8.0
-        swin_attention_layer (nn.Module): Type for the swin attention layer.
         conv_upsample (bool): Use transposed convolutions to unpatch. Default is False.
+        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
+        swin_attention_layer (nn.Module): Type for the swin attention layer.
         mode (LayerModes): Specify which operation to perform in the up-layer.
     """
 
@@ -142,8 +162,9 @@ class SwinBlockUp(nn.Module):
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         patching_hidden_ratio: float = 8.0,
-        swin_attention_layer: Type = SwinLayer,
         conv_upsample: bool = False,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
+        swin_attention_layer: Type = SwinLayer,
         mode: LayerModes = LayerModes.UPSAMPLE,
     ):
         super().__init__()
@@ -157,17 +178,6 @@ class SwinBlockUp(nn.Module):
                 dim, grid_size, learnable=learnable_pos_embed
             )
 
-        if mode == LayerModes.UPSAMPLE:
-            upsample_fn = partial(
-                PatchUnmerging,
-                expand_by=2,
-                target_grid_size=target_grid_size,
-                mlp_ratio=patching_hidden_ratio,
-                act_fn=act_fn,
-                use_conv=conv_upsample,
-            )
-        elif mode == LayerModes.SEQUENCE:
-            upsample_fn = None
         # NOTE: project down concat dimension first to save params
         self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
         # TODO move upsample here?
@@ -180,34 +190,54 @@ class SwinBlockUp(nn.Module):
             grid_size=grid_size,
             mlp_ratio=hidden_mlp_ratio,
             window_size=window_size,
-            resample_fn=upsample_fn,
-            c_multiplier=c_multiplier,
             use_checkpoint=use_checkpoint,
             act_fn=act_fn,
             mode=mode,
         )
+        if mode == LayerModes.UPSAMPLE:
+            self.upsample = PatchUnmerging(
+                space=space,
+                dim=dim,
+                grid_size=grid_size,
+                norm_layer=norm_layer,
+                c_multiplier=c_multiplier,
+                expand_by=2,
+                target_grid_size=target_grid_size,
+                mlp_ratio=patching_hidden_ratio,
+                act_fn=act_fn,
+                use_conv=conv_upsample,
+            )
+            self.resampled_grid_size = self.upsample.target_grid_size
+        elif mode == LayerModes.SEQUENCE:
+            self.upsample = None
+            self.resampled_grid_size = grid_size
 
-    def forward(self, x: torch.Tensor, s: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, s: Optional[torch.Tensor] = None, **kwargs
+    ) -> torch.Tensor:
         """
         Args:
             x: Tensor (B, D, H, ..., C)
-            s: Tensor (B, D, H, ..., C) unet skip connection
+            s: Tensor (B, D, H, ..., C) unet skip connection. Can be None (e.g. AE).
 
         Returns:
             Tensor (B, D, H, ..., C)
         """
-        assert (
-            all(x_s == s_s for x_s, s_s in zip(x.shape, s.shape)) and x.ndim == s.ndim
-        )
-
-        x = torch.cat([x, s], -1)
-        # concat to hidden dim
-        x = self.proj_concat(x)
+        if s is not None:
+            assert (
+                all(x_s == s_s for x_s, s_s in zip(x.shape, s.shape))
+                and x.ndim == s.ndim
+            )
+            # concat to hidden dim and project to latent dim
+            x = self.proj_concat(torch.cat([x, s], -1))
 
         if hasattr(self, "pos_embed"):
             x = self.pos_embed(x)
 
-        return self.swin_att(x, **kwargs)
+        x = self.swin_att(x, **kwargs)
+        if self.upsample is not None:
+            x = self.upsample(x)
+        return x
 
 
 class SwinUnet(nn.Module):
@@ -317,7 +347,7 @@ class SwinUnet(nn.Module):
             act_fn=act_fn,
         )
 
-        # down
+        # down path
         acc_multi = [1] + list(np.cumprod([c_multiplier] * num_layers))
         # pre-downsample dims
         down_dims = [int(dim * m) for m in acc_multi]
@@ -343,12 +373,12 @@ class SwinUnet(nn.Module):
                 swin_attention_layer=SwinAttentionLayer,
             )
             down_blocks.append(block)
-            grid_sizes.append(block.swin_att.resampled_grid_size)
+            grid_sizes.append(block.resampled_grid_size)
 
         self.down_blocks = nn.ModuleList(down_blocks)
         self.grid_sizes = grid_sizes
 
-        # middle
+        # middle/bottleneck
         self.middle = SwinAttentionLayer(
             space,
             down_dims[-1],
@@ -356,7 +386,6 @@ class SwinUnet(nn.Module):
             depth=middle_depth,
             num_heads=middle_num_heads,
             window_size=window_size,
-            resample_fn=None,
             drop_path=drop_path,
             mlp_ratio=hidden_mlp_ratio,
             mode=LayerModes.SEQUENCE,
@@ -377,7 +406,7 @@ class SwinUnet(nn.Module):
             use_conv=conv_patch,
         )
 
-        # up
+        # up path
         up_dims = down_dims[::-1][1:]
         up_grid_sizes = grid_sizes[::-1][1:]
         # patch merging padding

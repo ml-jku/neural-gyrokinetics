@@ -5,8 +5,8 @@ latent_dim: 32
 num_layers: 3
 
 swin:
-  patch_size: [4, 2, 2, 6, 4]
-  window_size: [4, 2, 4, 14, 3]
+  patch_size: [4, 2, 4, 12, 4]
+  window_size: [4, 2, 4, 7, 3]
   num_heads: [2, 4, 8]
   depth: [2, 4, 8]
   gradient_checkpoint: false

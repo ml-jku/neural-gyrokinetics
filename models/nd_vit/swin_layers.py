@@ -451,9 +451,6 @@ class SwinLayer(nn.Module):
         drop_path (float | tuple(float)): Stochastic depth drop rate. Default is 0.
         drop (float): Attention output dropout rate. Detault is 0.
         attn_drop (float): Attention dropout rate. Default is 0.
-        norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
-        c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
-        resample_fn (nn.Module): Optional resampling layer, applied after attention.
         use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
         act_fn (callable): Activation function. Default is nn.GELU.
     """
@@ -473,8 +470,6 @@ class SwinLayer(nn.Module):
         drop: float = 0.0,
         attn_drop: float = 0.0,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
-        c_multiplier: int = 2,
-        resample_fn: Optional[nn.Module] = None,
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
     ) -> None:
@@ -532,31 +527,9 @@ class SwinLayer(nn.Module):
         else:
             self.attn_mask = None
 
-        self.resampled_grid_size = grid_size
-        if callable(resample_fn):
-            self.resample = resample_fn(
-                space=space,
-                dim=dim,
-                grid_size=grid_size,
-                norm_layer=norm_layer,
-                c_multiplier=c_multiplier,
-            )
-            # TODO move one level up
-            self.resampled_grid_size = self.resample.target_grid_size
-
-    def forward(
-        self, x: torch.Tensor, *, return_skip: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         for blk in self.blocks:
             x = blk(x, self.attn_mask)
-
-        if hasattr(self, "resample"):
-            # return skip connection also
-            if return_skip:
-                # TODO check how expensive!!
-                x = (self.resample(x), x)
-            else:
-                x = self.resample(x)
 
         return x
 
@@ -571,19 +544,9 @@ class ModulatedSwinLayer(SwinLayer):
             [Film(cond_dim, self.dim) for _ in range(len(self.blocks))]
         )
 
-    def forward(
-        self, x: torch.Tensor, condition: torch.Tensor, *, return_skip: bool = False
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor]]:
+    def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
         for blk, cond in zip(self.blocks, self.conditioning):
             x = cond(x, condition)
             x = blk(x, self.attn_mask)
-
-        if hasattr(self, "resample"):
-            # return skip connection also
-            if return_skip:
-                # TODO check how expensive!!
-                x = (self.resample(x), x)
-            else:
-                x = self.resample(x)
 
         return x
