@@ -8,6 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from models.utils import seq_weight_init
+
 
 def pad_to_blocks(
     x: Union[Tuple[int], torch.Tensor], blocks: Sequence[int]
@@ -88,6 +90,7 @@ class PatchEmbed(nn.Module):
         use_conv: bool = False,
         act_fn: nn.Module = nn.LeakyReLU,
         mlp_ratio: float = 8.0,
+        init_weights: Optional[str] = None,
     ):
         assert len(base_resolution) == space, f"Image size must be {space}D"
         assert len(patch_size) == space, f"Patch size must be {space}D"
@@ -129,6 +132,19 @@ class PatchEmbed(nn.Module):
             )
 
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            pass
+        elif init_weights == "xavier_uniform":
+            self.patch.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            self.patch.apply(seq_weight_init(nn.init.trunc_normal_))
+        else:
+            raise NotImplementedError
 
     def forward(self, x):
         """
@@ -195,6 +211,7 @@ class PatchMerging(nn.Module):
         grid_size: Sequence[int],
         norm_layer: Type[nn.LayerNorm] = nn.LayerNorm,
         c_multiplier: int = 2,
+        init_weights: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.space = space
@@ -211,6 +228,19 @@ class PatchMerging(nn.Module):
         n_merges = sum(self.merge_subspace)
         self.norm = norm_layer(2**n_merges * dim) if norm_layer else nn.Identity()
         self.reduction = nn.Linear(2**n_merges * dim, c_multiplier * dim, bias=False)
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            pass
+        elif init_weights == "xavier_uniform":
+            self.reduction.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            self.reduction.apply(seq_weight_init(nn.init.trunc_normal_))
+        else:
+            raise NotImplementedError
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # must pad to even shape
@@ -270,6 +300,7 @@ class PatchUnmerging(nn.Module):
         act_fn: nn.Module = nn.LeakyReLU,
         mlp_ratio: float = 8.0,
         patch_skip: bool = False,
+        init_weights: Optional[str] = None,
     ):
         super().__init__()
         assert expand_by is not None or target_grid_size is not None
@@ -316,6 +347,19 @@ class PatchUnmerging(nn.Module):
             )
 
         self.norm = norm_layer(dim_out) if norm_layer else nn.Identity()
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            pass
+        elif init_weights == "xavier_uniform":
+            self.expansion.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            self.expansion.apply(seq_weight_init(nn.init.trunc_normal_))
+        else:
+            raise NotImplementedError
 
     def forward(self, x):
         ndim = x.ndim

@@ -11,28 +11,44 @@ class PositionalEmbedding(nn.Module):
     """
 
     def __init__(
-        self, dim: int, grid_size: tuple, learnable: bool = False, init: str = "sincos"
+        self,
+        dim: int,
+        grid_size: tuple,
+        learnable: bool = False,
+        init_weights: str = "sincos",
     ) -> None:
         super().__init__()
         self.grid_size = grid_size
+        self.dim = dim
+        self.learnable = learnable
+        self.init_weights = init_weights
 
-        if init == "rand":
-            pos_embed = torch.zeros(1, *grid_size, dim)
-            nn.init.trunc_normal_(pos_embed, std=0.02)
-        if init == "sincos":
+        pos_embed = torch.zeros(1, *self.grid_size, self.dim)
+        if learnable:
+            self.pos_embed = nn.Parameter(pos_embed)
+        else:
+            self.register_buffer("pos_embed", pos_embed)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.init_weights == "rand":
+            nn.init.trunc_normal_(self.pos_embed, std=0.02)
+        elif self.init_weights == "sincos":
             try:
                 from kappamodules.functional.pos_embed import (
                     get_sincos_pos_embed_from_seqlens,
                 )
             except ImportError:
                 raise ImportError("pip install kappamodules")
-
-            pos_embed = get_sincos_pos_embed_from_seqlens(grid_size, dim)[None]
-
-        if learnable:
-            self.pos_embed = nn.Parameter(pos_embed)
         else:
-            self.register_buffer("pos_embed", pos_embed)
+            raise NotImplementedError
+
+        pos_embed = get_sincos_pos_embed_from_seqlens(self.grid_size, self.dim)[None]
+        if isinstance(self.pos_embed, nn.Parameter):
+            self.pos_embed.data.copy_(pos_embed)
+        else:
+            self.pos_embed.copy_(pos_embed)
 
     def forward(self, x):
         ndim = x.ndim

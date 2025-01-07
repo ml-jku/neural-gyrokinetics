@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from einops import rearrange
-from math import ceil
 
 from models.nd_vit.drop import DropPath
 from models.utils import Film

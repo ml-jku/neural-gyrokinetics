@@ -45,7 +45,7 @@ def get_model(cfg, dataset):
             num_layers=num_layers,
             use_checkpoint=gradient_checkpoint,
             drop_path=0.1,
-            abs_pe=False,
+            abs_pe=True,
             conv_patch=False,
             hidden_mlp_ratio=6.0,
             patching_hidden_ratio=patching_hidden_ratio,
