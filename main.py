@@ -1,3 +1,4 @@
+from datetime import datetime
 import gc
 import os
 import os.path as osp
@@ -7,7 +8,6 @@ import traceback
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from hydra.core.hydra_config import HydraConfig
 
 from run import runner
 from utils import set_seed, compress_src, setup_logging
@@ -19,29 +19,35 @@ def main(config: DictConfig):
     os.environ["HYDRA_FULL_ERROR"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    os.environ["OMP_NUM_THREADS"] = str(config.training.num_workers)
     set_seed(config.seed)
 
     print("#" * 88, "\nStarting Cyclone with configs:")
     print(OmegaConf.to_yaml(config))
     print("#" * 88, "\n")
 
-    hydra_cfg = HydraConfig.get()
-    launcher = hydra_cfg["runtime"]["choices"]["hydra/launcher"]
-    dataset_choice = hydra_cfg["runtime"]["choices"]["dataset"]
-
     dict_config = OmegaConf.to_container(config)
     if config.output_path is None:
+        dir = str(uuid.uuid4()).split("-")[0]
         dict_config["output_path"] = osp.join(
-            "outputs", str(uuid.uuid4()).split("-")[0]
+            "outputs", dir
+        )
+        dict_config["ckpt_path"] = osp.join(
+            "outputs", dir
         )
         config = OmegaConf.create(dict_config)
 
     if not os.path.exists(config.output_path):
         os.makedirs(dict_config["output_path"], exist_ok=True)
 
-    compress_src(config.output_path)
+    compress_src(dict_config["output_path"])
 
     try:
+        if dict_config["logging"]["run_id"] is None:
+            data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
+            dict_config["logging"]["run_id"] = f"{dict_config['model']['name']}_{data_and_time}"
+            config = OmegaConf.create(dict_config)
+
         logging_writer = setup_logging(config)
         runner(config, logging_writer)
     except BaseException:

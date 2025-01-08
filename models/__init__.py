@@ -11,8 +11,6 @@ def get_model(cfg, dataset):
         space = 5
         patch_size = cfg.model.swin.patch_size
         window_size = cfg.model.swin.window_size
-        # TODO currently only support one resolution for all cyclones
-        # TODO should move away from needing a fixed grid size
         base_resolution = dataset.resolution
         num_heads = cfg.model.swin.num_heads
         depth = cfg.model.swin.depth

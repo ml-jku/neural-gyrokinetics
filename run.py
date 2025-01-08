@@ -3,17 +3,18 @@ from datetime import datetime
 from functools import partial
 import torch
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
-from einops import rearrange
+from torch.nn.utils import clip_grad_norm_
 import warnings
 from tqdm import tqdm
 from time import perf_counter_ns
 from collections import defaultdict
+from transformers.optimization import get_scheduler
 
 from dataset import get_data, CycloneSample
 from models import get_model
 
 from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
-from eval import get_rollout, validation_metrics, distribution_5D, plot4x4_sided
+from eval import get_rollout, validation_metrics, distribution_5D, plot4x4_sided, to_fourier
 from utils import load_model_and_config, save_model_and_config
 
 
@@ -40,6 +41,7 @@ def runner(cfg, writer):
 
     if cfg.mode == "train":
         n_epochs = cfg.training.n_epochs
+        total_steps = n_epochs * len(trainloader)
 
         # optimizer config
         opt = torch.optim.Adam(
@@ -47,9 +49,19 @@ def runner(cfg, writer):
             lr=cfg.training.learning_rate,
             weight_decay=cfg.training.weight_decay,
         )
+
+        scaler = torch.amp.GradScaler(device=cfg.device, enabled=cfg.use_amp)
+        use_bf16 = cfg.use_amp and torch.cuda.is_bf16_supported()
+        if cfg.training.scheduler is not None:
+            scheduler = get_scheduler(
+                name=cfg.training.scheduler,
+                optimizer=opt,
+                num_warmup_steps=total_steps // 6,
+                num_training_steps=total_steps,
+            )
+
         if opt_state_dict is not None:
             opt.load_state_dict(opt_state_dict)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, n_epochs, 1e-6)
 
         # configure loss
         predict_delta = cfg.training.predict_delta
@@ -69,7 +81,7 @@ def runner(cfg, writer):
         loss_val_min = torch.inf
 
         if cfg.training.pretraining:
-            model = pretrain_autoencoder(model, cfg, trainloader, valloader)
+            model = pretrain_autoencoder(model, cfg, trainloader, valloader, writer)
 
         use_tqdm = cfg.logging.tqdm
         for epoch in range(1, n_epochs + 1):
@@ -82,11 +94,11 @@ def runner(cfg, writer):
                 trainloader = tqdm(trainloader, "Training")
             for sample in trainloader:
                 reset_peak_memory_stats(device)
-
                 sample: CycloneSample
                 x = sample.x.to(device)
                 ts = sample.timestep.to(device)
                 y = sample.y.to(device)
+
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
                     for aug_fn in augmentations:
@@ -106,21 +118,27 @@ def runner(cfg, writer):
                     info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
 
                 t_start_fwd = perf_counter_ns()
-                # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
-                pred_x = model(x, timestep=torch.ceil(ts))
-
-                # compute loss
-                if predict_delta:
-                    pred_x = x + pred_x
-                loss = relative_norm_mse(pred_x, y)
+                with torch.autocast(cfg.device, dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=cfg.use_amp):
+                    # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
+                    pred_x = model(x, timestep=torch.ceil(ts))
+                    if predict_delta:
+                        pred_x = x + pred_x
+                    loss = relative_norm_mse(pred_x, y)
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
                 t_start_bkd = perf_counter_ns()
 
-                opt.zero_grad()
-                loss.backward()
-                opt.step()
+                opt.zero_grad(set_to_none=True)
+                scaler.scale(loss).backward()
+                if cfg.training.clip_grad:
+                    scaler.unscale_(opt)
+                    clip_grad_norm_(model.parameters(), 1.0)
+                scaler.step(opt)
+                scaler.update()
+                if cfg.training.scheduler is not None:
+                    scheduler.step()
+
                 train_mse += loss.item()
 
                 info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
@@ -128,13 +146,17 @@ def runner(cfg, writer):
                 t_start_data = perf_counter_ns()
 
             train_mse /= len(trainloader)
-            train_losses_dict = {"train/relative_norm_mse": train_mse}
+            train_losses_dict = {
+                "train/relative_norm_mse": train_mse,
+                "train/lr": scheduler.get_last_lr()[0] if cfg.training.scheduler else cfg.training.learning_rate,
+            }
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # Validation loop
             log_metric_dict = {}
             val_plots = {}
             if (epoch % cfg.validation.validate_every_n_epochs) == 0 or epoch == 1:
+                # Validation loop
                 model.eval()
                 # TODO configurable metric list
                 metrics = None
@@ -172,7 +194,7 @@ def runner(cfg, writer):
                         # back to fourier for plotting
                         if cfg.dataset.spatial_ifft:
                             # TODO move somewhere else
-                            x_rollout, y = to_fourier_for_val(x_rollout, y)
+                            x_rollout, y = to_fourier(x_rollout, y)
 
                         # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
                         # metrics tensor will have shape [number_of_metrics, n_timesteps]
@@ -228,8 +250,6 @@ def runner(cfg, writer):
                         "`cfg.ckpt_path` is not set: checkpoints will not be stored"
                     )
 
-            sched.step()
-
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
             if writer:
@@ -259,27 +279,3 @@ def runner(cfg, writer):
     if cfg.mode == "rollout":
         raise NotImplementedError("TODO")
 
-
-def to_fourier_for_val(x_rollout, y):
-    # TODO tmp, move somewhere else
-    x_rollout = rearrange(x_rollout, "t b c ... -> c t b ...")
-    x_rollout = torch.complex(real=x_rollout[0], imag=x_rollout[1])
-    x_rollout = torch.fft.fftn(x_rollout, dim=(-2, -1))
-    x_rollout = torch.stack([x_rollout.real, x_rollout.imag]).squeeze()
-    x_rollout = rearrange(x_rollout, "c t b ... -> t b c ...")
-
-    if y.ndim == 8:
-        y = rearrange(y, "t b c ... -> c t b ...")
-    else:
-        y = rearrange(y, "b c ... -> c b ...")
-
-    y = torch.complex(real=y[0], imag=y[1])
-    y = torch.fft.fftn(y, dim=(-2, -1))
-    y = torch.stack([y.real, y.imag]).squeeze()
-
-    if y.ndim == 8:
-        y = rearrange(y, "c t b ... -> t b c ...")
-    else:
-        y = rearrange(y, "c b ... -> b c ...")
-
-    return x_rollout, y

@@ -5,6 +5,7 @@ import matplotlib.ticker as tkr
 import matplotlib.pyplot as plt
 import numpy as np
 import wandb
+from einops import rearrange
 
 import torch
 
@@ -148,3 +149,27 @@ def mse_time_histogram(losses):
     img = wandb.Image(fig)
     plt.close(fig)
     return img
+
+def to_fourier(x_rollout, y):
+    # TODO tmp, move somewhere else
+    x_rollout = rearrange(x_rollout, "t b c ... -> c t b ...")
+    x_rollout = torch.complex(real=x_rollout[0], imag=x_rollout[1])
+    x_rollout = torch.fft.fftn(x_rollout, dim=(-2, -1))
+    x_rollout = torch.stack([x_rollout.real, x_rollout.imag]).squeeze()
+    x_rollout = rearrange(x_rollout, "c t b ... -> t b c ...")
+
+    if y.ndim == 8:
+        y = rearrange(y, "t b c ... -> c t b ...")
+    else:
+        y = rearrange(y, "b c ... -> c b ...")
+
+    y = torch.complex(real=y[0], imag=y[1])
+    y = torch.fft.fftn(y, dim=(-2, -1))
+    y = torch.stack([y.real, y.imag]).squeeze()
+
+    if y.ndim == 8:
+        y = rearrange(y, "c t b ... -> t b c ...")
+    else:
+        y = rearrange(y, "c b ... -> b c ...")
+
+    return x_rollout, y

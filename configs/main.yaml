@@ -15,5 +15,4 @@ use_amp: true
 mode: "train"
 eval: true
 device: "cuda"
-ckpt_path: "/system/user/publicwork/gyrokinetics_checkpoints/cyclone4_val"
 load_ckp: false

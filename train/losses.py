@@ -4,6 +4,8 @@ import torch
 from torch import nn
 import numpy as np
 from tqdm import tqdm
+from transformers.optimization import get_scheduler
+from torch.nn.utils import clip_grad_norm_
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -111,32 +113,64 @@ def get_pushforward_trick(
     return _loss_fn
 
 
-def pretrain_autoencoder(model, cfg, trainloader, valloader):
-    AE_n_epochs = 20  # TODO
+def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
 
-    AE_opt = torch.optim.Adam(
-        list(model.patch_embed.parameters()) + list(model.unpatch.parameters()),
-        lr=5e-4,
-        weight_decay=cfg.training.weight_decay,
+    if cfg.training.pretraining_kwargs.target_modules == "all":
+        target_modules = model.parameters()
+    else:
+        target_modules = []
+        for n, p in model.named_parameters():
+            for t in cfg.training.pretraining_kwargs.target_modules:
+                if t in n:
+                    target_modules.append(p)
+
+    scaler = torch.amp.GradScaler(device=cfg.device, enabled=cfg.use_amp)
+    use_bf16 = cfg.use_amp and torch.cuda.is_bf16_supported()
+    n_epochs = cfg.training.pretraining_kwargs.n_epochs
+
+    opt = torch.optim.Adam(
+        target_modules,
+        lr=cfg.training.pretraining_kwargs.lr,
+        weight_decay=cfg.training.pretraining_kwargs.weight_decay,
     )
 
-    for epoch in range(1, AE_n_epochs + 1):
+    if cfg.training.pretraining_kwargs.scheduler is not None:
+        total_steps = n_epochs * len(trainloader)
+        scheduler = get_scheduler(
+            name=cfg.training.pretraining_kwargs.scheduler,
+            optimizer=opt,
+            num_warmup_steps=total_steps // 10,
+            num_training_steps=total_steps,
+        )
+
+    for epoch in range(1, cfg.training.pretraining_kwargs.n_epochs + 1):
         train_mse = 0
         if cfg.logging.tqdm:
             trainloader = tqdm(trainloader, "AE pretraining")
         for sample in trainloader:
             x = sample.x.to(cfg.device)
-            z, pad_ax = model.patch_encode(x)
-            # TODO
-            z = z + torch.normal(0, 1e-3, size=(z.shape), device=z.device)
-            pred_x = model.patch_decode(z, pad_ax)
-            if cfg.training.predict_delta:
-                pred_x = x + pred_x
-            loss = relative_norm_mse(pred_x, x)
-            AE_opt.zero_grad()
-            loss.backward()
-            AE_opt.step()
+
+            with torch.autocast(cfg.device, dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=cfg.use_amp):
+                z, pad_ax = model.patch_encode(x)
+                # TODO
+                z = z + torch.normal(0, 1e-3, size=(z.shape), device=z.device)
+                pred_x = model.patch_decode(z, pad_ax)
+                if cfg.training.predict_delta:
+                    pred_x = x + pred_x
+                loss = relative_norm_mse(pred_x, x)
+
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            if cfg.training.pretraining_kwargs.clip_grad:
+                scaler.unscale_(opt)
+                clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(opt)
+            scaler.update()
+            if cfg.training.pretraining_kwargs.scheduler is not None:
+                scheduler.step()
+
             train_mse += loss.item()
+
         train_mse = train_mse / len(trainloader)
 
         val_log = ""
@@ -153,15 +187,24 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader):
                 val_mse += loss.item()
             val_mse = val_mse / len(valloader)
             val_log = f", val/relative_norm_mse: {val_mse:.4f}"
+            writer.log({
+                "pretrain/val_relative_norm_mse": val_mse,
+            })
 
-        epoch_str = str(epoch).zfill(len(str(int(AE_n_epochs))))
+        epoch_str = str(epoch).zfill(len(str(int(cfg.training.pretraining_kwargs.n_epochs))))
         print(
             f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
         )
+        writer.log({
+            "pretrain/train_relative_norm_mse": train_mse,
+            "pretrain/train_lr": scheduler.get_last_lr()[0] if cfg.training.pretraining_kwargs.scheduler is not None else cfg.training.pretraining_kwargs.lr,
+        })
 
-    # freeze patching
-    model.patch_embed.requires_grad_ = False
-    model.unpatch.requires_grad_ = False
+    if cfg.training.pretraining_kwargs.freeze_after:
+        # freeze patching
+        print("Freezing AE weights...")
+        model.patch_embed.requires_grad_(False)
+        model.unpatch.requires_grad_(False)
 
     print("Pretraining done!\n\n")
 
