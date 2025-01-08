@@ -41,14 +41,16 @@ class PositionalEmbedding(nn.Module):
                 )
             except ImportError:
                 raise ImportError("pip install kappamodules")
+            
             pos_embed = sincos_pos_embed(self.grid_size, self.dim)[None]
+            # replace param
+            if isinstance(self.pos_embed, nn.Parameter):
+                self.pos_embed.data.copy_(pos_embed)
+            else:
+                self.pos_embed.copy_(pos_embed)
         else:
             raise NotImplementedError
 
-        if isinstance(self.pos_embed, nn.Parameter):
-            self.pos_embed.data.copy_(pos_embed)
-        else:
-            self.pos_embed.copy_(pos_embed)
 
     def forward(self, x):
         ndim = x.ndim
