@@ -65,6 +65,7 @@ def get_data(cfg):
             num_workers=cfg.training.num_workers,
             shuffle=True,
             collate_fn=trainset.collate,
+            pin_memory=cfg.training.pin_memory,
         )
         valloader = DataLoader(
             valset,
@@ -72,6 +73,7 @@ def get_data(cfg):
             num_workers=cfg.training.num_workers,
             shuffle=False,
             collate_fn=valset.collate,
+            pin_memory=cfg.training.pin_memory,
         )
 
     return (trainset, valset), (trainloader, valloader), augmentations

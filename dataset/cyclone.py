@@ -23,6 +23,11 @@ class CycloneSample:
     timestep_index: torch.Tensor
     # TODO: add more fields (e.g. params that we can use for conditioning)
 
+    def pin_memory(self):
+        self.x = self.x.pin_memory()
+        self.y = self.y.pin_memory()
+        return self
+
 
 class CycloneDataset(Dataset):
     def __init__(
