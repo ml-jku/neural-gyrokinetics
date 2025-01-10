@@ -1,5 +1,4 @@
 name: swin
-input_seq_length: 1
 bundle_seq_length: 1
 latent_dim: 32
 num_layers: 3
