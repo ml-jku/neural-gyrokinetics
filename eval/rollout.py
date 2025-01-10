@@ -22,14 +22,25 @@ def get_rollout(
         file_idx: torch.Tensor,
         ts_index_0: torch.Tensor,
     ) -> torch.Tensor:
+        # cap the steps depending on the current max timestep
+        rollout_steps = min(
+            [
+                min(
+                    (dataset.num_ts(f_idx) - int(ts_index_0[i])) // bundle_steps - 1,
+                    n_steps,
+                )
+                for i, f_idx in enumerate(file_idx.tolist())
+            ]
+        )
+
         xt = x0.clone()
         if xt.ndim == 7:
             x_rollout = torch.zeros(
-                (xt.shape[0], problem_dim, n_steps * bundle_steps, *xt.shape[2:])
+                (xt.shape[0], problem_dim, rollout_steps * bundle_steps, *xt.shape[2:])
             )
         elif xt.ndim == 8:
             x_rollout = torch.zeros(
-                (xt.shape[0], problem_dim, n_steps * bundle_steps, *xt.shape[3:])
+                (xt.shape[0], problem_dim, rollout_steps * bundle_steps, *xt.shape[3:])
             )
         else:
             raise (
@@ -43,8 +54,8 @@ def get_rollout(
                 i
                 for i in range(
                     int(ts_idx_start),
-                    int(ts_idx_start) + n_steps * bundle_steps,
-                    bundle_steps,
+                    int(ts_idx_start) + rollout_steps * bundle_steps,
+                    bundle_steps
                 )
             ]
             for ts_idx_start in ts_index_0.tolist()
@@ -52,7 +63,7 @@ def get_rollout(
         tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
         with torch.no_grad():
             # move bundles forward, rollout in blocks
-            for i in range(0, n_steps):
+            for i in range(0, rollout_steps):
                 x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
                 if predict_delta:
                     x_p = xt + x_p
@@ -65,7 +76,7 @@ def get_rollout(
 
         # only return desired size
         x_rollout = rearrange(x_rollout, "b c t ... -> t b c ...")
-        return x_rollout[: n_steps * bundle_steps, :, ...]
+        return x_rollout[: rollout_steps * bundle_steps, :, ...]
 
     return _rollout
 
@@ -89,7 +100,9 @@ def validation_metrics(
     if bundle_steps == 1:
         y = torch.stack(
             [
-                dataset.get_at_time(file_idx, ts_index + t).y
+                dataset.get_at_time(
+                    file_idx, ts_index + t, to_fourier=True
+                ).y
                 for t in range(0, n_steps, bundle_steps)
             ],
             dim=0,
@@ -97,7 +110,9 @@ def validation_metrics(
     else:
         y = torch.concat(
             [
-                dataset.get_at_time(file_idx, ts_index + t).y
+                dataset.get_at_time(
+                    file_idx, ts_index + t, to_fourier=True
+                ).y
                 for t in range(0, n_steps, bundle_steps)
             ],
             dim=2,
