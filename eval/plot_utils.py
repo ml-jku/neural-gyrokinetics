@@ -150,6 +150,7 @@ def mse_time_histogram(losses):
     plt.close(fig)
     return img
 
+
 def to_fourier(x_rollout, y):
     # TODO tmp, move somewhere else
     x_rollout = rearrange(x_rollout, "t b c ... -> c t b ...")

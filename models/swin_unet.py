@@ -523,16 +523,11 @@ class SwinUnet(nn.Module):
         else:
             cond = {}
 
-        # pad to patch blocks
-        x = rearrange(x, "b c ... -> b ... c")
-        x, pad_axes = pad_to_blocks(x, self.patch_size)
-
-        # linear flat patch embedding
-        x = self.patch_embed(x)
+        # compress to patch space
+        x, pad_axes = self.patch_encode(x)
 
         # down path
         feature_maps = []
-
         for blk in self.down_blocks:
             x, x_pre = blk(x, **cond)
             feature_maps.append(x_pre)
@@ -543,25 +538,18 @@ class SwinUnet(nn.Module):
         x = self.middle(x, **cond)
         x = self.middle_upscale(x)
 
-        # down path
+        # up path
         feature_maps = feature_maps[::-1]
         for i, blk in enumerate(self.up_blocks):
             x = blk(x, s=feature_maps[i], **cond)
 
-        # expand patches to original size
-        x = self.unpatch(x)
-
-        # unpad output
-        x = unpad(x, pad_axes, self.base_resolution)
-        # return as image
-        x = rearrange(x, "b ... c -> b c ...")
-        return x
+        # expand to original
+        return self.patch_decode(x, pad_axes)
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         # pad to patch blocks
         x = rearrange(x, "b c ... -> b ... c")
         x, pad_axes = pad_to_blocks(x, self.patch_size)
-
         # linear flat patch embedding
         x = self.patch_embed(x)
         return x, pad_axes
@@ -569,10 +557,8 @@ class SwinUnet(nn.Module):
     def patch_decode(self, z: torch.Tensor, pad_axes: torch.Tensor) -> torch.Tensor:
         # expand patches to original size
         x = self.unpatch(z)
-
         # unpad output
         x = unpad(x, pad_axes, self.base_resolution)
         # return as image
         x = rearrange(x, "b ... c -> b c ...")
-
         return x

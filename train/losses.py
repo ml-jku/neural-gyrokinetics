@@ -195,11 +195,8 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
                 val_mse += loss.item()
             val_mse = val_mse / len(valloader)
             val_log = f", val/relative_norm_mse: {val_mse:.4f}"
-            writer.log(
-                {
-                    "pretrain/val_relative_norm_mse": val_mse,
-                }
-            )
+            if writer:
+                writer.log({"pretrain/val_relative_norm_mse": val_mse})
 
         epoch_str = str(epoch).zfill(
             len(str(int(cfg.training.pretraining_kwargs.n_epochs)))
@@ -207,16 +204,17 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
         print(
             f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
         )
-        writer.log(
-            {
-                "pretrain/train_relative_norm_mse": train_mse,
-                "pretrain/train_lr": (
-                    scheduler.get_last_lr()[0]
-                    if cfg.training.pretraining_kwargs.scheduler is not None
-                    else cfg.training.pretraining_kwargs.lr
-                ),
-            }
-        )
+        if writer:
+            writer.log(
+                {
+                    "pretrain/train_relative_norm_mse": train_mse,
+                    "pretrain/train_lr": (
+                        scheduler.get_last_lr()[0]
+                        if cfg.training.pretraining_kwargs.scheduler is not None
+                        else cfg.training.pretraining_kwargs.lr
+                    ),
+                }
+            )
 
     if cfg.training.pretraining_kwargs.freeze_after:
         # freeze patching
