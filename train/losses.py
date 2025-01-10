@@ -108,7 +108,11 @@ def get_pushforward_trick(
             unrolled = future.result()
 
         # have to clone xt to avoid view mode grad runtime error
-        return xt.clone(), unrolled.timestep.to(x.device), unrolled.y.to(x.device)
+        return (
+            xt.clone(),
+            unrolled.timestep.to(x.device),
+            unrolled.y.to(x.device, non_blocking=True),
+        )
 
     return _loss_fn
 
@@ -150,7 +154,11 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
         for sample in trainloader:
             x = sample.x.to(cfg.device)
 
-            with torch.autocast(cfg.device, dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=cfg.use_amp):
+            with torch.autocast(
+                cfg.device,
+                dtype=torch.float16 if not use_bf16 else torch.bfloat16,
+                enabled=cfg.use_amp,
+            ):
                 z, pad_ax = model.patch_encode(x)
                 # TODO
                 z = z + torch.normal(0, 1e-3, size=(z.shape), device=z.device)
@@ -187,18 +195,28 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
                 val_mse += loss.item()
             val_mse = val_mse / len(valloader)
             val_log = f", val/relative_norm_mse: {val_mse:.4f}"
-            writer.log({
-                "pretrain/val_relative_norm_mse": val_mse,
-            })
+            writer.log(
+                {
+                    "pretrain/val_relative_norm_mse": val_mse,
+                }
+            )
 
-        epoch_str = str(epoch).zfill(len(str(int(cfg.training.pretraining_kwargs.n_epochs))))
+        epoch_str = str(epoch).zfill(
+            len(str(int(cfg.training.pretraining_kwargs.n_epochs)))
+        )
         print(
             f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
         )
-        writer.log({
-            "pretrain/train_relative_norm_mse": train_mse,
-            "pretrain/train_lr": scheduler.get_last_lr()[0] if cfg.training.pretraining_kwargs.scheduler is not None else cfg.training.pretraining_kwargs.lr,
-        })
+        writer.log(
+            {
+                "pretrain/train_relative_norm_mse": train_mse,
+                "pretrain/train_lr": (
+                    scheduler.get_last_lr()[0]
+                    if cfg.training.pretraining_kwargs.scheduler is not None
+                    else cfg.training.pretraining_kwargs.lr
+                ),
+            }
+        )
 
     if cfg.training.pretraining_kwargs.freeze_after:
         # freeze patching

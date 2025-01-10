@@ -14,7 +14,13 @@ from dataset import get_data, CycloneSample
 from models import get_model
 
 from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
-from eval import get_rollout, validation_metrics, distribution_5D, plot4x4_sided, to_fourier
+from eval import (
+    get_rollout,
+    validation_metrics,
+    distribution_5D,
+    plot4x4_sided,
+    to_fourier,
+)
 from utils import load_model_and_config, save_model_and_config
 
 
@@ -95,9 +101,9 @@ def runner(cfg, writer):
             for sample in trainloader:
                 reset_peak_memory_stats(device)
                 sample: CycloneSample
-                x = sample.x.to(device)
+                x = sample.x.to(device, non_blocking=True)
+                y = sample.y.to(device, non_blocking=True)
                 ts = sample.timestep.to(device)
-                y = sample.y.to(device)
 
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
@@ -118,7 +124,11 @@ def runner(cfg, writer):
                     info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
 
                 t_start_fwd = perf_counter_ns()
-                with torch.autocast(cfg.device, dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=cfg.use_amp):
+                with torch.autocast(
+                    cfg.device,
+                    dtype=torch.float16 if not use_bf16 else torch.bfloat16,
+                    enabled=cfg.use_amp,
+                ):
                     # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
                     pred_x = model(x, timestep=torch.ceil(ts))
                     if predict_delta:
@@ -148,7 +158,11 @@ def runner(cfg, writer):
             train_mse /= len(trainloader)
             train_losses_dict = {
                 "train/relative_norm_mse": train_mse,
-                "train/lr": scheduler.get_last_lr()[0] if cfg.training.scheduler else cfg.training.learning_rate,
+                "train/lr": (
+                    scheduler.get_last_lr()[0]
+                    if cfg.training.scheduler
+                    else cfg.training.learning_rate
+                ),
             }
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
@@ -174,9 +188,9 @@ def runner(cfg, writer):
                 with torch.no_grad():
                     for idx, sample in enumerate(valloader):
                         sample: CycloneSample
-                        x = sample.x.to(device)
+                        x = sample.x.to(device, non_blocking=True)
+                        y = sample.y.to(device, non_blocking=True)
                         ts = sample.timestep.to(device)
-                        y = sample.y.to(device)
                         file_idx = sample.file_index.to(device)
                         ts_index = sample.timestep_index.to(device)
 
@@ -278,4 +292,3 @@ def runner(cfg, writer):
 
     if cfg.mode == "rollout":
         raise NotImplementedError("TODO")
-
