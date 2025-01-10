@@ -14,11 +14,12 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 from math import ceil
+from functools import partial
 
 from models.nd_vit.vit_layers import LayerModes
 from models.nd_vit.drop import DropPath
 from models.nd_vit.patching import unpad, pad_to_blocks
-from models.utils import Film, seq_weight_init
+from models.utils import Film, seq_weight_init, MLP
 
 
 def window_partition(x, window_size):
@@ -194,10 +195,10 @@ class WindowAttention(nn.Module):
         # nn.init.trunc_normal_(self.rpb, std=.02)
 
         # RPB from swinv2
-        self.cpb_mlp = nn.Sequential(
-            nn.Linear(space, 512),
-            nn.ReLU(inplace=True),
-            nn.Linear(512, num_heads, bias=False),
+        self.cpb_mlp = MLP(
+            [space, 512, num_heads],
+            act_fn=partial(nn.ReLU, inplace=True),
+            bias=[True, False],
         )
         # get relative_coords_table
         coords_nd = []
@@ -383,14 +384,7 @@ class SwinTransformerBlock(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
 
-        mlp_drop = nn.Dropout(drop)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_hidden_dim),
-            mlp_drop,
-            act_fn(),
-            nn.Linear(mlp_hidden_dim, dim),
-            mlp_drop,
-        )
+        self.mlp = MLP([dim, mlp_hidden_dim, dim], act_fn=act_fn, dropout_prob=drop)
 
         if init_weights:
             self.reset_parameters(init_weights)

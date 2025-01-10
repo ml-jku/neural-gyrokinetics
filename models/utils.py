@@ -1,5 +1,6 @@
-from typing import Optional
+from typing import Optional, Sequence, Union
 
+import torch
 from torch import nn
 from kappamodules.functional.pos_embed import get_sincos_1d_from_seqlen
 
@@ -68,3 +69,27 @@ class Film(nn.Module):
             mod.shape[0], *(1,) * (x.ndim - cond.ndim), *mod.shape[1:]
         ).chunk(2, dim=-1)
         return x * (scale + 1) + shift
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        latents: Sequence[int],
+        act_fn: nn.Module = nn.GELU,
+        bias: Union[bool, Sequence[bool]] = True,
+        dropout_prob: float = 0.0,
+    ):
+        super().__init__()
+        if isinstance(bias, bool):
+            bias = [bias] * (len(latents) - 1)
+        dropout = nn.Dropout(dropout_prob) if dropout_prob > 0 else nn.Identity()
+        mlp = []
+        for i, (lat_i, lat_i2) in enumerate(zip(latents, latents[1:])):
+            mlp.append(nn.Linear(lat_i, lat_i2, bias=bias[i]))
+            mlp.append(dropout)
+            if i != len(latents) - 2:
+                mlp.append(act_fn())
+        self.mlp = nn.Sequential(*mlp)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.mlp(x)

@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from models.utils import seq_weight_init
+from models.utils import seq_weight_init, MLP
 
 
 def pad_to_blocks(
@@ -75,6 +75,7 @@ class PatchEmbed(nn.Module):
         flatten (bool): Flatten output patches. Default is False.
         use_conv (bool): Use convolutions to patch (only 2D or 3D). Default is False.
         mlp_ratio (float): Expansion rate for patching MLPs. Default is 8.0
+        mlp_depth (int): Depth of the patching MLPs. Default is 2
         act_fn (callable): Activation function. Default is nn.LeakyReLU.
     """
 
@@ -90,6 +91,7 @@ class PatchEmbed(nn.Module):
         use_conv: bool = False,
         act_fn: nn.Module = nn.LeakyReLU,
         mlp_ratio: float = 8.0,
+        mlp_depth: int = 2,
         init_weights: Optional[str] = None,
     ):
         assert len(base_resolution) == space, f"Image size must be {space}D"
@@ -107,8 +109,6 @@ class PatchEmbed(nn.Module):
         self.space = space
         self.in_channels = in_channels
 
-        hidden_dim = int(embed_dim * mlp_ratio)
-
         if use_conv:
             if space == 2:
                 Conv = nn.Conv2d
@@ -118,17 +118,16 @@ class PatchEmbed(nn.Module):
                 raise NotImplementedError
 
             self.patch = Conv(
-                in_channels,
-                embed_dim,
-                kernel_size=patch_size,
-                stride=patch_size,
-                bias=False,
+                in_channels, embed_dim, kernel_size=patch_size, stride=patch_size
             )
         else:
-            self.patch = nn.Sequential(
-                nn.Linear(in_channels * np.prod(patch_size), hidden_dim),
-                act_fn(),
-                nn.Linear(hidden_dim, embed_dim, bias=False),
+            input_lat = [in_channels * np.prod(patch_size)]
+            output_lat = [embed_dim]
+            hidden_lat = [int(embed_dim * mlp_ratio)] * (mlp_depth - 1)
+            self.patch = MLP(
+                input_lat + hidden_lat + output_lat,
+                act_fn=act_fn,
+                bias=False,
             )
 
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
@@ -227,7 +226,8 @@ class PatchMerging(nn.Module):
 
         n_merges = sum(self.merge_subspace)
         self.norm = norm_layer(2**n_merges * dim) if norm_layer else nn.Identity()
-        self.reduction = nn.Linear(2**n_merges * dim, c_multiplier * dim, bias=False)
+        self.out_dim = c_multiplier * dim
+        self.reduction = nn.Linear(2**n_merges * dim, self.out_dim, bias=False)
 
         if init_weights:
             self.reset_parameters(init_weights)
@@ -282,7 +282,8 @@ class PatchUnmerging(nn.Module):
         flatten (bool): Flatten output patches. Default is False.
         use_conv (bool): Use convolutions to patch (only 2D or 3D). Default is False.
         act_fn (callable): Activation function. Default is nn.LeakyReLU.
-        mlp_ratio (float): Expansion rate for patching MLPs. Default is 8.0
+        mlp_ratio (float): Expansion rate for expansion MLPs. Default is 8.0
+        mlp_depth (int): Depth of the expansion MLPs. Default is 2
     """
 
     def __init__(
@@ -299,6 +300,7 @@ class PatchUnmerging(nn.Module):
         use_conv: bool = False,
         act_fn: nn.Module = nn.LeakyReLU,
         mlp_ratio: float = 8.0,
+        mlp_depth: int = 2,
         patch_skip: bool = False,
         init_weights: Optional[str] = None,
     ):
@@ -323,8 +325,6 @@ class PatchUnmerging(nn.Module):
         if target_grid_size is None:
             self.target_grid_size = [g * e for g, e in zip(grid_size, expand_by)]
 
-        hidden_dim = int(np.prod(expand_by) * mlp_ratio)
-
         # NOTE out_channels overrides c_multiplier
         dim_out = dim // c_multiplier if out_channels is None else out_channels
 
@@ -336,14 +336,15 @@ class PatchUnmerging(nn.Module):
             else:
                 raise NotImplementedError
 
-            self.expansion = Conv(
-                dim, dim_out, kernel_size=expand_by, stride=expand_by, bias=False
-            )
+            self.expansion = Conv(dim, dim_out, kernel_size=expand_by, stride=expand_by)
         else:
-            self.expansion = nn.Sequential(
-                nn.Linear(dim * (2 if patch_skip else 1), hidden_dim),
-                act_fn(),
-                nn.Linear(hidden_dim, np.prod(expand_by) * dim_out),
+            input_lat = [dim * (2 if patch_skip else 1)]
+            output_lat = [np.prod(expand_by) * dim_out]
+            hidden_lat = [int(np.prod(expand_by) * mlp_ratio)] * (mlp_depth - 1)
+            self.expansion = MLP(
+                input_lat + hidden_lat + output_lat,
+                act_fn=act_fn,
+                bias=True,
             )
 
         self.norm = norm_layer(dim_out) if norm_layer else nn.Identity()

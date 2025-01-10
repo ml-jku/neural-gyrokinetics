@@ -29,12 +29,8 @@ def main(config: DictConfig):
     dict_config = OmegaConf.to_container(config)
     if config.output_path is None:
         dir = str(uuid.uuid4()).split("-")[0]
-        dict_config["output_path"] = osp.join(
-            "outputs", dir
-        )
-        dict_config["ckpt_path"] = osp.join(
-            "outputs", dir
-        )
+        dict_config["output_path"] = osp.join("outputs", dir)
+        dict_config["ckpt_path"] = osp.join("outputs", dir)
         config = OmegaConf.create(dict_config)
 
     if not os.path.exists(config.output_path):
@@ -45,7 +41,9 @@ def main(config: DictConfig):
     try:
         if dict_config["logging"]["run_id"] is None:
             data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
-            dict_config["logging"]["run_id"] = f"{dict_config['model']['name']}_{data_and_time}"
+            dict_config["logging"][
+                "run_id"
+            ] = f"{dict_config['model']['name']}_{data_and_time}"
             config = OmegaConf.create(dict_config)
 
         logging_writer = setup_logging(config)

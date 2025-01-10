@@ -37,11 +37,11 @@ class PositionalEmbedding(nn.Module):
         elif self.init_weights == "sincos":
             try:
                 from kappamodules.functional.pos_embed import (
-                    get_sincos_pos_embed_from_seqlens as sincos_pos_embed
+                    get_sincos_pos_embed_from_seqlens as sincos_pos_embed,
                 )
             except ImportError:
                 raise ImportError("pip install kappamodules")
-            
+
             pos_embed = sincos_pos_embed(self.grid_size, self.dim)[None]
             # replace param
             if isinstance(self.pos_embed, nn.Parameter):
@@ -50,7 +50,6 @@ class PositionalEmbedding(nn.Module):
                 self.pos_embed.copy_(pos_embed)
         else:
             raise NotImplementedError
-
 
     def forward(self, x):
         ndim = x.ndim

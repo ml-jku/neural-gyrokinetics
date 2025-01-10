@@ -1,3 +1,4 @@
 writer: Null
 run_id: null
 tqdm: true
+model_summary: false
