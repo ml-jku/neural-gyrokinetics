@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from functools import partial
 
+from models.utils import seq_weight_init
 from models.nd_vit.swin_layers import SwinLayer, ModulatedSwinLayer, LayerModes
 from models.nd_vit.positional import PositionalEmbedding
 from models.nd_vit.patching import (
@@ -58,6 +59,7 @@ class SwinBlockDown(nn.Module):
         act_fn: nn.Module = nn.GELU,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         swin_attention_layer: Type = SwinLayer,
+        init_weights: str = "xavier_uniform",
     ):
         super().__init__()
 
@@ -95,6 +97,15 @@ class SwinBlockDown(nn.Module):
         )
         # TODO move one level up
         self.resampled_grid_size = self.downsample.target_grid_size
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if hasattr(self, "pos_embed"):
+            self.pos_embed.reset_parameters()
+        self.swin_att.reset_parameters(init_weights)
+        self.downsample.reset_parameters(init_weights)
 
     def forward(
         self, x: torch.Tensor, return_skip: bool = True, **kwargs
@@ -166,6 +177,7 @@ class SwinBlockUp(nn.Module):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         swin_attention_layer: Type = SwinLayer,
         mode: LayerModes = LayerModes.UPSAMPLE,
+        init_weights: Optional[str] = "xavier_uniform",
     ):
         super().__init__()
 
@@ -211,6 +223,25 @@ class SwinBlockUp(nn.Module):
         elif mode == LayerModes.SEQUENCE:
             self.upsample = None
             self.resampled_grid_size = grid_size
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            pass
+        elif init_weights == "xavier_uniform":
+            self.proj_concat.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            self.proj_concat.apply(seq_weight_init(nn.init.trunc_normal_))
+        else:
+            raise NotImplementedError
+
+        if hasattr(self, "pos_embed"):
+            self.pos_embed.reset_parameters()
+        self.swin_att.reset_parameters(init_weights)
+        if self.upsample is not None:
+            self.upsample.reset_parameters(init_weights)
 
     def forward(
         self, x: torch.Tensor, s: Optional[torch.Tensor] = None, **kwargs
@@ -306,6 +337,8 @@ class SwinUnet(nn.Module):
         conditioning: Optional[nn.Module] = None,
         act_fn: nn.Module = nn.GELU,
         expand_act_fn: nn.Module = nn.LeakyReLU,
+        init_weights: str = "xavier_uniform",
+        patching_init_weights: str = "xavier_uniform",
     ):
         super().__init__()
 
@@ -317,6 +350,8 @@ class SwinUnet(nn.Module):
 
         self.patch_size = patch_size
         self.window_size = window_size
+        self.init_weights = init_weights
+        self.patching_init_weights = patching_init_weights
         self.base_resolution = base_resolution
         padded_base_resolution, _ = pad_to_blocks(base_resolution, patch_size)
 
@@ -469,6 +504,20 @@ class SwinUnet(nn.Module):
             mlp_ratio=patching_hidden_ratio,
             act_fn=expand_act_fn,
         )
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        # patching
+        self.patch_embed.reset_parameters(self.patching_init_weights)
+        self.unpatch.reset_parameters(self.patching_init_weights)
+        # conditioning
+        self.cond_embed.reset_parameters(self.init_weights)
+        # backbone
+        for up_blk, down_blk in zip(self.up_blocks, self.down_blocks):
+            up_blk.reset_parameters(self.init_weights)
+            down_blk.reset_parameters(self.init_weights)
+        self.middle.reset_parameters(self.init_weights)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
 

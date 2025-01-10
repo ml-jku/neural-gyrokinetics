@@ -4,7 +4,7 @@ Swin Transformer: Hierarchical Vision Transformer using Shifted Windows
 <https://arxiv.org/abs/2103.14030>"
 """
 
-from typing import Optional, Type, Sequence, Union, Tuple
+from typing import Type, Sequence, Union, Optional
 
 import numpy as np
 from itertools import product
@@ -18,7 +18,7 @@ from math import ceil
 from models.nd_vit.vit_layers import LayerModes
 from models.nd_vit.drop import DropPath
 from models.nd_vit.patching import unpad, pad_to_blocks
-from models.utils import Film
+from models.utils import Film, seq_weight_init
 
 
 def window_partition(x, window_size):
@@ -172,6 +172,7 @@ class WindowAttention(nn.Module):
         qkv_bias: bool = False,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
+        init_weights: Optional[str] = None,
     ) -> None:
 
         super().__init__()
@@ -180,6 +181,7 @@ class WindowAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.attn_drop = attn_drop
+        self.qkv_bias = qkv_bias
         space = len(window_size)
 
         # relative position bias (RPB) to learn token distances
@@ -232,6 +234,26 @@ class WindowAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            pass
+        elif init_weights == "xavier_uniform":
+            init_weights_fn = nn.init.xavier_uniform_
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            init_weights_fn = nn.init.trunc_normal_
+        else:
+            raise NotImplementedError
+
+        self.cpb_mlp.apply(seq_weight_init(init_weights_fn))
+        init_weights_fn(self.qkv.weight)
+        if self.qkv_bias:
+            nn.init.zeros_(self.qkv.bias)
+        init_weights_fn(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
 
     def forward(self, x, mask):
         """Forward function.
@@ -331,6 +353,7 @@ class SwinTransformerBlock(nn.Module):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
+        init_weights: Optional[str] = None,
     ) -> None:
 
         super().__init__()
@@ -368,6 +391,21 @@ class SwinTransformerBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, dim),
             mlp_drop,
         )
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            pass
+        elif init_weights == "xavier_uniform":
+            self.mlp.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            self.mlp.apply(seq_weight_init(nn.init.trunc_normal_))
+        else:
+            raise NotImplementedError
+
+        self.attn.reset_parameters(init_weights)
 
     def forward_part1(self, x, mask_matrix):
         grid_size = x.shape[1:-1]
@@ -472,6 +510,7 @@ class SwinLayer(nn.Module):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
+        init_weights: Optional[str] = None,
     ) -> None:
 
         super().__init__()
@@ -526,6 +565,13 @@ class SwinLayer(nn.Module):
             self.register_buffer("attn_mask", attn_mask)
         else:
             self.attn_mask = None
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        for blk in self.blocks:
+            blk.reset_parameters(init_weights)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for blk in self.blocks:
