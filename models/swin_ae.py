@@ -1,15 +1,11 @@
 from typing import Sequence, Union, Optional
 
-import numpy as np
 from einops import rearrange
 import torch
 from torch import nn
-from functools import partial
 
-from models.nd_vit.swin_layers import SwinLayer, ModulatedSwinLayer, LayerModes
-from models.nd_vit.positional import PositionalEmbedding
-from models.nd_vit.patching import PatchEmbed, PatchUnmerging, pad_to_blocks, unpad
-from models.swin_unet import SwinUnet, SwinBlockDown, SwinBlockUp
+from models.nd_vit.patching import pad_to_blocks, unpad
+from models.swin_unet import SwinUnet
 
 
 class SwinAE(SwinUnet):
@@ -69,7 +65,6 @@ class SwinAE(SwinUnet):
             patching_init_weights=patching_init_weights,
         )
 
-        from models.nd_vit.vit_layers import ViTLayer
 
         del self.middle
 

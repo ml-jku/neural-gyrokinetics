@@ -1,6 +1,5 @@
 from typing import Sequence, Union, Optional, Type, Tuple
 
-import numpy as np
 from einops import rearrange
 import torch
 from torch import nn

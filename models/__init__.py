@@ -6,7 +6,7 @@ def get_model(cfg, dataset):
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet
-        from models.utils import IntegerConditionEmbed
+        from models.utils import ContinuousConditionEmbed
 
         space = 5
         patch_size = cfg.model.swin.patch_size
@@ -21,7 +21,7 @@ def get_model(cfg, dataset):
 
         cond_fn = None
         if cfg.model.swin.timestep_conditioning:
-            cond_fn = IntegerConditionEmbed(32, 501)
+            cond_fn = ContinuousConditionEmbed(32)
 
         bundle_steps = cfg.model.bundle_seq_length
         if bundle_steps > 1:  # TODO investigate time dimension!
@@ -54,7 +54,7 @@ def get_model(cfg, dataset):
 
     if cfg.model.name == "ae":
         from models.swin_ae import SwinAE
-        from models.utils import IntegerConditionEmbed
+        from models.utils import ContinuousConditionEmbed
 
         space = 5
         patch_size = cfg.model.swin.patch_size
@@ -70,7 +70,7 @@ def get_model(cfg, dataset):
 
         cond_fn = None
         if cfg.model.swin.timestep_conditioning:
-            cond_fn = IntegerConditionEmbed(32, 501)
+            cond_fn = ContinuousConditionEmbed(32)
 
         bundle_steps = cfg.model.bundle_seq_length
         if bundle_steps > 1:  # TODO investigate time dimension!

@@ -130,7 +130,7 @@ def runner(cfg, writer):
                     enabled=cfg.use_amp,
                 ):
                     # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
-                    pred_x = model(x, timestep=torch.ceil(ts))
+                    pred_x = model(x, timestep=ts)
                     if predict_delta:
                         pred_x = x + pred_x
                     loss = relative_norm_mse(pred_x, y)
