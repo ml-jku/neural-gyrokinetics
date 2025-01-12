@@ -173,13 +173,16 @@ def runner(cfg, writer):
                 # Validation loop
                 model.eval()
                 # TODO configurable metric list
-                metrics = None
                 metric_fn_list = {
                     "relative_norm_mse": partial(
                         relative_norm_mse, dim_to_keep=0
                     ),  # to average across all dimensions except timesteps
                     # TODO: add more useful metrics
                 }
+                n_eval_steps = cfg.validation.n_eval_steps
+                metrics = torch.zeros([len(metric_fn_list), n_eval_steps * cfg.model.bundle_seq_length])  # shape [n_metrics, n_timesteps]
+                n_timesteps_count = torch.zeros([n_eval_steps * cfg.model.bundle_seq_length])
+
                 # TODO initialize dictionary with torch tensors initialized to 0 and without grad with 1 dimension of size tsteps
                 # OR initialize tensor of metric with shape [n_metrics, n_timesteps]
                 # metric_dict = defaultdict(lambda: 0.0)
@@ -193,8 +196,6 @@ def runner(cfg, writer):
                         ts = sample.timestep.to(device)
                         file_idx = sample.file_index.to(device)
                         ts_index = sample.timestep_index.to(device)
-
-                        n_eval_steps = cfg.validation.n_eval_steps
 
                         # get the rolled out validation trajectories
                         x_rollout = get_rollout(
@@ -221,10 +222,18 @@ def runner(cfg, writer):
                             metric_fn_list,
                         )
 
-                        if metrics is None:
-                            metrics = metrics_i
+                        if metrics_i.shape[-1] < n_eval_steps * cfg.model.bundle_seq_length:
+                            # reached end of dataset at some point so we need to pad the tensor
+                            diff = n_eval_steps * cfg.model.bundle_seq_length - metrics_i.shape[-1]
+                            metrics_i = torch.cat([metrics_i, torch.zeros([metrics_i.shape[0], diff], dtype=metrics_i.dtype)], dim=-1)
+                            metrics += metrics_i
+                            validated_steps = torch.arange(1, n_eval_steps * cfg.model.bundle_seq_length + 1) <= metrics_i.shape[-1]
+                            validated_steps = validated_steps.to(dtype=metrics_i.dtype)
                         else:
                             metrics += metrics_i
+                            validated_steps = torch.ones([n_eval_steps * cfg.model.bundle_seq_length])
+                        n_timesteps_count += validated_steps  # shape: [n_eval_steps]
+
 
                         if idx in [0, 5]:
                             phase = "Linear Phase" if idx == 0 else "Saturated Phase"
@@ -241,7 +250,7 @@ def runner(cfg, writer):
                                 x2=y_first,
                             )
 
-                metrics = metrics / len(valloader)
+                metrics = metrics / n_timesteps_count.unsqueeze(0)
 
                 for idx, metric_name in enumerate(metric_fn_list):
                     vals = metrics[idx, ...]

@@ -59,7 +59,7 @@ def get_pushforward_trick(
         unroll_steps = min(
             [
                 min(
-                    dataset.num_ts(f_idx) - int(ts_idx[i]) - bundle_steps + 1,
+                    (dataset.num_ts(f_idx) - int(ts_idx[i])) // bundle_steps - 1,
                     unroll_steps,
                 )
                 for i, f_idx in enumerate(file_idx.tolist())
@@ -67,6 +67,7 @@ def get_pushforward_trick(
         )
 
         if unroll_steps < 2:
+            # print(f"ts_idx = {ts_idx}, file_idx = {file_idx}")
             return x, ts, y
 
         # get timesteps for unrolling
@@ -75,17 +76,13 @@ def get_pushforward_trick(
                 i
                 for i in range(
                     int(ts_idx_start),
-                    int(ts_idx_start) + (unroll_steps - 1) * bundle_steps,
+                    int(ts_idx_start) + unroll_steps * bundle_steps,
+                    bundle_steps
                 )
             ]
             for ts_idx_start in ts_idx.tolist()
         ]
         tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
-        # ts_idxs = [
-        #     [i for i in range(int(ts_idx_start), int(ts_idx_start) + n_steps*bundle_steps, bundle_steps)]
-        #     for ts_idx_start in ts_index_0.tolist()
-        # ]
-        # tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
 
         # get unrolled target in a non-blocking way
         def fetch_target(dataset, file_idx, ts_unrolled):

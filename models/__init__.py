@@ -29,7 +29,7 @@ def get_model(cfg, dataset):
             # extend patching for time dimension
             patch_size = [1] + patch_size
             window_size = [bundle_steps] + window_size
-            base_resolution = (bundle_steps,) + base_resolution
+            base_resolution = (bundle_steps,) + tuple(base_resolution)
 
         model = SwinUnet(
             space=space,
