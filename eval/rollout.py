@@ -53,7 +53,7 @@ def get_rollout(
         with torch.no_grad():
             # move bundles forward, rollout in blocks
             for i in range(0, n_steps):
-                x_p = model(xt, timestep=tsteps[:, i]).to(xt.device)
+                x_p = model(xt, timestep=tsteps[:, i].to(xt.device))
                 if predict_delta:
                     x_p = xt + x_p
                 # update model input
