@@ -12,6 +12,7 @@ def get_rollout(
     bundle_steps: int,
     dataset: Dataset,
     predict_delta: bool = False,
+    use_amp: bool = False,
 ) -> Callable:
     # correct step size by adding last bundle
     # n_steps_ = n_steps + bundle_steps - 1
@@ -61,14 +62,16 @@ def get_rollout(
             for ts_idx_start in ts_index_0.tolist()
         ]
         tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
+        use_bf16 = use_amp and torch.cuda.is_bf16_supported()
         with torch.no_grad():
             # move bundles forward, rollout in blocks
             for i in range(0, rollout_steps):
-                x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
-                if predict_delta:
-                    x_p = xt + x_p
-                # update model input
-                xt = x_p.clone()
+                with torch.autocast('cuda', dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=use_amp):
+                    x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
+                    if predict_delta:
+                        x_p = xt + x_p
+                    # update model input
+                    xt = x_p.clone().float()
                 # concatenate rollout
                 x_rollout[:, :, i * bundle_steps : (i + 1) * bundle_steps, ...] = (
                     x_p.cpu().unsqueeze(2) if x_p.ndim == 7 else x_p.cpu()

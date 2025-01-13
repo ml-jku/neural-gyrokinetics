@@ -9,10 +9,11 @@ from tqdm import tqdm
 from time import perf_counter_ns
 from collections import defaultdict
 from transformers.optimization import get_scheduler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group, is_initialized
 
 from dataset import get_data, CycloneSample
 from models import get_model
-
 from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
 from eval import (
     get_rollout,
@@ -21,19 +22,33 @@ from eval import (
     plot4x4_sided,
     to_fourier,
 )
-from utils import load_model_and_config, save_model_and_config
+from utils import load_model_and_config, save_model_and_config, setup_logging
 
+def ddp_setup(rank, world_size):
+    init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
-def runner(cfg, writer):
-    (trainset, valset), (trainloader, valloader), augmentations = get_data(cfg)
+def runner(rank, cfg, world_size):
+    device = torch.device(f'cuda:{rank}') if torch.cuda.is_available() else 'cpu'
+    if cfg.use_ddp and world_size > 1:
+        ddp_setup(rank, world_size)
+        use_ddp = True
+    else:
+        use_ddp = False
+
+    if not rank:
+        data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
+        cfg.logging.run_name = f"{cfg.model.name}_{data_and_time}"
+        writer = setup_logging(cfg)
+    else:
+        writer = None
 
     # TODO currently only support one resolution for all cyclones
+    (trainset, valset), (trainloader, valloader), augmentations = get_data(cfg)
+
     model = get_model(cfg, dataset=trainset)
-
-    data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
-    cfg.logging.run_name = f"{cfg.model.name}_{data_and_time}"
-
-    device = cfg.device
+    model = model.to(device)
+    if use_ddp:
+        model = DDP(model, device_ids=[rank])
     active_keys = cfg.dataset.active_keys
 
     opt_state_dict = None
@@ -42,8 +57,6 @@ def runner(cfg, writer):
         model, opt_state_dict, _ = load_model_and_config(
             cfg.ckpt_path, model=model, device=device
         )
-
-    model = model.to(device)
 
     if cfg.mode == "train":
         n_epochs = cfg.training.n_epochs
@@ -56,7 +69,7 @@ def runner(cfg, writer):
             weight_decay=cfg.training.weight_decay,
         )
 
-        scaler = torch.amp.GradScaler(device=cfg.device, enabled=cfg.use_amp)
+        scaler = torch.amp.GradScaler(device=device, enabled=cfg.use_amp)
         use_bf16 = cfg.use_amp and torch.cuda.is_bf16_supported()
         if cfg.training.scheduler is not None:
             scheduler = get_scheduler(
@@ -78,25 +91,28 @@ def runner(cfg, writer):
             pushforward_fn = get_pushforward_trick(
                 pf_cfg.unrolls,
                 pf_cfg.probs,
-                schecule=pf_cfg.epochs,
+                schedule=pf_cfg.epochs,
                 predict_delta=predict_delta,
                 dataset=trainset,
                 bundle_steps=cfg.model.bundle_seq_length,
+                use_amp=cfg.use_amp
             )
 
         loss_val_min = torch.inf
 
         if cfg.training.pretraining:
-            model = pretrain_autoencoder(model, cfg, trainloader, valloader, writer)
+            model = pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device)
+            if not hasattr(model, "module") and use_ddp:
+                model = DDP(model, device_ids=[rank])
 
-        use_tqdm = cfg.logging.tqdm
+        use_tqdm = cfg.logging.tqdm if not use_ddp else False
         for epoch in range(1, n_epochs + 1):
             train_mse = 0
             model.train()
             info_dict = defaultdict(list)
             t_start_data = perf_counter_ns()
 
-            if use_tqdm:
+            if use_tqdm or (use_ddp and not rank):
                 trainloader = tqdm(trainloader, "Training")
             for sample in trainloader:
                 reset_peak_memory_stats(device)
@@ -119,16 +135,14 @@ def runner(cfg, writer):
                     file_idx = sample.file_index.to(device)
                     ts_index = sample.timestep_index.to(device)
                     x, ts, y = pushforward_fn(
-                        model, x, ts, ts_index, y, file_idx, epoch
+                        model, x, ts, ts_index, y, file_idx, epoch, device
                     )
                     info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
+                else:
+                    info_dict["pf_ms"].append(0.)
 
                 t_start_fwd = perf_counter_ns()
-                with torch.autocast(
-                    cfg.device,
-                    dtype=torch.float16 if not use_bf16 else torch.bfloat16,
-                    enabled=cfg.use_amp,
-                ):
+                with torch.autocast(cfg.device, dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=cfg.use_amp):
                     # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
                     pred_x = model(x, timestep=torch.ceil(ts))
                     if predict_delta:
@@ -169,7 +183,7 @@ def runner(cfg, writer):
             # Validation loop
             log_metric_dict = {}
             val_plots = {}
-            if (epoch % cfg.validation.validate_every_n_epochs) == 0 or epoch == 1:
+            if ((epoch % cfg.validation.validate_every_n_epochs) == 0 or epoch == 1) and not rank:
                 # Validation loop
                 model.eval()
                 # TODO configurable metric list
@@ -186,7 +200,7 @@ def runner(cfg, writer):
                 # TODO initialize dictionary with torch tensors initialized to 0 and without grad with 1 dimension of size tsteps
                 # OR initialize tensor of metric with shape [n_metrics, n_timesteps]
                 # metric_dict = defaultdict(lambda: 0.0)
-                if use_tqdm:
+                if use_tqdm and not rank:
                     valloader = tqdm(valloader, "Validation")
                 with torch.no_grad():
                     for idx, sample in enumerate(valloader):
@@ -257,7 +271,7 @@ def runner(cfg, writer):
                     for t in range(n_eval_steps * cfg.model.bundle_seq_length):
                         log_metric_dict["val/" + metric_name + f"x{t+1}"] = vals[t]
 
-                if cfg.ckpt_path is not None:
+                if cfg.ckpt_path is not None and not rank:
                     # Save model if validation loss improves
                     loss_val_min = save_model_and_config(
                         model,
@@ -275,7 +289,7 @@ def runner(cfg, writer):
 
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
-            if writer:
+            if writer and not rank:
                 wandb_logs = epoch_logs | info_dict
                 # log epoch details
                 if not val_plots:
@@ -301,3 +315,7 @@ def runner(cfg, writer):
 
     if cfg.mode == "rollout":
         raise NotImplementedError("TODO")
+
+    if is_initialized():
+        destroy_process_group()
+

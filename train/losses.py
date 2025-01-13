@@ -6,6 +6,7 @@ import numpy as np
 from tqdm import tqdm
 from transformers.optimization import get_scheduler
 from torch.nn.utils import clip_grad_norm_
+from torch.distributed import get_rank, get_world_size, is_initialized
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -35,10 +36,11 @@ def relative_norm_mse(x, y, dim_to_keep=None):
 def get_pushforward_trick(
     unrolls: List[int],
     probs: List[float],
-    schecule: List[float],
+    schedule: List[float],
     predict_delta: bool,
     dataset: CycloneDataset,
     bundle_steps: int,
+    use_amp: bool = False,
 ) -> Callable:
     def _loss_fn(
         model: nn.Module,
@@ -48,9 +50,10 @@ def get_pushforward_trick(
         y: torch.Tensor,
         file_idx: torch.Tensor,
         epoch: int,
+        device: str
     ) -> List[float]:
         # pushforward scheduler with epoch
-        idx = (epoch > np.array(schecule)).sum()
+        idx = (epoch > np.array(schedule)).sum()
         # sample number of steps
         curr_probs = [p / sum(probs[:idx]) for p in probs[:idx]]
         unroll_steps = np.random.choice(unrolls[:idx], p=curr_probs)
@@ -67,7 +70,6 @@ def get_pushforward_trick(
         )
 
         if unroll_steps < 2:
-            # print(f"ts_idx = {ts_idx}, file_idx = {file_idx}")
             return x, ts, y
 
         # get timesteps for unrolling
@@ -89,7 +91,7 @@ def get_pushforward_trick(
             return dataset.get_at_time(file_idx.cpu(), ts_unrolled.cpu())
 
         executor = ThreadPoolExecutor(max_workers=1)
-
+        use_bf16 = use_amp and torch.cuda.is_bf16_supported()
         with torch.no_grad():
             ts_unrolled = ts_idx + (unroll_steps - 1) * bundle_steps
             future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
@@ -97,10 +99,11 @@ def get_pushforward_trick(
             xt = x
             for i in range(unroll_steps - 1):
                 # TODO: currenlty only integer conditioning. Remove that line if floats are possible
-                x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
-                if predict_delta:
-                    x_p = xt + x_p
-                xt = x_p.clone()
+                with torch.autocast("cuda", dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=use_amp):
+                    x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
+                    if predict_delta:
+                        x_p = xt + x_p
+                    xt = x_p.clone().float()
             # Get the result when needed
             unrolled = future.result()
 
@@ -114,7 +117,7 @@ def get_pushforward_trick(
     return _loss_fn
 
 
-def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
+def pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device):
 
     if cfg.training.pretraining_kwargs.target_modules == "all":
         target_modules = model.parameters()
@@ -125,8 +128,11 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
                 if t in n:
                     target_modules.append(p)
 
-    scaler = torch.amp.GradScaler(device=cfg.device, enabled=cfg.use_amp)
+    scaler = torch.amp.GradScaler(device=device, enabled=cfg.use_amp)
     use_bf16 = cfg.use_amp and torch.cuda.is_bf16_supported()
+    use_ddp = is_initialized()
+    if use_ddp:
+        rank = get_rank()
     n_epochs = cfg.training.pretraining_kwargs.n_epochs
 
     opt = torch.optim.Adam(
@@ -135,6 +141,8 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
         weight_decay=cfg.training.pretraining_kwargs.weight_decay,
     )
 
+
+    is_main_proc = not rank if use_ddp else True
     if cfg.training.pretraining_kwargs.scheduler is not None:
         total_steps = n_epochs * len(trainloader)
         scheduler = get_scheduler(
@@ -144,22 +152,31 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
             num_training_steps=total_steps,
         )
 
+    use_tqdm = cfg.logging.tqdm if not use_ddp else False
     for epoch in range(1, cfg.training.pretraining_kwargs.n_epochs + 1):
         train_mse = 0
-        if cfg.logging.tqdm:
+        if use_tqdm or (use_ddp and not rank):
             trainloader = tqdm(trainloader, "AE pretraining")
         for sample in trainloader:
-            x = sample.x.to(cfg.device)
+            x = sample.x.to(device)
+            ts = sample.timestep.to(device)
 
-            with torch.autocast(
-                cfg.device,
-                dtype=torch.float16 if not use_bf16 else torch.bfloat16,
-                enabled=cfg.use_amp,
-            ):
-                z, pad_ax = model.patch_encode(x)
-                # TODO
-                z = z + torch.normal(0, 1e-3, size=(z.shape), device=z.device)
-                pred_x = model.patch_decode(z, pad_ax)
+            with torch.autocast(cfg.device, dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=cfg.use_amp):
+                if cfg.training.pretraining_kwargs.target_modules == "all":
+                    pred_x = model(x, timestep=torch.ceil(ts))
+                else:
+                    if hasattr(model, "module"):
+                        z, pad_ax = model.module.patch_encode(x)
+                    else:
+                        z, pad_ax = model.patch_encode(x)
+
+                    if cfg.training.pretraining_kwargs.add_noise:
+                        z = z + torch.normal(0, 1e-3, size=(z.shape), device=z.device)
+
+                    if hasattr(model, "module"):
+                        pred_x = model.module.patch_decode(z, pad_ax)
+                    else:
+                        pred_x = model.patch_decode(z, pad_ax)
                 if cfg.training.predict_delta:
                     pred_x = x + pred_x
                 loss = relative_norm_mse(pred_x, x)
@@ -179,24 +196,26 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
         train_mse = train_mse / len(trainloader)
 
         val_log = ""
-        if (epoch % 10) == 0 or epoch == 1:
+        if ((epoch % 10) == 0 or epoch == 1) and is_main_proc:
             val_mse = 0
             if cfg.logging.tqdm:
                 valloader = tqdm(valloader, "AE evaluation")
             for sample in valloader:
-                x = sample.x.to(cfg.device)
-                pred_x = model.patch_decode(*model.patch_encode(x))
+                x = sample.x.to(device)
+                if hasattr(model, "module"):
+                    pred_x = model.module.patch_decode(*model.module.patch_encode(x))
+                else:
+                    pred_x = model.patch_decode(*model.patch_encode(x))
                 if cfg.training.predict_delta:
                     pred_x = x + pred_x
                 loss = relative_norm_mse(pred_x, x)
                 val_mse += loss.item()
             val_mse = val_mse / len(valloader)
             val_log = f", val/relative_norm_mse: {val_mse:.4f}"
-            writer.log(
-                {
+            if is_main_proc:
+                writer.log({
                     "pretrain/val_relative_norm_mse": val_mse,
-                }
-            )
+                })
 
         epoch_str = str(epoch).zfill(
             len(str(int(cfg.training.pretraining_kwargs.n_epochs)))
@@ -204,20 +223,17 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer):
         print(
             f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
         )
-        writer.log(
-            {
+        if is_main_proc:
+            writer.log({
                 "pretrain/train_relative_norm_mse": train_mse,
-                "pretrain/train_lr": (
-                    scheduler.get_last_lr()[0]
-                    if cfg.training.pretraining_kwargs.scheduler is not None
-                    else cfg.training.pretraining_kwargs.lr
-                ),
-            }
-        )
+                "pretrain/train_lr": scheduler.get_last_lr()[0] if cfg.training.pretraining_kwargs.scheduler is not None else cfg.training.pretraining_kwargs.lr,
+            })
 
     if cfg.training.pretraining_kwargs.freeze_after:
         # freeze patching
         print("Freezing AE weights...")
+        if hasattr(model, "module"):
+            model = model.module
         model.patch_embed.requires_grad_(False)
         model.unpatch.requires_grad_(False)
 

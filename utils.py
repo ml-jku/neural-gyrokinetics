@@ -4,6 +4,7 @@ import zipfile
 import os
 import random
 import importlib
+import socket
 
 import torch
 from torch import nn
@@ -160,3 +161,8 @@ def set_seed(seed):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
+
+def find_free_port():
+    with socket.socket() as s:
+        s.bind(('', 0))            # Bind to a free port provided by the host.
+        return s.getsockname()[1]  # Return the port number assigned.

@@ -2,6 +2,7 @@ from torch.utils.data.dataloader import DataLoader
 
 from dataset.augment import noise_transform
 from dataset.cyclone import CycloneDataset, CycloneSample
+from torch.utils.data.distributed import DistributedSampler
 
 
 def get_data(cfg):
@@ -46,24 +47,19 @@ def get_data(cfg):
             trajectories=cfg.dataset.validation_trajectories,
         )
 
-        # testset = CycloneDataset(
-        #     path=cfg.dataset.path,
-        #     split="test",
-        #     random_seed=cfg.seed,
-        # )
-
         print(f"Train: {len(trainset)} samples")
         print(f"Val: {len(valset)} samples")
-        # print(f"Test: {len(testset)} samples")
 
         trainloader = DataLoader(
             trainset,
             cfg.training.batch_size,
             num_workers=cfg.training.num_workers,
-            shuffle=True,
+            shuffle=True if not cfg.use_ddp else False,
             collate_fn=trainset.collate,
             pin_memory=cfg.training.pin_memory,
+            sampler=DistributedSampler(trainset) if cfg.use_ddp else None,
         )
+
         valloader = DataLoader(
             valset,
             cfg.validation.batch_size,
@@ -74,6 +70,7 @@ def get_data(cfg):
         )
 
     return (trainset, valset), (trainloader, valloader), augmentations
+
 
 
 __all__ = ["get_data", "CycloneDataset", "CycloneSample"]
