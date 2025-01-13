@@ -1,6 +1,5 @@
 from typing import Sequence, Union, Optional, Type, Tuple
 
-import numpy as np
 from einops import rearrange
 import torch
 from torch import nn
@@ -95,8 +94,8 @@ class SwinBlockDown(nn.Module):
             norm_layer=norm_layer,
             c_multiplier=c_multiplier,
         )
-        # TODO move one level up
         self.resampled_grid_size = self.downsample.target_grid_size
+        self.out_dim = self.downsample.out_dim
 
         if init_weights:
             self.reset_parameters(init_weights)
@@ -172,7 +171,6 @@ class SwinBlockUp(nn.Module):
         c_multiplier: int = 2,
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
-        patching_hidden_ratio: float = 8.0,
         conv_upsample: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         swin_attention_layer: Type = SwinLayer,
@@ -192,7 +190,6 @@ class SwinBlockUp(nn.Module):
 
         # NOTE: project down concat dimension first to save params
         self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
-        # TODO move upsample here?
         self.swin_att = swin_attention_layer(
             space,
             dim,
@@ -215,8 +212,7 @@ class SwinBlockUp(nn.Module):
                 c_multiplier=c_multiplier,
                 expand_by=2,
                 target_grid_size=target_grid_size,
-                mlp_ratio=patching_hidden_ratio,
-                act_fn=act_fn,
+                mlp_depth=1,  # inner unmerges as linear layers
                 use_conv=conv_upsample,
             )
             self.resampled_grid_size = self.upsample.target_grid_size
@@ -228,14 +224,15 @@ class SwinBlockUp(nn.Module):
             self.reset_parameters(init_weights)
 
     def reset_parameters(self, init_weights):
-        if init_weights == "torch" or init_weights is None:
-            pass
-        elif init_weights == "xavier_uniform":
-            self.proj_concat.apply(seq_weight_init(nn.init.xavier_uniform_))
-        elif init_weights in ["truncnormal", "truncnormal002"]:
-            self.proj_concat.apply(seq_weight_init(nn.init.trunc_normal_))
-        else:
-            raise NotImplementedError
+        if hasattr(self, "proj_concat"):
+            if init_weights == "torch" or init_weights is None:
+                pass
+            elif init_weights == "xavier_uniform":
+                self.proj_concat.apply(seq_weight_init(nn.init.xavier_uniform_))
+            elif init_weights in ["truncnormal", "truncnormal002"]:
+                self.proj_concat.apply(seq_weight_init(nn.init.trunc_normal_))
+            else:
+                raise NotImplementedError
 
         if hasattr(self, "pos_embed"):
             self.pos_embed.reset_parameters()
@@ -329,7 +326,7 @@ class SwinUnet(nn.Module):
         c_multiplier: int = 2,
         conv_patch: bool = False,
         drop_path: float = 0.1,
-        middle_depth: int = 4,
+        middle_depth: int = 2,
         middle_num_heads: int = 8,
         hidden_mlp_ratio: float = 2.0,
         use_checkpoint: bool = False,
@@ -383,14 +380,9 @@ class SwinUnet(nn.Module):
         )
 
         # down path
-        acc_multi = [1] + list(np.cumprod([c_multiplier] * num_layers))
-        # pre-downsample dims
-        down_dims = [int(dim * m) for m in acc_multi]
-
-        assert all([(d % h) == 0 for d, h in zip(down_dims, num_heads)])
-
         grid_sizes = [self.patch_embed.grid_size]
         down_blocks = []
+        down_dims = [dim]
         for i in range(num_layers):
             block = SwinBlockDown(
                 space,
@@ -404,10 +396,12 @@ class SwinUnet(nn.Module):
                 learnable_pos_embed=False,
                 use_checkpoint=use_checkpoint,
                 hidden_mlp_ratio=hidden_mlp_ratio,
+                c_multiplier=c_multiplier,
                 act_fn=act_fn,
                 swin_attention_layer=SwinAttentionLayer,
             )
             down_blocks.append(block)
+            down_dims.append(block.out_dim)
             grid_sizes.append(block.resampled_grid_size)
 
         self.down_blocks = nn.ModuleList(down_blocks)
@@ -436,9 +430,9 @@ class SwinUnet(nn.Module):
             dim=down_dims[-1],
             grid_size=grid_sizes[-1],
             target_grid_size=grid_sizes[-2],
-            mlp_ratio=patching_hidden_ratio,
-            act_fn=act_fn,
+            c_multiplier=c_multiplier,
             use_conv=conv_patch,
+            mlp_depth=1,  # inner unmerges as linear layers
         )
 
         # up path
@@ -464,8 +458,8 @@ class SwinUnet(nn.Module):
                     abs_pe=abs_pe,
                     drop_path=drop_path,
                     hidden_mlp_ratio=hidden_mlp_ratio,
+                    c_multiplier=c_multiplier,
                     use_checkpoint=use_checkpoint,
-                    patching_hidden_ratio=patching_hidden_ratio,
                     act_fn=act_fn,
                     swin_attention_layer=SwinAttentionLayer,
                     conv_upsample=conv_patch,
@@ -512,7 +506,8 @@ class SwinUnet(nn.Module):
         self.patch_embed.reset_parameters(self.patching_init_weights)
         self.unpatch.reset_parameters(self.patching_init_weights)
         # conditioning
-        self.cond_embed.reset_parameters(self.init_weights)
+        if hasattr(self, "cond_embed") and self.cond_embed is not None:
+            self.cond_embed.reset_parameters(self.init_weights)
         # backbone
         for up_blk, down_blk in zip(self.up_blocks, self.down_blocks):
             up_blk.reset_parameters(self.init_weights)
@@ -520,7 +515,6 @@ class SwinUnet(nn.Module):
         self.middle.reset_parameters(self.init_weights)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-
         cond = kwargs.get("timestep")
         if cond is not None and self.cond_embed is not None:
             # embed conditioning is e.g. sincos
@@ -528,16 +522,11 @@ class SwinUnet(nn.Module):
         else:
             cond = {}
 
-        # pad to patch blocks
-        x = rearrange(x, "b c ... -> b ... c")
-        x, pad_axes = pad_to_blocks(x, self.patch_size)
-
-        # linear flat patch embedding
-        x = self.patch_embed(x)
+        # compress to patch space
+        x, pad_axes = self.patch_encode(x)
 
         # down path
         feature_maps = []
-
         for blk in self.down_blocks:
             x, x_pre = blk(x, **cond)
             feature_maps.append(x_pre)
@@ -546,28 +535,20 @@ class SwinUnet(nn.Module):
         if hasattr(self, "middle_pe"):
             x = self.middle_pe(x)
         x = self.middle(x, **cond)
-
         x = self.middle_upscale(x)
 
-        # down path
+        # up path
         feature_maps = feature_maps[::-1]
         for i, blk in enumerate(self.up_blocks):
             x = blk(x, s=feature_maps[i], **cond)
 
-        # expand patches to original size
-        x = self.unpatch(x)
-
-        # unpad output
-        x = unpad(x, pad_axes, self.base_resolution)
-        # return as image
-        x = rearrange(x, "b ... c -> b c ...")
-        return x
+        # expand to original
+        return self.patch_decode(x, pad_axes)
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         # pad to patch blocks
         x = rearrange(x, "b c ... -> b ... c")
         x, pad_axes = pad_to_blocks(x, self.patch_size)
-
         # linear flat patch embedding
         x = self.patch_embed(x)
         return x, pad_axes
@@ -575,10 +556,8 @@ class SwinUnet(nn.Module):
     def patch_decode(self, z: torch.Tensor, pad_axes: torch.Tensor) -> torch.Tensor:
         # expand patches to original size
         x = self.unpatch(z)
-
         # unpad output
         x = unpad(x, pad_axes, self.base_resolution)
         # return as image
         x = rearrange(x, "b ... c -> b c ...")
-
         return x

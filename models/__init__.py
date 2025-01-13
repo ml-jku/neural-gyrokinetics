@@ -6,7 +6,7 @@ def get_model(cfg, dataset):
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet
-        from models.utils import IntegerConditionEmbed
+        from models.utils import ContinuousConditionEmbed
 
         space = 5
         patch_size = cfg.model.swin.patch_size
@@ -17,10 +17,11 @@ def get_model(cfg, dataset):
         num_layers = cfg.model.num_layers
         gradient_checkpoint = cfg.model.swin.gradient_checkpoint
         patching_hidden_ratio = cfg.model.swin.patching_hidden_ratio
+        c_multiplier = cfg.model.swin.c_multiplier
 
         cond_fn = None
         if cfg.model.swin.timestep_conditioning:
-            cond_fn = IntegerConditionEmbed(32, 501)
+            cond_fn = ContinuousConditionEmbed(32)
 
         bundle_steps = cfg.model.bundle_seq_length
         if bundle_steps > 1:  # TODO investigate time dimension!
@@ -43,12 +44,77 @@ def get_model(cfg, dataset):
             num_layers=num_layers,
             use_checkpoint=gradient_checkpoint,
             drop_path=0.1,
-            abs_pe=True,
+            abs_pe=False,
+            conv_patch=False,
+            hidden_mlp_ratio=2.0,
+            c_multiplier=c_multiplier,
+            patching_hidden_ratio=patching_hidden_ratio,
+            conditioning=cond_fn,
+        )
+
+    if cfg.model.name == "ae":
+        from models.swin_ae import SwinAE
+        from models.utils import ContinuousConditionEmbed
+
+        space = 5
+        patch_size = cfg.model.swin.patch_size
+        window_size = cfg.model.swin.window_size
+        # TODO currently only support one resolution for all cyclones
+        # TODO should move away from needing a fixed grid size
+        base_resolution = dataset.resolution
+        num_heads = cfg.model.swin.num_heads
+        depth = cfg.model.swin.depth
+        num_layers = cfg.model.num_layers
+        gradient_checkpoint = cfg.model.swin.gradient_checkpoint
+        patching_hidden_ratio = cfg.model.swin.patching_hidden_ratio
+
+        cond_fn = None
+        if cfg.model.swin.timestep_conditioning:
+            cond_fn = ContinuousConditionEmbed(32)
+
+        bundle_steps = cfg.model.bundle_seq_length
+        if bundle_steps > 1:  # TODO investigate time dimension!
+            space = space + 1
+            # extend patching for time dimension
+            patch_size = [1] + patch_size
+            window_size = [bundle_steps] + window_size
+            base_resolution = (bundle_steps,) + base_resolution
+
+        model = SwinAE(
+            space=space,
+            dim=latent_dim,
+            base_resolution=base_resolution,  # TODO
+            patch_size=patch_size,
+            window_size=window_size,
+            depth=depth,
+            num_heads=num_heads,
+            in_channels=problem_dim,
+            out_channels=problem_dim,
+            num_layers=num_layers,
+            use_checkpoint=gradient_checkpoint,
+            drop_path=0.1,
+            abs_pe=False,
             conv_patch=False,
             hidden_mlp_ratio=6.0,
             patching_hidden_ratio=patching_hidden_ratio,
-            middle_depth=8,
             conditioning=cond_fn,
+        )
+
+    if cfg.model.name == "perc":
+        from models.perceiver import CompressionPerc
+
+        base_resolution = dataset.resolution
+
+        model = CompressionPerc(
+            space=5,
+            in_channels=2,
+            out_channels=2,
+            dim=latent_dim,
+            patch_size=cfg.model.swin.patch_size,
+            base_resolution=base_resolution,
+            num_latent_tokens=420,
+            encoder_depth=2,
+            approximator_depth=8,
         )
 
     try:
@@ -57,5 +123,15 @@ def get_model(cfg, dataset):
         raise ValueError(f"Unknown model name: {cfg.model.name}")
 
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
+
+    if cfg.logging.model_summary:
+        import torchsummary
+
+        try:
+            torchsummary.summary(
+                model, input_size=[(problem_dim, *base_resolution)], device="cpu"
+            )
+        except Exception as e:
+            print("Could not print model summary, exception occurred:", e)
 
     return model

@@ -67,7 +67,7 @@ def get_rollout(
             # move bundles forward, rollout in blocks
             for i in range(0, rollout_steps):
                 with torch.autocast('cuda', dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=use_amp):
-                    x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
+                    x_p = model(xt, timestep=tsteps[:, i].to(xt.device))
                     if predict_delta:
                         x_p = xt + x_p
                     # update model input

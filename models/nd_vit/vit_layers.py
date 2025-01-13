@@ -8,7 +8,7 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 
 from models.nd_vit.drop import DropPath
-from models.utils import Film
+from models.utils import Film, MLP
 
 
 class LayerModes(Enum):
@@ -118,14 +118,7 @@ class VisionTransformerBlock(nn.Module):
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
 
-        mlp_drop = nn.Dropout(drop)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, mlp_hidden_dim),
-            mlp_drop,
-            act_fn(),
-            nn.Linear(mlp_hidden_dim, dim),
-            mlp_drop,
-        )
+        self.mlp = MLP([dim, mlp_hidden_dim, dim], act_fn=act_fn, dropout_prob=drop)
 
     def forward_part1(self, x):
         x = self.norm1(x)

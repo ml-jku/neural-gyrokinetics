@@ -144,7 +144,7 @@ def runner(rank, cfg, world_size):
                 t_start_fwd = perf_counter_ns()
                 with torch.autocast(cfg.device, dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=cfg.use_amp):
                     # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
-                    pred_x = model(x, timestep=torch.ceil(ts))
+                    pred_x = model(x, timestep=ts)
                     if predict_delta:
                         pred_x = x + pred_x
                     loss = relative_norm_mse(pred_x, y)

@@ -100,7 +100,7 @@ def get_pushforward_trick(
             for i in range(unroll_steps - 1):
                 # TODO: currenlty only integer conditioning. Remove that line if floats are possible
                 with torch.autocast("cuda", dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=use_amp):
-                    x_p = model(xt, timestep=torch.ceil(tsteps[:, i]).to(xt.device))
+                    x_p = model(xt, timestep=tsteps[:, i].to(xt.device))
                     if predict_delta:
                         x_p = xt + x_p
                     xt = x_p.clone().float()
@@ -212,7 +212,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device):
                 val_mse += loss.item()
             val_mse = val_mse / len(valloader)
             val_log = f", val/relative_norm_mse: {val_mse:.4f}"
-            if is_main_proc:
+            if is_main_proc and writer:
                 writer.log({
                     "pretrain/val_relative_norm_mse": val_mse,
                 })
@@ -223,10 +223,14 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device):
         print(
             f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
         )
-        if is_main_proc:
+        if is_main_proc and writer:
             writer.log({
                 "pretrain/train_relative_norm_mse": train_mse,
-                "pretrain/train_lr": scheduler.get_last_lr()[0] if cfg.training.pretraining_kwargs.scheduler is not None else cfg.training.pretraining_kwargs.lr,
+                "pretrain/train_lr": (
+                    scheduler.get_last_lr()[0]
+                    if cfg.training.pretraining_kwargs.scheduler is not None
+                    else cfg.training.pretraining_kwargs.lr
+                ),
             })
 
     if cfg.training.pretraining_kwargs.freeze_after:
