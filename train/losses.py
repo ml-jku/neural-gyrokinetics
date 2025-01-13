@@ -97,7 +97,7 @@ def get_pushforward_trick(
             xt = x
             for i in range(unroll_steps - 1):
                 # TODO: currenlty only integer conditioning. Remove that line if floats are possible
-                x_p = model(xt, timestep=tsteps[:, i]).to(xt.device)
+                x_p = model(xt, timestep=tsteps[:, i].to(xt.device))
                 if predict_delta:
                     x_p = xt + x_p
                 xt = x_p.clone()
