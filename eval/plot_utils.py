@@ -156,7 +156,7 @@ def to_fourier(x_rollout, y):
     x_rollout = rearrange(x_rollout, "t b c ... -> c t b ...")
     x_rollout = torch.complex(real=x_rollout[0], imag=x_rollout[1])
     x_rollout = torch.fft.fftn(x_rollout, dim=(-2, -1))
-    x_rollout = torch.stack([x_rollout.real, x_rollout.imag]).squeeze()
+    x_rollout = torch.stack([x_rollout.real, x_rollout.imag])
     x_rollout = rearrange(x_rollout, "c t b ... -> t b c ...")
 
     if y.ndim == 8:
@@ -174,3 +174,17 @@ def to_fourier(x_rollout, y):
         y = rearrange(y, "c b ... -> b c ...")
 
     return x_rollout, y
+
+
+def generate_val_plots(x_rollout, y, ts, phase, val_plots):
+    val_plots_dict = {
+        f"pred (T={ts[0].item():.2f}, {phase})": plot4x4_sided,
+        f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
+    }
+    for name, plot_fn in val_plots_dict.items():
+        # first timestep and batch
+        y_first = (y[0] if y.ndim == 7 else y[0, 0]).to("cpu")
+        val_plots[name] = plot_fn(
+            x_rollout[0, 0],
+            x2=y_first,
+        )

@@ -50,7 +50,6 @@ def get_pushforward_trick(
         y: torch.Tensor,
         file_idx: torch.Tensor,
         epoch: int,
-        device: str
     ) -> List[float]:
         # pushforward scheduler with epoch
         idx = (epoch > np.array(schedule)).sum()
@@ -62,7 +61,7 @@ def get_pushforward_trick(
         unroll_steps = min(
             [
                 min(
-                    (dataset.num_ts(f_idx) - int(ts_idx[i])) // bundle_steps - 1,
+                    (dataset.num_ts(int(f_idx)) - int(ts_idx[i])) // bundle_steps - 1,
                     unroll_steps,
                 )
                 for i, f_idx in enumerate(file_idx.tolist())
@@ -79,7 +78,7 @@ def get_pushforward_trick(
                 for i in range(
                     int(ts_idx_start),
                     int(ts_idx_start) + unroll_steps * bundle_steps,
-                    bundle_steps
+                    bundle_steps,
                 )
             ]
             for ts_idx_start in ts_idx.tolist()
@@ -99,7 +98,11 @@ def get_pushforward_trick(
             xt = x
             for i in range(unroll_steps - 1):
                 # TODO: currenlty only integer conditioning. Remove that line if floats are possible
-                with torch.autocast("cuda", dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=use_amp):
+                with torch.autocast(
+                    "cuda",
+                    dtype=torch.float16 if not use_bf16 else torch.bfloat16,
+                    enabled=use_amp,
+                ):
                     x_p = model(xt, timestep=tsteps[:, i].to(xt.device))
                     if predict_delta:
                         x_p = xt + x_p
@@ -117,8 +120,7 @@ def get_pushforward_trick(
     return _loss_fn
 
 
-def pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device):
-
+def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
     if cfg.training.pretraining_kwargs.target_modules == "all":
         target_modules = model.parameters()
     else:
@@ -141,7 +143,6 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device):
         weight_decay=cfg.training.pretraining_kwargs.weight_decay,
     )
 
-
     is_main_proc = not rank if use_ddp else True
     if cfg.training.pretraining_kwargs.scheduler is not None:
         total_steps = n_epochs * len(trainloader)
@@ -161,7 +162,11 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device):
             x = sample.x.to(device)
             ts = sample.timestep.to(device)
 
-            with torch.autocast(cfg.device, dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=cfg.use_amp):
+            with torch.autocast(
+                cfg.device,
+                dtype=torch.float16 if not use_bf16 else torch.bfloat16,
+                enabled=cfg.use_amp,
+            ):
                 if cfg.training.pretraining_kwargs.target_modules == "all":
                     pred_x = model(x, timestep=torch.ceil(ts))
                 else:
@@ -197,25 +202,31 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device):
 
         val_log = ""
         if ((epoch % 10) == 0 or epoch == 1) and is_main_proc:
-            val_mse = 0
-            if cfg.logging.tqdm:
-                valloader = tqdm(valloader, "AE evaluation")
-            for sample in valloader:
-                x = sample.x.to(device)
-                if hasattr(model, "module"):
-                    pred_x = model.module.patch_decode(*model.module.patch_encode(x))
-                else:
-                    pred_x = model.patch_decode(*model.patch_encode(x))
-                if cfg.training.predict_delta:
-                    pred_x = x + pred_x
-                loss = relative_norm_mse(pred_x, x)
-                val_mse += loss.item()
-            val_mse = val_mse / len(valloader)
-            val_log = f", val/relative_norm_mse: {val_mse:.4f}"
-            if is_main_proc and writer:
-                writer.log({
-                    "pretrain/val_relative_norm_mse": val_mse,
-                })
+            for val_idx, valloader in enumerate(valloaders):
+                valname = "holdout_trajectories" if val_idx == 0 else "holdout_samples"
+                val_mse = 0
+                if cfg.logging.tqdm:
+                    valloader = tqdm(valloader, "AE evaluation")
+                for sample in valloader:
+                    x = sample.x.to(device)
+                    if hasattr(model, "module"):
+                        pred_x = model.module.patch_decode(
+                            *model.module.patch_encode(x)
+                        )
+                    else:
+                        pred_x = model.patch_decode(*model.patch_encode(x))
+                    if cfg.training.predict_delta:
+                        pred_x = x + pred_x
+                    loss = relative_norm_mse(pred_x, x)
+                    val_mse += loss.item()
+                val_mse = val_mse / len(valloader)
+                val_log += f", val_{valname}/relative_norm_mse: {val_mse:.4f}"
+                if is_main_proc and writer:
+                    writer.log(
+                        {
+                            f"pretrain/val_{valname}_relative_norm_mse": val_mse,
+                        }
+                    )
 
         epoch_str = str(epoch).zfill(
             len(str(int(cfg.training.pretraining_kwargs.n_epochs)))
@@ -224,14 +235,16 @@ def pretrain_autoencoder(model, cfg, trainloader, valloader, writer, device):
             f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
         )
         if is_main_proc and writer:
-            writer.log({
-                "pretrain/train_relative_norm_mse": train_mse,
-                "pretrain/train_lr": (
-                    scheduler.get_last_lr()[0]
-                    if cfg.training.pretraining_kwargs.scheduler is not None
-                    else cfg.training.pretraining_kwargs.lr
-                ),
-            })
+            writer.log(
+                {
+                    "pretrain/train_relative_norm_mse": train_mse,
+                    "pretrain/train_lr": (
+                        scheduler.get_last_lr()[0]
+                        if cfg.training.pretraining_kwargs.scheduler is not None
+                        else cfg.training.pretraining_kwargs.lr
+                    ),
+                }
+            )
 
     if cfg.training.pretraining_kwargs.freeze_after:
         # freeze patching

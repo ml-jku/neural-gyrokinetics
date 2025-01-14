@@ -27,7 +27,8 @@ def get_rollout(
         rollout_steps = min(
             [
                 min(
-                    (dataset.num_ts(f_idx) - int(ts_index_0[i])) // bundle_steps - 1,
+                    (dataset.num_ts(int(f_idx)) - int(ts_index_0[i])) // bundle_steps
+                    - 1,
                     n_steps,
                 )
                 for i, f_idx in enumerate(file_idx.tolist())
@@ -56,7 +57,7 @@ def get_rollout(
                 for i in range(
                     int(ts_idx_start),
                     int(ts_idx_start) + rollout_steps * bundle_steps,
-                    bundle_steps
+                    bundle_steps,
                 )
             ]
             for ts_idx_start in ts_index_0.tolist()
@@ -66,7 +67,11 @@ def get_rollout(
         with torch.no_grad():
             # move bundles forward, rollout in blocks
             for i in range(0, rollout_steps):
-                with torch.autocast('cuda', dtype=torch.float16 if not use_bf16 else torch.bfloat16, enabled=use_amp):
+                with torch.autocast(
+                    "cuda",
+                    dtype=torch.float16 if not use_bf16 else torch.bfloat16,
+                    enabled=use_amp,
+                ):
                     x_p = model(xt, timestep=tsteps[:, i].to(xt.device))
                     if predict_delta:
                         x_p = xt + x_p
@@ -92,10 +97,9 @@ def validation_metrics(
     dataset,
     metrics_fns: Dict[str, Callable] = None,
 ) -> torch.Tensor:
-    assert (
-        metrics_fns is not None
-    ), "Pleas provide some metrics function for the validation metrics."
-
+    assert metrics_fns is not None, (
+        "Pleas provide some metrics function for the validation metrics."
+    )
     n_steps = rollout.shape[0]
     # n_steps = rollout.shape[0] // bundle_steps
     # TODO: optimize: if valset is not shuffled, we can only return every second, since the next input is the previous' target (maybe handle in the dataset not sure)
@@ -104,7 +108,7 @@ def validation_metrics(
         y = torch.stack(
             [
                 dataset.get_at_time(
-                    file_idx, ts_index + t, to_fourier=True
+                    file_idx.long(), (ts_index + t).long(), to_fourier=True
                 ).y
                 for t in range(0, n_steps, bundle_steps)
             ],
@@ -114,7 +118,7 @@ def validation_metrics(
         y = torch.concat(
             [
                 dataset.get_at_time(
-                    file_idx, ts_index + t, to_fourier=True
+                    file_idx.long(), (ts_index + t).long, to_fourier=True
                 ).y
                 for t in range(0, n_steps, bundle_steps)
             ],

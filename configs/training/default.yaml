@@ -13,7 +13,7 @@ pushforward:
   unrolls: [1, 2, 3]
   probs: [10, 5, 5]
 
-pretraining: false
+pretraining: true
 pretraining_kwargs:
   freeze_after: true
   clip_grad: false
@@ -22,4 +22,5 @@ pretraining_kwargs:
   n_epochs: 20
   target_modules: [patch_embed, unpatch]
   weight_decay: 1e-5
+  add_noise: false
 

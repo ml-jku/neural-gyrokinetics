@@ -36,18 +36,19 @@ class CycloneDataset(Dataset):
         path: str = "/system/user/publicdata/gyrokinetics_preprocessed",
         split: str = "train",
         active_keys: Optional[List[str]] = None,
-        trajectories: List = None,
+        trajectories: Optional[List[str]] = None,
+        partial_holdouts: Optional[dict] = None,
         normalization: Optional[str] = "zscore",
         spatial_ifft: bool = True,
-        dtype: Type = None,
+        dtype: Type = torch.float32,
         random_seed: int = 42,
         val_ratio: float = 0.1,
-        test_ratio: float = 0.1,
         in_memory: bool = False,
         bundle_seq_length: int = 1,
     ):
-        assert split in ["train", "val", "test"]
-        self.dtype = torch.float32 if dtype is None else dtype
+        self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
+        assert split in ["train", "val"]
+        self.dtype = dtype
 
         active_keys = active_keys if active_keys is not None else ["re", "im"]
         assert all([a in ["re", "im"] for a in active_keys])
@@ -67,7 +68,9 @@ class CycloneDataset(Dataset):
         if trajectories is None:
             self.trajectories_fnames = os.listdir(path)
             self.files = [
-                os.path.join(self.dir, f_name) for f_name in self.trajectories_fnames
+                os.path.join(self.dir, f_name)
+                for f_name in self.trajectories_fnames
+                if ".h5" in f_name
             ]
             # shuffle and split files into training and validation sets
             random.seed(random_seed)
@@ -78,61 +81,109 @@ class CycloneDataset(Dataset):
                 list(perm), max(1, int(val_ratio * len(self.files)))
             )
             perm = perm - set(val_idx)
-            if test_ratio != 0:
-                test_idx = random.sample(
-                    list(perm), max(1, int(test_ratio * len(self.files)))
-                )
-                perm = perm - set(test_idx)
             train_idx = list(perm)
-
             if split == "train":
                 self.files = [self.files[i] for i in train_idx]
-                # always 1 step training
-                # self.n_eval_steps = 1 * self.target_seq_length
             if split == "val":
                 self.files = [self.files[i] for i in val_idx]
-                # self.n_eval_steps = n_eval_steps * self.target_seq_length
-            if split == "test":
-                self.files = [self.files[i] for i in test_idx]
         else:
-            self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
-            if split == "train":
-                # always 1 step training
-                # self.n_eval_steps = 1 * self.target_seq_length
-                ...
-            if split == "val":
-                # self.n_eval_steps = n_eval_steps * self.target_seq_length
-                ...
+            if split == "val" and partial_holdouts:
+                self.files = []
+                for key in partial_holdouts.keys():
+                    self.files.append(os.path.join(self.dir, key))
+            else:
+                self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
 
-        # get total number of samples (assuming no bundling or pushforward and assuming constant number of timesteps accross files)
-        with h5py.File(self.files[0], "r") as f:
-            # read the timesteps
-            timesteps = f["metadata/timesteps"][:]
-            n_timesteps = (
-                len(timesteps)
-                - self.bundle_seq_length * 2
-                + 1  # This only works for 1 step training (works with pf and rollout aswell)
-            )
+        # get total number of samples per file
+        self.file_num_samples = []
+        self.file_num_timesteps = []
+        self.file_num_tot_timesteps = {}
+        for file_idx, file_path in enumerate(self.files):
+            # check for holdout samples
+            filename = os.path.split(file_path)[-1]
+            last_n_holdout_steps = self.partial_holdouts.get(filename)
+            with h5py.File(file_path, "r") as f:
+                # read the timesteps
+                if last_n_holdout_steps:
+                    if split == "train":
+                        timesteps = f["metadata/timesteps"][:-last_n_holdout_steps]
+                    else:
+                        timesteps = f["metadata/timesteps"][-last_n_holdout_steps:]
+                        self.file_num_tot_timesteps[file_idx] = len(
+                            f["metadata/timesteps"][:]
+                        )
+                else:
+                    timesteps = f["metadata/timesteps"][:]
+                n_samples = (
+                    len(timesteps)
+                    - self.bundle_seq_length * 2
+                    + 1  # This only works for 1 step training (works with pf and rollout aswell)
+                )
+                self.file_num_samples.append(n_samples)
+                self.file_num_timesteps.append(len(timesteps))
 
-        self.n_timesteps_per_file = len(timesteps)
-        self.length = n_timesteps * len(self.files)
-        self.n_samples_per_file = n_timesteps
+        self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
+        self.length = self.cumulative_samples[-1]
+
+        # create mapping from from file and ts index to flat index and vice versa
+        self.flat_index_to_file_and_tstep = {}
+        self.file_and_tstep_to_flat_index = {}
+        for file_idx in range(len(self.files)):
+            idxs_before = self.cumulative_samples[file_idx]
+            for tstep_idx in range(self.file_num_samples[file_idx]):
+                flat_idx = idxs_before + tstep_idx
+                self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, tstep_idx)
+                self.file_and_tstep_to_flat_index[(file_idx, tstep_idx)] = flat_idx
+
+        self.offsets = [0 for i in range(len(self.files))]
+        # calculate offsets if we are in a partial holdout validation dataset
+        if split == "val" and self.partial_holdouts:
+            for file_idx, file in enumerate(self.files):
+                filename = os.path.split(file)[-1]
+                last_n_holdout_steps = self.partial_holdouts.get(filename)
+                if last_n_holdout_steps:
+                    self.offsets[file_idx] = (
+                        self.file_num_tot_timesteps[file_idx] - last_n_holdout_steps
+                    )
 
         if self.in_memory:
             # load all timesteps into a dict of dicts
             self.data = {}
             for file_idx, file in enumerate(self.files):
                 file_dict = {}
+                # check for holdout samples
+                filename = os.path.split(file)[-1]
+                last_n_holdout_steps = self.partial_holdouts.get(filename)
                 with h5py.File(file, "r") as f:
-                    # read the 'metadata/timesteps' dataset
+                    # read the timesteps and fluxes dataset
                     timesteps = f["metadata/timesteps"][:]
-                    file_dict["metadata/timesteps"] = timesteps
                     fluxes = f["metadata/fluxes"][:]
+                    file_dict["metadata/timesteps"] = timesteps
                     file_dict["metadata/fluxes"] = fluxes
                     # read in all the data points
-                    for t_index in tqdm(range(len(file_dict["metadata/timesteps"]))):
-                        k_name = "timestep_" + str(t_index).zfill(5)
-                        poten_name = "poten_" + str(t_index).zfill(5)
+                    if last_n_holdout_steps:
+                        if split == "train":
+                            _range = range(
+                                len(
+                                    file_dict["metadata/timesteps"][
+                                        :-last_n_holdout_steps
+                                    ]
+                                )
+                            )
+                        else:
+                            _range = range(
+                                len(
+                                    file_dict["metadata/timesteps"][
+                                        -last_n_holdout_steps:
+                                    ]
+                                )
+                            )
+                    else:
+                        _range = range(len(file_dict["metadata/timesteps"]))
+                    for t_index in tqdm(_range):
+                        original_t_index = t_index + self.offsets[file_idx]
+                        k_name = "timestep_" + str(original_t_index).zfill(5)
+                        poten_name = "poten_" + str(original_t_index).zfill(5)
                         k_data = f[f"data/{k_name}"][:]
                         poten_data = f[f"data/{poten_name}"][:]
                         if self.spatial_ifft:
@@ -150,17 +201,18 @@ class CycloneDataset(Dataset):
             self.resolution = f["metadata/resolution"][:]
 
     def __getitem__(self, index):
-        # calculate file index and remainder for time index in file
-        file_index = int(index // self.n_samples_per_file)
-        t_index = int(index % self.n_samples_per_file)
+        # lookup file index and time index from flat index
+        file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
         if self.in_memory:
             x, timestep, gt_poten, gt_flux, gt = self._load_data(
-                self.data[file_index], t_index
+                self.data[file_index], file_index, t_index
             )
         else:
             with h5py.File(self.files[file_index], "r") as f:
-                x, timestep, gt_poten, gt_flux, gt = self._load_data(f, t_index)
+                x, timestep, gt_poten, gt_flux, gt = self._load_data(
+                    f, file_index, t_index
+                )
 
         if self.normalization is not None:
             x = self._normalize(x)
@@ -176,30 +228,37 @@ class CycloneDataset(Dataset):
             timestep_index=torch.tensor(t_index, dtype=self.dtype),
         )
 
-    def _load_data(self, data, t_index) -> Tuple[np.ndarray, float, float, np.ndarray]:
-        timestep = data["metadata/timesteps"][t_index]
+    def _load_data(
+        self, data, file_index, t_index
+    ) -> Tuple[np.ndarray, float, float, np.ndarray]:
+        original_t_index = t_index + self.offsets[file_index]
+        timestep = data["metadata/timesteps"][original_t_index]
         x = []
         gt = []
         gt_poten = []
         gt_flux = []
         for i in range(self.bundle_seq_length):
             # read the input
-            k_name = "timestep_" + str(t_index + i).zfill(5)
+            k_name = "timestep_" + str(original_t_index + i).zfill(5)
             k = data[f"data/{k_name}"][:]
             # select only active re/im parts
             x.append(k[self.active_keys])
         for i in range(self.bundle_seq_length):
             # read the gt output (next timestep)
-            k_name_gt = "timestep_" + str(t_index + self.bundle_seq_length + i).zfill(5)
-            poten_name_gt = "poten_" + str(t_index + self.bundle_seq_length + i).zfill(
-                5
-            )
+            k_name_gt = "timestep_" + str(
+                original_t_index + self.bundle_seq_length + i
+            ).zfill(5)
+            poten_name_gt = "poten_" + str(
+                original_t_index + self.bundle_seq_length + i
+            ).zfill(5)
             k_gt = data[f"data/{k_name_gt}"][:]
             poten_gt = data[f"data/{poten_name_gt}"][:]
             # select only active re/im parts
             gt.append(k_gt[self.active_keys])
             gt_poten.append(poten_gt)
-            flux = data["metadata/fluxes"][t_index + self.bundle_seq_length + i]
+            flux = data["metadata/fluxes"][
+                original_t_index + self.bundle_seq_length + i
+            ]
 
             gt_flux.append(flux)
 
@@ -234,8 +293,12 @@ class CycloneDataset(Dataset):
         timestep_idx: torch.Tensor,
         to_fourier: bool = False,
     ):
-        updated_index = (file_idx * self.n_samples_per_file + timestep_idx).long()
-        sample = self.collate([self.__getitem__(idx) for idx in updated_index.tolist()])
+        # Compute the flat indices from the file indices and time indices
+        updated_index = [
+            self.file_and_tstep_to_flat_index[i]
+            for i in zip(file_idx.tolist(), timestep_idx.tolist())
+        ]
+        sample = self.collate([self.__getitem__(idx) for idx in updated_index])
         # TODO move somewhere else?
         if self.spatial_ifft and to_fourier:
             if sample.y.ndim == 8:
@@ -245,7 +308,7 @@ class CycloneDataset(Dataset):
 
             sample.y = torch.complex(real=sample.y[0], imag=sample.y[1])
             sample.y = torch.fft.fftn(sample.y, dim=(-2, -1))
-            sample.y = torch.stack([sample.y.real, sample.y.imag]).squeeze()
+            sample.y = torch.stack([sample.y.real, sample.y.imag])
 
             if sample.y.ndim == 8:
                 sample.y = rearrange(sample.y, "c t b ... -> t b c ...")
@@ -276,17 +339,16 @@ class CycloneDataset(Dataset):
             flat_file_idx = file_idx_expanded.flatten()  # (B*N,)
             flat_timestep_idx = timestep_idx.flatten()  # (B*N,)
 
-        # Compute the linear index
-        updated_index = (
-            # flat_file_idx * self.n_samples_per_file + flat_timestep_idx * self.target_seq_length
-            flat_file_idx * self.n_samples_per_file + flat_timestep_idx
-        ).long()
+        # Compute the flat indices from the file indices and time indices
+        updated_index = [
+            self.file_and_tstep_to_flat_index[i]
+            for i in zip(flat_file_idx.tolist(), flat_timestep_idx.tolist())
+        ]
 
         timesteps_list = []
-        for idx in updated_index.tolist():
-            # use n_samples_per_file_val, because we need to access the last timesteps
-            file_index = int(idx // self.n_samples_per_file)
-            t_index = int(idx % self.n_samples_per_file)
+        for idx in updated_index:
+            # lookup file index and time index
+            file_index, t_index = self.flat_index_to_file_and_tstep[idx]
 
             if self.in_memory:
                 timesteps_array = self.data[file_index]["metadata/timesteps"]
@@ -311,8 +373,8 @@ class CycloneDataset(Dataset):
     def __len__(self):
         return self.length
 
-    def num_ts(self, file_id: int):
-        return self.n_timesteps_per_file
+    def num_ts(self, file_idx: int):
+        return self.file_num_timesteps[file_idx]
 
     def collate(self, batch):
         # batch is a list of CycloneSamples
