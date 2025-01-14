@@ -1,5 +1,5 @@
 from .rollout import get_rollout, validation_metrics
-from .plot_utils import distribution_5D, plot4x4_sided, to_fourier
+from .plot_utils import distribution_5D, plot4x4_sided, to_fourier, generate_val_plots
 
 
 __all__ = [
@@ -8,4 +8,5 @@ __all__ = [
     "distribution_5D",
     "plot4x4_sided",
     "to_fourier",
+    "generate_val_plots",
 ]
