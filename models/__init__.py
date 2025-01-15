@@ -20,8 +20,9 @@ def get_model(cfg, dataset):
         c_multiplier = cfg.model.swin.c_multiplier
 
         cond_fn = None
-        if cfg.model.swin.timestep_conditioning:
-            cond_fn = ContinuousConditionEmbed(32)
+        n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
+        if n_cond > 0:
+            cond_fn = ContinuousConditionEmbed(32, n_cond)
 
         bundle_steps = cfg.model.bundle_seq_length
         if bundle_steps > 1:  # TODO investigate time dimension!

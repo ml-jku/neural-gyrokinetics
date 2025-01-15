@@ -12,3 +12,4 @@ swin:
   gradient_checkpoint: false
   patching_hidden_ratio: 12.0
   timestep_conditioning: true
+  itg_conditioning: true

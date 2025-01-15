@@ -65,7 +65,6 @@ class SwinAE(SwinUnet):
             patching_init_weights=patching_init_weights,
         )
 
-
         del self.middle
 
         # middle_dim = dim * c_multiplier ** num_layers

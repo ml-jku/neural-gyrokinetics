@@ -1,4 +1,4 @@
-from typing import Sequence, Union, Optional, Type, Tuple
+from typing import Sequence, Union, Optional, Type, Tuple, Dict
 
 from einops import rearrange
 import torch
@@ -515,13 +515,7 @@ class SwinUnet(nn.Module):
         self.middle.reset_parameters(self.init_weights)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        cond = kwargs.get("timestep")
-        if cond is not None and self.cond_embed is not None:
-            # embed conditioning is e.g. sincos
-            cond = {"condition": self.cond_embed(cond)}
-        else:
-            cond = {}
-
+        cond = self.condition(kwargs)
         # compress to patch space
         x, pad_axes = self.patch_encode(x)
 
@@ -561,3 +555,16 @@ class SwinUnet(nn.Module):
         # return as image
         x = rearrange(x, "b ... c -> b c ...")
         return x
+
+    def condition(self, kwconds) -> Dict:
+        cond = kwconds.get("timestep")
+        itg = kwconds.get("itg")
+        if cond is None:
+            cond = itg
+        elif itg is not None:
+            cond = torch.cat([cond.unsqueeze(-1), itg.unsqueeze(-1)], dim=-1)
+        if cond is not None and self.cond_embed is not None:
+            # embed conditioning is e.g. sincos
+            return {"condition": self.cond_embed(cond)}
+        else:
+            return {}

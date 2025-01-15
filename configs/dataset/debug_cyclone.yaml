@@ -1,11 +1,12 @@
 name: cyclone
-path: /system/user/publicdata/gyrokinetics/preprocessed
+path: /restricteddata/ukaea/gyrokinetics/preprocessed
 normalization: zscore
-spatial_ifft: false
+spatial_ifft: true
 in_memory: false
 active_keys: ["re", "im"]
-training_trajectories: ["cyclone4.h5"]
-validation_trajectories: ["cyclone4.h5"]
+training_trajectories: ["cyclone4_2_2.h5"]
+validation_trajectories: ["cyclone4_2_2.h5"]
+partial_holdouts:
 
 augment:
   noise: false
