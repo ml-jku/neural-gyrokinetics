@@ -135,6 +135,7 @@ def runner(rank, cfg, world_size):
                 x = sample.x.to(device, non_blocking=True)
                 y = sample.y.to(device, non_blocking=True)
                 ts = sample.timestep.to(device)
+                itg = sample.itg.to(device)
 
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
@@ -150,7 +151,7 @@ def runner(rank, cfg, world_size):
                     file_idx = sample.file_index.to(device)
                     ts_index = sample.timestep_index.to(device)
                     x, ts, y = pushforward_fn(
-                        model, x, ts, ts_index, y, file_idx, epoch
+                        model, x, ts, itg, ts_index, y, file_idx, epoch
                     )
                     info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
                 else:
@@ -163,7 +164,7 @@ def runner(rank, cfg, world_size):
                     enabled=cfg.use_amp,
                 ):
                     # TODO: currently only supporting integer conditioning, therefore ceiling the actual float timestep
-                    pred_x = model(x, timestep=ts)
+                    pred_x = model(x, timestep=ts, itg=itg)
                     if predict_delta:
                         pred_x = x + pred_x
                     loss = relative_norm_mse(pred_x, y)
@@ -234,9 +235,11 @@ def runner(rank, cfg, world_size):
                     if use_tqdm and not rank:
                         valloader = tqdm(
                             valloader,
-                            desc="Validation holdout trajectories"
-                            if val_idx == 0
-                            else "Validation holdout samples",
+                            desc=(
+                                "Validation holdout trajectories"
+                                if val_idx == 0
+                                else "Validation holdout samples"
+                            ),
                         )
                     with torch.no_grad():
                         for idx, sample in enumerate(valloader):
@@ -244,6 +247,7 @@ def runner(rank, cfg, world_size):
                             x = sample.x.to(device, non_blocking=True)
                             y = sample.y.to(device, non_blocking=True)
                             ts = sample.timestep.to(device)
+                            itg = sample.itg.to(device)
                             file_idx = sample.file_index.to(device)
                             ts_index = sample.timestep_index.to(device)
 
@@ -254,7 +258,7 @@ def runner(rank, cfg, world_size):
                                 bundle_steps=cfg.model.bundle_seq_length,
                                 dataset=valset,
                                 predict_delta=cfg.training.predict_delta,
-                            )(model, x, file_idx=file_idx, ts_index_0=ts_index)
+                            )(model, x, file_idx=file_idx, ts_index_0=ts_index, itg=itg)
 
                             # back to fourier for plotting
                             if cfg.dataset.spatial_ifft and cfg.dataset.in_memory:
@@ -318,9 +322,11 @@ def runner(rank, cfg, world_size):
                                         x_rollout=x_rollout,
                                         y=y,
                                         ts=ts,
-                                        phase="Linear Phase"
-                                        if idx == 0
-                                        else "Saturated Phase",
+                                        phase=(
+                                            "Linear Phase"
+                                            if idx == 0
+                                            else "Saturated Phase"
+                                        ),
                                         val_plots=val_plots,
                                     )
                             else:

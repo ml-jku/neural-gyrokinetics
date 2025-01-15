@@ -22,6 +22,7 @@ def get_rollout(
         x0: torch.Tensor,
         file_idx: torch.Tensor,
         ts_index_0: torch.Tensor,
+        itg: torch.Tensor,
     ) -> torch.Tensor:
         # cap the steps depending on the current max timestep
         rollout_steps = min(
@@ -72,7 +73,7 @@ def get_rollout(
                     dtype=torch.float16 if not use_bf16 else torch.bfloat16,
                     enabled=use_amp,
                 ):
-                    x_p = model(xt, timestep=tsteps[:, i].to(xt.device))
+                    x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
                     if predict_delta:
                         x_p = xt + x_p
                     # update model input
@@ -97,9 +98,9 @@ def validation_metrics(
     dataset,
     metrics_fns: Dict[str, Callable] = None,
 ) -> torch.Tensor:
-    assert metrics_fns is not None, (
-        "Pleas provide some metrics function for the validation metrics."
-    )
+    assert (
+        metrics_fns is not None
+    ), "Pleas provide some metrics function for the validation metrics."
     n_steps = rollout.shape[0]
     # n_steps = rollout.shape[0] // bundle_steps
     # TODO: optimize: if valset is not shuffled, we can only return every second, since the next input is the previous' target (maybe handle in the dataset not sure)

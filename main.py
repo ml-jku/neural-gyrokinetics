@@ -30,12 +30,8 @@ def main(config: DictConfig):
     dict_config = OmegaConf.to_container(config)
     if config.output_path is None:
         dir = str(uuid.uuid4()).split("-")[0]
-        dict_config["output_path"] = osp.join(
-            "outputs", dir
-        )
-    dict_config["ckpt_path"] = osp.join(
-        "outputs", dir
-    )
+        dict_config["output_path"] = osp.join("outputs", dir)
+    dict_config["ckpt_path"] = osp.join("outputs", dir)
     config = OmegaConf.create(dict_config)
 
     if not os.path.exists(config.output_path):
@@ -51,21 +47,23 @@ def main(config: DictConfig):
     try:
         if dict_config["logging"]["run_id"] is None:
             data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
-            print(dict_config['model']['name'])
-            dict_config["logging"]["run_id"] = f"{dict_config['model']['name']}_{data_and_time}"
+            print(dict_config["model"]["name"])
+            dict_config["logging"][
+                "run_id"
+            ] = f"{dict_config['model']['name']}_{data_and_time}"
             config = OmegaConf.create(dict_config)
 
         if config.use_ddp and world_size > 1:
-            if not "SLURM_NODELIST" in os.environ:
+            if "SLURM_NODELIST" not in os.environ:
                 os.environ["MASTER_ADDR"] = "localhost"
             else:
                 # os.system(f'export MASTER_ADDR=$(scontrol show hostname {os.environ["SLURM_NODELIST"]})')
                 # only works for single node so far, adapt above for multinode
-                os.environ['MASTER_ADDR'] = os.environ['SLURM_NODELIST']
+                os.environ["MASTER_ADDR"] = os.environ["SLURM_NODELIST"]
             os.environ["MASTER_PORT"] = str(find_free_port())
-            if 'NCCL_SOCKET_IFNAME' in os.environ:
+            if "NCCL_SOCKET_IFNAME" in os.environ:
                 # unset nccl comm interface
-                del os.environ['NCCL_SOCKET_IFNAME']
+                del os.environ["NCCL_SOCKET_IFNAME"]
             mp.spawn(runner, args=(config, world_size), nprocs=world_size)
         else:
             rank = 0

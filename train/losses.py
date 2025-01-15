@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 from transformers.optimization import get_scheduler
 from torch.nn.utils import clip_grad_norm_
-from torch.distributed import get_rank, get_world_size, is_initialized
+from torch.distributed import get_rank, is_initialized
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -46,6 +46,7 @@ def get_pushforward_trick(
         model: nn.Module,
         x: torch.Tensor,
         ts: torch.Tensor,
+        itg: torch.Tensor,
         ts_idx: torch.Tensor,
         y: torch.Tensor,
         file_idx: torch.Tensor,
@@ -103,7 +104,7 @@ def get_pushforward_trick(
                     dtype=torch.float16 if not use_bf16 else torch.bfloat16,
                     enabled=use_amp,
                 ):
-                    x_p = model(xt, timestep=tsteps[:, i].to(xt.device))
+                    x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
                     if predict_delta:
                         x_p = xt + x_p
                     xt = x_p.clone().float()
@@ -161,6 +162,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
         for sample in trainloader:
             x = sample.x.to(device)
             ts = sample.timestep.to(device)
+            itg = sample.itg.to(device)
 
             with torch.autocast(
                 cfg.device,
@@ -168,7 +170,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                 enabled=cfg.use_amp,
             ):
                 if cfg.training.pretraining_kwargs.target_modules == "all":
-                    pred_x = model(x, timestep=torch.ceil(ts))
+                    pred_x = model(x, timestep=torch.ceil(ts), itg=itg)
                 else:
                     if hasattr(model, "module"):
                         z, pad_ax = model.module.patch_encode(x)
