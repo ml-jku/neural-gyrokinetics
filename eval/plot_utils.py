@@ -61,17 +61,27 @@ def distribution_5D(x, **kwargs):
 
 
 def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
-    labels = ["vpar", "vmu", "s", "x", "y"]
+    labels = ["v_{par}", "v_{\mu}", "s", "k_x", "k_y"]
     comb = torch.combinations(torch.arange(5), 2).tolist()
 
     fig, ax = plt.subplots(5, 5, figsize=(30, 14))
     for i in range(5):
         for j in range(5):
-            ax[i, j].remove()
+            if j == 0:
+                ax[i, j].remove()
+                continue
+            if i == 4:
+                ax[i, j].remove()
+                continue
+            ax_ij = ax[i, j]
+            ax_ij.set_frame_on(False)
+            ax_ij.tick_params(labelleft=False, labelbottom=False)
+            ax_ij.set_xticks([])
+            ax_ij.set_yticks([])
 
-    fig.tight_layout()
+    # fig.tight_layout()
     fig.suptitle(title)
-    c_map = matplotlib.colormaps["coolwarm"]
+    c_map = matplotlib.colormaps["RdBu"]
     c_map.set_bad("k")
 
     for i, j in comb:
@@ -90,47 +100,54 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
             x1_plot[x1_std == 0] = np.nan
             x2_plot[x2_std == 0] = np.nan
 
-        # Clear the axis and directly plot two images side by side
         ax_ij = ax[i, j]
-
-        # Get the position of the original axis
         pos = ax_ij.get_position()
 
-        # Create two new axes within the same space as the original subplot
-        displ = pos.width / 2
-        width = 0.92 * (displ)  # Split the width into two halves
-        ax1 = fig.add_axes([pos.x0, pos.y0, width, pos.height])
-        ax2 = fig.add_axes([pos.x0 + displ, pos.y0, width, pos.height])
+        # create two new axes within the same space as the original subplot
+        plot_width = 0.475 * pos.width
+        left_margin = 0.0 * pos.width
+        x_left_1 = pos.x0 + left_margin
+        x_left_2 = x_left_1 + plot_width
+        y = pos.y0
+        h = pos.height
+        ax1 = fig.add_axes([x_left_1, y, plot_width, h])
+        ax2 = fig.add_axes([x_left_2, y, plot_width, h])
 
-        # Plot x1 and xp side by side
-        im1 = ax1.matshow(x1_plot, cmap=c_map)
-        im2 = ax2.matshow(x2_plot, cmap=c_map)
+        # compute shared vmin and vmax
+        vmin = min(x1_plot.min(), x2_plot.min())
+        vmax = max(x1_plot.max(), x2_plot.max())
 
-        cbar1 = fig.colorbar(im1, ax=ax1, format=tkr.FormatStrFormatter("%.2g"))
-        cbar2 = fig.colorbar(im2, ax=ax2, format=tkr.FormatStrFormatter("%.2g"))
+        im1 = ax1.matshow(x1_plot, cmap=c_map, vmin=vmin, vmax=vmax)
+        im2 = ax2.matshow(x2_plot, cmap=c_map, vmin=vmin, vmax=vmax)
 
-        cbar1.set_ticks([x1_plot.min(), x1_plot.max()])
-        cbar2.set_ticks([x2_plot.min(), x2_plot.max()])
+        # shared colourbar
+        cbar = fig.colorbar(
+            im1, ax=[ax_ij], format=tkr.FormatStrFormatter("%.2g"), pad=0, fraction=0.05
+        )
+        cbar.set_ticks([vmin, (vmin + vmax) / 2, vmax])
+        cbar.ax.tick_params(labelsize=12)
 
         if i == 0:
             # Set axis labels
-            ax1.set_title("PRED")
-            ax2.set_title("GT")
+            ax1.set_title(r"PRED", fontsize=24)
+            ax2.set_title(r"GT", fontsize=24)
 
-        ax1.set_xlabel(labels[j])
-        ax1.set_ylabel(labels[i])
-        ax2.set_xlabel(labels[j])
-        # ax2.set_ylabel(labels[i])
+        if j == 1 or (i == 1 and j == 2) or (i == 2 and j == 3) or (i == 3 and j == 4):
+            ax_ij.set_ylabel(rf"${labels[i]}$", fontsize=14)
 
+        if i == 3 or j == 1 or (i == 1 and j == 2) or (i == 2 and j == 3):
+            ax_ij.set_xlabel(rf"${labels[j]}$", fontsize=14)
+
+        # Remove axis ticks and labels
+        ax1.set_xticks([])
+        ax1.set_yticks([])
+        ax2.set_xticks([])
+        ax2.set_yticks([])
+        ax1.tick_params(labelleft=False, labelbottom=False)
+        ax2.tick_params(labelleft=False, labelbottom=False)
         # Force aspect ratio
         force_aspect(ax1)
         force_aspect(ax2)
-
-        # Set only one tick at the maximum value for both axes
-        ax1.set_xticks([x1_plot.shape[1] - 1])
-        ax1.set_yticks([x1_plot.shape[0] - 1])
-        ax2.set_xticks([x2_plot.shape[1] - 1])
-        ax2.set_yticks([x2_plot.shape[0] - 1])
 
     return plt_to_wandb_image(fig)
 
