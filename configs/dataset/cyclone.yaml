@@ -1,6 +1,7 @@
 name: cyclone
 path: /system/user/publicdata/gyrokinetics/preprocessed
 normalization: zscore
+normalization_scope: sample
 spatial_ifft: true
 in_memory: true
 active_keys: ["re", "im"]
