@@ -43,7 +43,7 @@ class CycloneDataset(Dataset):
         trajectories: Optional[List[str]] = None,
         partial_holdouts: Optional[dict] = None,
         normalization: Optional[str] = "zscore",
-        normalization_scope: str = "sample", 
+        normalization_scope: str = "sample",
         spatial_ifft: bool = True,
         dtype: Type = torch.float32,
         random_seed: int = 42,
@@ -62,7 +62,7 @@ class CycloneDataset(Dataset):
         assert normalization_scope in ["sample", "dataset"]
         self.normalization = normalization if normalization != "none" else None
         self.normalization_scope = normalization_scope
-        
+
         self.in_memory = in_memory
         self.dir = path
 
@@ -197,7 +197,7 @@ class CycloneDataset(Dataset):
                         file_dict[f"data/{k_name}"] = k_data
                         file_dict[f"data/{poten_name}"] = poten_data
                 self.data[file_idx] = file_dict
-        
+
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
