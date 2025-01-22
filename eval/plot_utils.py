@@ -61,7 +61,7 @@ def distribution_5D(x, **kwargs):
 
 
 def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
-    labels = ["v_{par}", "v_{\mu}", "s", "k_x", "k_y"]
+    labels = [r"v_{par}", r"v_{\mu}", r"s", r"k_x", r"k_y"]
     comb = torch.combinations(torch.arange(5), 2).tolist()
 
     fig, ax = plt.subplots(5, 5, figsize=(30, 14))
@@ -118,7 +118,7 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
         vmax = max(x1_plot.max(), x2_plot.max())
 
         im1 = ax1.matshow(x1_plot, cmap=c_map, vmin=vmin, vmax=vmax)
-        im2 = ax2.matshow(x2_plot, cmap=c_map, vmin=vmin, vmax=vmax)
+        ax2.matshow(x2_plot, cmap=c_map, vmin=vmin, vmax=vmax)
 
         # shared colourbar
         cbar = fig.colorbar(

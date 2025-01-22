@@ -8,6 +8,9 @@ active_keys: ["re", "im"]
 training_trajectories: ["cyclone4_2_2.h5"]
 validation_trajectories: ["cyclone4_2_2.h5"]
 partial_holdouts:
+training_cond_filters:
+  ion_temp_grad: [2.5, 9.5]
+eval_cond_filters:
 
 augment:
   noise: false

@@ -1,7 +1,7 @@
+from typing import Type, Optional, List, Tuple, Dict, Sequence
 import re
 import os
 import h5py
-from typing import Type, Optional, List, Tuple
 from dataclasses import dataclass
 from tqdm import tqdm
 from collections import defaultdict
@@ -35,6 +35,26 @@ class CycloneSample:
 
 
 class CycloneDataset(Dataset):
+    """Dataset for preprocessed gyrokinetics datasets.
+
+    Args:
+        path (str): Path to the preprocessed .h5 files
+        split (str): 'train' or 'val'. When set to 'val', it enables partial holdouts.
+        active_keys (optional, list): List of channels to use ('re', 'im').
+        trajectories (optional, list): Optional list with picked trajectories.
+        partial_holdouts (optional, dict): TODO
+        normalization (optional, str): Normalization type ('none', 'zscore', 'minmax').
+        normalization_scope (optional, str): Normalization scope ('sample', 'dataset').
+        spatial_ifft (bool): Whether to use IFFT data (must be preprocessed).
+        cond_filters (optional, dict): Filters on conditioning params (as a dictionary
+                    of {cond_name: [(cond_min, cond_max), ... (cond_min, cond_max)]})
+        dtype (type): Cast returned samples to this torch dtype.
+        random_seed (int): Seed initialization for random splits.
+        val_ratio (float): Validation data ration for random splits.
+        in_memory (bool): Whether to load the dataset in RAM.
+        bundle_seq_length (int): Extra temporal steps to append to returned samples.
+    """
+
     def __init__(
         self,
         path: str = "/restricteddata/ukaea/gyrokinetics/preprocessed",
@@ -45,6 +65,7 @@ class CycloneDataset(Dataset):
         normalization: Optional[str] = "zscore",
         normalization_scope: str = "sample",
         spatial_ifft: bool = True,
+        cond_filters: Optional[Dict[str, Sequence]] = None,
         dtype: Type = torch.float32,
         random_seed: int = 42,
         val_ratio: float = 0.1,
@@ -62,6 +83,7 @@ class CycloneDataset(Dataset):
         assert normalization_scope in ["sample", "dataset"]
         self.normalization = normalization if normalization != "none" else None
         self.normalization_scope = normalization_scope
+        self.cond_filters = cond_filters
 
         self.in_memory = in_memory
         self.dir = path
@@ -110,7 +132,14 @@ class CycloneDataset(Dataset):
         for f in self.files:
             assert os.path.isfile(f), f"Trajectory  '{f}' does not exist!"
 
-        # get metadata (total number of samples per file and normalization stats)
+        # filter files based on conditioning
+        if self.cond_filters:
+            self.files = [f for f in self.files if self._conditioning_filter(f)]
+        
+        if len(self.files) == 0:
+            raise RuntimeError(f"No trajectories found! Active filters: {cond_filters}")
+
+        # get metadata (samples per file and normalization stats)
         self.file_num_samples = []
         self.file_num_timesteps = []
         self.steps_per_file = {}
@@ -202,7 +231,22 @@ class CycloneDataset(Dataset):
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> CycloneSample:
+        """
+        Args:
+            index (int): Flat index with dataset ordering.
+
+        Returns:
+            CycloneSample: dataclass
+                - x (torch.Tensor): model input, shape `(c, bundle, v1, v2, s, x, y)`
+                - y (torch.Tensor): target, shape `(c, bundle, v1, v2, s, x, y)`
+                - y_poten (torch.Tensor): target potential field, shape `(x, s, y)`
+                - y_flux (torch.Tensor): target flux, shape `()`
+                - timestep (torch.Tensor): physical timestep, shape `()`
+                - itg (torch.Tensor): ion temperature gradient, shape `()`
+                - file_index (torch.Tensor): accessory file index, shape `()`
+                - timestep_index (torch.Tensor): accessory timestep index, shape `()`
+        """
         # lookup file index and time index from flat index
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
@@ -304,6 +348,21 @@ class CycloneDataset(Dataset):
                 scale = x_max - x_min
 
         return (x - shift) / scale
+
+    def _conditioning_filter(self, fname: str) -> bool:
+        with h5py.File(fname, "r") as f:
+            for cond_name, cond_range in self.cond_filters.items():
+                if f"metadata/{cond_name}" in f:
+                    cond = f[f"metadata/{cond_name}"][:]
+                    if not isinstance(cond_range[0], Sequence):
+                        cond_range = [cond_range]
+                    # check filters
+                    if not any(min_ <= cond <= max_ for min_, max_ in cond_range):
+                        return False
+                else:
+                    raise UserWarning(f"`{cond_name}` not found in metadata {fname}.")
+
+            return True
 
     def get_at_time(
         self,
