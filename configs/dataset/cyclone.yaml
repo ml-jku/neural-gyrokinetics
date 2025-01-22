@@ -12,6 +12,8 @@ partial_holdouts:
   last_n: 10
 - trajectory: "cyclone7_2.h5"
   last_n: 20
+training_cond_filters:
+eval_cond_filters:
 
 augment:
   noise: false
