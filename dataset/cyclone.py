@@ -4,6 +4,7 @@ import h5py
 from typing import Type, Optional, List, Tuple
 from dataclasses import dataclass
 from tqdm import tqdm
+from collections import defaultdict
 
 from einops import rearrange
 import torch
@@ -11,6 +12,8 @@ import numpy as np
 from torch.utils.data import Dataset
 
 import random
+
+from utils import expand_as
 
 
 @dataclass
@@ -40,6 +43,7 @@ class CycloneDataset(Dataset):
         trajectories: Optional[List[str]] = None,
         partial_holdouts: Optional[dict] = None,
         normalization: Optional[str] = "zscore",
+        normalization_scope: str = "sample",
         spatial_ifft: bool = True,
         dtype: Type = torch.float32,
         random_seed: int = 42,
@@ -55,7 +59,9 @@ class CycloneDataset(Dataset):
         assert all([a in ["re", "im"] for a in active_keys])
         self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
         assert normalization in ["zscore", "minmax", "none", None]
+        assert normalization_scope in ["sample", "dataset"]
         self.normalization = normalization if normalization != "none" else None
+        self.normalization_scope = normalization_scope
 
         self.in_memory = in_memory
         self.dir = path
@@ -104,33 +110,34 @@ class CycloneDataset(Dataset):
         for f in self.files:
             assert os.path.isfile(f), f"Trajectory  '{f}' does not exist!"
 
-        # get total number of samples per file
+        # get metadata (total number of samples per file and normalization stats)
         self.file_num_samples = []
         self.file_num_timesteps = []
-        self.file_num_tot_timesteps = {}
+        self.steps_per_file = {}
+        self.dataset_stats = defaultdict(dict)
         for file_idx, file_path in enumerate(self.files):
             # check for holdout samples
             filename = os.path.split(file_path)[-1]
-            last_n_holdout_steps = self.partial_holdouts.get(filename)
+            n_tail_holdout = self.partial_holdouts.get(filename)
             with h5py.File(file_path, "r") as f:
                 # read the timesteps
-                if last_n_holdout_steps:
+                if n_tail_holdout:
                     if split == "train":
-                        timesteps = f["metadata/timesteps"][:-last_n_holdout_steps]
+                        timesteps = f["metadata/timesteps"][:-n_tail_holdout]
                     else:
-                        timesteps = f["metadata/timesteps"][-last_n_holdout_steps:]
-                        self.file_num_tot_timesteps[file_idx] = len(
-                            f["metadata/timesteps"][:]
-                        )
+                        timesteps = f["metadata/timesteps"][-n_tail_holdout:]
+                        self.steps_per_file[file_idx] = len(f["metadata/timesteps"][:])
                 else:
                     timesteps = f["metadata/timesteps"][:]
-                n_samples = (
-                    len(timesteps)
-                    - self.bundle_seq_length * 2
-                    + 1  # This only works for 1 step training (works with pf and rollout aswell)
-                )
+                # This only works for 1 step training (with pf and rollout aswell)
+                n_samples = len(timesteps) - self.bundle_seq_length * 2 + 1
                 self.file_num_samples.append(n_samples)
                 self.file_num_timesteps.append(len(timesteps))
+                # normalization stats
+                self.dataset_stats[file_idx]["mean"] = f["metadata/k_mean"][:]
+                self.dataset_stats[file_idx]["std"] = f["metadata/k_std"][:]
+                self.dataset_stats[file_idx]["min"] = f["metadata/k_min"][:]
+                self.dataset_stats[file_idx]["max"] = f["metadata/k_max"][:]
 
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
@@ -145,15 +152,15 @@ class CycloneDataset(Dataset):
                 self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, tstep_idx)
                 self.file_and_tstep_to_flat_index[(file_idx, tstep_idx)] = flat_idx
 
-        self.offsets = [0 for i in range(len(self.files))]
+        self.offsets = [0 for _ in range(len(self.files))]
         # calculate offsets if we are in a partial holdout validation dataset
         if split == "val" and self.partial_holdouts:
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
-                last_n_holdout_steps = self.partial_holdouts.get(filename)
-                if last_n_holdout_steps:
+                n_tail_holdout = self.partial_holdouts.get(filename)
+                if n_tail_holdout:
                     self.offsets[file_idx] = (
-                        self.file_num_tot_timesteps[file_idx] - last_n_holdout_steps
+                        self.steps_per_file[file_idx] - n_tail_holdout
                     )
 
         if self.in_memory:
@@ -163,7 +170,7 @@ class CycloneDataset(Dataset):
                 file_dict = {}
                 # check for holdout samples
                 filename = os.path.split(file)[-1]
-                last_n_holdout_steps = self.partial_holdouts.get(filename)
+                n_tail_holdout = self.partial_holdouts.get(filename)
                 with h5py.File(file, "r") as f:
                     # read the timesteps and fluxes dataset
                     timesteps = f["metadata/timesteps"][:]
@@ -173,23 +180,11 @@ class CycloneDataset(Dataset):
                     itg = f["metadata/ion_temp_grad"][:]
                     file_dict["metadata/ion_temp_grad"] = itg
                     # read in all the data points
-                    if last_n_holdout_steps:
+                    if n_tail_holdout:
                         if split == "train":
-                            _range = range(
-                                len(
-                                    file_dict["metadata/timesteps"][
-                                        :-last_n_holdout_steps
-                                    ]
-                                )
-                            )
+                            _range = range(timesteps[:-n_tail_holdout])
                         else:
-                            _range = range(
-                                len(
-                                    file_dict["metadata/timesteps"][
-                                        -last_n_holdout_steps:
-                                    ]
-                                )
-                            )
+                            _range = range(timesteps[-n_tail_holdout:])
                     else:
                         _range = range(len(file_dict["metadata/timesteps"]))
                     for t_index in tqdm(_range):
@@ -203,6 +198,7 @@ class CycloneDataset(Dataset):
                         file_dict[f"data/{poten_name}"] = poten_data
                 self.data[file_idx] = file_dict
 
+        # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
 
@@ -222,8 +218,8 @@ class CycloneDataset(Dataset):
         # conditioning fields
         timestep, itg = sample["timestep"], sample["itg"]
         if self.normalization is not None:
-            x = self._normalize(x)
-            gt = self._normalize(gt)
+            x = self._normalize(x, file_index)
+            gt = self._normalize(gt, file_index)
 
         return CycloneSample(
             x=torch.tensor(x, dtype=self.dtype),
@@ -286,18 +282,28 @@ class CycloneDataset(Dataset):
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
         return sample
 
-    def _normalize(self, x):
-        # TODO proper normalization
-        if self.normalization == "zscore":
-            x_mean = x.mean((1, 2, 3, 4, 5), keepdims=True)
-            x_std = x.std((1, 2, 3, 4, 5), keepdims=True)
-            return (x - x_mean) / x_std
-        if self.normalization == "minmax":
-            x_min = x.min((1, 2, 3, 4, 5), keepdims=True)
-            x_max = x.max((1, 2, 3, 4, 5), keepdims=True)
-            return (x - x_min) / (x_max - x_min)
+    def _normalize(self, x, file_index):
+        shift, scale = 0.0, 1.0
+        if self.normalization_scope == "sample":
+            if self.normalization == "zscore":
+                shift = x.mean((1, 2, 3, 4, 5), keepdims=True)
+                scale = x.std((1, 2, 3, 4, 5), keepdims=True)
+            if self.normalization == "minmax":
+                x_min = x.min((1, 2, 3, 4, 5), keepdims=True)
+                x_max = x.max((1, 2, 3, 4, 5), keepdims=True)
+                shift = x_min
+                scale = x_max - x_min
+        if self.normalization_scope == "dataset":
+            if self.normalization == "zscore":
+                shift = expand_as(self.dataset_stats[file_index]["mean"], x)
+                scale = expand_as(self.dataset_stats[file_index]["std"], x)
+            if self.normalization == "minmax":
+                x_min = expand_as(self.dataset_stats[file_index]["min"], x)
+                x_max = expand_as(self.dataset_stats[file_index]["max"], x)
+                shift = x_min
+                scale = x_max - x_min
 
-        return x
+        return (x - shift) / scale
 
     def get_at_time(
         self,

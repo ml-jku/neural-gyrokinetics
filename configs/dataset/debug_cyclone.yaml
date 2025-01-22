@@ -1,7 +1,8 @@
 name: cyclone
 path: /restricteddata/ukaea/gyrokinetics/preprocessed
 normalization: zscore
-spatial_ifft: true
+normalization_scope: sample
+spatial_ifft: false
 in_memory: false
 active_keys: ["re", "im"]
 training_trajectories: ["cyclone4_2_2.h5"]
