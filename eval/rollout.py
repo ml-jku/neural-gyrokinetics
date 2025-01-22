@@ -63,7 +63,7 @@ def get_rollout(
             ]
             for ts_idx_start in ts_index_0.tolist()
         ]
-        tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
+        tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
         use_bf16 = use_amp and torch.cuda.is_bf16_supported()
         with torch.no_grad():
             # move bundles forward, rollout in blocks

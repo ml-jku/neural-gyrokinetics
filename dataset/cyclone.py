@@ -34,7 +34,7 @@ class CycloneSample:
 class CycloneDataset(Dataset):
     def __init__(
         self,
-        path: str = "/system/user/publicdata/gyrokinetics_preprocessed",
+        path: str = "/restricteddata/ukaea/gyrokinetics/preprocessed",
         split: str = "train",
         active_keys: Optional[List[str]] = None,
         trajectories: Optional[List[str]] = None,
@@ -329,10 +329,21 @@ class CycloneDataset(Dataset):
 
         return sample
 
-    def get_timesteps_only(self, file_idx: torch.Tensor, timestep_idx: torch.Tensor):
+    def get_timesteps(
+        self, file_idx: torch.Tensor, timestep_idx: Optional[torch.Tensor] = None
+    ):
         # file_idx: (B,)
-        # timestep_idx: (B, N)
         file_idx = file_idx.cpu().long()
+        # all timesteps in file
+        if timestep_idx is None:
+            timestep_idx = torch.stack(
+                [
+                    torch.arange(self.num_ts(file_idx[i]) - 1)
+                    for i in range(file_idx.shape[0])
+                ],
+                dim=0,
+            )
+        # timestep_idx: (B, N)
         timestep_idx = timestep_idx.cpu().long()
 
         B = file_idx.shape[0]

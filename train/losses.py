@@ -84,7 +84,7 @@ def get_pushforward_trick(
             ]
             for ts_idx_start in ts_idx.tolist()
         ]
-        tsteps = dataset.get_timesteps_only(file_idx, torch.tensor(ts_idxs))
+        tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
 
         # get unrolled target in a non-blocking way
         def fetch_target(dataset, file_idx, ts_unrolled):

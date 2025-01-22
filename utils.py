@@ -98,10 +98,16 @@ def save_model_and_config(
     with open(os.path.join(cfg.ckpt_path, "config.yaml"), "w") as f:
         OmegaConf.save(config=cfg, f=f.name)
 
+    state_dict = model.state_dict()
+
+    if hasattr(model, "module"):
+        # using DDP wrapper
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
+
     torch.save(
         {
             "epoch": epoch,
-            "model_state_dict": model.state_dict(),
+            "model_state_dict": state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
             "loss": val_loss,
         },
@@ -113,7 +119,7 @@ def save_model_and_config(
         torch.save(
             {
                 "epoch": epoch,
-                "model_state_dict": model.state_dict(),
+                "model_state_dict": state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
                 "loss": val_loss,
             },
