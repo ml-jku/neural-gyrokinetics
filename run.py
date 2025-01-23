@@ -159,7 +159,7 @@ def runner(rank, cfg, world_size):
 
                 t_start_fwd = perf_counter_ns()
                 with torch.autocast(
-                    str(device),
+                    str(cfg.device),
                     dtype=torch.float16 if not use_bf16 else torch.bfloat16,
                     enabled=cfg.use_amp,
                 ):
