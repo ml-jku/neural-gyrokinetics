@@ -136,6 +136,9 @@ def load_model_and_config(
 
     loaded_ckp = torch.load(ckp_path, map_location=device, weights_only=True)
     optimizer_state_dict = loaded_ckp["optimizer_state_dict"]
+    temp_key = list(loaded_ckp["model_state_dict"].keys())[0]
+    if temp_key.startswith("module."):
+        loaded_ckp["model_state_dict"] = { k.replace("module.", ""): v for k, v in loaded_ckp["model_state_dict"].items() }
     model.load_state_dict(loaded_ckp["model_state_dict"])
     resume_epoch = loaded_ckp["epoch"]
     resume_loss = loaded_ckp["loss"]

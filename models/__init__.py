@@ -16,7 +16,7 @@ def get_model(cfg, dataset):
         depth = cfg.model.swin.depth
         num_layers = cfg.model.num_layers
         gradient_checkpoint = cfg.model.swin.gradient_checkpoint
-        patching_hidden_ratio = cfg.model.swin.patching_hidden_ratio
+        patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
         c_multiplier = cfg.model.swin.c_multiplier
 
         cond_fn = None
@@ -49,7 +49,8 @@ def get_model(cfg, dataset):
             conv_patch=False,
             hidden_mlp_ratio=2.0,
             c_multiplier=c_multiplier,
-            patching_hidden_ratio=patching_hidden_ratio,
+            merging_hidden_ratio=patching_hidden_ratio,
+            unmerging_hidden_ratio=cfg.model.swin.unmerging_hidden_ratio,
             conditioning=cond_fn,
         )
 

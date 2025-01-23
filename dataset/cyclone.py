@@ -15,7 +15,6 @@ import random
 
 from utils import expand_as
 
-
 @dataclass
 class CycloneSample:
     x: torch.Tensor
@@ -135,7 +134,7 @@ class CycloneDataset(Dataset):
         # filter files based on conditioning
         if self.cond_filters:
             self.files = [f for f in self.files if self._conditioning_filter(f)]
-        
+
         if len(self.files) == 0:
             raise RuntimeError(f"No trajectories found! Active filters: {cond_filters}")
 
@@ -147,6 +146,8 @@ class CycloneDataset(Dataset):
         for file_idx, file_path in enumerate(self.files):
             # check for holdout samples
             filename = os.path.split(file_path)[-1]
+            if spatial_ifft:
+                filename = filename.replace("_ifft", "")
             n_tail_holdout = self.partial_holdouts.get(filename)
             with h5py.File(file_path, "r") as f:
                 # read the timesteps
@@ -186,6 +187,8 @@ class CycloneDataset(Dataset):
         if split == "val" and self.partial_holdouts:
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
+                if spatial_ifft:
+                    filename = filename.replace("_ifft", "")
                 n_tail_holdout = self.partial_holdouts.get(filename)
                 if n_tail_holdout:
                     self.offsets[file_idx] = (
@@ -199,6 +202,8 @@ class CycloneDataset(Dataset):
                 file_dict = {}
                 # check for holdout samples
                 filename = os.path.split(file)[-1]
+                if spatial_ifft:
+                    filename = filename.replace("_ifft", "")
                 n_tail_holdout = self.partial_holdouts.get(filename)
                 with h5py.File(file, "r") as f:
                     # read the timesteps and fluxes dataset
@@ -290,7 +295,6 @@ class CycloneDataset(Dataset):
             k = data[f"data/{k_name}"][:]
             # select only active re/im parts
             x.append(k[self.active_keys])
-        for i in range(self.bundle_seq_length):
             # read the gt output (next timestep)
             k_name_gt = "timestep_" + str(
                 original_t_index + self.bundle_seq_length + i

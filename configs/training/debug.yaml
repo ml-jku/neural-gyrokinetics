@@ -1,7 +1,7 @@
 batch_size: 2
 n_epochs: 100
 num_workers: 1
-pin_memory: true
+pin_memory: false
 learning_rate: 1e-3
 final_learning_rate: 1e-6
 weight_decay: 1e-5
@@ -9,9 +9,9 @@ predict_delta: false
 scheduler: "cosine"
 clip_grad: false
 pushforward:
-  epochs: [-1, 40, 70]
-  unrolls: [1, 2, 3]
-  probs: [10, 5, 5]
+  epochs: [-1, 100, 120, 140, 160, 180]
+  unrolls: [1, 2, 3, 5, 5, 10]
+  probs: [10, 10, 10, 5, 5, 5]
 
 pretraining: false
 pretraining_kwargs:

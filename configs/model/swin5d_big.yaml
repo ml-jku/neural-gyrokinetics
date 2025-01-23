@@ -9,5 +9,8 @@ swin:
   num_heads: [4, 8]
   depth: [4, 8]
   gradient_checkpoint: false
-  patching_hidden_ratio: 16.0
+  merging_hidden_ratio: 16.0
+  unmerging_hidden_ratio: 16.0
   timestep_conditioning: true
+  itg_conditioning: true
+  c_multiplier: 4

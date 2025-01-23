@@ -330,7 +330,8 @@ class SwinUnet(nn.Module):
         middle_num_heads: int = 8,
         hidden_mlp_ratio: float = 2.0,
         use_checkpoint: bool = False,
-        patching_hidden_ratio: float = 8.0,
+        merging_hidden_ratio: float = 8.0,
+        unmerging_hidden_ratio: float = 8.0,
         conditioning: Optional[nn.Module] = None,
         act_fn: nn.Module = nn.GELU,
         expand_act_fn: nn.Module = nn.LeakyReLU,
@@ -375,7 +376,7 @@ class SwinUnet(nn.Module):
             embed_dim=dim,
             flatten=False,
             use_conv=conv_patch,
-            mlp_ratio=patching_hidden_ratio,
+            mlp_ratio=merging_hidden_ratio,
             act_fn=act_fn,
         )
 
@@ -495,7 +496,7 @@ class SwinUnet(nn.Module):
             flatten=False,
             use_conv=conv_patch,
             norm_layer=None,
-            mlp_ratio=patching_hidden_ratio,
+            mlp_ratio=unmerging_hidden_ratio,
             act_fn=expand_act_fn,
         )
 

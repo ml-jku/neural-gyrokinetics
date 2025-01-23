@@ -13,6 +13,7 @@ def get_rollout(
     dataset: Dataset,
     predict_delta: bool = False,
     use_amp: bool = False,
+    device: str = "cuda",
 ) -> Callable:
     # correct step size by adding last bundle
     # n_steps_ = n_steps + bundle_steps - 1
@@ -69,11 +70,12 @@ def get_rollout(
             # move bundles forward, rollout in blocks
             for i in range(0, rollout_steps):
                 with torch.autocast(
-                    "cuda",
+                    device,
                     dtype=torch.float16 if not use_bf16 else torch.bfloat16,
                     enabled=use_amp,
                 ):
                     x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
+
                     if predict_delta:
                         x_p = xt + x_p
                     # update model input

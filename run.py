@@ -11,10 +11,11 @@ from collections import defaultdict
 from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group, is_initialized
+import numpy as np
 
 from dataset import get_data, CycloneSample
 from models import get_model
-from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
+from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder, pretrain_nextstep
 from eval import (
     get_rollout,
     validation_metrics,
@@ -159,7 +160,7 @@ def runner(rank, cfg, world_size):
 
                 t_start_fwd = perf_counter_ns()
                 with torch.autocast(
-                    cfg.device,
+                    str(device),
                     dtype=torch.float16 if not use_bf16 else torch.bfloat16,
                     enabled=cfg.use_amp,
                 ):
@@ -231,8 +232,7 @@ def runner(rank, cfg, world_size):
                     n_timesteps_count = torch.zeros(
                         [n_eval_steps * cfg.model.bundle_seq_length]
                     )
-
-                    if use_tqdm and not rank:
+                    if use_tqdm or (use_ddp and not rank):
                         valloader = tqdm(
                             valloader,
                             desc=(
@@ -258,6 +258,8 @@ def runner(rank, cfg, world_size):
                                 bundle_steps=cfg.model.bundle_seq_length,
                                 dataset=valset,
                                 predict_delta=cfg.training.predict_delta,
+                                device=str(device),
+                                use_amp=cfg.use_amp,
                             )(model, x, file_idx=file_idx, ts_index_0=ts_index, itg=itg)
 
                             # back to fourier for plotting
@@ -351,7 +353,7 @@ def runner(rank, cfg, world_size):
 
                 if cfg.ckpt_path is not None and not rank:
                     # Save model if validation loss improves
-                    loss_val_min = save_model_and_config(
+                    save_model_and_config(
                         model,
                         optimizer=opt,
                         cfg=cfg,
@@ -385,16 +387,14 @@ def runner(rank, cfg, world_size):
                 + info_dict["info/data_ms"]
                 + info_dict["info/pf_ms"]
             )
-            print(
-                f"Epoch: {epoch_str}, "
-                f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
-                f", epoch time: {total_time:.2f}ms"
-            )
+            if not rank:
+                print(
+                    f"Epoch: {epoch_str}, "
+                    f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
+                    f", epoch time: {total_time:.2f}ms"
+                )
         if writer:
             writer.finish()
 
     if cfg.mode == "rollout":
         raise NotImplementedError("TODO")
-
-    if is_initialized():
-        destroy_process_group()

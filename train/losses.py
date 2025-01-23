@@ -1,5 +1,5 @@
 from typing import List, Callable
-
+import warnings
 import torch
 from torch import nn
 import numpy as np
@@ -10,6 +10,7 @@ from torch.distributed import get_rank, is_initialized
 
 from concurrent.futures import ThreadPoolExecutor
 
+from utils import save_model_and_config
 from dataset.cyclone import CycloneDataset
 
 
@@ -105,6 +106,7 @@ def get_pushforward_trick(
                     enabled=use_amp,
                 ):
                     x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
+
                     if predict_delta:
                         x_p = xt + x_p
                     xt = x_p.clone().float()
@@ -155,6 +157,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
         )
 
     use_tqdm = cfg.logging.tqdm if not use_ddp else False
+    loss_val_min = torch.inf
     for epoch in range(1, cfg.training.pretraining_kwargs.n_epochs + 1):
         train_mse = 0
         if use_tqdm or (use_ddp and not rank):
@@ -230,13 +233,29 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                         }
                     )
 
+            if cfg.ckpt_path is not None and is_main_proc:
+                # Save model if validation loss improves
+                save_model_and_config(
+                    model,
+                    optimizer=opt,
+                    cfg=cfg,
+                    epoch=epoch,
+                    # TODO decide target metric
+                    val_loss=val_mse,
+                    loss_val_min=loss_val_min,
+                )
+            else:
+                warnings.warn(
+                    "`cfg.ckpt_path` is not set: checkpoints will not be stored"
+                )
+
         epoch_str = str(epoch).zfill(
             len(str(int(cfg.training.pretraining_kwargs.n_epochs)))
         )
-        print(
-            f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
-        )
         if is_main_proc and writer:
+            print(
+                f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
+            )
             writer.log(
                 {
                     "pretrain/train_relative_norm_mse": train_mse,

@@ -96,6 +96,7 @@ def get_data(cfg):
                 split="val",
                 random_seed=cfg.seed,
                 normalization=cfg.dataset.normalization,
+                normalization_scope=cfg.dataset.normalization_scope,
                 spatial_ifft=cfg.dataset.spatial_ifft,
                 in_memory=cfg.dataset.in_memory,
                 bundle_seq_length=cfg.model.bundle_seq_length,

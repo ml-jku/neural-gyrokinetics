@@ -2,7 +2,6 @@ from datetime import datetime
 import gc
 import os
 import os.path as osp
-import uuid
 import sys
 import traceback
 import torch.multiprocessing as mp
@@ -28,10 +27,17 @@ def main(config: DictConfig):
     print("#" * 88, "\n")
 
     dict_config = OmegaConf.to_container(config)
+    date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
     if config.output_path is None:
-        dir = str(uuid.uuid4()).split("-")[0]
-        dict_config["output_path"] = osp.join("outputs", dir)
-    dict_config["ckpt_path"] = osp.join("outputs", dir)
+        dict_config["output_path"] = osp.join(
+            "outputs", date_and_time
+        )
+    else:
+        dict_config["output_path"] = osp.join(
+            dict_config["output_path"], date_and_time
+        )
+
+    dict_config["ckpt_path"] = dict_config["output_path"]
     config = OmegaConf.create(dict_config)
 
     if not os.path.exists(config.output_path):
@@ -46,11 +52,10 @@ def main(config: DictConfig):
 
     try:
         if dict_config["logging"]["run_id"] is None:
-            data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
             print(dict_config["model"]["name"])
             dict_config["logging"][
                 "run_id"
-            ] = f"{dict_config['model']['name']}_{data_and_time}"
+            ] = f"{dict_config['model']['name']}_{date_and_time}"
             config = OmegaConf.create(dict_config)
 
         if config.use_ddp and world_size > 1:
