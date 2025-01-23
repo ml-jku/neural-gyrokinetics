@@ -10,12 +10,11 @@ from time import perf_counter_ns
 from collections import defaultdict
 from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group, destroy_process_group, is_initialized
-import numpy as np
+from torch.distributed import init_process_group
 
 from dataset import get_data, CycloneSample
 from models import get_model
-from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder, pretrain_nextstep
+from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
 from eval import (
     get_rollout,
     validation_metrics,
