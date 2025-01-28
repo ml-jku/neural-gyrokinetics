@@ -172,16 +172,6 @@ class CycloneDataset(Dataset):
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
 
-        # create mapping from from file and ts index to flat index and vice versa
-        self.flat_index_to_file_and_tstep = {}
-        self.file_and_tstep_to_flat_index = {}
-        for file_idx in range(len(self.files)):
-            idxs_before = self.cumulative_samples[file_idx]
-            for tstep_idx in range(self.file_num_samples[file_idx]):
-                flat_idx = idxs_before + tstep_idx
-                self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, tstep_idx)
-                self.file_and_tstep_to_flat_index[(file_idx, tstep_idx)] = flat_idx
-
         self.offsets = [0 for _ in range(len(self.files))]
         # calculate offsets if we are in a partial holdout validation dataset
         if split == "val" and self.partial_holdouts:
@@ -194,6 +184,16 @@ class CycloneDataset(Dataset):
                     self.offsets[file_idx] = (
                         self.steps_per_file[file_idx] - n_tail_holdout
                     )
+
+        # create mapping from from file and ts index to flat index and vice versa
+        self.flat_index_to_file_and_tstep = {}
+        self.file_and_tstep_to_flat_index = {}
+        for file_idx in range(len(self.files)):
+            idxs_before = self.cumulative_samples[file_idx]
+            for tstep_idx in range(self.file_num_samples[file_idx]):
+                flat_idx = idxs_before + tstep_idx
+                self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, tstep_idx)
+                self.file_and_tstep_to_flat_index[(file_idx, tstep_idx)] = flat_idx
 
         if self.in_memory:
             # load all timesteps into a dict of dicts
@@ -326,7 +326,7 @@ class CycloneDataset(Dataset):
         # stack to shape (x, s, y)
         sample["gt_poten"] = np.stack(gt_poten, axis=0)
         sample["gt_flux"] = np.array(gt_flux).squeeze()
-        sample["timestep"] = data["metadata/timesteps"][t_index]
+        sample["timestep"] = data["metadata/timesteps"][original_t_index]
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
         return sample
 
