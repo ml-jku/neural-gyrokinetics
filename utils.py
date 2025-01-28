@@ -182,3 +182,34 @@ def expand_as(src: np.ndarray, tgt: np.ndarray):
     while src.ndim < tgt.ndim:
         src = np.expand_dims(src, axis=-1)
     return src
+
+
+def split_batch_into_phases(phase_change, x, y, ts, itg, file_idx, ts_index):
+    split_idx = torch.searchsorted(ts, phase_change, right=False)
+    if split_idx == ts.shape[0]:
+        # whole batch in linear
+        x_list = [x]
+        y_list = [y]
+        ts_list = [ts]
+        itg_list = [itg]
+        file_idx_list = [file_idx]
+        ts_index_list = [ts_index]
+        phase_list = ["linear"]
+    elif split_idx == 0:
+        # whole batch in saturated phase
+        x_list = [x]
+        y_list = [y]
+        ts_list = [ts]
+        itg_list = [itg]
+        file_idx_list = [file_idx]
+        ts_index_list = [ts_index]
+        phase_list = ["saturated"]
+    else:
+        x_list = [x[:split_idx], x[split_idx:]]
+        y_list = [y[:split_idx], y[split_idx:]]
+        ts_list = [ts[:split_idx], ts[split_idx:]]
+        itg_list = [itg[:split_idx], itg[split_idx:]]
+        file_idx_list = [file_idx[:split_idx], file_idx[split_idx:]]
+        ts_index_list = [ts_index[:split_idx], ts_index[split_idx:]]
+        phase_list = ["linear", "saturated"]
+    return x_list, y_list, ts_list, itg_list, file_idx_list, ts_index_list, phase_list

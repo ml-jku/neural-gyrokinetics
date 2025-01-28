@@ -21,7 +21,7 @@ from eval import (
     generate_val_plots,
     to_fourier,
 )
-from utils import load_model_and_config, save_model_and_config, setup_logging
+from utils import load_model_and_config, save_model_and_config, setup_logging, split_batch_into_phases
 
 
 def ddp_setup(rank, world_size):
@@ -128,8 +128,6 @@ def runner(rank, cfg, world_size):
             if use_tqdm or (use_ddp and not rank):
                 trainloader = tqdm(trainloader, "Training")
             for i, sample in enumerate(trainloader):
-                # if i > 0:
-                #     break
                 reset_peak_memory_stats(device)
                 sample: CycloneSample
                 x = sample.x.to(device, non_blocking=True)
@@ -212,8 +210,6 @@ def runner(rank, cfg, world_size):
                     valname = (
                         "holdout_trajectories" if val_idx == 0 else "holdout_samples"
                     )
-                    # if val_idx == 0:
-                    #     continue
                     # TODO configurable metric list
                     metric_fn_list = {
                         "relative_norm_mse": partial(
@@ -222,15 +218,26 @@ def runner(rank, cfg, world_size):
                         # TODO: add more useful metrics
                     }
                     n_eval_steps = cfg.validation.n_eval_steps
-                    metrics = torch.zeros(
+                    metrics_linear = torch.zeros(
                         [
                             len(metric_fn_list),
                             n_eval_steps * cfg.model.bundle_seq_length,
                         ]
                     )  # shape [n_metrics, n_timesteps]
-                    n_timesteps_count = torch.zeros(
+                    n_timesteps_count_linear = torch.zeros(
                         [n_eval_steps * cfg.model.bundle_seq_length]
                     )
+                    metrics_saturated = torch.zeros(
+                        [
+                            len(metric_fn_list),
+                            n_eval_steps * cfg.model.bundle_seq_length,
+                        ]
+                    )  # shape [n_metrics, n_timesteps]
+                    n_timesteps_count_saturated = torch.zeros(
+                        [n_eval_steps * cfg.model.bundle_seq_length]
+                    )
+                    metrics = {"linear": metrics_linear, "saturated": metrics_saturated}
+                    n_timesteps_count = {"linear": n_timesteps_count_linear, "saturated":n_timesteps_count_saturated}
                     if use_tqdm or (use_ddp and not rank):
                         valloader = tqdm(
                             valloader,
@@ -250,117 +257,140 @@ def runner(rank, cfg, world_size):
                             file_idx = sample.file_index.to(device)
                             ts_index = sample.timestep_index.to(device)
 
-                            # get the rolled out validation trajectories
-                            x_rollout = get_rollout(
-                                problem_dim=len(active_keys),
-                                n_steps=n_eval_steps,
-                                bundle_steps=cfg.model.bundle_seq_length,
-                                dataset=valset,
-                                predict_delta=cfg.training.predict_delta,
-                                device=str(device),
-                                use_amp=cfg.use_amp,
-                            )(model, x, file_idx=file_idx, ts_index_0=ts_index, itg=itg)
+                            # TODO: dont hardcode this
+                            phase_change = 24
+                            x_list, y_list, ts_list, itg_list, file_idx_list, ts_index_list, phase_list = split_batch_into_phases(phase_change, x, y, ts, itg, file_idx, ts_index)
 
-                            # back to fourier for plotting
-                            if cfg.dataset.spatial_ifft and cfg.dataset.in_memory:
-                                # TODO move somewhere else
-                                x_rollout, y = to_fourier(x_rollout, y)
+                            # Iterate over the splits
+                            for i in range(len(x_list)):
+                                x = x_list[i]
+                                y = y_list[i]
+                                ts = ts_list[i]
+                                itg = itg_list[i]
+                                file_idx = file_idx_list[i]
+                                ts_index = ts_index_list[i]
+                                phase = phase_list[i]
 
-                            # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
-                            # metrics tensor will have shape [number_of_metrics, n_timesteps]
-                            metrics_i = validation_metrics(
-                                x_rollout,
-                                file_idx,
-                                ts_index,
-                                cfg.model.bundle_seq_length,
-                                valset,
-                                metric_fn_list,
-                            )
+                                # get the rolled out validation trajectories
+                                x_rollout = get_rollout(
+                                    problem_dim=len(active_keys),
+                                    n_steps=n_eval_steps,
+                                    bundle_steps=cfg.model.bundle_seq_length,
+                                    dataset=valset,
+                                    predict_delta=cfg.training.predict_delta,
+                                    device=str(device),
+                                    use_amp=cfg.use_amp,
+                                )(model, x, file_idx=file_idx, ts_index_0=ts_index, itg=itg)
 
-                            if (
-                                metrics_i.shape[-1]
-                                < n_eval_steps * cfg.model.bundle_seq_length
-                            ):
-                                # reached end of dataset at some point so we need to pad the tensor
-                                diff = (
-                                    n_eval_steps * cfg.model.bundle_seq_length
-                                    - metrics_i.shape[-1]
+                                # back to fourier for plotting
+                                if cfg.dataset.spatial_ifft and cfg.dataset.in_memory:
+                                    # TODO move somewhere else
+                                    x_rollout, y = to_fourier(x_rollout, y)
+
+                                # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
+                                # metrics tensor will have shape [number_of_metrics, n_timesteps]
+                                metrics_i = validation_metrics(
+                                    x_rollout,
+                                    file_idx,
+                                    ts_index,
+                                    cfg.model.bundle_seq_length,
+                                    valset,
+                                    metric_fn_list,
                                 )
-                                metrics_i = torch.cat(
-                                    [
-                                        metrics_i,
-                                        torch.zeros(
-                                            [metrics_i.shape[0], diff],
-                                            dtype=metrics_i.dtype,
-                                        ),
-                                    ],
-                                    dim=-1,
-                                )
-                                metrics += metrics_i
-                                validated_steps = (
-                                    torch.arange(
-                                        1,
-                                        n_eval_steps * cfg.model.bundle_seq_length + 1,
+
+                                if (
+                                    metrics_i.shape[-1]
+                                    < n_eval_steps * cfg.model.bundle_seq_length
+                                ):
+                                    # reached end of dataset at some point so we need to pad the tensor
+                                    diff = (
+                                        n_eval_steps * cfg.model.bundle_seq_length
+                                        - metrics_i.shape[-1]
                                     )
-                                    <= metrics_i.shape[-1]
-                                )
-                                validated_steps = validated_steps.to(
-                                    dtype=metrics_i.dtype
-                                )
-                            else:
-                                metrics += metrics_i
-                                validated_steps = torch.ones(
-                                    [n_eval_steps * cfg.model.bundle_seq_length]
-                                )
-                            n_timesteps_count += (
-                                validated_steps  # shape: [n_eval_steps]
-                            )
-
-                            if val_idx == 0:
-                                # holdout trajectories valset
-                                if idx in [0, 5]:
-                                    generate_val_plots(
-                                        x_rollout=x_rollout,
-                                        y=y,
-                                        ts=ts,
-                                        phase=(
-                                            "Linear Phase"
-                                            if idx == 0
-                                            else "Saturated Phase"
-                                        ),
-                                        val_plots=val_plots,
+                                    metrics_i = torch.cat(
+                                        [
+                                            metrics_i,
+                                            torch.zeros(
+                                                [metrics_i.shape[0], diff],
+                                                dtype=metrics_i.dtype,
+                                            ),
+                                        ],
+                                        dim=-1,
                                     )
-                            else:
-                                # holdout samples valset
-                                if idx == 0:
-                                    generate_val_plots(
-                                        x_rollout=x_rollout,
-                                        y=y,
-                                        ts=ts,
-                                        phase="Holdout samples",
-                                        val_plots=val_plots,
+                                    metrics[phase] += metrics_i
+                                    validated_steps = (
+                                        torch.arange(
+                                            1,
+                                            n_eval_steps * cfg.model.bundle_seq_length + 1,
+                                        )
+                                        <= metrics_i.shape[-1]
                                     )
+                                    validated_steps = validated_steps.to(
+                                        dtype=metrics_i.dtype
+                                    )
+                                else:
+                                    metrics[phase] += metrics_i
+                                    validated_steps = torch.ones(
+                                        [n_eval_steps * cfg.model.bundle_seq_length]
+                                    )
+                                n_timesteps_count[phase] += (
+                                    validated_steps  # shape: [n_eval_steps]
+                                )
 
-                    metrics = metrics / n_timesteps_count.unsqueeze(0)
+                                if val_idx == 0:
+                                    # holdout trajectories valset
+                                    if idx in [0, 20]:
+                                        generate_val_plots(
+                                            x_rollout=x_rollout,
+                                            y=y,
+                                            ts=ts,
+                                            phase=(
+                                                "Linear Phase"
+                                                if idx == 0
+                                                else "Saturated Phase"
+                                            ),
+                                            val_plots=val_plots,
+                                        )
+                                else:
+                                    # holdout samples valset
+                                    if idx == 0:
+                                        generate_val_plots(
+                                            x_rollout=x_rollout,
+                                            y=y,
+                                            ts=ts,
+                                            phase="Holdout samples",
+                                            val_plots=val_plots,
+                                        )
+
+                    for key in metrics.keys():
+                        metrics[key] = metrics[key] / n_timesteps_count[key].unsqueeze(0)
 
                     for idx, metric_name in enumerate(metric_fn_list):
-                        vals = metrics[idx, ...]
-                        for t in range(n_eval_steps * cfg.model.bundle_seq_length):
-                            log_metric_dict[
-                                f"val_{valname}/" + metric_name + f"x{t + 1}"
-                            ] = vals[t]
+                        for phase, metric in metrics.items():
+                            vals = metric[idx, ...]
+                            for t in range(n_eval_steps * cfg.model.bundle_seq_length):
+                                log_metric_dict[
+                                    f"val_{valname}/" + metric_name + "_" + phase + "_" + f"x{t + 1}"
+                                ] = vals[t]
+                    
+                    if val_idx == 0:
+                        # trajectoy validation
+                        n_timesteps_count_model_saving = n_timesteps_count
 
                 if cfg.ckpt_path is not None and not rank:
-                    # Save model if validation loss improves
-                    save_model_and_config(
+                    # Save model if validation loss on trajectories improves
+                    val_loss = (log_metric_dict[
+                            "val_holdout_trajectories/relative_norm_mse_saturated_x1"
+                        ] * n_timesteps_count_model_saving["saturated"] + log_metric_dict[
+                            "val_holdout_trajectories/relative_norm_mse_linear_x1"
+                        ] * n_timesteps_count_model_saving["linear"]) / (n_timesteps_count_model_saving["saturated"] + n_timesteps_count_model_saving["linear"])
+                    loss_val_min = save_model_and_config(
                         model,
                         optimizer=opt,
                         cfg=cfg,
                         epoch=epoch,
                         # TODO decide target metric
-                        val_loss=log_metric_dict[
-                            "val_holdout_trajectories/relative_norm_msex1"
-                        ],  # current metric only on hold out trajectories (not holdout samples)
+                        val_loss=val_loss,
                         loss_val_min=loss_val_min,
                     )
                 else:
