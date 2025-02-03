@@ -15,12 +15,7 @@ from torch.distributed import init_process_group
 from dataset import get_data, CycloneSample
 from models import get_model
 from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
-from eval import (
-    get_rollout,
-    validation_metrics,
-    generate_val_plots,
-    to_fourier,
-)
+from eval import get_rollout, validation_metrics, generate_val_plots
 from utils import load_model_and_config, save_model_and_config, setup_logging, split_batch_into_phases
 
 
@@ -281,11 +276,6 @@ def runner(rank, cfg, world_size):
                                     device=str(device),
                                     use_amp=cfg.use_amp,
                                 )(model, x, file_idx=file_idx, ts_index_0=ts_index, itg=itg)
-
-                                # back to fourier for plotting
-                                if cfg.dataset.spatial_ifft and cfg.dataset.in_memory:
-                                    # TODO move somewhere else
-                                    x_rollout, y = to_fourier(x_rollout, y)
 
                                 # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
                                 # metrics tensor will have shape [number_of_metrics, n_timesteps]

@@ -17,7 +17,9 @@ def get_model(cfg, dataset):
         num_layers = cfg.model.num_layers
         gradient_checkpoint = cfg.model.swin.gradient_checkpoint
         patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
+        unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
         c_multiplier = cfg.model.swin.c_multiplier
+        abs_pe = cfg.model.swin.abs_pe
 
         cond_fn = None
         n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
@@ -45,12 +47,12 @@ def get_model(cfg, dataset):
             num_layers=num_layers,
             use_checkpoint=gradient_checkpoint,
             drop_path=0.1,
-            abs_pe=False,
+            abs_pe=abs_pe,
             conv_patch=False,
             hidden_mlp_ratio=2.0,
             c_multiplier=c_multiplier,
             merging_hidden_ratio=patching_hidden_ratio,
-            unmerging_hidden_ratio=cfg.model.swin.unmerging_hidden_ratio,
+            unmerging_hidden_ratio=unmerging_hidden_ratio,
             conditioning=cond_fn,
         )
 
