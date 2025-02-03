@@ -4,12 +4,14 @@ latent_dim: 128
 num_layers: 2
 
 swin:
-  patch_size: [ 4, 2, 4, 8, 4 ]
-  window_size: [ 4, 2, 2, 8, 4 ]
-  num_heads: [2, 8]
+  patch_size: [ 4, 2, 2, 8, 4 ]
+  window_size: [ 4, 2, 4, 16, 4 ]
+  num_heads: [4, 8]
   depth: [2, 2]
-  c_multiplier: 2
+  c_multiplier: 4
   gradient_checkpoint: false
-  patching_hidden_ratio: 12.0
+  merging_hidden_ratio: 6.0
+  unmerging_hidden_ratio: 6.0
   timestep_conditioning: true
-  itg_conditioning: true
+  itg_conditioning: false
+  abs_pe: false

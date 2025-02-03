@@ -1,17 +1,15 @@
 name: cyclone
-path: /system/user/publicdata/gyrokinetics/preprocessed
+path: /local00/bioinf/gyrokinetics/preprocessed
 normalization: zscore
 normalization_scope: sample
 spatial_ifft: true
-in_memory: true
+in_memory: false
 active_keys: ["re", "im"]
-training_trajectories: ["cyclone6_2.h5", "cyclone7_2.h5", "cyclone8_2.h5"]
-validation_trajectories: ["cyclone5_2.h5"]
+training_trajectories: ["cyclone5_2.h5", "cyclone6_2.h5", "cyclone7_2.h5", "cyclone9_2.h5", "cyclone10_2.h5", "cyclone12_2.h5"]
+validation_trajectories: ["cyclone4_2_2.h5"]
 partial_holdouts:
-- trajectory: "cyclone6_2.h5"
-  last_n: 10
 - trajectory: "cyclone7_2.h5"
-  last_n: 20
+  last_n: 10
 training_cond_filters:
 eval_cond_filters:
 
