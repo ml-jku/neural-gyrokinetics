@@ -295,7 +295,7 @@ class WindowAttention(nn.Module):
         # x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=self.attn_drop)
 
         # swinv2 cosine similarity attention
-        attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
+        attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
         logit_scale = torch.clamp(self.logit_scale, max=self.max_logits).exp()
         attn = attn * logit_scale
         attn = attn + rpb

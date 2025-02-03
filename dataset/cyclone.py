@@ -15,6 +15,7 @@ import random
 
 from utils import expand_as
 
+
 @dataclass
 class CycloneSample:
     x: torch.Tensor

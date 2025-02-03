@@ -29,13 +29,9 @@ def main(config: DictConfig):
     dict_config = OmegaConf.to_container(config)
     date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
     if config.output_path is None:
-        dict_config["output_path"] = osp.join(
-            "outputs", date_and_time
-        )
+        dict_config["output_path"] = osp.join("outputs", date_and_time)
     else:
-        dict_config["output_path"] = osp.join(
-            dict_config["output_path"], date_and_time
-        )
+        dict_config["output_path"] = osp.join(dict_config["output_path"], date_and_time)
 
     dict_config["ckpt_path"] = dict_config["output_path"]
     config = OmegaConf.create(dict_config)
