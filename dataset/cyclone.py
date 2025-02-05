@@ -15,6 +15,7 @@ import random
 
 from utils import expand_as
 
+
 @dataclass
 class CycloneSample:
     x: torch.Tensor
@@ -372,7 +373,6 @@ class CycloneDataset(Dataset):
         self,
         file_idx: torch.Tensor,
         timestep_idx: torch.Tensor,
-        to_fourier: bool = False,
     ):
         # Compute the flat indices from the file indices and time indices
         updated_index = [
@@ -380,22 +380,6 @@ class CycloneDataset(Dataset):
             for i in zip(file_idx.tolist(), timestep_idx.tolist())
         ]
         sample = self.collate([self.__getitem__(idx) for idx in updated_index])
-        # TODO move somewhere else?
-        if self.spatial_ifft and to_fourier:
-            if sample.y.ndim == 8:
-                sample.y = rearrange(sample.y, "t b c ... -> c t b ...")
-            else:
-                sample.y = rearrange(sample.y, "b c ... -> c b ...")
-
-            sample.y = torch.complex(real=sample.y[0], imag=sample.y[1])
-            sample.y = torch.fft.fftn(sample.y, dim=(-2, -1))
-            sample.y = torch.stack([sample.y.real, sample.y.imag])
-
-            if sample.y.ndim == 8:
-                sample.y = rearrange(sample.y, "c t b ... -> t b c ...")
-            else:
-                sample.y = rearrange(sample.y, "c b ... -> b c ...")
-
         return sample
 
     def get_timesteps(

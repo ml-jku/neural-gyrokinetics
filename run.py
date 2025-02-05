@@ -15,13 +15,13 @@ from torch.distributed import init_process_group
 from dataset import get_data, CycloneSample
 from models import get_model
 from train import get_pushforward_trick, relative_norm_mse, pretrain_autoencoder
-from eval import (
-    get_rollout,
-    validation_metrics,
-    generate_val_plots,
-    to_fourier,
+from eval import get_rollout, validation_metrics, generate_val_plots
+from utils import (
+    load_model_and_config,
+    save_model_and_config,
+    setup_logging,
+    split_batch_into_phases,
 )
-from utils import load_model_and_config, save_model_and_config, setup_logging, split_batch_into_phases
 
 
 def ddp_setup(rank, world_size):
@@ -237,7 +237,10 @@ def runner(rank, cfg, world_size):
                         [n_eval_steps * cfg.model.bundle_seq_length]
                     )
                     metrics = {"linear": metrics_linear, "saturated": metrics_saturated}
-                    n_timesteps_count = {"linear": n_timesteps_count_linear, "saturated":n_timesteps_count_saturated}
+                    n_timesteps_count = {
+                        "linear": n_timesteps_count_linear,
+                        "saturated": n_timesteps_count_saturated,
+                    }
                     if use_tqdm or (use_ddp and not rank):
                         valloader = tqdm(
                             valloader,
@@ -259,7 +262,17 @@ def runner(rank, cfg, world_size):
 
                             # TODO: dont hardcode this
                             phase_change = 24
-                            x_list, y_list, ts_list, itg_list, file_idx_list, ts_index_list, phase_list = split_batch_into_phases(phase_change, x, y, ts, itg, file_idx, ts_index)
+                            (
+                                x_list,
+                                y_list,
+                                ts_list,
+                                itg_list,
+                                file_idx_list,
+                                ts_index_list,
+                                phase_list,
+                            ) = split_batch_into_phases(
+                                phase_change, x, y, ts, itg, file_idx, ts_index
+                            )
 
                             # Iterate over the splits
                             for i in range(len(x_list)):
@@ -280,12 +293,13 @@ def runner(rank, cfg, world_size):
                                     predict_delta=cfg.training.predict_delta,
                                     device=str(device),
                                     use_amp=cfg.use_amp,
-                                )(model, x, file_idx=file_idx, ts_index_0=ts_index, itg=itg)
-
-                                # back to fourier for plotting
-                                if cfg.dataset.spatial_ifft and cfg.dataset.in_memory:
-                                    # TODO move somewhere else
-                                    x_rollout, y = to_fourier(x_rollout, y)
+                                )(
+                                    model,
+                                    x,
+                                    file_idx=file_idx,
+                                    ts_index_0=ts_index,
+                                    itg=itg,
+                                )
 
                                 # TODO: make smarter (i.e. use timeindex when we output a dataclass from the dataset)
                                 # metrics tensor will have shape [number_of_metrics, n_timesteps]
@@ -321,7 +335,8 @@ def runner(rank, cfg, world_size):
                                     validated_steps = (
                                         torch.arange(
                                             1,
-                                            n_eval_steps * cfg.model.bundle_seq_length + 1,
+                                            n_eval_steps * cfg.model.bundle_seq_length
+                                            + 1,
                                         )
                                         <= metrics_i.shape[-1]
                                     )
@@ -333,9 +348,9 @@ def runner(rank, cfg, world_size):
                                     validated_steps = torch.ones(
                                         [n_eval_steps * cfg.model.bundle_seq_length]
                                     )
-                                n_timesteps_count[phase] += (
-                                    validated_steps  # shape: [n_eval_steps]
-                                )
+                                n_timesteps_count[
+                                    phase
+                                ] += validated_steps  # shape: [n_eval_steps]
 
                                 if val_idx == 0:
                                     # holdout trajectories valset
@@ -363,27 +378,42 @@ def runner(rank, cfg, world_size):
                                         )
 
                     for key in metrics.keys():
-                        metrics[key] = metrics[key] / n_timesteps_count[key].unsqueeze(0)
+                        metrics[key] = metrics[key] / n_timesteps_count[key].unsqueeze(
+                            0
+                        )
 
                     for idx, metric_name in enumerate(metric_fn_list):
                         for phase, metric in metrics.items():
                             vals = metric[idx, ...]
                             for t in range(n_eval_steps * cfg.model.bundle_seq_length):
                                 log_metric_dict[
-                                    f"val_{valname}/" + metric_name + "_" + phase + "_" + f"x{t + 1}"
+                                    f"val_{valname}/"
+                                    + metric_name
+                                    + "_"
+                                    + phase
+                                    + "_"
+                                    + f"x{t + 1}"
                                 ] = vals[t]
-                    
+
                     if val_idx == 0:
                         # trajectoy validation
                         n_timesteps_count_model_saving = n_timesteps_count
 
                 if cfg.ckpt_path is not None and not rank:
                     # Save model if validation loss on trajectories improves
-                    val_loss = (log_metric_dict[
+                    val_loss = (
+                        log_metric_dict[
                             "val_holdout_trajectories/relative_norm_mse_saturated_x1"
-                        ] * n_timesteps_count_model_saving["saturated"] + log_metric_dict[
+                        ]
+                        * n_timesteps_count_model_saving["saturated"]
+                        + log_metric_dict[
                             "val_holdout_trajectories/relative_norm_mse_linear_x1"
-                        ] * n_timesteps_count_model_saving["linear"]) / (n_timesteps_count_model_saving["saturated"] + n_timesteps_count_model_saving["linear"])
+                        ]
+                        * n_timesteps_count_model_saving["linear"]
+                    ) / (
+                        n_timesteps_count_model_saving["saturated"]
+                        + n_timesteps_count_model_saving["linear"]
+                    )
                     loss_val_min = save_model_and_config(
                         model,
                         optimizer=opt,

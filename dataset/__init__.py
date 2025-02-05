@@ -24,7 +24,7 @@ def get_data(cfg):
         augmentations.append(
             noise_transform(
                 std=cfg.dataset.augment.noise_std,
-                window_size=cfg.model.input_seq_length,
+                window_size=cfg.model.bundle_seq_length,
             )
         )
 

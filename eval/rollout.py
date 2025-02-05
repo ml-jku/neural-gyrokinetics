@@ -110,9 +110,7 @@ def validation_metrics(
     if bundle_steps == 1:
         y = torch.stack(
             [
-                dataset.get_at_time(
-                    file_idx.long(), (ts_index + t).long(), to_fourier=True
-                ).y
+                dataset.get_at_time(file_idx.long(), (ts_index + t).long()).y
                 for t in range(0, n_steps, bundle_steps)
             ],
             dim=0,
@@ -120,9 +118,7 @@ def validation_metrics(
     else:
         y = torch.concat(
             [
-                dataset.get_at_time(
-                    file_idx.long(), (ts_index + t).long, to_fourier=True
-                ).y
+                dataset.get_at_time(file_idx.long(), (ts_index + t).long).y
                 for t in range(0, n_steps, bundle_steps)
             ],
             dim=2,
