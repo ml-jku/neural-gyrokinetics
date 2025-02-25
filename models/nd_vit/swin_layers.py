@@ -227,10 +227,10 @@ class WindowAttention(nn.Module):
 
         self.register_buffer("rpb_idx", dists.sum(0))
 
-        # for swinv2 cosine similarity attention
-        self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))))
-        self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
-        self.attn_drop = nn.Dropout(attn_drop)
+        # # for swinv2 cosine similarity attention
+        # self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))))
+        # self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
+        # self.attn_drop = nn.Dropout(attn_drop)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
@@ -283,29 +283,29 @@ class WindowAttention(nn.Module):
 
         rpb = rearrange(rpb, "slx sly h -> h slx sly").unsqueeze(0).contiguous()
 
-        # # swinv1 normal sdpa attention
-        # if mask is not None:
-        #     mask = mask.unsqueeze(1)  # head dimension
-        #     # TODO with broadcasting
-        #     mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)
-        # # q = q * (self.head_dim**-0.5)
-        # # TODO find better way to add rpb -> easy OOM here!
-        # mask = mask + rpb if mask is not None else rpb
-        # # with nn.attention.sdpa_kernel(nn.attention.SDPBackend.CUDNN_ATTENTION):
-        # x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=self.attn_drop)
-
-        # swinv2 cosine similarity attention
-        attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
-        logit_scale = torch.clamp(self.logit_scale, max=self.max_logits).exp()
-        attn = attn * logit_scale
-        attn = attn + rpb
+        # swinv1 normal sdpa attention
         if mask is not None:
             mask = mask.unsqueeze(1)  # head dimension
-            # TODO do with broadcasting
-            mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)  # batch dimension
-            attn = attn + mask
-        attn = self.attn_drop(F.softmax(attn, dim=-1))
-        x = attn @ v
+            # TODO with broadcasting
+            mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)
+        # q = q * (self.head_dim**-0.5)
+        # TODO find better way to add rpb -> easy OOM here!
+        mask = mask + rpb if mask is not None else rpb
+        # with nn.attention.sdpa_kernel(nn.attention.SDPBackend.CUDNN_ATTENTION):
+        x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=self.attn_drop)
+
+        # # swinv2 cosine similarity attention
+        # attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
+        # logit_scale = torch.clamp(self.logit_scale, max=self.max_logits).exp()
+        # attn = attn * logit_scale
+        # attn = attn + rpb
+        # if mask is not None:
+        #     mask = mask.unsqueeze(1)  # head dimension
+        #     # TODO do with broadcasting
+        #     mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)  # batch dimension
+        #     attn = attn + mask
+        # attn = self.attn_drop(F.softmax(attn, dim=-1))
+        # x = attn @ v
 
         # attention readout
         x = rearrange(x, "b k n c -> b n (k c)")
@@ -355,6 +355,7 @@ class SwinTransformerBlock(nn.Module):
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
+        pre_ln: bool = True
     ) -> None:
 
         super().__init__()
@@ -363,6 +364,7 @@ class SwinTransformerBlock(nn.Module):
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.use_checkpoint = use_checkpoint
+        self.pre_ln = pre_ln
 
         self.window_size, self.shift_size = get_window_size(
             grid_size, window_size, shift_size
@@ -404,7 +406,8 @@ class SwinTransformerBlock(nn.Module):
     def forward_part1(self, x, mask_matrix):
         grid_size = x.shape[1:-1]
         # swinv1 attention norm
-        # x = self.norm1(x)
+        if self.pre_ln:
+            x = self.norm1(x)
 
         # TODO check if padding is needed and replace with pad_to_blocks
         x, pad_axes = pad_to_blocks(x, self.window_size)
@@ -437,14 +440,18 @@ class SwinTransformerBlock(nn.Module):
         x = unpad(x, pad_axes, grid_size)
 
         # NOTE swinv2 attention norm
-        x = self.norm1(x)
+        if not self.pre_ln:
+            x = self.norm1(x)
         return x
 
     def forward_part2(self, x):
         # swinv1 mlp norm
-        # x = self.drop_path(self.mlp(self.norm2(x)))
+        if self.pre_ln:
+            x = self.drop_path(self.mlp(self.norm2(x)))
+        else:
+            x = self.norm2(self.drop_path(self.mlp(x)))
         # NOTE swinv2 mlp norm
-        x = self.drop_path(self.norm2(self.mlp(x)))
+        # x = self.drop_path(self.norm2(self.mlp(x)))
         return x
 
     def forward(self, x, mask_matrix):
@@ -505,6 +512,7 @@ class SwinLayer(nn.Module):
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
+        pre_ln: bool = True
     ) -> None:
 
         super().__init__()
@@ -543,6 +551,7 @@ class SwinLayer(nn.Module):
                     norm_layer=norm_layer,
                     use_checkpoint=use_checkpoint,
                     act_fn=act_fn,
+                    pre_ln=pre_ln,
                 )
                 for i in range(depth)
             ]

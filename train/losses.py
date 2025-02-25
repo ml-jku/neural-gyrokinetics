@@ -55,6 +55,9 @@ def get_pushforward_trick(
     ) -> List[float]:
         # pushforward scheduler with epoch
         idx = (epoch > np.array(schedule)).sum()
+        if not idx:
+            return x, ts, y
+
         # sample number of steps
         curr_probs = [p / sum(probs[:idx]) for p in probs[:idx]]
         unroll_steps = np.random.choice(unrolls[:idx], p=curr_probs)
@@ -73,18 +76,12 @@ def get_pushforward_trick(
         if unroll_steps < 2:
             return x, ts, y
 
-        # get timesteps for unrolling
-        ts_idxs = [
-            [
-                i
-                for i in range(
-                    int(ts_idx_start),
-                    int(ts_idx_start) + unroll_steps * bundle_steps,
-                    bundle_steps,
-                )
-            ]
-            for ts_idx_start in ts_idx.tolist()
-        ]
+        # get corresponding timesteps
+        ts_idxs = [[i for i in range(int(ts_idx_start) * dataset.subsample,
+                                     int(ts_idx_start) * dataset.subsample + unroll_steps * bundle_steps * dataset.subsample,
+                                     bundle_steps * dataset.subsample, )]
+                   for ts_idx_start in ts_idx.tolist()
+                   ]
         tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
 
         # get unrolled target in a non-blocking way
@@ -94,7 +91,7 @@ def get_pushforward_trick(
         executor = ThreadPoolExecutor(max_workers=1)
         use_bf16 = use_amp and torch.cuda.is_bf16_supported()
         with torch.no_grad():
-            ts_unrolled = ts_idx + (unroll_steps - 1) * bundle_steps
+            ts_unrolled = ts_idx * dataset.subsample + (unroll_steps - 1) * bundle_steps * dataset.subsample
             future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
 
             xt = x
@@ -235,7 +232,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
 
             if cfg.ckpt_path is not None and is_main_proc:
                 # Save model if validation loss improves
-                save_model_and_config(
+                loss_val_min = save_model_and_config(
                     model,
                     optimizer=opt,
                     cfg=cfg,

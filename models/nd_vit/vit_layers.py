@@ -8,7 +8,7 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 
 from models.nd_vit.drop import DropPath
-from models.utils import Film, MLP
+from models.utils import Film, MLP, seq_weight_init
 
 
 class LayerModes(Enum):
@@ -34,10 +34,28 @@ class PatchAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.attn_drop = attn_drop
+        self.qkv_bias = qkv_bias
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            return
+        elif init_weights == "xavier_uniform":
+            init_weights_fn = nn.init.xavier_uniform_
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            init_weights_fn = nn.init.trunc_normal_
+        else:
+            raise NotImplementedError
+
+        self.cpb_mlp.apply(seq_weight_init(init_weights_fn))
+        init_weights_fn(self.qkv.weight)
+        if self.qkv_bias:
+            nn.init.zeros_(self.qkv.bias)
+        init_weights_fn(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
 
     def forward(self, x):
         """Forward function.
@@ -95,6 +113,7 @@ class VisionTransformerBlock(nn.Module):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
+        pre_ln: bool = False,
     ) -> None:
 
         super().__init__()
@@ -103,6 +122,7 @@ class VisionTransformerBlock(nn.Module):
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
         self.use_checkpoint = use_checkpoint
+        self.pre_ln = pre_ln
 
         self.norm1 = norm_layer(dim)
         self.attn = PatchAttention(
@@ -120,13 +140,32 @@ class VisionTransformerBlock(nn.Module):
 
         self.mlp = MLP([dim, mlp_hidden_dim, dim], act_fn=act_fn, dropout_prob=drop)
 
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            pass
+        elif init_weights == "xavier_uniform":
+            init_weights_fn = nn.init.xavier_uniform_
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            init_weights_fn = nn.init.trunc_normal_
+        else:
+            raise NotImplementedError
+
+        self.attn.reset_parameters(init_weights_fn)
+
+
     def forward_part1(self, x):
-        x = self.norm1(x)
+        if self.pre_ln:
+            x = self.norm1(x)
         x = self.attn(x)
+        if not self.pre_ln:
+            x = self.norm1(x)
         return x
 
     def forward_part2(self, x):
-        x = self.drop_path(self.mlp(self.norm2(x)))
+        if self.pre_ln:
+            x = self.drop_path(self.mlp(self.norm2(x)))
+        else:
+            x = self.norm2(self.drop_path(self.mlp(x)))
         return x
 
     def forward(self, x):
@@ -184,6 +223,7 @@ class ViTLayer(nn.Module):
         resample_fn: Optional[nn.Module] = None,
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
+        pre_ln: bool = False,
     ) -> None:
 
         super().__init__()
@@ -217,6 +257,7 @@ class ViTLayer(nn.Module):
                     norm_layer=norm_layer,
                     use_checkpoint=use_checkpoint,
                     act_fn=act_fn,
+                    pre_ln=pre_ln,
                 )
                 for i in range(depth)
             ]
@@ -233,6 +274,10 @@ class ViTLayer(nn.Module):
             )
             # TODO move one level up
             self.resampled_grid_size = self.resample.target_grid_size
+
+    def reset_parameters(self, init_weights):
+        for blk in self.blocks:
+            blk.reset_parameters(init_weights)
 
     def forward(
         self, x: torch.Tensor, *, return_skip: bool = False

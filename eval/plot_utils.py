@@ -88,11 +88,11 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
         other = tuple([o for o in range(5) if o != i and o != j])
 
         if average:
-            x1_plot = x1[0].mean(other)
-            x2_plot = x2[0].mean(other)
+            x1_plot = x1[::2].sum(0).mean(other)
+            x2_plot = x2[::2].sum(0).mean(other)
         else:
-            x1_plot = torch.tensor(x1[0]).permute(i, j, *other).numpy()[:, :, 0, 0, 0]
-            x2_plot = torch.tensor(x2[0]).permute(i, j, *other).numpy()[:, :, 0, 0, 0]
+            x1_plot = torch.tensor(x1[::2].sum(0)).permute(i, j, *other).numpy()[:, :, 0, 0, 0]
+            x2_plot = torch.tensor(x2[::2].sum(0)).permute(i, j, *other).numpy()[:, :, 0, 0, 0]
 
         if mark_bad:
             x1_std = x1.std(other)

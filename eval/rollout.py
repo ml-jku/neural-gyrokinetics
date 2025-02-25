@@ -53,15 +53,7 @@ def get_rollout(
             )
 
         # get corresponding timesteps
-        ts_idxs = [
-            [
-                i
-                for i in range(
-                    int(ts_idx_start),
-                    int(ts_idx_start) + rollout_steps * bundle_steps,
-                    bundle_steps,
-                )
-            ]
+        ts_idxs = [[i for i in range(int(ts_idx_start)*dataset.subsample, int(ts_idx_start) * dataset.subsample + rollout_steps * bundle_steps * dataset.subsample, bundle_steps * dataset.subsample,)]
             for ts_idx_start in ts_index_0.tolist()
         ]
         tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
@@ -110,16 +102,16 @@ def validation_metrics(
     if bundle_steps == 1:
         y = torch.stack(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index + t).long()).y
-                for t in range(0, n_steps, bundle_steps)
+                dataset.get_at_time(file_idx.long(), (ts_index * dataset.subsample + t).long()).y
+                for t in range(0, n_steps*dataset.subsample, bundle_steps*dataset.subsample)
             ],
             dim=0,
         )
     else:
         y = torch.concat(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index + t).long).y
-                for t in range(0, n_steps, bundle_steps)
+                dataset.get_at_time(file_idx.long(), (ts_index * dataset.subsample + t).long).y
+                for t in range(0, n_steps*dataset.subsample, bundle_steps*dataset.subsample)
             ],
             dim=2,
         )

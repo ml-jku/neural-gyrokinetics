@@ -286,7 +286,7 @@ def runner(rank, cfg, world_size):
 
                                 # get the rolled out validation trajectories
                                 x_rollout = get_rollout(
-                                    problem_dim=len(active_keys),
+                                    problem_dim=len(active_keys) if not cfg.dataset.separate_zf else 4,
                                     n_steps=n_eval_steps,
                                     bundle_steps=cfg.model.bundle_seq_length,
                                     dataset=valset,
@@ -378,9 +378,7 @@ def runner(rank, cfg, world_size):
                                         )
 
                     for key in metrics.keys():
-                        metrics[key] = metrics[key] / n_timesteps_count[key].unsqueeze(
-                            0
-                        )
+                        metrics[key] = metrics[key] / n_timesteps_count[key].unsqueeze(0)
 
                     for idx, metric_name in enumerate(metric_fn_list):
                         for phase, metric in metrics.items():
@@ -401,26 +399,20 @@ def runner(rank, cfg, world_size):
 
                 if cfg.ckpt_path is not None and not rank:
                     # Save model if validation loss on trajectories improves
-                    val_loss = (
-                        log_metric_dict[
-                            "val_holdout_trajectories/relative_norm_mse_saturated_x1"
-                        ]
-                        * n_timesteps_count_model_saving["saturated"]
-                        + log_metric_dict[
-                            "val_holdout_trajectories/relative_norm_mse_linear_x1"
-                        ]
-                        * n_timesteps_count_model_saving["linear"]
-                    ) / (
-                        n_timesteps_count_model_saving["saturated"]
-                        + n_timesteps_count_model_saving["linear"]
-                    )
+                    val_loss = (log_metric_dict[
+                                    "val_holdout_trajectories/relative_norm_mse_saturated_x1"
+                                ] * n_timesteps_count_model_saving["saturated"][0] + log_metric_dict[
+                                    "val_holdout_trajectories/relative_norm_mse_linear_x1"
+                                ] * n_timesteps_count_model_saving["linear"][0]) / (
+                                           n_timesteps_count_model_saving["saturated"][0] +
+                                           n_timesteps_count_model_saving["linear"][0])
                     loss_val_min = save_model_and_config(
                         model,
                         optimizer=opt,
                         cfg=cfg,
                         epoch=epoch,
                         # TODO decide target metric
-                        val_loss=val_loss,
+                        val_loss=val_loss.item(),
                         loss_val_min=loss_val_min,
                     )
                 else:

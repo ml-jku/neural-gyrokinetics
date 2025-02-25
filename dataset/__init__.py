@@ -54,6 +54,10 @@ def get_data(cfg):
             trajectories=cfg.dataset.training_trajectories,
             partial_holdouts=partial_holdouts,
             cond_filters=cfg.dataset.training_cond_filters,
+            subsample=cfg.dataset.subsample,
+            no_zf=cfg.dataset.no_zf,
+            separate_zf=cfg.dataset.separate_zf,
+            log_transform=cfg.dataset.log_transform,
         )
 
         holdout_trajectories_valset = CycloneDataset(
@@ -68,6 +72,10 @@ def get_data(cfg):
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,
             cond_filters=cfg.dataset.eval_cond_filters,
+            subsample=cfg.dataset.subsample,
+            no_zf=cfg.dataset.no_zf,
+            separate_zf=cfg.dataset.separate_zf,
+            log_transform=cfg.dataset.log_transform,
         )
 
         trainloader = DataLoader(
@@ -103,6 +111,10 @@ def get_data(cfg):
                 trajectories=cfg.dataset.training_trajectories,
                 partial_holdouts=partial_holdouts,
                 cond_filters=cfg.dataset.eval_cond_filters,
+                subsample=cfg.dataset.subsample,
+                no_zf=cfg.dataset.no_zf,
+                separate_zf=cfg.dataset.separate_zf,
+                log_transform=cfg.dataset.log_transform,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,

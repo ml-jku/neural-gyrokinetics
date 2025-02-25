@@ -91,7 +91,7 @@ def save_model_and_config(
     epoch: int,
     val_loss: float,
     loss_val_min: float,
-) -> None:
+) -> float:
     # create directory if it s not there
     os.makedirs(cfg.ckpt_path, exist_ok=True)
 

@@ -1,8 +1,10 @@
+import torch
+
 def get_model(cfg, dataset):
     # TODO need to standardize modules everywhere (eg for different inputs)
 
     latent_dim = cfg.model.latent_dim
-    problem_dim = len(cfg.dataset.active_keys)
+    problem_dim = len(cfg.dataset.active_keys) if not cfg.dataset.separate_zf else 4
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet
@@ -19,7 +21,11 @@ def get_model(cfg, dataset):
         patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
         unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
         c_multiplier = cfg.model.swin.c_multiplier
+        pre_ln = cfg.model.swin.pre_ln
+        norm_output = cfg.model.swin.norm_output
         abs_pe = cfg.model.swin.abs_pe
+        act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
+        add_first_residual = cfg.model.swin.add_first_residual
 
         cond_fn = None
         n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
@@ -53,7 +59,12 @@ def get_model(cfg, dataset):
             c_multiplier=c_multiplier,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
+            unmerging_layer_norm=cfg.model.swin.unmerging_layer_norm,
             conditioning=cond_fn,
+            pre_ln=pre_ln,
+            norm_output=norm_output,
+            act_fn=act_fn,
+            add_first_residual=add_first_residual,
         )
 
     if cfg.model.name == "ae":

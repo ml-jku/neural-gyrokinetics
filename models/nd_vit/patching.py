@@ -347,7 +347,7 @@ class PatchUnmerging(nn.Module):
                 bias=True,
             )
 
-        self.norm = norm_layer(dim_out) if norm_layer else nn.Identity()
+        self.norm = norm_layer(dim_out, elementwise_affine=True) if norm_layer else nn.Identity()
 
         if init_weights:
             self.reset_parameters(init_weights)
