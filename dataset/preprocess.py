@@ -4,7 +4,7 @@ import h5py
 import re
 from tqdm import tqdm
 
-from .utils import RunningMeanStd
+from dataset.utils import RunningMeanStd
 
 ROOT = "/restricteddata/ukaea/gyrokinetics"
 
@@ -54,8 +54,6 @@ def parse_input_dat(file_path):
     return parsed_data
 
 def do_ifft(knth):
-    # shift freqs to correct range
-    knth = np.fft.fftshift(knth, axes=(3, 4))
     knth = np.fft.ifftn(knth, axes=(3, 4))
     knth = np.stack([knth.real, knth.imag]).squeeze().astype("float32")
     return knth
@@ -142,12 +140,46 @@ def get_stats(filenames, spatial_ifft=False, separate_zf=False, per_mode_norm=Fa
 
     return running_stats
 
-def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_mode_norm=False):
+def check_ifft(transformed, orig):
+    real_parts = transformed[::2]
+    imag_parts = transformed[1::2]
+    sum_real = np.sum(real_parts, axis=0)
+    sum_imag = np.sum(imag_parts, axis=0)
+    orig_ifft = np.concatenate([np.expand_dims(sum_real, 0), np.expand_dims(sum_imag, 0)], axis=0)
+    orig_ifft = np.moveaxis(orig_ifft, 0, -1).copy()
+    orig_ifft = orig_ifft.view(dtype=np.complex64)
+    orig_ifft = np.fft.fftn(orig_ifft, axes=(3, 4))
+    orig_ifft = np.fft.ifftshift(orig_ifft, axes=(3,))
+    orig_ifft = np.stack([orig_ifft.real, orig_ifft.imag]).squeeze().astype("float32")
+    return np.allclose(orig_ifft, orig, rtol=0, atol=1e-5)
+
+def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_mode_norm=False,
+               split_into_bands=None, norm_axes=(1, 2, 3, 4, 5)):
     assert not (separate_zf and not spatial_ifft), "Need to perform IFFT to maintain shapes for separate_zf"
     dir_in = f"{ROOT}/raw/{filename}"
     dir_out = f"{ROOT}/preprocessed"
     if not os.path.exists(dir_out):
         os.makedirs(dir_out)
+
+    # create h5 file with timestamps and field data
+    ifft_tag = "_ifft" if spatial_ifft else ""
+    zf_tag = "_separate_zf" if separate_zf else ""
+    per_mode_tag = "_per_mode" if per_mode_norm else ""
+    split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+    axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
+    norm_axes_tag = f"_norm_{'_'.join([axes_desc[ax-1] for ax in norm_axes])}"
+    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}{norm_axes_tag}.h5"
+    if os.path.exists(h5_filename):
+        if per_mode_norm:
+            # update stats with new stats
+            with h5py.File(h5_filename, "r+") as file:
+                file['metadata']['k_mean'] = stats.mean
+                file['metadata']['k_var'] = np.sqrt(stats.var)
+                file['metadata']['k_min'] = stats.min
+                file['metadata']['k_max'] = stats.max
+
+        print(f"File {h5_filename} already exists, skipping...")
+        return h5_filename
 
     ks = K_files(dir_in)
     potens, ts_slices = poten_files(dir_in)
@@ -193,31 +225,17 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
     # load parameters
     config = parse_input_dat(f"{dir_in}/input.dat")
     ion_temp_grad = config["SPECIES"]["rlt"]
-
-    # create h5 file with timestamps and field data
-    ifft_tag = "_ifft" if spatial_ifft else ""
-    zf_tag = "_separate_zf" if separate_zf else ""
-    per_mode_tag = "_per_mode" if per_mode_norm else ""
-    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{per_mode_tag}.h5"
-    if os.path.exists(h5_filename):
-        if per_mode_norm:
-            # update stats with new stats
-            with h5py.File(h5_filename, "r+") as file:
-                file['metadata']['k_mean'] = stats.mean
-                file['metadata']['k_var'] = np.sqrt(stats.var)
-                file['metadata']['k_min'] = stats.min
-                file['metadata']['k_max'] = stats.max
-
-        print(f"File {h5_filename} already exists, skipping...")
-        return h5_filename
-
     if not per_mode_norm:
+        shape = tuple([1 if ax in norm_axes else resolution[ax-1] for ax in np.arange(1,len(resolution)+1)])
         if zf_tag:
-            stats = RunningMeanStd(shape=(4, 1, 1, 1, 1, 1))
+            if split_into_bands:
+                stats = RunningMeanStd(shape=((split_into_bands+1)*2,)+shape)
+            else:
+                stats = RunningMeanStd(shape=(4,)+shape)
         else:
-            stats = RunningMeanStd(shape=(2, 1, 1, 1, 1, 1))
+            stats = RunningMeanStd(shape=(2,)+shape)
 
-    with h5py.File(h5_filename, "w") as file:
+    with (h5py.File(h5_filename, "w") as file):
 
         # group for metadata (e.g. timesteps)
         metadata_group = file.create_group("metadata")
@@ -230,7 +248,7 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
         data_group = file.create_group("data")
         for idx, (k, pot) in tqdm(
             enumerate(zip(ks, potens)),
-            f"Processing {filename} -> {filename + ifft_tag + zf_tag + per_mode_tag + '.h5'}",
+            f"Processing {filename} -> {filename + ifft_tag + zf_tag + per_mode_tag + split_into_bands_tag + norm_axes_tag + '.h5'}",
             total=len(ks),
         ):
             # Load the full distribution function data
@@ -239,28 +257,48 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
 
             # Reshape the distribution function (copy for speeed in stat computation)
             knth = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+            orig_knth = knth.copy()
             if spatial_ifft:
                 if per_mode_norm:
                     knth = (knth - stats.mean) / np.sqrt(stats.var)
                 knth = np.moveaxis(knth, 0, -1).copy()
                 knth = knth.view(dtype=np.complex64)
+                knth = np.fft.fftshift(knth, axes=(3,))
+                separated_modes = []
                 if separate_zf:
                     knth_zf = knth.copy()
                     knth_no_zf = knth.copy()
                     knth_zf[..., 1:, :] = 0.
-                    knth_no_zf[..., 0, :] = 0.
-                    ifft_knth_no_zf = do_ifft(knth_no_zf)
                     ifft_knth_zf = do_ifft(knth_zf)
-                    knth = np.concatenate([ifft_knth_no_zf, ifft_knth_zf], axis=0)
+                    separated_modes.append(ifft_knth_zf)
+                    knth_no_zf[..., 0, :] = 0.
+                    if split_into_bands:
+                        modes_per_channel = nky // split_into_bands
+                        for band in range(split_into_bands):
+                            cur_knth = np.zeros_like(knth_no_zf)
+                            offset = 1 + band * modes_per_channel
+                            if (split_into_bands - 1) == band:
+                                # last band contains all remaining frequencies
+                                cur_knth[..., offset:, :] = knth_no_zf[..., offset:, :]
+                            else:
+                                cur_knth[..., offset:offset+modes_per_channel, :] = knth_no_zf[..., offset:offset+modes_per_channel, :]
+                            ifft_knth = do_ifft(cur_knth)
+                            separated_modes.append(ifft_knth)
+                    else:
+                        ifft_knth_no_zf = do_ifft(knth_no_zf)
+                        separated_modes.append(ifft_knth_no_zf)
+
+                    knth = np.concatenate(separated_modes, axis=0)
+                    assert check_ifft(knth, orig_knth), "Error transforming back to original space"
                 else:
                     knth = do_ifft(knth)
 
             if not per_mode_norm:
                 # update running averages
-                stats.update(np.mean(knth, axis=(1, 2, 3, 4, 5), keepdims=True),
-                             np.var(knth, axis=(1, 2, 3, 4, 5), keepdims=True),
-                             np.min(knth, axis=(1, 2, 3, 4, 5), keepdims=True),
-                             np.max(knth, axis=(1, 2, 3, 4, 5), keepdims=True))
+                stats.update(np.mean(knth, axis=norm_axes, keepdims=True),
+                             np.var(knth, axis=norm_axes, keepdims=True),
+                             np.min(knth, axis=norm_axes, keepdims=True),
+                             np.max(knth, axis=norm_axes, keepdims=True))
 
             # Add the reshaped data as a dataset to the "data" group
             k_name = "timestep_" + str(idx).zfill(5)
@@ -282,11 +320,23 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
 IFFT = True
 separate_zf = True
 per_mode_norm = False
+split_into_bands = None
+norm_axes = (3,4,5)
 ifft_tag = "_ifft" if IFFT else ""
 zf_tag = "_separate_zf" if separate_zf else ""
 per_mode_tag = "_per_mode" if per_mode_norm else ""
+split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
+norm_axes_tag = f"_norm_{'_'.join([axes_desc[ax-1] for ax in norm_axes])}"
 datasets = [
-    "cyclone19_2",
+    "cyclone4_2_2",
+    "cyclone5_2",
+    "cyclone6_2",
+    "cyclone7_2",
+    "cyclone8_2",
+    "cyclone9_2",
+    "cyclone10_2",
+    "cyclone12_2",
     "cyclone20_2",
     "cyclone21_2",
     "cyclone22_2",
@@ -297,7 +347,8 @@ datasets = [
 
 stats = get_stats(datasets, IFFT, separate_zf, per_mode_norm) if per_mode_norm else None
 for f in datasets:
-    h5_filename = preprocess(f, spatial_ifft=IFFT, separate_zf=separate_zf, stats=stats, per_mode_norm=per_mode_norm)
+    h5_filename = preprocess(f, spatial_ifft=IFFT, separate_zf=separate_zf, stats=stats, per_mode_norm=per_mode_norm,
+                             split_into_bands=split_into_bands, norm_axes=norm_axes)
     # set rwx permissions
     try:
         os.chmod(h5_filename, 0o777)
@@ -318,5 +369,5 @@ for f in datasets:
         )
 
 for filename in datasets:
-    h5_filename = f"/local00/bioinf/gyrokinetics/preprocessed/{filename}{ifft_tag}{zf_tag}{per_mode_tag}.h5"
-    os.system(f"rsync -ah --info=progress {h5_filename} {ROOT}/preprocessed")
+    h5_filename = f"{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}{norm_axes_tag}.h5"
+    os.system(f"rsync -ah --info=progress {ROOT}/preprocessed/{h5_filename} /local00/bioinf/gyrokinetics/preprocessed/{h5_filename}")

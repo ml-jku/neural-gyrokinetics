@@ -74,7 +74,8 @@ class CycloneDataset(Dataset):
         subsample: int = 1,
         no_zf: bool = False,
         separate_zf: bool = False,
-        log_transform: bool = False
+        log_transform: bool = False,
+        split_into_bands: int = None
     ):
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
         assert split in ["train", "val"]
@@ -85,7 +86,10 @@ class CycloneDataset(Dataset):
         if not separate_zf:
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
         else:
-            self.active_keys = np.arange(4)
+            if split_into_bands:
+                self.active_keys = np.arange(2 + split_into_bands * 2)
+            else:
+                self.active_keys = np.arange(4)
         assert normalization in ["zscore", "minmax", "none", None]
         assert normalization_scope in ["sample", "dataset", "per_mode", "trajectory"]
         self.normalization = normalization if normalization != "none" else None
@@ -133,8 +137,9 @@ class CycloneDataset(Dataset):
         self.no_zf = no_zf
         if spatial_ifft:
             if no_zf or separate_zf and normalization_scope != "per_mode":
+                n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                 self.files = [
-                    f if "_ifft_separate_zf.h5" in f else re.sub(r"\.h5$", "_ifft_separate_zf.h5", f)
+                    f if f"_ifft_separate_zf{n_bands_tag}.h5" in f else re.sub(r"\.h5$", f"_ifft_separate_zf{n_bands_tag}.h5", f)
                     for f in self.files
                 ]
             elif normalization_scope == "per_mode":
@@ -172,7 +177,8 @@ class CycloneDataset(Dataset):
             filename = os.path.split(file_path)[-1]
             if spatial_ifft:
                 if no_zf or separate_zf and normalization_scope != "per_mode":
-                    filename = filename.replace("_ifft_separate_zf", "")
+                    n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+                    filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                 elif normalization_scope == "per_mode":
                     filename = filename.replace("_ifft_separate_zf_per_mode", "")
                 else:
@@ -227,7 +233,8 @@ class CycloneDataset(Dataset):
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
                 if no_zf or separate_zf and normalization_scope != "per_mode":
-                    filename = filename.replace("_ifft_separate_zf", "")
+                    n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+                    filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                 elif normalization_scope == "per_mode":
                     filename = filename.replace("_ifft_separate_zf_per_mode", "")
                 else:
@@ -258,7 +265,8 @@ class CycloneDataset(Dataset):
                 filename = os.path.split(file)[-1]
                 if spatial_ifft:
                     if no_zf or separate_zf and normalization_scope != "per_mode":
-                        filename = filename.replace("_ifft_separate_zf", "")
+                        n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+                        filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                     elif normalization_scope == "per_mode":
                         filename = filename.replace("_ifft_separate_zf_per_mode", "")
                     else:
@@ -326,8 +334,8 @@ class CycloneDataset(Dataset):
         # conditioning fields
         timestep, itg = sample["timestep"], sample["itg"]
         if self.normalization is not None and get_normalized:
-            x = self._normalize(x, file_index)
-            gt = self._normalize(gt, file_index)
+            x, shift, scale = self._normalize(x, file_index)
+            gt = (gt - shift) / scale
 
         ts_index = torch.tensor(t_index // self.subsample, dtype=self.dtype)
         return CycloneSample(
@@ -421,7 +429,7 @@ class CycloneDataset(Dataset):
                 shift = x_min
                 scale = x_max - x_min
 
-        return (x - shift) / scale
+        return (x - shift) / scale, shift, scale
 
     def denormalize(self, x, file_index):
         shift, scale = 0.0, 1.0

@@ -4,7 +4,11 @@ def get_model(cfg, dataset):
     # TODO need to standardize modules everywhere (eg for different inputs)
 
     latent_dim = cfg.model.latent_dim
-    problem_dim = len(cfg.dataset.active_keys) if not cfg.dataset.separate_zf else 4
+    if not cfg.dataset.separate_zf:
+        problem_dim = len(cfg.dataset.active_keys)
+    else:
+        problem_dim = 4
+        problem_dim += (cfg.dataset.split_into_bands - 1) * 2 if cfg.dataset.split_into_bands else 0
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet

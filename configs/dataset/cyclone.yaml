@@ -6,6 +6,7 @@ subsample: 1
 no_zf: false
 separate_zf: true
 spatial_ifft: true
+split_into_bands: null
 log_transform: false
 in_memory: false
 active_keys: ["re", "im"]

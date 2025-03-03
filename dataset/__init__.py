@@ -58,6 +58,7 @@ def get_data(cfg):
             no_zf=cfg.dataset.no_zf,
             separate_zf=cfg.dataset.separate_zf,
             log_transform=cfg.dataset.log_transform,
+            split_into_bands=cfg.dataset.split_into_bands,
         )
 
         holdout_trajectories_valset = CycloneDataset(
@@ -76,6 +77,7 @@ def get_data(cfg):
             no_zf=cfg.dataset.no_zf,
             separate_zf=cfg.dataset.separate_zf,
             log_transform=cfg.dataset.log_transform,
+            split_into_bands=cfg.dataset.split_into_bands,
         )
 
         trainloader = DataLoader(

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from functools import partial
 import torch
@@ -25,7 +25,7 @@ from utils import (
 
 
 def ddp_setup(rank, world_size):
-    init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    init_process_group(backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20))
 
 
 def runner(rank, cfg, world_size):
@@ -56,11 +56,16 @@ def runner(rank, cfg, world_size):
         trainloader, valloaders = dataloaders
         valloaders = [valloaders]
 
+    if not cfg.dataset.separate_zf:
+        problem_dim = len(cfg.dataset.active_keys)
+    else:
+        problem_dim = 4
+        problem_dim += (cfg.dataset.split_into_bands - 1) * 2 if cfg.dataset.split_into_bands else 0
+
     model = get_model(cfg, dataset=trainset)
     model = model.to(device)
     if use_ddp:
         model = DDP(model, device_ids=[rank])
-    active_keys = cfg.dataset.active_keys
 
     opt_state_dict = None
     if cfg.load_ckp is True and cfg.ckpt_path is not None:
@@ -286,7 +291,7 @@ def runner(rank, cfg, world_size):
 
                                 # get the rolled out validation trajectories
                                 x_rollout = get_rollout(
-                                    problem_dim=len(active_keys) if not cfg.dataset.separate_zf else 4,
+                                    problem_dim=problem_dim,
                                     n_steps=n_eval_steps,
                                     bundle_steps=cfg.model.bundle_seq_length,
                                     dataset=valset,
@@ -420,6 +425,8 @@ def runner(rank, cfg, world_size):
                         "`cfg.ckpt_path` is not set: checkpoints will not be stored"
                     )
 
+            if use_ddp:
+                torch.distributed.barrier()
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
             if writer and not rank:
