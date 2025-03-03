@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from models.utils import seq_weight_init, MLP
+from models.utils import seq_weight_init, MLP, Film
 
 
 def pad_to_blocks(
@@ -301,6 +301,7 @@ class PatchUnmerging(nn.Module):
         act_fn: nn.Module = nn.LeakyReLU,
         mlp_ratio: float = 8.0,
         mlp_depth: int = 2,
+        cond_dim: Optional[int] = None,
         patch_skip: bool = False,
         init_weights: Optional[str] = None,
     ):
@@ -347,7 +348,9 @@ class PatchUnmerging(nn.Module):
                 bias=True,
             )
 
-        self.norm = norm_layer(dim_out, elementwise_affine=True) if norm_layer else nn.Identity()
+        self.norm = norm_layer(dim_out) if norm_layer else nn.Identity()
+        if cond_dim:
+            self.modulation = Film(cond_dim, dim)
 
         if init_weights:
             self.reset_parameters(init_weights)
@@ -362,11 +365,14 @@ class PatchUnmerging(nn.Module):
         else:
             raise NotImplementedError
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor, cond: Optional[torch.Tensor] = None):
         ndim = x.ndim
         if ndim < 4:
             b, c = x.shape[0], x.shape[-1]
             x = x.view(b, *self.grid_size, c)
+
+        if hasattr(self, "modulation"):
+            x = self.modulation(x, cond=cond)
 
         if self.use_conv:
             x = rearrange(x, "b ... c -> b c ...")
@@ -387,7 +393,7 @@ class PatchUnmerging(nn.Module):
 
         return x
 
-    def up_proj(self, x):
+    def up_proj(self, x: torch.Tensor):
         b = x.shape[0]
         # linear expansion of patches
         x = self.expansion(x)

@@ -63,7 +63,7 @@ def get_stats(filenames, spatial_ifft=False, separate_zf=False, per_mode_norm=Fa
     old_running_stats = None
     for filename in filenames:
         dir_in = f"{ROOT}/raw/{filename}"
-        dir_out = f"/local00/bioinf/gyrokinetics/preprocessed"
+        dir_out = "/local00/bioinf/gyrokinetics/preprocessed"
         if not os.path.exists(dir_out):
             os.makedirs(dir_out)
         # create h5 file with timestamps and field data

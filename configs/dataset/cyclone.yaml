@@ -3,7 +3,6 @@ path: /local00/bioinf/gyrokinetics/preprocessed
 normalization: zscore
 normalization_scope: sample
 subsample: 1
-no_zf: false
 separate_zf: true
 spatial_ifft: true
 split_into_bands: null

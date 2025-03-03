@@ -11,16 +11,17 @@ from torch.distributed import get_rank, is_initialized
 from concurrent.futures import ThreadPoolExecutor
 
 from utils import save_model_and_config
-from dataset.cyclone import CycloneDataset
+from dataset.cyclone import CycloneDataset, CycloneSample
 
 
-def relative_norm_mse(x, y, dim_to_keep=None):
+def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
     if dim_to_keep is None:
         y = y.flatten(1)
         diff = x.flatten(1) - y
         diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
         y_norms = torch.linalg.norm(y, ord=2, dim=-1)
-        diff_norms, y_norms = diff_norms**2, y_norms**2
+        if squared:
+            diff_norms, y_norms = diff_norms**2, y_norms**2
         # sum over timesteps and mean over examples in batch
         return torch.mean(diff_norms / y_norms)
     else:
@@ -29,15 +30,16 @@ def relative_norm_mse(x, y, dim_to_keep=None):
         diff = x.flatten(2) - y
         diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
         y_norms = torch.linalg.norm(y, ord=2, dim=-1)
-        diff_norms, y_norms = diff_norms**2, y_norms**2
+        if squared:
+            diff_norms, y_norms = diff_norms**2, y_norms**2
         dims = [i for i in range(len(y_norms.shape))][dim_to_keep + 1 :]
         return torch.mean(diff_norms / y_norms, dim=dims)
 
 
-def get_pushforward_trick(
-    unrolls: List[int],
-    probs: List[float],
-    schedule: List[float],
+def get_pushforward_fn(
+    n_unrolls_schedule: List[int],
+    probs_schedule: List[float],
+    epoch_schedule: List[float],
     predict_delta: bool,
     dataset: CycloneDataset,
     bundle_steps: int,
@@ -54,54 +56,50 @@ def get_pushforward_trick(
         epoch: int,
     ) -> List[float]:
         # pushforward scheduler with epoch
-        idx = (epoch > np.array(schedule)).sum()
+        idx = (epoch > np.array(epoch_schedule)).sum()
         if not idx:
             return x, ts, y
 
         # sample number of steps
-        curr_probs = [p / sum(probs[:idx]) for p in probs[:idx]]
-        unroll_steps = np.random.choice(unrolls[:idx], p=curr_probs)
+        curr_probs = [p / sum(probs_schedule[:idx]) for p in probs_schedule[:idx]]
+        pf_n_unrolls = np.random.choice(n_unrolls_schedule[:idx], p=curr_probs)
 
         # cap the unroll steps depending on the current max timestep
-        unroll_steps = min(
-            [
-                min(
-                    (dataset.num_ts(int(f_idx)) - int(ts_idx[i])) // bundle_steps - 1,
-                    unroll_steps,
-                )
-                for i, f_idx in enumerate(file_idx.tolist())
-            ]
-        )
+        n_unrolls = []
+        for i, f_idx in enumerate(file_idx.tolist()):
+            sleft = (dataset.num_ts(int(f_idx)) - int(ts_idx[i])) // bundle_steps - 1
+            n_unrolls.append(min(sleft, pf_n_unrolls))
+        n_unrolls = min(n_unrolls)
 
-        if unroll_steps < 2:
+        if n_unrolls < 2:
             return x, ts, y
 
-        # get corresponding timesteps
-        ts_idxs = [[i for i in range(int(ts_idx_start) * dataset.subsample,
-                                     int(ts_idx_start) * dataset.subsample + unroll_steps * bundle_steps * dataset.subsample,
-                                     bundle_steps * dataset.subsample, )]
-                   for ts_idx_start in ts_idx.tolist()
-                   ]
+        subs = dataset.subsample
+        ts_step = bundle_steps * subs
+        # get corresponding timesteps (acount for dataset subsample)
+        ts_idxs = [
+            list(range(int(ts) * subs, int(ts) * subs + n_unrolls * ts_step, ts_step))
+            for ts in ts_idx.tolist()
+        ]
         tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
 
         # get unrolled target in a non-blocking way
         def fetch_target(dataset, file_idx, ts_unrolled):
-            return dataset.get_at_time(file_idx.cpu(), ts_unrolled.cpu())
+            return dataset.get_at_time(
+                file_idx.cpu(),
+                ts_unrolled.cpu(),
+            )
 
         executor = ThreadPoolExecutor(max_workers=1)
-        use_bf16 = use_amp and torch.cuda.is_bf16_supported()
         with torch.no_grad():
-            ts_unrolled = ts_idx * dataset.subsample + (unroll_steps - 1) * bundle_steps * dataset.subsample
+            ts_unrolled = ts_idx * subs + (n_unrolls - 1) * ts_step
             future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
 
             xt = x
-            for i in range(unroll_steps - 1):
-                # TODO: currenlty only integer conditioning. Remove that line if floats are possible
-                with torch.autocast(
-                    "cuda",
-                    dtype=torch.float16 if not use_bf16 else torch.bfloat16,
-                    enabled=use_amp,
-                ):
+            for i in range(n_unrolls - 1):
+                use_bf16 = use_amp and torch.cuda.is_bf16_supported()
+                amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+                with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                     x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
 
                     if predict_delta:
@@ -132,6 +130,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
 
     scaler = torch.amp.GradScaler(device=device, enabled=cfg.use_amp)
     use_bf16 = cfg.use_amp and torch.cuda.is_bf16_supported()
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
     use_ddp = is_initialized()
     if use_ddp:
         rank = get_rank()
@@ -160,17 +159,14 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
         if use_tqdm or (use_ddp and not rank):
             trainloader = tqdm(trainloader, "AE pretraining")
         for sample in trainloader:
+            sample: CycloneSample
             x = sample.x.to(device)
             ts = sample.timestep.to(device)
             itg = sample.itg.to(device)
 
-            with torch.autocast(
-                cfg.device,
-                dtype=torch.float16 if not use_bf16 else torch.bfloat16,
-                enabled=cfg.use_amp,
-            ):
+            with torch.autocast(cfg.device, dtype=amp_dtype, enabled=cfg.use_amp):
                 if cfg.training.pretraining_kwargs.target_modules == "all":
-                    pred_x = model(x, timestep=torch.ceil(ts), itg=itg)
+                    pred_x = model(x, timestep=ts, itg=itg)
                 else:
                     if hasattr(model, "module"):
                         z, pad_ax = model.module.patch_encode(x)
@@ -180,10 +176,13 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                     if cfg.training.pretraining_kwargs.add_noise:
                         z = z + torch.normal(0, 1e-3, size=(z.shape), device=z.device)
 
+                    cond = {"timestep": ts, "itg": itg}
                     if hasattr(model, "module"):
-                        pred_x = model.module.patch_decode(z, pad_ax)
+                        cond = model.module.condition(cond)["condition"]
+                        pred_x = model.module.patch_decode(z, cond, pad_ax)
                     else:
-                        pred_x = model.patch_decode(z, pad_ax)
+                        cond = model.condition(cond)["condition"]
+                        pred_x = model.patch_decode(z, cond, pad_ax)
                 if cfg.training.predict_delta:
                     pred_x = x + pred_x
                 loss = relative_norm_mse(pred_x, x)
@@ -210,13 +209,19 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                 if cfg.logging.tqdm:
                     valloader = tqdm(valloader, "AE evaluation")
                 for sample in valloader:
+                    sample: CycloneSample
                     x = sample.x.to(device)
+                    ts = sample.timestep.to(device)
+                    itg = sample.itg.to(device)
+                    cond = {"timestep": ts, "itg": itg}
                     if hasattr(model, "module"):
-                        pred_x = model.module.patch_decode(
-                            *model.module.patch_encode(x)
-                        )
+                        z, pad_ax = model.module.patch_encode(x)
+                        cond = model.module.condition(cond)["condition"]
+                        pred_x = model.module.patch_decode(z, cond, pad_ax)
                     else:
-                        pred_x = model.patch_decode(*model.patch_encode(x))
+                        z, pad_ax = model.module.patch_encode(x)
+                        cond = model.condition(cond)["condition"]
+                        pred_x = model.patch_decode(z, cond, pad_ax)
                     if cfg.training.predict_delta:
                         pred_x = x + pred_x
                     loss = relative_norm_mse(pred_x, x)
@@ -224,11 +229,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                 val_mse = val_mse / len(valloader)
                 val_log += f", val_{valname}/relative_norm_mse: {val_mse:.4f}"
                 if is_main_proc and writer:
-                    writer.log(
-                        {
-                            f"pretrain/val_{valname}_relative_norm_mse": val_mse,
-                        }
-                    )
+                    writer.log({f"pretrain/val_{valname}_relative_norm_mse": val_mse})
 
             if cfg.ckpt_path is not None and is_main_proc:
                 # Save model if validation loss improves
@@ -242,16 +243,15 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                     loss_val_min=loss_val_min,
                 )
             else:
-                warnings.warn(
-                    "`cfg.ckpt_path` is not set: checkpoints will not be stored"
-                )
+                warnings.warn("`cfg.ckpt_path` not set: checkpoints will not be stored")
 
         epoch_str = str(epoch).zfill(
             len(str(int(cfg.training.pretraining_kwargs.n_epochs)))
         )
         if is_main_proc and writer:
             print(
-                f"AE epoch: {epoch_str}, train/relative_norm_mse: {train_mse:.4f}{val_log}"
+                f"AE epoch: {epoch_str}, "
+                f"train/relative_norm_mse: {train_mse:.4f}{val_log}"
             )
             writer.log(
                 {

@@ -1,15 +1,17 @@
 name: cyclone
-path: /restricteddata/ukaea/gyrokinetics/preprocessed
+path: /local01/bioinf/gyrokinetics/preprocessed
 normalization: zscore
-normalization_scope: sample
-spatial_ifft: false
-in_memory: false
+normalization_scope: trajectory
+subsample: 1
+no_zf: false
+separate_zf: false
+spatial_ifft: true
+log_transform: false
 active_keys: ["re", "im"]
-training_trajectories: ["cyclone4_2_2.h5"]
+training_trajectories: ["cyclone5_2.h5"]
 validation_trajectories: ["cyclone4_2_2.h5"]
 partial_holdouts:
 training_cond_filters:
-  ion_temp_grad: [2.5, 9.5]
 eval_cond_filters:
 
 augment:

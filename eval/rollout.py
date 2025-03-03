@@ -6,7 +6,7 @@ from torch import nn
 from torch.utils.data import Dataset
 
 
-def get_rollout(
+def get_rollout_fn(
     problem_dim: int,
     n_steps: int,
     bundle_steps: int,
@@ -26,26 +26,19 @@ def get_rollout(
         itg: torch.Tensor,
     ) -> torch.Tensor:
         # cap the steps depending on the current max timestep
-        rollout_steps = min(
-            [
-                min(
-                    (dataset.num_ts(int(f_idx)) - int(ts_index_0[i])) // bundle_steps
-                    - 1,
-                    n_steps,
-                )
-                for i, f_idx in enumerate(file_idx.tolist())
-            ]
-        )
+        rollout_steps = []
+        for i, f_idx in enumerate(file_idx.tolist()):
+            ts_left = dataset.num_ts(int(f_idx)) - int(ts_index_0[i])
+            ts_left = ts_left // bundle_steps - 1
+            rollout_steps.append(min(ts_left, n_steps))
+        rollout_steps = min(rollout_steps)
 
+        tot_ts = rollout_steps * bundle_steps
         xt = x0.clone()
         if xt.ndim == 7:
-            x_rollout = torch.zeros(
-                (xt.shape[0], problem_dim, rollout_steps * bundle_steps, *xt.shape[2:])
-            )
+            x_rollout = torch.zeros((xt.shape[0], problem_dim, tot_ts, *xt.shape[2:]))
         elif xt.ndim == 8:
-            x_rollout = torch.zeros(
-                (xt.shape[0], problem_dim, rollout_steps * bundle_steps, *xt.shape[3:])
-            )
+            x_rollout = torch.zeros((xt.shape[0], problem_dim, tot_ts, *xt.shape[3:]))
         else:
             raise (
                 "x should have 7 (b, c, v1, v2, s, x, y) "
@@ -53,19 +46,19 @@ def get_rollout(
             )
 
         # get corresponding timesteps
-        ts_idxs = [[i for i in range(int(ts_idx_start)*dataset.subsample, int(ts_idx_start) * dataset.subsample + rollout_steps * bundle_steps * dataset.subsample, bundle_steps * dataset.subsample,)]
-            for ts_idx_start in ts_index_0.tolist()
+        subs = dataset.subsample
+        ts_step = bundle_steps * subs
+        ts_idxs = [
+            list(range(int(ts) * subs, int(ts) * subs + tot_ts * subs, ts_step))
+            for ts in ts_index_0.tolist()
         ]
         tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
         use_bf16 = use_amp and torch.cuda.is_bf16_supported()
+        amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
         with torch.no_grad():
             # move bundles forward, rollout in blocks
             for i in range(0, rollout_steps):
-                with torch.autocast(
-                    device,
-                    dtype=torch.float16 if not use_bf16 else torch.bfloat16,
-                    enabled=use_amp,
-                ):
+                with torch.autocast(device, dtype=amp_dtype, enabled=use_amp):
                     x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
 
                     if predict_delta:
@@ -96,22 +89,23 @@ def validation_metrics(
         metrics_fns is not None
     ), "Pleas provide some metrics function for the validation metrics."
     n_steps = rollout.shape[0]
+    subs = dataset.subsample
     # n_steps = rollout.shape[0] // bundle_steps
     # TODO: optimize: if valset is not shuffled, we can only return every second, since the next input is the previous' target (maybe handle in the dataset not sure)
     # construct target y (NOTE: can use a lot of RAM with large n_steps and takes a lot of time)
     if bundle_steps == 1:
         y = torch.stack(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index * dataset.subsample + t).long()).y
-                for t in range(0, n_steps*dataset.subsample, bundle_steps*dataset.subsample)
+                dataset.get_at_time(file_idx.long(), (ts_index * subs + t).long()).y
+                for t in range(0, n_steps * subs, bundle_steps * subs)
             ],
             dim=0,
         )
     else:
         y = torch.concat(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index * dataset.subsample + t).long).y
-                for t in range(0, n_steps*dataset.subsample, bundle_steps*dataset.subsample)
+                dataset.get_at_time(file_idx.long(), (ts_index * subs + t).long()).y
+                for t in range(0, n_steps * subs, bundle_steps * subs)
             ],
             dim=2,
         )
