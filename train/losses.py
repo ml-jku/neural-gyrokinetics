@@ -74,11 +74,9 @@ def get_pushforward_fn(
         if n_unrolls < 2:
             return x, ts, y
 
-        subs = dataset.subsample
-        ts_step = bundle_steps * subs
-        # get corresponding timesteps (acount for dataset subsample)
+        ts_step = bundle_steps
         ts_idxs = [
-            list(range(int(ts) * subs, int(ts) * subs + n_unrolls * ts_step, ts_step))
+            list(range(int(ts), int(ts) + n_unrolls * ts_step, ts_step))
             for ts in ts_idx.tolist()
         ]
         tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
@@ -92,7 +90,7 @@ def get_pushforward_fn(
 
         executor = ThreadPoolExecutor(max_workers=1)
         with torch.no_grad():
-            ts_unrolled = ts_idx * subs + (n_unrolls - 1) * ts_step
+            ts_unrolled = ts_idx + (n_unrolls - 1) * ts_step
             future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
 
             xt = x

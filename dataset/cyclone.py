@@ -170,7 +170,7 @@ class CycloneDataset(Dataset):
             # check for holdout samples
             filename = os.path.split(file_path)[-1]
             if spatial_ifft:
-                if no_zf or separate_zf and normalization_scope != "per_mode":
+                if separate_zf and normalization_scope != "per_mode":
                     n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                     filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                 elif normalization_scope == "per_mode":

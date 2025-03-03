@@ -46,10 +46,9 @@ def get_rollout_fn(
             )
 
         # get corresponding timesteps
-        subs = dataset.subsample
-        ts_step = bundle_steps * subs
+        ts_step = bundle_steps
         ts_idxs = [
-            list(range(int(ts) * subs, int(ts) * subs + tot_ts * subs, ts_step))
+            list(range(int(ts), int(ts) + tot_ts, ts_step))
             for ts in ts_index_0.tolist()
         ]
         tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
@@ -89,23 +88,22 @@ def validation_metrics(
         metrics_fns is not None
     ), "Pleas provide some metrics function for the validation metrics."
     n_steps = rollout.shape[0]
-    subs = dataset.subsample
     # n_steps = rollout.shape[0] // bundle_steps
     # TODO: optimize: if valset is not shuffled, we can only return every second, since the next input is the previous' target (maybe handle in the dataset not sure)
     # construct target y (NOTE: can use a lot of RAM with large n_steps and takes a lot of time)
     if bundle_steps == 1:
         y = torch.stack(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index * subs + t).long()).y
-                for t in range(0, n_steps * subs, bundle_steps * subs)
+                dataset.get_at_time(file_idx.long(), (ts_index + t).long()).y
+                for t in range(0, n_steps, bundle_steps)
             ],
             dim=0,
         )
     else:
         y = torch.concat(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index * subs + t).long()).y
-                for t in range(0, n_steps * subs, bundle_steps * subs)
+                dataset.get_at_time(file_idx.long(), (ts_index + t).long()).y
+                for t in range(0, n_steps, bundle_steps)
             ],
             dim=2,
         )

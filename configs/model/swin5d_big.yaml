@@ -17,3 +17,4 @@ swin:
   norm_output: false
   abs_pe: false
   act_fn: GELU
+  patch_skip: true

@@ -7,7 +7,6 @@ separate_zf: true
 spatial_ifft: true
 split_into_bands: null
 log_transform: false
-in_memory: false
 active_keys: ["re", "im"]
 training_trajectories: ["cyclone5_2.h5", "cyclone6_2.h5", "cyclone7_2.h5", "cyclone9_2.h5", "cyclone10_2.h5", "cyclone8_2.h5", "cyclone12_2.h5"]
 validation_trajectories: ["cyclone4_2_2.h5"]

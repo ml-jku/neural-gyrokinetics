@@ -14,7 +14,6 @@ swin:
   timestep_conditioning: true
   itg_conditioning: true
   c_multiplier: 2
-  unmerging_layer_norm: false
   norm_output: false
   abs_pe: false
   act_fn: GELU

@@ -63,7 +63,6 @@ def get_model(cfg, dataset):
             c_multiplier=c_multiplier,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
-            unmerging_layer_norm=cfg.model.swin.unmerging_layer_norm,
             conditioning=cond_fn,
             norm_output=norm_output,
             act_fn=act_fn,
