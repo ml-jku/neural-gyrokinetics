@@ -29,9 +29,6 @@ def get_data(cfg):
         )
 
     if cfg.dataset.name == "cyclone":
-        if cfg.dataset.in_memory:
-            print("Loading dataset in memory!")
-
         partial_holdouts = {}
         if cfg.dataset.partial_holdouts:
             # validate config
@@ -49,13 +46,11 @@ def get_data(cfg):
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
             spatial_ifft=cfg.dataset.spatial_ifft,
-            in_memory=cfg.dataset.in_memory,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.training_trajectories,
             partial_holdouts=partial_holdouts,
             cond_filters=cfg.dataset.training_cond_filters,
             subsample=cfg.dataset.subsample,
-            no_zf=cfg.dataset.no_zf,
             separate_zf=cfg.dataset.separate_zf,
             log_transform=cfg.dataset.log_transform,
             split_into_bands=cfg.dataset.split_into_bands,
@@ -69,12 +64,10 @@ def get_data(cfg):
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
             spatial_ifft=cfg.dataset.spatial_ifft,
-            in_memory=cfg.dataset.in_memory,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,
             cond_filters=cfg.dataset.eval_cond_filters,
             subsample=cfg.dataset.subsample,
-            no_zf=cfg.dataset.no_zf,
             separate_zf=cfg.dataset.separate_zf,
             log_transform=cfg.dataset.log_transform,
             split_into_bands=cfg.dataset.split_into_bands,
@@ -108,13 +101,11 @@ def get_data(cfg):
                 normalization=cfg.dataset.normalization,
                 normalization_scope=cfg.dataset.normalization_scope,
                 spatial_ifft=cfg.dataset.spatial_ifft,
-                in_memory=cfg.dataset.in_memory,
                 bundle_seq_length=cfg.model.bundle_seq_length,
                 trajectories=cfg.dataset.training_trajectories,
                 partial_holdouts=partial_holdouts,
                 cond_filters=cfg.dataset.eval_cond_filters,
                 subsample=cfg.dataset.subsample,
-                no_zf=cfg.dataset.no_zf,
                 separate_zf=cfg.dataset.separate_zf,
                 log_transform=cfg.dataset.log_transform,
             )

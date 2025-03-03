@@ -6,7 +6,8 @@ from torch import nn
 from functools import partial
 
 from models.utils import seq_weight_init
-from models.nd_vit.swin_layers import SwinLayer, ModulatedSwinLayer, LayerModes
+from models.nd_vit.vit_layers import ViTLayer, DiTLayer, FilmViTLayer, LayerModes
+from models.nd_vit.swin_layers import SwinLayer, DiTSwinLayer, FilmSwinLayer
 from models.nd_vit.positional import PositionalEmbedding
 from models.nd_vit.patching import (
     PatchEmbed,
@@ -38,7 +39,7 @@ class SwinBlockDown(nn.Module):
         use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
         act_fn (callable): Activation function. Default is nn.GELU.
         norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
-        swin_attention_layer (nn.Module): Type for the swin attention layer.
+        LayerType (nn.Module): Type for the swin attention layer.
     """
 
     def __init__(
@@ -57,9 +58,8 @@ class SwinBlockDown(nn.Module):
         use_checkpoint: bool = True,
         act_fn: nn.Module = nn.GELU,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
-        swin_attention_layer: Type = SwinLayer,
+        LayerType: Type = SwinLayer,
         init_weights: str = "xavier_uniform",
-        pre_ln: bool = True,
     ):
         super().__init__()
 
@@ -72,7 +72,7 @@ class SwinBlockDown(nn.Module):
                 dim, grid_size, learnable=learnable_pos_embed
             )
 
-        self.swin_att = swin_attention_layer(
+        self.swin_att = LayerType(
             space,
             dim,
             depth=depth,
@@ -83,9 +83,7 @@ class SwinBlockDown(nn.Module):
             mlp_ratio=hidden_mlp_ratio,
             norm_layer=norm_layer,
             use_checkpoint=use_checkpoint,
-            mode=LayerModes.DOWNSAMPLE,
             act_fn=act_fn,
-            pre_ln=pre_ln,
         )
 
         self.resampled_grid_size = grid_size
@@ -153,7 +151,7 @@ class SwinBlockUp(nn.Module):
         patching_hidden_ratio (float): Expansion rate for patching MLPs. Default is 8.0
         conv_upsample (bool): Use transposed convolutions to unpatch. Default is False.
         norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
-        swin_attention_layer (nn.Module): Type for the swin attention layer.
+        LayerType (nn.Module): Type for the swin attention layer.
         mode (LayerModes): Specify which operation to perform in the up-layer.
     """
 
@@ -175,10 +173,9 @@ class SwinBlockUp(nn.Module):
         act_fn: nn.Module = nn.GELU,
         conv_upsample: bool = False,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
-        swin_attention_layer: Type = SwinLayer,
+        LayerType: Type = SwinLayer,
         mode: LayerModes = LayerModes.UPSAMPLE,
         init_weights: Optional[str] = "xavier_uniform",
-        pre_ln: bool = True,
     ):
         super().__init__()
 
@@ -193,7 +190,7 @@ class SwinBlockUp(nn.Module):
 
         # NOTE: project down concat dimension first to save params
         self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
-        self.swin_att = swin_attention_layer(
+        self.swin_att = LayerType(
             space,
             dim,
             num_heads=num_heads,
@@ -204,8 +201,6 @@ class SwinBlockUp(nn.Module):
             window_size=window_size,
             use_checkpoint=use_checkpoint,
             act_fn=act_fn,
-            mode=mode,
-            pre_ln=pre_ln,
         )
         if mode == LayerModes.UPSAMPLE:
             self.upsample = PatchUnmerging(
@@ -336,15 +331,15 @@ class SwinUnet(nn.Module):
         use_checkpoint: bool = False,
         merging_hidden_ratio: float = 8.0,
         unmerging_hidden_ratio: float = 8.0,
-        unmerging_layer_norm: bool = False,
         conditioning: Optional[nn.Module] = None,
+        modulation: str = "dit",
         act_fn: nn.Module = nn.GELU,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
         expand_act_fn: nn.Module = nn.LeakyReLU,
         init_weights: str = "xavier_uniform",
         patching_init_weights: str = "xavier_uniform",
-        pre_ln: bool = True,
         norm_output: bool = False,
-        add_first_residual: bool = False,
+        patch_skip: bool = False,
     ):
         super().__init__()
 
@@ -360,7 +355,7 @@ class SwinUnet(nn.Module):
         self.patching_init_weights = patching_init_weights
         self.base_resolution = base_resolution
         self.norm_output = norm_output
-        self.add_first_residual = add_first_residual
+        self.patch_skip = patch_skip
         padded_base_resolution, _ = pad_to_blocks(base_resolution, patch_size)
 
         if isinstance(num_heads, int):
@@ -370,13 +365,19 @@ class SwinUnet(nn.Module):
 
         assert len(num_heads) == len(depth) == num_layers
 
-        # set conditioning and layer type
-        SwinAttentionLayer = SwinLayer
+        # set layer type and conditioning
+        LocalLayer = SwinLayer
+        GlobalLayer = ViTLayer
         self.cond_embed = conditioning
         if self.cond_embed is not None:
-            SwinAttentionLayer = partial(
-                ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim
-            )
+            if modulation == "dit":
+                ModulatedSwinLayer = DiTSwinLayer
+                ModulatedViTLayer = DiTLayer
+            if modulation == "film":
+                ModulatedSwinLayer = FilmSwinLayer
+                ModulatedViTLayer = FilmViTLayer
+            LocalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
+            GlobalLayer = partial(ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim)
 
         self.patch_embed = PatchEmbed(
             space=space,
@@ -409,8 +410,8 @@ class SwinUnet(nn.Module):
                 hidden_mlp_ratio=hidden_mlp_ratio,
                 c_multiplier=c_multiplier,
                 act_fn=act_fn,
-                swin_attention_layer=SwinAttentionLayer,
-                pre_ln=pre_ln,
+                norm_layer=norm_layer,
+                LayerType=LocalLayer,
             )
             down_blocks.append(block)
             down_dims.append(block.out_dim)
@@ -418,25 +419,23 @@ class SwinUnet(nn.Module):
 
         self.down_blocks = nn.ModuleList(down_blocks)
         self.grid_sizes = grid_sizes
+        self.down_dims = down_dims
 
         # middle/bottleneck
-        self.middle = SwinAttentionLayer(
+        self.middle = GlobalLayer(
             space,
             down_dims[-1],
             grid_size=grid_sizes[-1],
             depth=middle_depth,
             num_heads=middle_num_heads,
-            window_size=window_size,
             drop_path=drop_path,
             mlp_ratio=hidden_mlp_ratio,
-            mode=LayerModes.SEQUENCE,
             use_checkpoint=use_checkpoint,
+            norm_layer=norm_layer,
             act_fn=act_fn,
-            pre_ln=pre_ln,
         )
 
-        if abs_pe:
-            self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
+        self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
 
         self.middle_upscale = PatchUnmerging(
             space=space,
@@ -451,8 +450,6 @@ class SwinUnet(nn.Module):
         # up path
         up_dims = down_dims[::-1][1:]
         up_grid_sizes = grid_sizes[::-1][1:]
-        # patch merging padding
-        # up_grid_sizes = [pad_to_blocks(g, space * (2,))[0] for g in up_grid_sizes]
 
         up_depth = up_depth if up_depth is not None else depth[::-1]
         up_num_heads = up_num_heads if up_num_heads is not None else num_heads[::-1]
@@ -474,9 +471,9 @@ class SwinUnet(nn.Module):
                     c_multiplier=c_multiplier,
                     use_checkpoint=use_checkpoint,
                     act_fn=act_fn,
-                    swin_attention_layer=SwinAttentionLayer,
+                    norm_layer=norm_layer,
+                    LayerType=LocalLayer,
                     conv_upsample=conv_patch,
-                    pre_ln=pre_ln,
                 )
             )
         # last up block (no upsample)
@@ -493,15 +490,12 @@ class SwinUnet(nn.Module):
                 hidden_mlp_ratio=hidden_mlp_ratio,
                 use_checkpoint=use_checkpoint,
                 act_fn=act_fn,
-                swin_attention_layer=SwinAttentionLayer,
+                norm_layer=norm_layer,
+                LayerType=LocalLayer,
                 mode=LayerModes.SEQUENCE,
-                pre_ln=pre_ln,
             )
         )
         self.up_blocks = nn.ModuleList(up_blocks)
-
-        if self.add_first_residual:
-            self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
 
         # unpatch
         self.unpatch = PatchUnmerging(
@@ -512,9 +506,11 @@ class SwinUnet(nn.Module):
             out_channels=out_channels,
             flatten=False,
             use_conv=conv_patch,
-            norm_layer=None if not unmerging_layer_norm else nn.LayerNorm,
+            norm_layer=None,
             mlp_ratio=unmerging_hidden_ratio,
             act_fn=expand_act_fn,
+            patch_skip=self.patch_skip,
+            # cond_dim=self.cond_embed.cond_dim,
         )
 
         self.reset_parameters()
@@ -533,12 +529,13 @@ class SwinUnet(nn.Module):
         self.middle.reset_parameters(self.init_weights)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
-        cond = self.condition(kwargs)
         # compress to patch space
-        first_res = []
         x, pad_axes = self.patch_encode(x)
-        if self.add_first_residual:
+        if self.patch_skip:
             first_res = x.clone()
+
+        # backbone
+        cond = self.condition(kwargs)
 
         # down path
         feature_maps = []
@@ -547,8 +544,7 @@ class SwinUnet(nn.Module):
             feature_maps.append(x_pre)
 
         # middle block
-        if hasattr(self, "middle_pe"):
-            x = self.middle_pe(x)
+        x = self.middle_pe(x)
         x = self.middle(x, **cond)
         x = self.middle_upscale(x)
 
@@ -558,15 +554,10 @@ class SwinUnet(nn.Module):
             x = blk(x, s=feature_maps[i], **cond)
 
         # expand to original
-        if self.add_first_residual:
-            assert (
-                    all(x_s == s_s for x_s, s_s in zip(x.shape, first_res.shape))
-                    and x.ndim == first_res.ndim
-            )
-            # concat to hidden dim and project to latent dim
-            x = self.proj_concat(torch.cat([x, first_res], -1))
+        if self.patch_skip:
+            x = torch.cat([x, first_res], -1)
 
-        x = self.patch_decode(x, pad_axes)
+        x = self.patch_decode(x, cond["condition"], pad_axes)
 
         if self.norm_output:
             x = x / x.std((2, 3, 4, 5, 6), keepdims=True)
@@ -580,9 +571,11 @@ class SwinUnet(nn.Module):
         x = self.patch_embed(x)
         return x, pad_axes
 
-    def patch_decode(self, z: torch.Tensor, pad_axes: torch.Tensor) -> torch.Tensor:
+    def patch_decode(
+        self, z: torch.Tensor, cond: torch.Tensor, pad_axes: torch.Tensor
+    ) -> torch.Tensor:
         # expand patches to original size
-        x = self.unpatch(z)
+        x = self.unpatch(z, cond)
         # unpad output
         x = unpad(x, pad_axes, self.base_resolution)
         # return as image
@@ -591,11 +584,13 @@ class SwinUnet(nn.Module):
 
     def condition(self, kwconds) -> Dict:
         cond = kwconds.get("timestep")
-        itg = kwconds.get("itg")
-        if cond is None:
-            cond = itg
-        elif itg is not None:
-            cond = torch.cat([cond.unsqueeze(-1), itg.unsqueeze(-1)], dim=-1)
+        cond = cond.unsqueeze(-1)
+        refine_step = kwconds.get("refinement_step", None)
+        if refine_step is not None:
+            cond = torch.cat([cond, refine_step.unsqueeze(-1)], dim=-1)
+        itg = kwconds.get("itg", None)
+        if itg is not None:
+            cond = torch.cat([cond, itg.unsqueeze(-1)], dim=-1)
         if cond is not None and self.cond_embed is not None:
             # embed conditioning is e.g. sincos
             return {"condition": self.cond_embed(cond)}

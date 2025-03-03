@@ -3,7 +3,6 @@ import re
 import os
 import h5py
 from dataclasses import dataclass
-from tqdm import tqdm
 from collections import defaultdict
 
 import torch
@@ -51,7 +50,6 @@ class CycloneDataset(Dataset):
         dtype (type): Cast returned samples to this torch dtype.
         random_seed (int): Seed initialization for random splits.
         val_ratio (float): Validation data ration for random splits.
-        in_memory (bool): Whether to load the dataset in RAM.
         bundle_seq_length (int): Extra temporal steps to append to returned samples.
     """
 
@@ -69,10 +67,8 @@ class CycloneDataset(Dataset):
         dtype: Type = torch.float32,
         random_seed: int = 42,
         val_ratio: float = 0.1,
-        in_memory: bool = False,
         bundle_seq_length: int = 1,
         subsample: int = 1,
-        no_zf: bool = False,
         separate_zf: bool = False,
         log_transform: bool = False,
         split_into_bands: int = None
@@ -98,7 +94,6 @@ class CycloneDataset(Dataset):
         self.subsample = subsample
         self.apply_log = log_transform
 
-        self.in_memory = in_memory
         self.dir = path
 
         self.bundle_seq_length = bundle_seq_length
@@ -134,9 +129,8 @@ class CycloneDataset(Dataset):
 
         # if set, load preprocessed files with ifft
         self.spatial_ifft = spatial_ifft
-        self.no_zf = no_zf
         if spatial_ifft:
-            if no_zf or separate_zf and normalization_scope != "per_mode":
+            if separate_zf and normalization_scope != "per_mode":
                 n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                 self.files = [
                     f if f"_ifft_separate_zf{n_bands_tag}.h5" in f else re.sub(r"\.h5$", f"_ifft_separate_zf{n_bands_tag}.h5", f)
@@ -195,7 +189,9 @@ class CycloneDataset(Dataset):
                         timesteps = f["metadata/timesteps"][-n_tail_holdout:]
                         orig_t_index = np.arange(len(timesteps))[::subsample]
                         timesteps = timesteps[orig_t_index]
-                        self.steps_per_file[file_idx] = len(f["metadata/timesteps"][:][::subsample])
+                        self.steps_per_file[file_idx] = len(
+                            f["metadata/timesteps"][:][::subsample]
+                        )
                 else:
                     timesteps = f["metadata/timesteps"][:]
                     orig_t_index = np.arange(len(timesteps))[::subsample]
@@ -232,7 +228,7 @@ class CycloneDataset(Dataset):
         if split == "val" and self.partial_holdouts:
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
-                if no_zf or separate_zf and normalization_scope != "per_mode":
+                if separate_zf and normalization_scope != "per_mode":
                     n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                     filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                 elif normalization_scope == "per_mode":
@@ -255,49 +251,6 @@ class CycloneDataset(Dataset):
                 t_index = per_file_t_indexes[file_idx][tstep_idx]
                 self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, t_index)
                 self.file_and_tstep_to_flat_index[(file_idx, t_index)] = flat_idx
-
-        if self.in_memory:
-            # load all timesteps into a dict of dicts
-            self.data = {}
-            for file_idx, file in enumerate(self.files):
-                file_dict = {}
-                # check for holdout samples
-                filename = os.path.split(file)[-1]
-                if spatial_ifft:
-                    if no_zf or separate_zf and normalization_scope != "per_mode":
-                        n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-                        filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
-                    elif normalization_scope == "per_mode":
-                        filename = filename.replace("_ifft_separate_zf_per_mode", "")
-                    else:
-                        filename = filename.replace("_ifft", "")
-                n_tail_holdout = self.partial_holdouts.get(filename)
-                with h5py.File(file, "r") as f:
-                    # read the timesteps and fluxes dataset
-                    timesteps = f["metadata/timesteps"][:]
-                    fluxes = f["metadata/fluxes"][:]
-                    file_dict["metadata/timesteps"] = timesteps
-                    file_dict["metadata/fluxes"] = fluxes
-                    itg = f["metadata/ion_temp_grad"][:]
-                    file_dict["metadata/ion_temp_grad"] = itg
-                    # read in all the data points
-                    if n_tail_holdout:
-                        if split == "train":
-                            _range = range(timesteps[:-n_tail_holdout])
-                        else:
-                            _range = range(timesteps[-n_tail_holdout:])
-                    else:
-                        _range = range(len(file_dict["metadata/timesteps"]))
-                    for t_index in tqdm(_range):
-                        original_t_index = t_index + self.offsets[file_idx]
-                        k_name = "timestep_" + str(original_t_index).zfill(5)
-                        poten_name = "poten_" + str(original_t_index).zfill(5)
-                        k_data = f[f"data/{k_name}"][:]
-                        poten_data = f[f"data/{poten_name}"][:]
-                        # cache samples
-                        file_dict[f"data/{k_name}"] = k_data
-                        file_dict[f"data/{poten_name}"] = poten_data
-                self.data[file_idx] = file_dict
 
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
@@ -322,11 +275,8 @@ class CycloneDataset(Dataset):
         # lookup file index and time index from flat index
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
-        if self.in_memory:
-            sample = self._load_data(self.data[file_index], file_index, t_index)
-        else:
-            with h5py.File(self.files[file_index], "r") as f:
-                sample = self._load_data(f, file_index, t_index)
+        with h5py.File(self.files[file_index], "r") as f:
+            sample = self._load_data(f, file_index, t_index)
         # k-fields
         x, gt = sample["x"], sample["gt"]
         # accessory fields
@@ -337,7 +287,6 @@ class CycloneDataset(Dataset):
             x, shift, scale = self._normalize(x, file_index)
             gt = (gt - shift) / scale
 
-        ts_index = torch.tensor(t_index // self.subsample, dtype=self.dtype)
         return CycloneSample(
             x=torch.tensor(x, dtype=self.dtype),
             y=torch.tensor(gt, dtype=self.dtype),
@@ -346,7 +295,7 @@ class CycloneDataset(Dataset):
             timestep=torch.tensor(timestep, dtype=self.dtype),
             itg=torch.tensor(itg, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=self.dtype),
-            timestep_index=ts_index,
+            timestep_index=torch.tensor(t_index, dtype=self.dtype),
         )
 
     def _load_data(
@@ -432,9 +381,10 @@ class CycloneDataset(Dataset):
         return (x - shift) / scale, shift, scale
 
     def denormalize(self, x, file_index):
-        shift, scale = 0.0, 1.0
+        shift, scale = np.array(0.0), np.array(1.0)
         if self.normalization_scope == "sample":
-            raise NotImplementedError
+            # NOTE no denormalization with sample scope
+            pass
         else:
             if self.normalization_scope == "dataset":
                 key = "full"
@@ -472,19 +422,24 @@ class CycloneDataset(Dataset):
         self,
         file_idx: torch.Tensor,
         timestep_idx: torch.Tensor,
+        get_normalized: bool = True,
     ):
         # Compute the flat indices from the file indices and time indices
         updated_index = [
             self.file_and_tstep_to_flat_index[i]
             for i in zip(file_idx.tolist(), timestep_idx.tolist())
         ]
-        sample = self.collate([self.__getitem__(idx) for idx in updated_index])
+        sample = self.collate(
+            [self.__getitem__(idx, get_normalized) for idx in updated_index]
+        )
         return sample
 
     def get_timesteps(
         self, file_idx: torch.Tensor, timestep_idx: Optional[torch.Tensor] = None
     ):
         # file_idx: (B,)
+        if isinstance(file_idx, int):
+            file_idx = torch.tensor([file_idx])
         file_idx = file_idx.cpu().long()
         # all timesteps in file
         if timestep_idx is None:
@@ -525,13 +480,9 @@ class CycloneDataset(Dataset):
             # lookup file index and time index
             file_index, t_index = self.flat_index_to_file_and_tstep[idx]
 
-            if self.in_memory:
-                timesteps_array = self.data[file_index]["metadata/timesteps"]
+            with h5py.File(self.files[file_index], "r") as f:
+                timesteps_array = f["metadata/timesteps"][:]
                 step_value = timesteps_array[t_index]
-            else:
-                with h5py.File(self.files[file_index], "r") as f:
-                    timesteps_array = f["metadata/timesteps"][:]
-                    step_value = timesteps_array[t_index]
 
             timesteps_list.append(torch.tensor(step_value, dtype=self.dtype))
 
@@ -544,6 +495,11 @@ class CycloneDataset(Dataset):
             timesteps_tensor = timesteps_tensor.view(B, -1)
 
         return timesteps_tensor
+
+    def get_fluxes(self, file_index: int):
+        with h5py.File(self.files[file_index], "r") as f:
+            fluxes = f["metadata/fluxes"][:]
+        return fluxes[1:]  # discard flux at t=0
 
     def __len__(self):
         return self.length

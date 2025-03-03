@@ -118,6 +118,8 @@ class ContinuousConditionEmbed(nn.Module):
             raise NotImplementedError
 
     def forward(self, cond: torch.Tensor) -> torch.Tensor:
+        if cond.ndim == 1:
+            cond = cond.unsqueeze(-1)
         assert self.n_cond == cond.shape[-1], f"{self.n_cond} != {cond.shape[-1]}"
         out = cond.unsqueeze(-1) @ self.omega.unsqueeze(0)
         emb = torch.concat([torch.sin(out), torch.cos(out)], dim=-1)
@@ -132,12 +134,12 @@ class ContinuousConditionEmbed(nn.Module):
 
 
 class Film(nn.Module):
-    def __init__(self, cond_dim: int, dim_out: int):
+    def __init__(self, cond_dim: int, dim: int):
         super().__init__()
 
         self.dim_cond = cond_dim
-        self.dim_out = dim_out
-        self.modulation = nn.Linear(cond_dim, dim_out * 2)
+        self.dim = dim
+        self.modulation = nn.Linear(cond_dim, dim * 2)
 
     def forward(self, x: torch.Tensor, cond: torch.Tensor):
         mod = self.modulation(cond)
@@ -146,3 +148,62 @@ class Film(nn.Module):
             mod.shape[0], *(1,) * (x.ndim - cond.ndim), *mod.shape[1:]
         ).chunk(2, dim=-1)
         return x * (scale + 1) + shift
+
+
+class DiT(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        cond_dim: int,
+        gate_indices=None,
+        init_weights="xavier_uniform",
+        init_gate_zero=False,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.cond_dim = cond_dim
+        # NOTE: 6 for (scale1, shift1, gate1, scale2, shift2, gate2)
+        self.modulation = nn.Linear(cond_dim, 6 * dim)
+        self.init_gate_zero = init_gate_zero
+        self.gate_indices = gate_indices
+        if init_weights is not None:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch":
+            pass
+        elif init_weights == "xavier_uniform":
+            nn.init.xavier_uniform_(self.modulation.weight)
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            self.modulation.apply(nn.init.trunc_normal_)
+        else:
+            raise NotImplementedError
+
+        if self.init_gate_zero:
+            assert self.gate_indices is not None
+            for gate_index in self.gate_indices:
+                start = self.dim * gate_index
+                end = self.dim * (gate_index + 1)
+                with torch.no_grad():
+                    self.modulation.weight[start:end] = 0
+                    self.modulation.bias[start:end] = 0
+
+    def forward(self, cond):
+        return self.modulation(cond).chunk(6, dim=1)
+
+    @staticmethod
+    def modulate_scale_shift(x, scale, shift):
+        scale = scale.reshape(
+            scale.shape[0], *(1,) * (x.ndim - scale.ndim), *scale.shape[1:]
+        )
+        shift = shift.reshape(
+            shift.shape[0], *(1,) * (x.ndim - shift.ndim), *shift.shape[1:]
+        )
+        return x * (1 + scale) + shift
+
+    @staticmethod
+    def modulate_gate(x, gate):
+        gate = gate.reshape(
+            gate.shape[0], *(1,) * (x.ndim - gate.ndim), *gate.shape[1:]
+        )
+        return gate * x

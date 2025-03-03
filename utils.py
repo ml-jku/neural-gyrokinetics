@@ -1,4 +1,4 @@
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import glob
 import zipfile
 import os
@@ -50,8 +50,8 @@ class WandbManager:
         )
         self._initialized = True
 
-    def log(self, logs, commit=True):
-        wandb.log(logs, commit=commit)
+    def log(self, logs, commit: bool = True, step: Optional[int] = None):
+        wandb.log(logs, step=step, commit=commit)
 
     def close(self):
         pass

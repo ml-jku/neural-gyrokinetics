@@ -1,6 +1,7 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from functools import partial
+import random
 import torch
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
 from torch.nn.utils import clip_grad_norm_
@@ -12,11 +13,12 @@ from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 
 from dataset import get_data, CycloneSample
 from models import get_model
-from train import get_pushforward_fn, relative_norm_mse, pretrain_autoencoder
-from eval import get_rollout_fn, validation_metrics, generate_val_plots, get_flux_plot
+from train import relative_norm_mse, pretrain_autoencoder
+from eval import get_rollout_fn, validation_metrics, generate_val_plots
 from eval.gkw_client import request_gkw_sim, dump_rollout
 from utils import (
     load_model_and_config,
@@ -27,7 +29,7 @@ from utils import (
 
 
 def ddp_setup(rank, world_size):
-    init_process_group(backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20))
+    init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
 
 def runner(rank, cfg, world_size):
@@ -58,25 +60,15 @@ def runner(rank, cfg, world_size):
         trainloader, valloaders = dataloaders
         valloaders = [valloaders]
 
-    if not cfg.dataset.separate_zf:
-        problem_dim = len(cfg.dataset.active_keys)
-    else:
-        problem_dim = 4
-        problem_dim += (cfg.dataset.split_into_bands - 1) * 2 if cfg.dataset.split_into_bands else 0
-
     model = get_model(cfg, dataset=trainset)
     model = model.to(device)
     if use_ddp:
         model = DDP(model, device_ids=[rank])
-
+    active_keys = cfg.dataset.active_keys
     bundle_seq_length = cfg.model.bundle_seq_length
+
     use_gkw = cfg.validation.use_gkw
     if use_gkw:
-        if cfg.dataset.normalization_scope == "sample":
-            raise UserWarning(
-                "Cannot denormalize with `normalization_scope='sample'`. "
-                "Cannot compute correct GKW results."
-            )
         gkw_executor = ThreadPoolExecutor(max_workers=1)
         # TODO hardcoded for now
         gkw_dump_path = "/system/user/publicdata/gyrokinetics/dumps/test_gkw_client"
@@ -90,56 +82,78 @@ def runner(rank, cfg, world_size):
         )
 
     if cfg.mode == "train":
+        n_boost_steps = 2
+        models = [deepcopy(model) for _ in range(n_boost_steps)]
+        opts = [
+            torch.optim.Adam(
+                models[i].parameters(),
+                lr=cfg.training.learning_rate,
+                weight_decay=cfg.training.weight_decay,
+            )
+            for i in range(n_boost_steps)
+        ]
         n_epochs = cfg.training.n_epochs
         total_steps = n_epochs * len(trainloader)
 
-        # optimizer config
-        opt = torch.optim.Adam(
-            model.parameters(),
-            lr=cfg.training.learning_rate,
-            weight_decay=cfg.training.weight_decay,
-        )
-
-        use_amp = cfg.use_amp
-
-        scaler = torch.amp.GradScaler(device=device, enabled=use_amp)
-        use_bf16 = use_amp and torch.cuda.is_bf16_supported()
-        amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
         if cfg.training.scheduler is not None:
-            scheduler = get_scheduler(
-                name=cfg.training.scheduler,
-                optimizer=opt,
-                num_warmup_steps=total_steps // 6,
-                num_training_steps=total_steps,
-            )
-
-        if opt_state_dict is not None:
-            opt.load_state_dict(opt_state_dict)
-
-        # configure loss
-        predict_delta = cfg.training.predict_delta
-        # and pushforward
-        pf_cfg = cfg.training.pushforward
-        pushforward_fn = None
-        if sum(pf_cfg.unrolls) > 0:
-            pushforward_fn = get_pushforward_fn(
-                n_unrolls_schedule=pf_cfg.unrolls,
-                probs_schedule=pf_cfg.probs,
-                epoch_schedule=pf_cfg.epochs,
-                predict_delta=predict_delta,
-                dataset=trainset,
-                bundle_steps=bundle_seq_length,
-                use_amp=use_amp,
-            )
+            schedulers = [
+                get_scheduler(
+                    name=cfg.training.scheduler,
+                    optimizer=opt,
+                    num_warmup_steps=total_steps // 6,
+                    num_training_steps=total_steps,
+                )
+                for opt in opts
+            ]
 
         loss_val_min = torch.inf
-
         if cfg.training.pretraining:
             model = pretrain_autoencoder(
                 model, cfg, trainloader, valloaders, writer, device
             )  # only valuate on the holdout trajectories, not the holdout samples
             if not hasattr(model, "module") and use_ddp:
                 model = DDP(model, device_ids=[rank])
+
+        # boost_error_scale = {0: 1.0, 1: 1.0}
+        # decay = 0.99
+
+        def boost_step(x, y, epoch: int, **kwargs):
+            # k = random.randint(0, n_boost_steps - 1)
+            k = [0, random.randint(0, n_boost_steps - 1)][epoch > 50]
+            with torch.no_grad():
+                pred = 0.0
+                for i in range(k):
+                    pred = models[i](x, **kwargs)
+
+            err = y - pred
+            # if k > 0:
+            #     err /= boost_error_scale[k - 1]
+
+            pred = models[k](x, **kwargs)
+
+            def to_fft(x):
+                x = x.permute(0, 2, 3, 4, 5, 6, 1).contiguous()
+                x = torch.view_as_complex(x)
+                x = torch.fft.fftn(x, dim=(1, 2, 3, 4, 5))
+                x = torch.fft.ifftshift(x, dim=(1, 2, 3, 4, 5))
+                return torch.stack([x.real, x.imag], dim=1).squeeze()
+
+            pred = to_fft(pred)
+            err = to_fft(err)
+
+            # normalize error (RMSE)
+            # rmse = torch.sqrt(((y - pred) ** 2).mean()).item()
+            # running mean
+            # boost_error_scale[k] = decay * boost_error_scale[k] + (1 - decay) * rmse
+            return relative_norm_mse(pred, err, squared=False), k
+
+        @torch.no_grad()
+        def predict(x, **kwargs):
+            pred = models[0](x, **kwargs)
+            for i in range(1, n_boost_steps):
+                pred += models[i](x, **kwargs)
+                # pred += boost_error_scale[i - 1] * models[i](x, **kwargs)
+            return pred
 
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
         for epoch in range(1, n_epochs + 1):
@@ -166,39 +180,23 @@ def runner(rank, cfg, world_size):
                 # dataloading timings
                 info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
 
-                if pushforward_fn:
-                    start_pf = perf_counter_ns()
-                    # accessory information for pf (to retreive unrolled target)
-                    file_idx = sample.file_index.to(device)
-                    ts_index = sample.timestep_index.to(device)
-                    x, ts, y = pushforward_fn(
-                        model, x, ts, itg, ts_index, y, file_idx, epoch
-                    )
-                    info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
-                else:
-                    info_dict["pf_ms"].append(0.0)
+                info_dict["pf_ms"].append(0.0)
 
                 t_start_fwd = perf_counter_ns()
 
-                with torch.autocast(str(cfg.device), dtype=amp_dtype, enabled=use_amp):
-                    pred_x = model(x, timestep=ts, itg=itg)
-                    if predict_delta:
-                        pred_x = x + pred_x
-                    loss = relative_norm_mse(pred_x, y)
+                loss, k = boost_step(x, y, epoch, timestep=ts, itg=itg)
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
                 t_start_bkd = perf_counter_ns()
 
-                opt.zero_grad(set_to_none=True)
-                scaler.scale(loss).backward()
+                opts[k].zero_grad(set_to_none=True)
+                loss.backward()
                 if cfg.training.clip_grad:
-                    scaler.unscale_(opt)
-                    clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(opt)
-                scaler.update()
+                    clip_grad_norm_(models[k].parameters(), 1.0)
+                opts[k].step()
                 if cfg.training.scheduler is not None:
-                    scheduler.step()
+                    schedulers[k].step()
 
                 train_mse += loss.item()
 
@@ -210,7 +208,7 @@ def runner(rank, cfg, world_size):
             train_losses_dict = {
                 "train/relative_norm_mse": train_mse,
                 "train/lr": (
-                    scheduler.get_last_lr()[0]
+                    schedulers[0].get_last_lr()[0]
                     if cfg.training.scheduler
                     else cfg.training.learning_rate
                 ),
@@ -218,7 +216,6 @@ def runner(rank, cfg, world_size):
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # Validation loop
-            separate_zf = cfg.dataset.separate_zf
             n_eval_steps = cfg.validation.n_eval_steps
             val_freq = cfg.validation.validate_every_n_epochs
             tot_eval_steps = n_eval_steps * bundle_seq_length
@@ -227,17 +224,17 @@ def runner(rank, cfg, world_size):
             val_plots = {}
             if (epoch % val_freq) == 0 or epoch == 1 and not rank:
                 # Validation loop
-                model.eval()
+                [m.eval() for m in models]
                 for val_idx, (valset, valloader) in enumerate(zip(valsets, valloaders)):
 
                     rollout_fn = get_rollout_fn(
-                        problem_dim=problem_dim,
+                        problem_dim=len(active_keys),
                         n_steps=n_eval_steps,
                         bundle_steps=bundle_seq_length,
                         dataset=valset,
-                        predict_delta=predict_delta,
+                        predict_delta=cfg.training.predict_delta,
                         device=str(device),
-                        use_amp=use_amp,
+                        use_amp=cfg.use_amp,
                     )
 
                     valname = (
@@ -301,29 +298,32 @@ def runner(rank, cfg, world_size):
 
                                 # get the rolled out validation trajectories
                                 x_rollout = rollout_fn(
-                                    model,
+                                    predict,
                                     x,
                                     file_idx=file_idx,
                                     ts_index_0=ts_index,
                                     itg=itg,
                                 )
 
-                                # denormalize rollout and target for evaluation / plots
+                                # denormalize rollout and target for gkw / evaluation / plotting
+                                n_steps, bs = x_rollout.shape[0], x_rollout.shape[1]
                                 x_rollout = torch.stack(
                                     [
                                         torch.stack(
                                             [
-                                                valset.denormalize(x_rollout[t, b], f)
-                                                for b, f in enumerate(file_idx.tolist())
+                                                valset.denormalize(
+                                                    x_rollout[t, b], file_idx[b].item()
+                                                )
+                                                for b in range(bs)
                                             ]
                                         )
-                                        for t in range(x_rollout.shape[0])
+                                        for t in range(n_steps)
                                     ]
                                 )
                                 y = torch.stack(
                                     [
-                                        valset.denormalize(y[b], f)
-                                        for b, f in enumerate(file_idx.tolist())
+                                        valset.denormalize(y[b], file_idx[b].item())
+                                        for b in range(bs)
                                     ]
                                 )
 
@@ -337,18 +337,15 @@ def runner(rank, cfg, world_size):
                                     metric_fn_list,
                                 )
                                 if use_gkw:
-                                    # onestep predictions (time dimension = 0)
                                     rollout_dict = {
-                                        int(t_idx.item()): x_rollout[0, b].cpu().numpy()
-                                        for b, t_idx in enumerate(ts_index)
+                                        int(ts_idx.item()): r.cpu().numpy()
+                                        for ts_idx, r in zip(ts_index, x_rollout)
                                     }
-                                    # TODO put original file in config?
                                     src_config_path = (
                                         valset.files[0]
-                                        .split("/")[-1]
                                         .replace("_ifft", "")
-                                        .replace("_separate_zf", "")
                                         .replace(".h5", "")
+                                        .split("/")[-1]
                                     )
                                     src_config_path = (
                                         f"/restricteddata/ukaea/"
@@ -361,7 +358,7 @@ def runner(rank, cfg, world_size):
                                     )
 
                                 if metrics_i.shape[-1] < tot_eval_steps:
-                                    # end of dataset, need to pad the tensor
+                                    # reached end of dataset at some point so we need to pad the tensor
                                     diff = tot_eval_steps - metrics_i.shape[-1]
                                     metrics_i = torch.cat(
                                         [
@@ -442,7 +439,7 @@ def runner(rank, cfg, world_size):
                     # Save model if validation loss on trajectories improves
                     loss_val_min = save_model_and_config(
                         model,
-                        optimizer=opt,
+                        optimizer=opts[0],
                         cfg=cfg,
                         epoch=epoch,
                         # TODO decide target metric
@@ -454,31 +451,14 @@ def runner(rank, cfg, world_size):
                         "`cfg.ckpt_path` is not set: checkpoints will not be stored"
                     )
 
-            # check gkw future once a epoch
+            # TODO IMPORTANT : log flux plots + error to wandb
             if use_gkw:
                 fluxes, potentials = {}, {}
-                done_futures = []
-                for future_epoch, fut in gkw_futures.items():
+                # NOTE check gkw future once a epoch
+                for step, fut in gkw_futures.items():
                     if fut.done():
-                        done_futures.append(future_epoch)
-                        fluxes[future_epoch], potentials[future_epoch] = fut.result()
-                        flux_plot, flux_error = get_flux_plot(
-                            fluxes[future_epoch], dataset=valset
-                        )
-                        gkw_logs = {
-                            "Flux": flux_plot,
-                            "val_holdout_trajectories/flux_mse": flux_error,
-                        }
-                        if writer and not rank:
-                            # NOTE not possible to log at previous step...
-                            writer.log(gkw_logs)
-                # close finished futures
-                for k in done_futures:
-                    del gkw_futures[k]
+                        fluxes[step], potentials[step] = fut.result()
 
-            if use_ddp:
-                # Add barrier for all ranks and wait for rank 0
-                torch.distributed.barrier()
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
             if writer and not rank:
@@ -501,12 +481,8 @@ def runner(rank, cfg, world_size):
                 print(
                     f"Epoch: {epoch_str}, "
                     f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
-                    f", step time: {total_time:.2f}ms"
+                    f", epoch time: {total_time:.2f}ms"
                 )
-        if use_gkw:
-            # TODO wait some more if some gkw process is still hanging
-            pass
-
         if writer:
             writer.finish()
 
