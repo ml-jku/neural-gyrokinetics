@@ -1,7 +1,7 @@
 name: cyclone
 path: /local00/bioinf/gyrokinetics/preprocessed
 normalization: zscore
-normalization_scope: sample
+normalization_scope: dataset
 subsample: 1
 separate_zf: true
 spatial_ifft: true

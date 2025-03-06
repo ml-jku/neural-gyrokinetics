@@ -76,7 +76,7 @@ class PatchAttention(nn.Module):
         )
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop)
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
 
         # attention readout
         x = rearrange(x, "b k n c -> b n (k c)")

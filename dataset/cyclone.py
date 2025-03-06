@@ -76,7 +76,6 @@ class CycloneDataset(Dataset):
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
         assert split in ["train", "val"]
         self.dtype = dtype
-
         active_keys = active_keys if active_keys is not None else ["re", "im"]
         assert all([a in ["re", "im"] for a in active_keys])
         if not separate_zf:
@@ -212,7 +211,8 @@ class CycloneDataset(Dataset):
                     stats.update(self.dataset_stats[file_idx]["mean"],
                                  self.dataset_stats[file_idx]["std"]**2,
                                  self.dataset_stats[file_idx]["min"],
-                                 self.dataset_stats[file_idx]["max"])
+                                 self.dataset_stats[file_idx]["max"],
+                                 count=len(timesteps))
 
         if normalization_scope == "dataset":
             self.dataset_stats["full"]["mean"] = stats.mean
