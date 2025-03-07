@@ -12,6 +12,7 @@ from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from concurrent.futures import ThreadPoolExecutor
+from itertools import chain
 
 from dataset import get_data, CycloneSample
 from models import get_model
@@ -409,16 +410,25 @@ def runner(rank, cfg, world_size):
                         for key in metrics.keys():
                             cur_metric = metrics[key].to(device)
                             cur_ts = n_timesteps_acc[key].to(device)
-                            gathered = [torch.zeros_like(cur_metric, dtype=cur_metric.dtype, device=cur_metric.device)
+                            gathered_ms = [torch.zeros_like(cur_metric, dtype=cur_metric.dtype, device=cur_metric.device)
                                         for _ in range(world_size)]
                             gathered_ts = [torch.zeros_like(cur_metric, dtype=cur_metric.dtype, device=cur_metric.device)
                                         for _ in range(world_size)]
-                            dist.all_gather(gathered, cur_metric)
+                            dist.all_gather(gathered_ms, cur_metric)
+                            gathered_ms = torch.cat(gathered_ms)
+                            if len(gathered_ms.shape) == 2:
+                                # account for different metrics axis if not present
+                                gathered_ms = gathered_ms.unsqueeze(1)
                             dist.all_gather(gathered_ts, cur_ts)
-                            metrics[key] = gathered
-                            n_timesteps_acc[key] = gathered_ts
+                            metrics[key] = gathered_ms.sum(0).cpu()
+                            n_timesteps_acc[key] = torch.cat(gathered_ts).sum(0).cpu()
 
-                        # TODO: fix all_gather_object for val_plots
+                        # TODO: for some reason deadlocks
+                        # gathered_plots = [object() for _ in range(world_size)]
+                        # dist.all_gather_object(gathered_plots, val_plots)
+                        # val_plots = {}
+                        # for d in gathered_plots:
+                        #     val_plots.update(d)
 
                     for key in metrics.keys():
                         metrics[key] = metrics[key] / n_timesteps_acc[key].unsqueeze(0)
@@ -506,6 +516,7 @@ def runner(rank, cfg, world_size):
                 + info_dict["info/data_ms"]
                 + info_dict["info/pf_ms"]
             )
+
             if not rank:
                 print(
                     f"Epoch: {epoch_str}, "
