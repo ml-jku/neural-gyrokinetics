@@ -16,3 +16,4 @@ mode: "train"
 eval: true
 device: "cuda"
 load_ckp: false
+method: default

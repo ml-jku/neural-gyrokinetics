@@ -351,7 +351,31 @@ def plot4x4_sided_spec(x1, x2, title="", mark_bad=False, average=True):
     return plt_to_wandb_image(fig)
 
 
-def generate_val_plots(x_rollout, y, ts, phase):
+def plot_potentials(phi, y_phi):
+    from matplotlib import colormaps
+
+    c_map = colormaps["plasma"]
+
+    fig, ax = plt.subplots(2, 1, figsize=(10, 5))
+    fig.subplots_adjust(wspace=0.05)
+
+    ax[0].matshow(np.squeeze(phi[:, 8, :]), cmap=c_map)
+    ax[0].set_title(r"$\phi_{pred}$", fontsize=24)
+    ax[0].set_ylabel(r"$y_{\phi}$", fontsize=20)
+    ax[0].set_xticks([])
+    ax[0].set_yticks([])
+
+    ax[1].matshow(np.squeeze(y_phi[:, 8, :]), cmap=c_map)
+    ax[1].set_title(r"$\phi_{GT}$", fontsize=24)
+    ax[1].set_xlabel(r"$x_{\phi}$", fontsize=20)
+    ax[1].set_ylabel(r"$y_{\phi}$", fontsize=20)
+    ax[1].set_xticks([])
+    ax[1].set_yticks([])
+
+    return plt_to_wandb_image(fig)
+
+
+def generate_val_plots(x_rollout, y, ts, phase, phi_rollout=None, y_phi=None):
     plots = {}
     val_plots_dict = {
         f"pred (T={ts[0].item():.2f}, {phase})": plot4x4_sided,
@@ -360,8 +384,11 @@ def generate_val_plots(x_rollout, y, ts, phase):
         f"pred (spectrum) (T={ts[0].item():.2f}, {phase})": plot4x4_sided_spec,
         # f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
     }
+    if phi_rollout is not None:
+        plots[f"Potentials (T={ts[0].item():.2f}, {phase})"] = plot_potentials(
+            phi_rollout[0, 0], y_phi[0].cpu()
+        )
     for name, plot_fn in val_plots_dict.items():
-        # first timestep and batch
         y_first = (y[0] if y.ndim == 7 else y[0, 0]).to("cpu")
         plots[name] = plot_fn(x_rollout[0, 0], x2=y_first)
     return plots

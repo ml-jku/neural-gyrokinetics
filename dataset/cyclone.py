@@ -19,6 +19,7 @@ from utils import expand_as
 class CycloneSample:
     x: torch.Tensor
     y: torch.Tensor
+    x_poten: torch.Tensor
     y_poten: torch.Tensor
     y_flux: torch.Tensor
     timestep: torch.Tensor
@@ -30,6 +31,8 @@ class CycloneSample:
     def pin_memory(self):
         self.x = self.x.pin_memory()
         self.y = self.y.pin_memory()
+        self.x_poten = self.x_poten.pin_memory()
+        self.y_poten = self.y_poten.pin_memory()
         return self
 
 
@@ -71,7 +74,7 @@ class CycloneDataset(Dataset):
         subsample: int = 1,
         separate_zf: bool = False,
         log_transform: bool = False,
-        split_into_bands: int = None
+        split_into_bands: int = None,
     ):
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
         assert split in ["train", "val"]
@@ -133,12 +136,20 @@ class CycloneDataset(Dataset):
             if separate_zf and normalization_scope != "per_mode":
                 n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                 self.files = [
-                    f if f"_ifft_separate_zf{n_bands_tag}.h5" in f else re.sub(r"\.h5$", f"_ifft_separate_zf{n_bands_tag}.h5", f)
+                    (
+                        f
+                        if f"_ifft_separate_zf{n_bands_tag}.h5" in f
+                        else re.sub(r"\.h5$", f"_ifft_separate_zf{n_bands_tag}.h5", f)
+                    )
                     for f in self.files
                 ]
             elif normalization_scope == "per_mode":
                 self.files = [
-                    f if "_ifft_separate_zf_per_mode.h5" in f else re.sub(r"\.h5$", "_ifft_separate_zf_per_mode.h5", f)
+                    (
+                        f
+                        if "_ifft_separate_zf_per_mode.h5" in f
+                        else re.sub(r"\.h5$", "_ifft_separate_zf_per_mode.h5", f)
+                    )
                     for f in self.files
                 ]
             else:
@@ -171,7 +182,9 @@ class CycloneDataset(Dataset):
             filename = os.path.split(file_path)[-1]
             if spatial_ifft:
                 if separate_zf and normalization_scope != "per_mode":
-                    n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+                    n_bands_tag = (
+                        f"_{split_into_bands}bands" if split_into_bands else ""
+                    )
                     filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                 elif normalization_scope == "per_mode":
                     filename = filename.replace("_ifft_separate_zf_per_mode", "")
@@ -207,16 +220,20 @@ class CycloneDataset(Dataset):
                 self.dataset_stats[file_idx]["min"] = f["metadata/k_min"][:]
                 self.dataset_stats[file_idx]["max"] = f["metadata/k_max"][:]
                 if stats is None and normalization_scope == "dataset":
-                    stats = RunningMeanStd(shape=self.dataset_stats[file_idx]["mean"].shape)
+                    stats = RunningMeanStd(
+                        shape=self.dataset_stats[file_idx]["mean"].shape
+                    )
                 if stats is not None:
-                    stats.update(self.dataset_stats[file_idx]["mean"],
-                                 self.dataset_stats[file_idx]["std"]**2,
-                                 self.dataset_stats[file_idx]["min"],
-                                 self.dataset_stats[file_idx]["max"])
+                    stats.update(
+                        self.dataset_stats[file_idx]["mean"],
+                        self.dataset_stats[file_idx]["std"] ** 2,
+                        self.dataset_stats[file_idx]["min"],
+                        self.dataset_stats[file_idx]["max"],
+                    )
 
         if normalization_scope == "dataset":
             self.dataset_stats["full"]["mean"] = stats.mean
-            self.dataset_stats["full"]["std"] = stats.var ** (1/2)
+            self.dataset_stats["full"]["std"] = stats.var ** (1 / 2)
             self.dataset_stats["full"]["min"] = stats.min
             self.dataset_stats["full"]["max"] = stats.max
 
@@ -229,7 +246,9 @@ class CycloneDataset(Dataset):
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
                 if separate_zf and normalization_scope != "per_mode":
-                    n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+                    n_bands_tag = (
+                        f"_{split_into_bands}bands" if split_into_bands else ""
+                    )
                     filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                 elif normalization_scope == "per_mode":
                     filename = filename.replace("_ifft_separate_zf_per_mode", "")
@@ -255,6 +274,7 @@ class CycloneDataset(Dataset):
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
+            self.phi_resolution = (392, 16, 96)  # TODO
 
     def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneSample:
         """
@@ -280,17 +300,24 @@ class CycloneDataset(Dataset):
         # k-fields
         x, gt = sample["x"], sample["gt"]
         # accessory fields
-        poten, flux = sample["gt_poten"], sample["gt_flux"]
+        poten, gt_poten, flux = sample["poten"], sample["gt_poten"], sample["gt_flux"]
         # conditioning fields
         timestep, itg = sample["timestep"], sample["itg"]
         if self.normalization is not None and get_normalized:
             x, shift, scale = self._normalize(x, file_index)
             gt = (gt - shift) / scale
 
+            # TODO poten normalization
+            poten_scale = poten.mean()
+            poten_shift = poten.std()
+            poten = (poten - poten_scale) / poten_shift
+            gt_poten = (gt_poten - poten_scale) / poten_shift
+
         return CycloneSample(
             x=torch.tensor(x, dtype=self.dtype),
             y=torch.tensor(gt, dtype=self.dtype),
-            y_poten=torch.tensor(poten, dtype=self.dtype),
+            x_poten=torch.tensor(poten, dtype=self.dtype),
+            y_poten=torch.tensor(gt_poten, dtype=self.dtype),
             y_flux=torch.tensor(flux, dtype=self.dtype),
             timestep=torch.tensor(timestep, dtype=self.dtype),
             itg=torch.tensor(itg, dtype=self.dtype),
@@ -304,26 +331,33 @@ class CycloneDataset(Dataset):
         original_t_index = t_index + self.offsets[file_index]
         x = []
         gt = []
+        poten = []
         gt_poten = []
         gt_flux = []
         for i in range(self.bundle_seq_length):
             # read the input
             k_name = "timestep_" + str(original_t_index + i).zfill(5)
+            phi_name = "poten_" + str(original_t_index + i).zfill(5)
             k = data[f"data/{k_name}"][:]
+            phi = data[f"data/{phi_name}"][:]
             # select only active re/im parts
             x.append(k[self.active_keys])
+            poten.append(phi)
+
             # read the gt output (next timestep)
             k_name_gt = "timestep_" + str(
                 original_t_index + self.bundle_seq_length + i
             ).zfill(5)
-            poten_name_gt = "poten_" + str(
+            phi_name_gt = "poten_" + str(
                 original_t_index + self.bundle_seq_length + i
             ).zfill(5)
             k_gt = data[f"data/{k_name_gt}"][:]
-            poten_gt = data[f"data/{poten_name_gt}"][:]
+            phi_gt = data[f"data/{phi_name_gt}"][:]
             # select only active re/im parts
             gt.append(k_gt[self.active_keys])
-            gt_poten.append(poten_gt)
+            gt_poten.append(phi_gt)
+
+            # target flux
             flux = data["metadata/fluxes"][
                 original_t_index + self.bundle_seq_length + i
             ]
@@ -334,14 +368,19 @@ class CycloneDataset(Dataset):
         # stack to shape (c, t, v1, v2, s, x, y)
         x = np.stack(x, axis=1)
         gt = np.stack(gt, axis=1)
+        # stack to shape (1, t, x, s, y)
+        poten = np.stack(poten, axis=0)[None]
+        gt_poten = np.stack(gt_poten, axis=0)[None]
         if self.bundle_seq_length == 1:
             # sqeeze out time if we only have 1 timestep
             x = x.squeeze(axis=1)
             gt = gt.squeeze(axis=1)
+            poten = poten.squeeze(axis=1)
+            gt_poten = gt_poten.squeeze(axis=1)
         sample["x"] = x
         sample["gt"] = gt
-        # stack to shape (x, s, y)
-        sample["gt_poten"] = np.stack(gt_poten, axis=0)
+        sample["poten"] = poten
+        sample["gt_poten"] = gt_poten
         sample["gt_flux"] = np.array(gt_flux).squeeze()
         sample["timestep"] = data["metadata/timesteps"][original_t_index]
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
@@ -512,6 +551,7 @@ class CycloneDataset(Dataset):
         return CycloneSample(
             x=torch.stack([sample.x for sample in batch]),
             y=torch.stack([sample.y for sample in batch]),
+            x_poten=torch.stack([sample.x_poten for sample in batch]),
             y_poten=torch.stack([sample.y_poten for sample in batch]),
             y_flux=torch.stack([sample.y_flux for sample in batch]),
             timestep=torch.stack([sample.timestep for sample in batch]),

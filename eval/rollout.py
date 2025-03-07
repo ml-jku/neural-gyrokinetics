@@ -1,4 +1,4 @@
-from typing import Dict, Callable
+from typing import Dict, Callable, Optional
 
 from einops import rearrange
 import torch
@@ -24,6 +24,7 @@ def get_rollout_fn(
         file_idx: torch.Tensor,
         ts_index_0: torch.Tensor,
         itg: torch.Tensor,
+        phi: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # cap the steps depending on the current max timestep
         rollout_steps = []
@@ -35,10 +36,16 @@ def get_rollout_fn(
 
         tot_ts = rollout_steps * bundle_steps
         xt = x0.clone()
+        if phi is not None:
+            phit = phi.clone()
         if xt.ndim == 7:
             x_rollout = torch.zeros((xt.shape[0], problem_dim, tot_ts, *xt.shape[2:]))
+            if phi is not None:
+                phi_rollout = torch.zeros((xt.shape[0], 1, tot_ts, *phit.shape[2:]))
         elif xt.ndim == 8:
             x_rollout = torch.zeros((xt.shape[0], problem_dim, tot_ts, *xt.shape[3:]))
+            if phi is not None:
+                phi_rollout = torch.zeros((xt.shape[0], 1, tot_ts, *phit.shape[3:]))
         else:
             raise (
                 "x should have 7 (b, c, v1, v2, s, x, y) "
@@ -58,20 +65,36 @@ def get_rollout_fn(
             # move bundles forward, rollout in blocks
             for i in range(0, rollout_steps):
                 with torch.autocast(device, dtype=amp_dtype, enabled=use_amp):
-                    x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
-
+                    if phi is not None:
+                        x_p, phi_p = model(
+                            xt, phit, timestep=tsteps[:, i].to(xt.device), itg=itg
+                        )
+                    else:
+                        x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
                     if predict_delta:
                         x_p = xt + x_p
                     # update model input
                     xt = x_p.clone().float()
+                    if phi is not None:
+                        phit = phi_p.clone().float()
                 # concatenate rollout
                 x_rollout[:, :, i * bundle_steps : (i + 1) * bundle_steps, ...] = (
                     x_p.cpu().unsqueeze(2) if x_p.ndim == 7 else x_p.cpu()
                 )
+                if phi is not None:
+                    phi_rollout[
+                        :, :, i * bundle_steps : (i + 1) * bundle_steps, ...
+                    ] = (phi_p.cpu().unsqueeze(2) if x_p.ndim == 7 else phi_p.cpu())
 
         # only return desired size
-        x_rollout = rearrange(x_rollout, "b c t ... -> t b c ...")
-        return x_rollout[: rollout_steps * bundle_steps, :, ...]
+        if phi is None:
+            x_rollout = rearrange(x_rollout, "b c t ... -> t b c ...")
+            x_rollout = x_rollout[: rollout_steps * bundle_steps, :, ...]
+            return x_rollout
+        if phi is not None:
+            phi_rollout = rearrange(phi_rollout, "b c t ... -> t b c ...")
+            phi_rollout = phi_rollout[: rollout_steps * bundle_steps, :, ...]
+            return x_rollout, phi_rollout
 
     return _rollout
 

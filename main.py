@@ -10,7 +10,6 @@ import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from run import runner
 from utils import set_seed, compress_src, find_free_port
 
 
@@ -45,6 +44,11 @@ def main(config: DictConfig):
         world_size = torch.cuda.device_count()
     else:
         world_size = 1
+
+    if config.method == "default":
+        from run import runner
+    if config.method == "xnet":
+        from experimental.run_xnet import runner
 
     try:
         if dict_config["logging"]["run_id"] is None:

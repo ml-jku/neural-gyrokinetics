@@ -1,6 +1,7 @@
 from typing import Sequence
 import numpy as np
 
+
 class RunningMeanStd:
     def __init__(self, shape: Sequence[int], epsilon: float = 1e-4):
         """

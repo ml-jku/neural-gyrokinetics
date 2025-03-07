@@ -14,7 +14,6 @@ from torch.distributed import init_process_group
 from concurrent.futures import ThreadPoolExecutor
 
 from dataset import get_data, CycloneSample
-from models import get_model
 from train import get_pushforward_fn, relative_norm_mse, pretrain_autoencoder
 from eval import get_rollout_fn, validation_metrics, generate_val_plots, get_flux_plot
 from eval.gkw_client import request_gkw_sim, dump_rollout
@@ -24,6 +23,78 @@ from utils import (
     setup_logging,
     split_batch_into_phases,
 )
+
+
+import torch
+
+
+def get_xnet(cfg, dataset):
+    # TODO need to standardize modules everywhere (eg for different inputs)
+
+    latent_dim = cfg.model.latent_dim
+    if not cfg.dataset.separate_zf:
+        problem_dim = len(cfg.dataset.active_keys)
+    else:
+        problem_dim = 4
+        problem_dim += (
+            (cfg.dataset.split_into_bands - 1) * 2
+            if cfg.dataset.split_into_bands
+            else 0
+        )
+
+    from experimental.swin_xnet import SwinXnet
+    from models.utils import ContinuousConditionEmbed
+
+    df_patch_size = cfg.model.swin.patch_size
+    phi_patch_size = (14, 2, 8)
+    df_window_size = cfg.model.swin.window_size
+    phi_window_size = (14, 4, 6)
+    df_base_resolution = dataset.resolution
+    phi_base_resolution = dataset.phi_resolution
+    num_heads = cfg.model.swin.num_heads
+    depth = cfg.model.swin.depth
+    num_layers = cfg.model.num_layers
+    gradient_checkpoint = cfg.model.swin.gradient_checkpoint
+    patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
+    unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
+    c_multiplier = cfg.model.swin.c_multiplier
+    abs_pe = cfg.model.swin.abs_pe
+    act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
+
+    cond_fn = None
+    n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
+    if n_cond > 0:
+        cond_fn = ContinuousConditionEmbed(128, n_cond)
+
+    if cfg.model.bundle_seq_length > 1:
+        raise NotImplementedError
+
+    model = SwinXnet(
+        dim=latent_dim,
+        df_base_resolution=df_base_resolution,  # TODO
+        phi_base_resolution=phi_base_resolution,  # TODO
+        df_patch_size=df_patch_size,
+        phi_patch_size=phi_patch_size,
+        df_window_size=df_window_size,
+        phi_window_size=phi_window_size,
+        depth=depth,
+        num_heads=num_heads,
+        in_channels=problem_dim,
+        out_channels=problem_dim,
+        num_layers=num_layers,
+        use_checkpoint=gradient_checkpoint,
+        drop_path=0.1,
+        abs_pe=abs_pe,
+        c_multiplier=c_multiplier,
+        merging_hidden_ratio=patching_hidden_ratio,
+        unmerging_hidden_ratio=unmerging_hidden_ratio,
+        conditioning=cond_fn,
+        act_fn=act_fn,
+    )
+
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
+
+    return model
 
 
 def ddp_setup(rank, world_size):
@@ -70,7 +141,7 @@ def runner(rank, cfg, world_size):
             else 0
         )
 
-    model = get_model(cfg, dataset=trainset)
+    model = get_xnet(cfg, dataset=trainset)
     model = model.to(device)
     if use_ddp:
         model = DDP(model, device_ids=[rank])
@@ -127,16 +198,17 @@ def runner(rank, cfg, world_size):
         # and pushforward
         pf_cfg = cfg.training.pushforward
         pushforward_fn = None
-        if sum(pf_cfg.unrolls) > 0:
-            pushforward_fn = get_pushforward_fn(
-                n_unrolls_schedule=pf_cfg.unrolls,
-                probs_schedule=pf_cfg.probs,
-                epoch_schedule=pf_cfg.epochs,
-                predict_delta=predict_delta,
-                dataset=trainset,
-                bundle_steps=bundle_seq_length,
-                use_amp=use_amp,
-            )
+        # TODO
+        # if sum(pf_cfg.unrolls) > 0:
+        #     pushforward_fn = get_pushforward_fn(
+        #         n_unrolls_schedule=pf_cfg.unrolls,
+        #         probs_schedule=pf_cfg.probs,
+        #         epoch_schedule=pf_cfg.epochs,
+        #         predict_delta=predict_delta,
+        #         dataset=trainset,
+        #         bundle_steps=bundle_seq_length,
+        #         use_amp=use_amp,
+        #     )
 
         loss_val_min = torch.inf
 
@@ -150,6 +222,8 @@ def runner(rank, cfg, world_size):
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
         for epoch in range(1, n_epochs + 1):
             train_mse = 0
+            train_df_mse = 0
+            train_phi_mse = 0
             model.train()
             info_dict = defaultdict(list)
             t_start_data = perf_counter_ns()
@@ -157,17 +231,19 @@ def runner(rank, cfg, world_size):
             if use_tqdm or (use_ddp and not rank):
                 trainloader = tqdm(trainloader, "Training")
             for i, sample in enumerate(trainloader):
-                reset_peak_memory_stats(device)
+                # reset_peak_memory_stats(device)
                 sample: CycloneSample
-                x = sample.x.to(device, non_blocking=True)
-                y = sample.y.to(device, non_blocking=True)
+                df = sample.x.to(device, non_blocking=True)
+                y_df = sample.y.to(device, non_blocking=True)
+                phi = sample.x_poten.to(device, non_blocking=True)
+                y_phi = sample.y_poten.to(device, non_blocking=True)
                 ts = sample.timestep.to(device)
                 itg = sample.itg.to(device)
 
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
                     for aug_fn in augmentations:
-                        x = aug_fn(x)
+                        df = aug_fn(df)
 
                 # dataloading timings
                 info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
@@ -187,10 +263,13 @@ def runner(rank, cfg, world_size):
                 t_start_fwd = perf_counter_ns()
 
                 with torch.autocast(str(cfg.device), dtype=amp_dtype, enabled=use_amp):
-                    pred_x = model(x, timestep=ts, itg=itg)
+                    pred_df, pred_phi = model(df, phi, timestep=ts, itg=itg)
                     if predict_delta:
-                        pred_x = x + pred_x
-                    loss = relative_norm_mse(pred_x, y)
+                        pred_df = df + pred_df
+                        pred_phi = phi + pred_phi
+                    df_loss = relative_norm_mse(pred_df, y_df)
+                    phi_loss = relative_norm_mse(pred_phi, y_phi)
+                    loss = df_loss + phi_loss
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
@@ -207,14 +286,20 @@ def runner(rank, cfg, world_size):
                     scheduler.step()
 
                 train_mse += loss.item()
+                train_df_mse += df_loss.item()
+                train_phi_mse += phi_loss.item()
 
                 info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
                 info_dict["memory_mb"].append(max_memory_allocated(device) / 1024**2)
                 t_start_data = perf_counter_ns()
 
             train_mse /= len(trainloader)
+            train_df_mse /= len(trainloader)
+            train_phi_mse /= len(trainloader)
             train_losses_dict = {
                 "train/relative_norm_mse": train_mse,
+                "train/df_mse": train_df_mse,
+                "train/phi_mse": train_phi_mse,
                 "train/lr": (
                     scheduler.get_last_lr()[0]
                     if cfg.training.scheduler
@@ -274,8 +359,10 @@ def runner(rank, cfg, world_size):
                     with torch.no_grad():
                         for idx, sample in enumerate(valloader):
                             sample: CycloneSample
-                            x = sample.x.to(device, non_blocking=True)
+                            df = sample.x.to(device, non_blocking=True)
+                            phi = sample.x_poten.to(device, non_blocking=True)
                             y = sample.y.to(device, non_blocking=True)
+                            y_phi = sample.y_poten.to(device, non_blocking=True)
                             ts = sample.timestep.to(device)
                             itg = sample.itg.to(device)
                             file_idx = sample.file_index.to(device)
@@ -284,23 +371,33 @@ def runner(rank, cfg, world_size):
                             # TODO: dont hardcode this
                             phase_change = 24
                             (
-                                x_list,
+                                df_list,
                                 y_list,
                                 ts_list,
                                 itg_list,
                                 file_idx_list,
                                 ts_index_list,
                                 phase_list,
-                                _,
-                                _,
+                                phi_list,
+                                y_phi_list,
                             ) = split_batch_into_phases(
-                                phase_change, x, y, ts, itg, file_idx, ts_index
+                                phase_change,
+                                df,
+                                y,
+                                ts,
+                                itg,
+                                file_idx,
+                                ts_index,
+                                phi=phi,
+                                y_phi=y_phi,
                             )
 
                             # Iterate over the splits
-                            for i in range(len(x_list)):
-                                x = x_list[i]
+                            for i in range(len(df_list)):
+                                df = df_list[i]
+                                phi = phi_list[i]
                                 y = y_list[i]
+                                y_phi = y_phi_list[i]
                                 ts = ts_list[i]
                                 itg = itg_list[i]
                                 file_idx = file_idx_list[i]
@@ -308,24 +405,25 @@ def runner(rank, cfg, world_size):
                                 phase = phase_list[i]
 
                                 # get the rolled out validation trajectories
-                                x_rollout = rollout_fn(
+                                df_rollout, phi_rollout = rollout_fn(
                                     model,
-                                    x,
+                                    df,
+                                    phi,
                                     file_idx=file_idx,
                                     ts_index_0=ts_index,
                                     itg=itg,
                                 )
 
                                 # denormalize rollout and target for evaluation / plots
-                                x_rollout = torch.stack(
+                                df_rollout = torch.stack(
                                     [
                                         torch.stack(
                                             [
-                                                valset.denormalize(x_rollout[t, b], f)
+                                                valset.denormalize(df_rollout[t, b], f)
                                                 for b, f in enumerate(file_idx.tolist())
                                             ]
                                         )
-                                        for t in range(x_rollout.shape[0])
+                                        for t in range(df_rollout.shape[0])
                                     ]
                                 )
                                 y = torch.stack(
@@ -337,7 +435,7 @@ def runner(rank, cfg, world_size):
 
                                 # TODO: smarter (i.e. use timeindex when we output a dataclass from the dataset)
                                 metrics_i = validation_metrics(
-                                    x_rollout,
+                                    df_rollout,
                                     file_idx,
                                     ts_index,
                                     bundle_seq_length,
@@ -347,7 +445,9 @@ def runner(rank, cfg, world_size):
                                 if use_gkw:
                                     # onestep predictions (time dimension = 0)
                                     rollout_dict = {
-                                        int(t_idx.item()): x_rollout[0, b].cpu().numpy()
+                                        int(t_idx.item()): df_rollout[0, b]
+                                        .cpu()
+                                        .numpy()
                                         for b, t_idx in enumerate(ts_index)
                                     }
                                     # TODO put original file in config?
@@ -395,7 +495,7 @@ def runner(rank, cfg, world_size):
                                     # holdout trajectories valset
                                     if idx in [0, 20]:
                                         plots = generate_val_plots(
-                                            x_rollout=x_rollout,
+                                            x_rollout=df_rollout,
                                             y=y,
                                             ts=ts,
                                             phase=(
@@ -403,16 +503,20 @@ def runner(rank, cfg, world_size):
                                                 if idx == 0
                                                 else "Saturated Phase"
                                             ),
+                                            phi_rollout=phi_rollout,
+                                            y_phi=y_phi,
                                         )
                                         val_plots.update(plots)
                                 else:
                                     # holdout samples valset
                                     if idx == 0:
                                         plots = generate_val_plots(
-                                            x_rollout=x_rollout,
+                                            x_rollout=df_rollout,
                                             y=y,
                                             ts=ts,
                                             phase="Holdout samples",
+                                            phi_rollout=phi_rollout,
+                                            y_phi=y_phi,
                                         )
                                         val_plots.update(plots)
 

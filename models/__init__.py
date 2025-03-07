@@ -9,7 +9,11 @@ def get_model(cfg, dataset):
         problem_dim = len(cfg.dataset.active_keys)
     else:
         problem_dim = 4
-        problem_dim += (cfg.dataset.split_into_bands - 1) * 2 if cfg.dataset.split_into_bands else 0
+        problem_dim += (
+            (cfg.dataset.split_into_bands - 1) * 2
+            if cfg.dataset.split_into_bands
+            else 0
+        )
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet
