@@ -37,8 +37,8 @@ class RunningMeanStd:
             other.mean, other.var, other.min, other.max, other.count
         )
 
-    def update(self, mean, var, min, max) -> None:
-        self.update_from_moments(mean, var, min, max)
+    def update(self, mean, var, min, max, count) -> None:
+        self.update_from_moments(mean, var, min, max, count)
 
     def update_from_moments(
         self,

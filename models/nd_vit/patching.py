@@ -339,7 +339,7 @@ class PatchUnmerging(nn.Module):
 
             self.expansion = Conv(dim, dim_out, kernel_size=expand_by, stride=expand_by)
         else:
-            input_lat = [dim * (2 if patch_skip else 1)]
+            input_lat = [dim]
             output_lat = [np.prod(expand_by) * dim_out]
             hidden_lat = [int(np.prod(expand_by) * mlp_ratio)] * (mlp_depth - 1)
             self.expansion = MLP(
@@ -347,8 +347,11 @@ class PatchUnmerging(nn.Module):
                 act_fn=act_fn,
                 bias=True,
             )
+            if patch_skip:
+                self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
 
         self.norm = norm_layer(dim_out) if norm_layer else nn.Identity()
+
         if cond_dim:
             self.modulation = Film(cond_dim, dim)
 
@@ -370,6 +373,9 @@ class PatchUnmerging(nn.Module):
         if ndim < 4:
             b, c = x.shape[0], x.shape[-1]
             x = x.view(b, *self.grid_size, c)
+
+        if hasattr(self, "proj_concat"):
+            x = self.proj_concat(x)
 
         if hasattr(self, "modulation"):
             x = self.modulation(x, cond=cond)

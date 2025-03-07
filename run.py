@@ -10,7 +10,7 @@ from time import perf_counter_ns
 from collections import defaultdict
 from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed import init_process_group
+import torch.distributed as dist
 from concurrent.futures import ThreadPoolExecutor
 
 from dataset import get_data, CycloneSample
@@ -27,10 +27,7 @@ from utils import (
 
 
 def ddp_setup(rank, world_size):
-    init_process_group(
-        backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20)
-    )
-
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20))
 
 def runner(rank, cfg, world_size):
     device = torch.device(f"cuda:{rank}") if torch.cuda.is_available() else "cpu"
@@ -60,16 +57,7 @@ def runner(rank, cfg, world_size):
         trainloader, valloaders = dataloaders
         valloaders = [valloaders]
 
-    if not cfg.dataset.separate_zf:
-        problem_dim = len(cfg.dataset.active_keys)
-    else:
-        problem_dim = 4
-        problem_dim += (
-            (cfg.dataset.split_into_bands - 1) * 2
-            if cfg.dataset.split_into_bands
-            else 0
-        )
-
+    problem_dim = len(trainset.active_keys)
     model = get_model(cfg, dataset=trainset)
     model = model.to(device)
     if use_ddp:
@@ -224,14 +212,14 @@ def runner(rank, cfg, world_size):
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # Validation loop
-            separate_zf = cfg.dataset.separate_zf
             n_eval_steps = cfg.validation.n_eval_steps
             val_freq = cfg.validation.validate_every_n_epochs
             tot_eval_steps = n_eval_steps * bundle_seq_length
+            denormalize = cfg.validation.denormalize
             log_metric_dict = {}
             gkw_kfiles = []
             val_plots = {}
-            if (epoch % val_freq) == 0 or epoch == 1 and not rank:
+            if (epoch % val_freq) == 0 or epoch == 1:
                 # Validation loop
                 model.eval()
                 for val_idx, (valset, valloader) in enumerate(zip(valsets, valloaders)):
@@ -316,24 +304,25 @@ def runner(rank, cfg, world_size):
                                     itg=itg,
                                 )
 
-                                # denormalize rollout and target for evaluation / plots
-                                x_rollout = torch.stack(
-                                    [
-                                        torch.stack(
-                                            [
-                                                valset.denormalize(x_rollout[t, b], f)
-                                                for b, f in enumerate(file_idx.tolist())
-                                            ]
-                                        )
-                                        for t in range(x_rollout.shape[0])
-                                    ]
-                                )
-                                y = torch.stack(
-                                    [
-                                        valset.denormalize(y[b], f)
-                                        for b, f in enumerate(file_idx.tolist())
-                                    ]
-                                )
+                                if denormalize:
+                                    # denormalize rollout and target for evaluation / plots
+                                    x_rollout = torch.stack(
+                                        [
+                                            torch.stack(
+                                                [
+                                                    valset.denormalize(x_rollout[t, b], f)
+                                                    for b, f in enumerate(file_idx.tolist())
+                                                ]
+                                            )
+                                            for t in range(x_rollout.shape[0])
+                                        ]
+                                    )
+                                    y = torch.stack(
+                                        [
+                                            valset.denormalize(y[b], f)
+                                            for b, f in enumerate(file_idx.tolist())
+                                        ]
+                                    )
 
                                 # TODO: smarter (i.e. use timeindex when we output a dataclass from the dataset)
                                 metrics_i = validation_metrics(
@@ -343,7 +332,9 @@ def runner(rank, cfg, world_size):
                                     bundle_seq_length,
                                     valset,
                                     metric_fn_list,
+                                    get_normalized=not denormalize,
                                 )
+
                                 if use_gkw:
                                     # onestep predictions (time dimension = 0)
                                     rollout_dict = {
@@ -416,6 +407,21 @@ def runner(rank, cfg, world_size):
                                         )
                                         val_plots.update(plots)
 
+                    if dist.is_initialized():
+                        for key in metrics.keys():
+                            cur_metric = metrics[key].to(device)
+                            cur_ts = n_timesteps_acc[key].to(device)
+                            gathered = [torch.zeros_like(cur_metric, dtype=cur_metric.dtype, device=cur_metric.device)
+                                        for _ in range(world_size)]
+                            gathered_ts = [torch.zeros_like(cur_metric, dtype=cur_metric.dtype, device=cur_metric.device)
+                                        for _ in range(world_size)]
+                            dist.all_gather(gathered, cur_metric)
+                            dist.all_gather(gathered_ts, cur_ts)
+                            metrics[key] = gathered
+                            n_timesteps_acc[key] = gathered_ts
+
+                        # TODO: fix all_gather_object for val_plots
+
                     for key in metrics.keys():
                         metrics[key] = metrics[key] / n_timesteps_acc[key].unsqueeze(0)
 
@@ -484,9 +490,6 @@ def runner(rank, cfg, world_size):
                 for k in done_futures:
                     del gkw_futures[k]
 
-            if use_ddp:
-                # Add barrier for all ranks and wait for rank 0
-                torch.distributed.barrier()
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
             if writer and not rank:

@@ -5,15 +5,7 @@ def get_model(cfg, dataset):
     # TODO need to standardize modules everywhere (eg for different inputs)
 
     latent_dim = cfg.model.latent_dim
-    if not cfg.dataset.separate_zf:
-        problem_dim = len(cfg.dataset.active_keys)
-    else:
-        problem_dim = 4
-        problem_dim += (
-            (cfg.dataset.split_into_bands - 1) * 2
-            if cfg.dataset.split_into_bands
-            else 0
-        )
+    problem_dim = len(dataset.active_keys)
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet
@@ -34,6 +26,7 @@ def get_model(cfg, dataset):
         abs_pe = cfg.model.swin.abs_pe
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         patch_skip = cfg.model.swin.patch_skip
+        modulation = cfg.model.swin.modulation
 
         cond_fn = None
         n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
@@ -60,7 +53,7 @@ def get_model(cfg, dataset):
             out_channels=problem_dim,
             num_layers=num_layers,
             use_checkpoint=gradient_checkpoint,
-            drop_path=0.1,
+            drop_path=cfg.model.swin.drop_path,
             abs_pe=abs_pe,
             conv_patch=False,
             hidden_mlp_ratio=2.0,
@@ -71,6 +64,7 @@ def get_model(cfg, dataset):
             norm_output=norm_output,
             act_fn=act_fn,
             patch_skip=patch_skip,
+            modulation=modulation,
         )
 
     if cfg.model.name == "ae":

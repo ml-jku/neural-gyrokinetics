@@ -106,6 +106,7 @@ def validation_metrics(
     bundle_steps: int,
     dataset,
     metrics_fns: Dict[str, Callable] = None,
+    get_normalized: bool = False,
 ) -> torch.Tensor:
     assert (
         metrics_fns is not None
@@ -117,7 +118,7 @@ def validation_metrics(
     if bundle_steps == 1:
         y = torch.stack(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index + t).long()).y
+                dataset.get_at_time(file_idx.long(), (ts_index + t).long(), get_normalized).y
                 for t in range(0, n_steps, bundle_steps)
             ],
             dim=0,
@@ -125,7 +126,7 @@ def validation_metrics(
     else:
         y = torch.concat(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index + t).long()).y
+                dataset.get_at_time(file_idx.long(), (ts_index + t).long(), get_normalized).y
                 for t in range(0, n_steps, bundle_steps)
             ],
             dim=2,

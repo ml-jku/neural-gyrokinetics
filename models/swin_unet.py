@@ -340,9 +340,9 @@ class SwinUnet(nn.Module):
         patching_init_weights: str = "xavier_uniform",
         norm_output: bool = False,
         patch_skip: bool = False,
+        swin_bottleneck: bool = False,
     ):
         super().__init__()
-
         if isinstance(patch_size, int):
             patch_size = [patch_size] * space
 
@@ -367,7 +367,7 @@ class SwinUnet(nn.Module):
 
         # set layer type and conditioning
         LocalLayer = SwinLayer
-        GlobalLayer = ViTLayer
+        GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
         self.cond_embed = conditioning
         if self.cond_embed is not None:
             if modulation == "dit":
@@ -377,7 +377,11 @@ class SwinUnet(nn.Module):
                 ModulatedSwinLayer = FilmSwinLayer
                 ModulatedViTLayer = FilmViTLayer
             LocalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
-            GlobalLayer = partial(ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim)
+            if swin_bottleneck:
+                GlobalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim,
+                                      window_size=window_size)
+            else:
+                GlobalLayer = partial(ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim)
 
         self.patch_embed = PatchEmbed(
             space=space,
@@ -435,7 +439,8 @@ class SwinUnet(nn.Module):
             act_fn=act_fn,
         )
 
-        self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
+        if abs_pe:
+            self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
 
         self.middle_upscale = PatchUnmerging(
             space=space,
@@ -544,7 +549,8 @@ class SwinUnet(nn.Module):
             feature_maps.append(x_pre)
 
         # middle block
-        x = self.middle_pe(x)
+        if hasattr(self, "middle_pe"):
+            x = self.middle_pe(x)
         x = self.middle(x, **cond)
         x = self.middle_upscale(x)
 
