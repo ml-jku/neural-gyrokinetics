@@ -63,6 +63,7 @@ def get_data(cfg):
             random_seed=cfg.seed,
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
+            dataset_stats=trainset.dataset_stats,
             spatial_ifft=cfg.dataset.spatial_ifft,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,
@@ -90,7 +91,9 @@ def get_data(cfg):
             shuffle=False,
             collate_fn=holdout_trajectories_valset.collate,
             pin_memory=cfg.training.pin_memory,
-            sampler=DistributedSampler(holdout_trajectories_valset) if cfg.use_ddp else None,
+            sampler=(
+                DistributedSampler(holdout_trajectories_valset) if cfg.use_ddp else None
+            ),
         )
 
         if partial_holdouts:
@@ -101,6 +104,7 @@ def get_data(cfg):
                 random_seed=cfg.seed,
                 normalization=cfg.dataset.normalization,
                 normalization_scope=cfg.dataset.normalization_scope,
+                dataset_stats=trainset.dataset_stats,
                 spatial_ifft=cfg.dataset.spatial_ifft,
                 bundle_seq_length=cfg.model.bundle_seq_length,
                 trajectories=cfg.dataset.training_trajectories,
@@ -117,7 +121,9 @@ def get_data(cfg):
                 shuffle=False,
                 collate_fn=holdout_samples_valset.collate,
                 pin_memory=cfg.training.pin_memory,
-                sampler=DistributedSampler(holdout_samples_valset) if cfg.use_ddp else None,
+                sampler=(
+                    DistributedSampler(holdout_samples_valset) if cfg.use_ddp else None
+                ),
             )
 
         print(f"Train: {len(trainset)} samples")

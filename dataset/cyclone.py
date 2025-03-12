@@ -65,6 +65,7 @@ class CycloneDataset(Dataset):
         partial_holdouts: Optional[dict] = None,
         normalization: Optional[str] = "zscore",
         normalization_scope: str = "sample",
+        dataset_stats: Optional[Dict[str, float]] = None,
         spatial_ifft: bool = True,
         cond_filters: Optional[Dict[str, Sequence]] = None,
         dtype: Type = torch.float32,
@@ -173,7 +174,8 @@ class CycloneDataset(Dataset):
         self.file_num_samples = []
         self.file_num_timesteps = []
         self.steps_per_file = {}
-        self.dataset_stats = defaultdict(dict)
+        if dataset_stats is None:
+            self.dataset_stats = defaultdict(dict)
         per_file_t_indexes = []
         stats = None
         for file_idx, file_path in enumerate(self.files):
@@ -214,26 +216,33 @@ class CycloneDataset(Dataset):
                 self.file_num_timesteps.append(len(timesteps))
                 per_file_t_indexes.append(orig_t_index)
                 # normalization stats
-                self.dataset_stats[file_idx]["mean"] = f["metadata/k_mean"][:]
-                self.dataset_stats[file_idx]["std"] = f["metadata/k_std"][:]
-                self.dataset_stats[file_idx]["min"] = f["metadata/k_min"][:]
-                self.dataset_stats[file_idx]["max"] = f["metadata/k_max"][:]
-                if stats is None and normalization_scope == "dataset":
-                    stats = RunningMeanStd(
-                        shape=self.dataset_stats[file_idx]["mean"].shape
-                    )
-                if stats is not None:
-                    stats.update(self.dataset_stats[file_idx]["mean"],
-                                 self.dataset_stats[file_idx]["std"]**2,
-                                 self.dataset_stats[file_idx]["min"],
-                                 self.dataset_stats[file_idx]["max"],
-                                 count=len(timesteps))
+                if dataset_stats is None:
+                    self.dataset_stats[file_idx]["mean"] = f["metadata/k_mean"][:]
+                    self.dataset_stats[file_idx]["std"] = f["metadata/k_std"][:]
+                    self.dataset_stats[file_idx]["min"] = f["metadata/k_min"][:]
+                    self.dataset_stats[file_idx]["max"] = f["metadata/k_max"][:]
+                    if stats is None and normalization_scope == "dataset":
+                        stats = RunningMeanStd(
+                            shape=self.dataset_stats[file_idx]["mean"].shape
+                        )
+                    if stats is not None:
+                        stats.update(
+                            self.dataset_stats[file_idx]["mean"],
+                            self.dataset_stats[file_idx]["std"] ** 2,
+                            self.dataset_stats[file_idx]["min"],
+                            self.dataset_stats[file_idx]["max"],
+                            count=len(timesteps),
+                        )
 
-        if normalization_scope == "dataset":
-            self.dataset_stats["full"]["mean"] = stats.mean
-            self.dataset_stats["full"]["std"] = stats.var ** (1 / 2)
-            self.dataset_stats["full"]["min"] = stats.min
-            self.dataset_stats["full"]["max"] = stats.max
+        if dataset_stats is None:
+            if normalization_scope == "dataset":
+                self.dataset_stats["full"]["mean"] = stats.mean
+                self.dataset_stats["full"]["std"] = stats.var ** (1 / 2)
+                self.dataset_stats["full"]["min"] = stats.min
+                self.dataset_stats["full"]["max"] = stats.max
+
+        if dataset_stats is not None:
+            self.dataset_stats = dataset_stats
 
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
@@ -396,8 +405,10 @@ class CycloneDataset(Dataset):
             if self.normalization == "minmax":
                 x_min = x.min((1, 2, 3, 4, 5), keepdims=True)
                 x_max = x.max((1, 2, 3, 4, 5), keepdims=True)
-                shift = x_min
-                scale = x_max - x_min
+                # shift = x_min
+                # scale = x_max - x_min
+                scale = (x_max - x_min) / 16
+                shift = x_min + scale * 8
         else:
             if self.normalization_scope == "dataset":
                 key = "full"
@@ -412,8 +423,10 @@ class CycloneDataset(Dataset):
             if self.normalization == "minmax":
                 x_min = expand_as(self.dataset_stats[key]["min"], x)
                 x_max = expand_as(self.dataset_stats[key]["max"], x)
-                shift = x_min
-                scale = x_max - x_min
+                # shift = x_min
+                # scale = x_max - x_min
+                scale = (x_max - x_min) / 16
+                shift = x_min + scale * 8
 
         return (x - shift) / scale, shift, scale
 

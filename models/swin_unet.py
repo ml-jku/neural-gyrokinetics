@@ -378,10 +378,15 @@ class SwinUnet(nn.Module):
                 ModulatedViTLayer = FilmViTLayer
             LocalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
             if swin_bottleneck:
-                GlobalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim,
-                                      window_size=window_size)
+                GlobalLayer = partial(
+                    ModulatedSwinLayer,
+                    cond_dim=self.cond_embed.cond_dim,
+                    window_size=window_size,
+                )
             else:
-                GlobalLayer = partial(ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim)
+                GlobalLayer = partial(
+                    ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim
+                )
 
         self.patch_embed = PatchEmbed(
             space=space,
@@ -515,7 +520,7 @@ class SwinUnet(nn.Module):
             mlp_ratio=unmerging_hidden_ratio,
             act_fn=expand_act_fn,
             patch_skip=self.patch_skip,
-            # cond_dim=self.cond_embed.cond_dim,
+            cond_dim=self.cond_embed.cond_dim if self.cond_embed else None,
         )
 
         self.reset_parameters()
@@ -532,6 +537,7 @@ class SwinUnet(nn.Module):
             up_blk.reset_parameters(self.init_weights)
             down_blk.reset_parameters(self.init_weights)
         self.middle.reset_parameters(self.init_weights)
+        self.middle_upscale.reset_parameters(self.init_weights)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         # compress to patch space
@@ -589,6 +595,8 @@ class SwinUnet(nn.Module):
         return x
 
     def condition(self, kwconds) -> Dict:
+        if len(kwconds) == 0:
+            return {}
         cond = kwconds.get("timestep")
         cond = cond.unsqueeze(-1)
         refine_step = kwconds.get("refinement_step", None)

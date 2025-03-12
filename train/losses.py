@@ -1,4 +1,4 @@
-from typing import List, Callable
+from typing import List, Callable, Optional
 import warnings
 import torch
 from torch import nn
@@ -44,6 +44,7 @@ def get_pushforward_fn(
     dataset: CycloneDataset,
     bundle_steps: int,
     use_amp: bool = False,
+    use_potentials: bool = False,
 ) -> Callable:
     def _loss_fn(
         model: nn.Module,
@@ -54,11 +55,17 @@ def get_pushforward_fn(
         y: torch.Tensor,
         file_idx: torch.Tensor,
         epoch: int,
+        phi: Optional[torch.Tensor] = None,
+        y_phi: Optional[torch.Tensor] = None,
+        y_flux: Optional[torch.Tensor] = None,
     ) -> List[float]:
         # pushforward scheduler with epoch
         idx = (epoch > np.array(epoch_schedule)).sum()
         if not idx:
-            return x, ts, y
+            if use_potentials:
+                return x, phi, ts, y, y_phi, y_flux
+            else:
+                return x, ts, y
 
         # sample number of steps
         curr_probs = [p / sum(probs_schedule[:idx]) for p in probs_schedule[:idx]]
@@ -72,7 +79,10 @@ def get_pushforward_fn(
         n_unrolls = min(n_unrolls)
 
         if n_unrolls < 2:
-            return x, ts, y
+            if use_potentials:
+                return x, phi, ts, y, y_phi, y_flux
+            else:
+                return x, ts, y
 
         ts_step = bundle_steps
         ts_idxs = [
@@ -94,24 +104,43 @@ def get_pushforward_fn(
             future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
 
             xt = x
+            if use_potentials:
+                phit = phi
             for i in range(n_unrolls - 1):
                 use_bf16 = use_amp and torch.cuda.is_bf16_supported()
                 amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
                 with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-                    x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
+                    if use_potentials:
+                        x_p, phi_p, _ = model(
+                            xt, phit, timestep=tsteps[:, i].to(xt.device), itg=itg
+                        )
+                    else:
+                        x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
 
                     if predict_delta:
                         x_p = xt + x_p
                     xt = x_p.clone().float()
+                    if use_potentials:
+                        phit = phi_p.clone().float()
             # Get the result when needed
-            unrolled = future.result()
+            unrolled: CycloneSample = future.result()
 
         # have to clone xt to avoid view mode grad runtime error
-        return (
-            xt.clone(),
-            unrolled.timestep.to(x.device),
-            unrolled.y.to(x.device, non_blocking=True),
-        )
+        if use_potentials:
+            return (
+                xt.clone(),
+                phit.clone(),
+                unrolled.timestep.to(x.device),
+                unrolled.y.to(x.device, non_blocking=True),
+                unrolled.y_poten.to(x.device, non_blocking=True),
+                unrolled.y_flux.to(x.device, non_blocking=True),
+            )
+        else:
+            return (
+                xt.clone(),
+                unrolled.timestep.to(x.device),
+                unrolled.y.to(x.device, non_blocking=True),
+            )
 
     return _loss_fn
 

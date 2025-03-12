@@ -100,7 +100,7 @@ class ContinuousConditionEmbed(nn.Module):
         )
         self.cond_dim = 4 * dim
         self.mlp = nn.Sequential(
-            nn.Linear(dim + self.padding, self.cond_dim),
+            nn.Linear(dim, self.cond_dim),
             nn.SiLU(),
         )
 

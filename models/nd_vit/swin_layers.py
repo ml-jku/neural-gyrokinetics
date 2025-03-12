@@ -291,7 +291,9 @@ class WindowAttention(nn.Module):
         # TODO find better way to add rpb -> easy OOM here!
         mask = mask + rpb if mask is not None else rpb
         # with nn.attention.sdpa_kernel(nn.attention.SDPBackend.CUDNN_ATTENTION):
-        x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0))
+        x = F.scaled_dot_product_attention(
+            q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0)
+        )
 
         # # swinv2 cosine similarity attention
         # attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)

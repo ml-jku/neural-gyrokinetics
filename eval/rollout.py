@@ -66,7 +66,7 @@ def get_rollout_fn(
             for i in range(0, rollout_steps):
                 with torch.autocast(device, dtype=amp_dtype, enabled=use_amp):
                     if phi is not None:
-                        x_p, phi_p = model(
+                        x_p, phi_p, _ = model(
                             xt, phit, timestep=tsteps[:, i].to(xt.device), itg=itg
                         )
                     else:
@@ -87,9 +87,9 @@ def get_rollout_fn(
                     ] = (phi_p.cpu().unsqueeze(2) if x_p.ndim == 7 else phi_p.cpu())
 
         # only return desired size
+        x_rollout = rearrange(x_rollout, "b c t ... -> t b c ...")
+        x_rollout = x_rollout[: rollout_steps * bundle_steps, :, ...]
         if phi is None:
-            x_rollout = rearrange(x_rollout, "b c t ... -> t b c ...")
-            x_rollout = x_rollout[: rollout_steps * bundle_steps, :, ...]
             return x_rollout
         if phi is not None:
             phi_rollout = rearrange(phi_rollout, "b c t ... -> t b c ...")
@@ -118,7 +118,9 @@ def validation_metrics(
     if bundle_steps == 1:
         y = torch.stack(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index + t).long(), get_normalized).y
+                dataset.get_at_time(
+                    file_idx.long(), (ts_index + t).long(), get_normalized
+                ).y
                 for t in range(0, n_steps, bundle_steps)
             ],
             dim=0,
@@ -126,7 +128,9 @@ def validation_metrics(
     else:
         y = torch.concat(
             [
-                dataset.get_at_time(file_idx.long(), (ts_index + t).long(), get_normalized).y
+                dataset.get_at_time(
+                    file_idx.long(), (ts_index + t).long(), get_normalized
+                ).y
                 for t in range(0, n_steps, bundle_steps)
             ],
             dim=2,

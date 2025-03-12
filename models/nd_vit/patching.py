@@ -313,6 +313,7 @@ class PatchUnmerging(nn.Module):
         self.grid_size = grid_size
         self.flatten = flatten
         self.use_conv = use_conv
+        self.c_multiplier = c_multiplier
 
         if target_grid_size is not None:
             self.target_grid_size = target_grid_size
@@ -347,8 +348,9 @@ class PatchUnmerging(nn.Module):
                 act_fn=act_fn,
                 bias=True,
             )
-            if patch_skip:
-                self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
+
+        if patch_skip:
+            self.proj_concat = nn.Sequential(nn.Linear(2 * dim, dim), act_fn())
 
         self.norm = norm_layer(dim_out) if norm_layer else nn.Identity()
 

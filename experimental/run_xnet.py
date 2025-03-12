@@ -46,9 +46,9 @@ def get_xnet(cfg, dataset):
     from models.utils import ContinuousConditionEmbed
 
     df_patch_size = cfg.model.swin.patch_size
-    phi_patch_size = (14, 2, 8)
+    phi_patch_size = (14, 2, 4)
     df_window_size = cfg.model.swin.window_size
-    phi_window_size = (14, 4, 6)
+    phi_window_size = (14, 4, 12)
     df_base_resolution = dataset.resolution
     phi_base_resolution = dataset.phi_resolution
     num_heads = cfg.model.swin.num_heads
@@ -59,12 +59,16 @@ def get_xnet(cfg, dataset):
     unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
     c_multiplier = cfg.model.swin.c_multiplier
     abs_pe = cfg.model.swin.abs_pe
+    patch_skip = cfg.model.swin.patch_skip
+    modulation = cfg.model.swin.modulation
+    latent_cross_attn = cfg.model.swin.latent_cross_attn
+    flux_head = cfg.model.swin.flux_head
     act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
 
     cond_fn = None
     n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
     if n_cond > 0:
-        cond_fn = ContinuousConditionEmbed(128, n_cond)
+        cond_fn = ContinuousConditionEmbed(32, n_cond)
 
     if cfg.model.bundle_seq_length > 1:
         raise NotImplementedError
@@ -90,6 +94,10 @@ def get_xnet(cfg, dataset):
         unmerging_hidden_ratio=unmerging_hidden_ratio,
         conditioning=cond_fn,
         act_fn=act_fn,
+        patch_skip=patch_skip,
+        modulation=modulation,
+        latent_cross_attn=latent_cross_attn,
+        flux_head=flux_head,
     )
 
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
@@ -199,16 +207,17 @@ def runner(rank, cfg, world_size):
         pf_cfg = cfg.training.pushforward
         pushforward_fn = None
         # TODO
-        # if sum(pf_cfg.unrolls) > 0:
-        #     pushforward_fn = get_pushforward_fn(
-        #         n_unrolls_schedule=pf_cfg.unrolls,
-        #         probs_schedule=pf_cfg.probs,
-        #         epoch_schedule=pf_cfg.epochs,
-        #         predict_delta=predict_delta,
-        #         dataset=trainset,
-        #         bundle_steps=bundle_seq_length,
-        #         use_amp=use_amp,
-        #     )
+        if sum(pf_cfg.unrolls) > 0:
+            pushforward_fn = get_pushforward_fn(
+                n_unrolls_schedule=pf_cfg.unrolls,
+                probs_schedule=pf_cfg.probs,
+                epoch_schedule=pf_cfg.epochs,
+                predict_delta=predict_delta,
+                dataset=trainset,
+                bundle_steps=bundle_seq_length,
+                use_amp=use_amp,
+                use_potentials=True,
+            )
 
         loss_val_min = torch.inf
 
@@ -224,6 +233,7 @@ def runner(rank, cfg, world_size):
             train_mse = 0
             train_df_mse = 0
             train_phi_mse = 0
+            train_flux_mse = 0
             model.train()
             info_dict = defaultdict(list)
             t_start_data = perf_counter_ns()
@@ -237,6 +247,7 @@ def runner(rank, cfg, world_size):
                 y_df = sample.y.to(device, non_blocking=True)
                 phi = sample.x_poten.to(device, non_blocking=True)
                 y_phi = sample.y_poten.to(device, non_blocking=True)
+                y_flux = sample.y_flux.to(device)
                 ts = sample.timestep.to(device)
                 itg = sample.itg.to(device)
 
@@ -253,8 +264,18 @@ def runner(rank, cfg, world_size):
                     # accessory information for pf (to retreive unrolled target)
                     file_idx = sample.file_index.to(device)
                     ts_index = sample.timestep_index.to(device)
-                    x, ts, y = pushforward_fn(
-                        model, x, ts, itg, ts_index, y, file_idx, epoch
+                    df, phi, ts, y_df, y_phi, y_flux = pushforward_fn(
+                        model,
+                        df,
+                        ts,
+                        itg,
+                        ts_index,
+                        y_df,
+                        file_idx,
+                        epoch,
+                        phi=phi,
+                        y_phi=y_phi,
+                        y_flux=y_flux,
                     )
                     info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
                 else:
@@ -263,13 +284,16 @@ def runner(rank, cfg, world_size):
                 t_start_fwd = perf_counter_ns()
 
                 with torch.autocast(str(cfg.device), dtype=amp_dtype, enabled=use_amp):
-                    pred_df, pred_phi = model(df, phi, timestep=ts, itg=itg)
+                    pred_df, pred_phi, pred_flux = model(df, phi, timestep=ts, itg=itg)
                     if predict_delta:
                         pred_df = df + pred_df
                         pred_phi = phi + pred_phi
                     df_loss = relative_norm_mse(pred_df, y_df)
                     phi_loss = relative_norm_mse(pred_phi, y_phi)
-                    loss = df_loss + phi_loss
+                    flux_loss = 0.0
+                    if pred_flux is not None:
+                        flux_loss = relative_norm_mse(pred_flux, y_flux.unsqueeze(1))
+                    loss = 0.6 * df_loss + 0.2 * phi_loss + 0.2 * flux_loss
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
@@ -288,6 +312,7 @@ def runner(rank, cfg, world_size):
                 train_mse += loss.item()
                 train_df_mse += df_loss.item()
                 train_phi_mse += phi_loss.item()
+                train_flux_mse += flux_loss.item()
 
                 info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
                 info_dict["memory_mb"].append(max_memory_allocated(device) / 1024**2)
@@ -300,6 +325,7 @@ def runner(rank, cfg, world_size):
                 "train/relative_norm_mse": train_mse,
                 "train/df_mse": train_df_mse,
                 "train/phi_mse": train_phi_mse,
+                "train/flux_mse": train_flux_mse,
                 "train/lr": (
                     scheduler.get_last_lr()[0]
                     if cfg.training.scheduler
@@ -309,10 +335,10 @@ def runner(rank, cfg, world_size):
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # Validation loop
-            separate_zf = cfg.dataset.separate_zf
             n_eval_steps = cfg.validation.n_eval_steps
             val_freq = cfg.validation.validate_every_n_epochs
             tot_eval_steps = n_eval_steps * bundle_seq_length
+            denormalize = cfg.validation.denormalize
             log_metric_dict = {}
             gkw_kfiles = []
             val_plots = {}
@@ -408,30 +434,36 @@ def runner(rank, cfg, world_size):
                                 df_rollout, phi_rollout = rollout_fn(
                                     model,
                                     df,
-                                    phi,
                                     file_idx=file_idx,
                                     ts_index_0=ts_index,
                                     itg=itg,
+                                    phi=phi,
                                 )
 
                                 # denormalize rollout and target for evaluation / plots
-                                df_rollout = torch.stack(
-                                    [
-                                        torch.stack(
-                                            [
-                                                valset.denormalize(df_rollout[t, b], f)
-                                                for b, f in enumerate(file_idx.tolist())
-                                            ]
-                                        )
-                                        for t in range(df_rollout.shape[0])
-                                    ]
-                                )
-                                y = torch.stack(
-                                    [
-                                        valset.denormalize(y[b], f)
-                                        for b, f in enumerate(file_idx.tolist())
-                                    ]
-                                )
+                                if denormalize:
+                                    # denormalize rollout and target for evaluation / plots
+                                    df_rollout = torch.stack(
+                                        [
+                                            torch.stack(
+                                                [
+                                                    valset.denormalize(
+                                                        df_rollout[t, b], f
+                                                    )
+                                                    for b, f in enumerate(
+                                                        file_idx.tolist()
+                                                    )
+                                                ]
+                                            )
+                                            for t in range(df_rollout.shape[0])
+                                        ]
+                                    )
+                                    y = torch.stack(
+                                        [
+                                            valset.denormalize(y[b], f)
+                                            for b, f in enumerate(file_idx.tolist())
+                                        ]
+                                    )
 
                                 # TODO: smarter (i.e. use timeindex when we output a dataclass from the dataset)
                                 metrics_i = validation_metrics(
@@ -441,6 +473,7 @@ def runner(rank, cfg, world_size):
                                     bundle_seq_length,
                                     valset,
                                     metric_fn_list,
+                                    get_normalized=not denormalize,
                                 )
                                 if use_gkw:
                                     # onestep predictions (time dimension = 0)

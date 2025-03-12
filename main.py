@@ -49,6 +49,10 @@ def main(config: DictConfig):
         from run import runner
     if config.method == "xnet":
         from experimental.run_xnet import runner
+    if config.method == "refiner":
+        from experimental.run_refine import runner
+    if config.method == "boost":
+        from experimental.run_boost import runner
 
     try:
         if dict_config["logging"]["run_id"] is None:
