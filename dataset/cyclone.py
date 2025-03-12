@@ -62,6 +62,7 @@ class CycloneDataset(Dataset):
         partial_holdouts: Optional[dict] = None,
         normalization: Optional[str] = "zscore",
         normalization_scope: str = "sample",
+        normalization_stats: Optional[Dict[str, float]] = None,
         spatial_ifft: bool = True,
         cond_filters: Optional[Dict[str, Sequence]] = None,
         dtype: Type = torch.float32,
@@ -88,6 +89,8 @@ class CycloneDataset(Dataset):
         assert normalization in ["zscore", "minmax", "none", None]
         assert normalization_scope in ["sample", "dataset", "per_mode", "trajectory"]
         self.normalization = normalization if normalization != "none" else None
+        if normalization_stats is not None:
+            self.dataset_stats = normalization_stats
         self.normalization_scope = normalization_scope
         self.cond_filters = cond_filters
         self.subsample = subsample
@@ -162,7 +165,8 @@ class CycloneDataset(Dataset):
         self.file_num_samples = []
         self.file_num_timesteps = []
         self.steps_per_file = {}
-        self.dataset_stats = defaultdict(dict)
+        if normalization_stats is None:
+            self.dataset_stats = defaultdict(dict)
         per_file_t_indexes = []
         stats = None
         for file_idx, file_path in enumerate(self.files):
@@ -200,21 +204,22 @@ class CycloneDataset(Dataset):
                 self.file_num_samples.append(n_samples)
                 self.file_num_timesteps.append(len(timesteps))
                 per_file_t_indexes.append(orig_t_index)
-                # normalization stats
-                self.dataset_stats[file_idx]["mean"] = f["metadata/k_mean"][:]
-                self.dataset_stats[file_idx]["std"] = f["metadata/k_std"][:]
-                self.dataset_stats[file_idx]["min"] = f["metadata/k_min"][:]
-                self.dataset_stats[file_idx]["max"] = f["metadata/k_max"][:]
-                if stats is None and normalization_scope == "dataset":
-                    stats = RunningMeanStd(shape=self.dataset_stats[file_idx]["mean"].shape)
-                if stats is not None:
-                    stats.update(self.dataset_stats[file_idx]["mean"],
-                                 self.dataset_stats[file_idx]["std"]**2,
-                                 self.dataset_stats[file_idx]["min"],
-                                 self.dataset_stats[file_idx]["max"],
-                                 count=len(timesteps))
+                if self.dataset_stats is not None:
+                    # normalization stats
+                    self.dataset_stats[file_idx]["mean"] = f["metadata/k_mean"][:]
+                    self.dataset_stats[file_idx]["std"] = f["metadata/k_std"][:]
+                    self.dataset_stats[file_idx]["min"] = f["metadata/k_min"][:]
+                    self.dataset_stats[file_idx]["max"] = f["metadata/k_max"][:]
+                    if stats is None and normalization_scope == "dataset":
+                        stats = RunningMeanStd(shape=self.dataset_stats[file_idx]["mean"].shape)
+                    if stats is not None:
+                        stats.update(self.dataset_stats[file_idx]["mean"],
+                                     self.dataset_stats[file_idx]["std"]**2,
+                                     self.dataset_stats[file_idx]["min"],
+                                     self.dataset_stats[file_idx]["max"],
+                                     count=len(timesteps))
 
-        if normalization_scope == "dataset":
+        if normalization_scope == "dataset" and normalization_stats is None:
             self.dataset_stats["full"]["mean"] = stats.mean
             self.dataset_stats["full"]["std"] = stats.var ** (1/2)
             self.dataset_stats["full"]["min"] = stats.min

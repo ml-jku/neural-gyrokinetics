@@ -63,6 +63,7 @@ def get_data(cfg):
             random_seed=cfg.seed,
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
+            normalization_stats=trainset.dataset_stats,
             spatial_ifft=cfg.dataset.spatial_ifft,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,

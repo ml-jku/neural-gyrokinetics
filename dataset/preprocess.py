@@ -4,7 +4,7 @@ import h5py
 import re
 from tqdm import tqdm
 
-from dataset.utils import RunningMeanStd
+from utils import RunningMeanStd
 
 ROOT = "/restricteddata/ukaea/gyrokinetics"
 
@@ -166,9 +166,9 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
     zf_tag = "_separate_zf" if separate_zf else ""
     per_mode_tag = "_per_mode" if per_mode_norm else ""
     split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-    axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
-    norm_axes_tag = f"_norm_{'_'.join([axes_desc[ax-1] for ax in norm_axes])}"
-    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}{norm_axes_tag}.h5"
+    # axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
+    # norm_axes_tag = f"_norm_{'_'.join([axes_desc[ax-1] for ax in norm_axes])}"
+    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}.h5"
     if os.path.exists(h5_filename):
         if per_mode_norm:
             # update stats with new stats
@@ -248,7 +248,7 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
         data_group = file.create_group("data")
         for idx, (k, pot) in tqdm(
             enumerate(zip(ks, potens)),
-            f"Processing {filename} -> {filename + ifft_tag + zf_tag + per_mode_tag + split_into_bands_tag + norm_axes_tag + '.h5'}",
+            f"Processing {filename} -> {filename + ifft_tag + zf_tag + per_mode_tag + split_into_bands_tag + '.h5'}",
             total=len(ks),
         ):
             # Load the full distribution function data
@@ -321,28 +321,23 @@ IFFT = True
 separate_zf = True
 per_mode_norm = False
 split_into_bands = None
-norm_axes = (3,4,5)
+norm_axes = (1,2,3,4,5)
 ifft_tag = "_ifft" if IFFT else ""
 zf_tag = "_separate_zf" if separate_zf else ""
 per_mode_tag = "_per_mode" if per_mode_norm else ""
 split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
-norm_axes_tag = f"_norm_{'_'.join([axes_desc[ax-1] for ax in norm_axes])}"
+# axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
+# norm_axes_tag = f"_norm_{'_'.join([axes_desc[ax-1] for ax in norm_axes])}"
 datasets = [
-    "cyclone4_2_2",
-    "cyclone5_2",
-    "cyclone6_2",
-    "cyclone7_2",
-    "cyclone8_2",
-    "cyclone9_2",
-    "cyclone10_2",
-    "cyclone12_2",
-    "cyclone20_2",
-    "cyclone21_2",
-    "cyclone22_2",
-    "cyclone22_2_diffInit",
-    "cyclone22_2_diffInit2",
-    "cyclone22_2_diffInit3",
+    "cyclone12_2_diffInit",
+    "cyclone12_2_diffInit2",
+    "cyclone12_2_diffInit3",
+    "cyclone5_2_diffInit",
+    "cyclone5_2_diffInit2",
+    "cyclone5_2_diffInit3",
+    "cyclone8_2_diffInit",
+    "cyclone8_2_diffInit2",
+    "cyclone8_2_diffInit3",
 ]
 
 stats = get_stats(datasets, IFFT, separate_zf, per_mode_norm) if per_mode_norm else None
@@ -369,5 +364,5 @@ for f in datasets:
         )
 
 for filename in datasets:
-    h5_filename = f"{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}{norm_axes_tag}.h5"
+    h5_filename = f"{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}.h5"
     os.system(f"rsync -ah --info=progress {ROOT}/preprocessed/{h5_filename} /local00/bioinf/gyrokinetics/preprocessed/{h5_filename}")

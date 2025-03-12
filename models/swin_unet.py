@@ -517,7 +517,6 @@ class SwinUnet(nn.Module):
             patch_skip=self.patch_skip,
             # cond_dim=self.cond_embed.cond_dim,
         )
-
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -532,6 +531,7 @@ class SwinUnet(nn.Module):
             up_blk.reset_parameters(self.init_weights)
             down_blk.reset_parameters(self.init_weights)
         self.middle.reset_parameters(self.init_weights)
+        self.middle_upscale.reset_parameters(self.init_weights)
 
     def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         # compress to patch space

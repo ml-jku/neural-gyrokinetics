@@ -88,16 +88,16 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
         other = tuple([o for o in range(5) if o != i and o != j])
 
         if average:
-            x1_plot = x1[::2].sum(0).mean(other)
-            x2_plot = x2[::2].sum(0).mean(other)
+            x1_plot = x1[0].mean(other)
+            x2_plot = x2[0].mean(other)
         else:
             x1_plot = (
-                torch.tensor(x1[::2].sum(0))
+                torch.tensor(x1[0])
                 .permute(i, j, *other)
                 .numpy()[:, :, 0, 0, 0]
             )
             x2_plot = (
-                torch.tensor(x2[::2].sum(0))
+                torch.tensor(x2[0])
                 .permute(i, j, *other)
                 .numpy()[:, :, 0, 0, 0]
             )
@@ -362,7 +362,14 @@ def generate_val_plots(x_rollout, y, ts, phase):
     }
     for name, plot_fn in val_plots_dict.items():
         # first timestep and batch
+        if y.shape[1] != 2:
+            y = torch.cat([y[:, 0::2].sum(axis=1, keepdims=True), y[:, 1::2].sum(axis=1, keepdims=True)], dim=1).cpu()
         y_first = (y[0] if y.ndim == 7 else y[0, 0]).to("cpu")
+        if x_rollout.shape[2] != 2:
+            x_rollout = torch.cat(
+                [x_rollout[:, :, 0::2].sum(axis=2, keepdims=True), x_rollout[:, :, 1::2].sum(axis=2, keepdims=True)],
+                dim=2
+            )
         plots[name] = plot_fn(x_rollout[0, 0], x2=y_first)
     return plots
 
