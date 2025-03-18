@@ -46,9 +46,9 @@ def get_xnet(cfg, dataset):
     from models.utils import ContinuousConditionEmbed
 
     df_patch_size = cfg.model.swin.patch_size
-    phi_patch_size = (14, 2, 4)
+    phi_patch_size = (8, 2, 4)
     df_window_size = cfg.model.swin.window_size
-    phi_window_size = (14, 4, 12)
+    phi_window_size = (7, 4, 12)
     df_base_resolution = dataset.resolution
     phi_base_resolution = dataset.phi_resolution
     num_heads = cfg.model.swin.num_heads
@@ -293,7 +293,7 @@ def runner(rank, cfg, world_size):
                     flux_loss = 0.0
                     if pred_flux is not None:
                         flux_loss = relative_norm_mse(pred_flux, y_flux.unsqueeze(1))
-                    loss = 0.6 * df_loss + 0.2 * phi_loss + 0.2 * flux_loss
+                    loss = 0.6 * df_loss + 0.4 * phi_loss + 1e-3 * flux_loss
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
