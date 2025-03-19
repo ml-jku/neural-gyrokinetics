@@ -7,6 +7,7 @@ from einops import rearrange
 
 from models.swin_unet import SwinUnet
 from models.nd_vit.drop import DropPath
+from models.nd_vit.positional import PositionalEmbedding
 from models.utils import Film, MLP, seq_weight_init
 
 
@@ -73,7 +74,7 @@ class CrossAttention(nn.Module):
         return x
 
 
-class LatentMixingTransformer(nn.Module):
+class MixingBlock(nn.Module):
     def __init__(
         self,
         dim: int,
@@ -84,7 +85,6 @@ class LatentMixingTransformer(nn.Module):
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
-        use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
     ):
@@ -93,7 +93,6 @@ class LatentMixingTransformer(nn.Module):
         self.dim = dim
         self.num_heads = num_heads
         self.mlp_ratio = mlp_ratio
-        self.use_checkpoint = use_checkpoint
         self.init_weights = init_weights
 
         self.norm1 = norm_layer(dim) if norm_layer is not None else nn.Identity()
@@ -127,52 +126,124 @@ class LatentMixingTransformer(nn.Module):
 
         self.attn.reset_parameters(init_weights)
 
-    def forward_part1(self, left: torch.Tensor, right: torch.Tensor):
-        x = self.norm1(self.attn(left, right))
-        return x
-
-    def forward_part2(self, x):
-        x = self.drop_path(self.mlp(self.norm2(x)))
-        return x
-
     def forward(self, left: torch.Tensor, right: Optional[torch.Tensor] = None):
         right = right if right is not None else left
-        shortcut = left
-        x = self.forward_part1(left, right)
-        x = shortcut + self.drop_path(x)
-        x = x + self.forward_part2(x)
+        x = left + self.drop_path(self.norm1(self.attn(left, right)))
+        x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
 
-class LatentMixingMLP(nn.Module):
+class LatentMixingTransformer(nn.Module):
     def __init__(
-        self, dim: int, right_dim: int, right_grid: int, dropout_prob: float = 0.1
+        self,
+        space: int,
+        dim: int,
+        depth: int,
+        num_heads: int,
+        grid_size: Sequence[int],
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        drop_path: Union[Sequence[float], float] = 0.0,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
+        act_fn: nn.Module = nn.GELU,
+        init_weights: Optional[str] = None,
+    ):
+
+        super().__init__()
+
+        if isinstance(drop_path, float):
+            drop_path = [drop_path] * depth
+
+        self.depth = depth
+        self.dim = dim
+        self.grid_size = grid_size
+        self.drop_path = drop_path
+
+        assert dim % num_heads == 0
+
+        self.blocks = nn.ModuleList(
+            [
+                MixingBlock(
+                    space,
+                    dim=dim,
+                    grid_size=grid_size,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path[i],
+                    norm_layer=norm_layer,
+                    act_fn=act_fn,
+                )
+                for i in range(depth)
+            ]
+        )
+
+        if init_weights is not None:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        for blk in self.blocks:
+            blk.reset_parameters(init_weights)
+
+    def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+        for blk in self.blocks:
+            x = blk(left, right)
+        return x
+
+
+class FluxDecoder(nn.Module):
+    def __init__(
+        self,
+        dims: Sequence[int],
+        num_heads: int,
+        mlp_ratio: float = 2.0,
+        qkv_bias: bool = True,
+        drop: float = 0.0,
+        attn_drop: float = 0.0,
+        drop_path: float = 0.0,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
+        act_fn: nn.Module = nn.GELU,
+        init_weights: Optional[str] = None,
     ):
         super().__init__()
 
-        self.latent_resolution = right_grid
-        self.right_dim = right_dim
-        self.cond_dim = 4 * right_dim
-        self.embed_mlp = nn.Sequential(
-            nn.Linear(right_dim, self.cond_dim),
-            nn.Dropout(dropout_prob),
-            nn.SiLU(),
+        flux_blocks = []
+        flux_latent_size = 0
+        for dim in dims:
+            flux_blocks.append(
+                MixingBlock(
+                    dim,
+                    num_heads,
+                    mlp_ratio,
+                    qkv_bias=qkv_bias,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=drop_path,
+                    norm_layer=norm_layer,
+                    act_fn=act_fn,
+                    init_weights=init_weights,
+                )
+            )
+            flux_latent_size += dim
+
+        self.blocks = nn.ModuleList(flux_blocks)
+        self.flux_mlp = MLP(
+            [flux_latent_size, flux_latent_size // 2, 1],
+            last_act_fn=nn.Softplus,
+            dropout_prob=drop,
         )
 
-        self.modulate = Film(self.cond_dim, dim)
-
-    def forward(self, left: torch.Tensor, right: torch.Tensor):
-        # pool out spatials
-        right = rearrange(right, "b ... c -> b (...) c").mean(1, keepdim=True)
-        right = self.embed_mlp(right)
-        return self.modulate(left, right)
-
-
-class FluxDecoder(LatentMixingTransformer):
-    def forward(self, left: torch.Tensor, right: Optional[torch.Tensor] = None):
-        x = super().forward(left, right)
+    def mix(self, i: int, left: torch.Tensor, right: Optional[torch.Tensor] = None):
+        x = self.blocks[i].forward(left, right)
         # average spatials out
         return x.mean(axis=list(range(1, x.ndim - 1)))
+
+    def forward(self, flux_latents: Sequence[torch.Tensor]):
+        return self.flux_mlp(torch.cat(flux_latents, dim=-1))
 
 
 class SwinXnet(nn.Module):
@@ -200,17 +271,43 @@ class SwinXnet(nn.Module):
         modulation: str = "dit",
         act_fn: nn.Module = nn.GELU,
         patch_skip: bool = False,
-        latent_cross_attn: bool = True,
         flux_head: bool = True,
+        decouple_mu: bool = False,
+        separate_zf: bool = False,
+        zf_norm: bool = False,
+        flux_drop: float = 0.5,
     ):
         super().__init__()
 
         self.patch_skip = patch_skip
+        self.decouple_mu = decouple_mu
+        self.separate_zf = separate_zf
+        self.df_base_resolution = df_base_resolution
+        self.df_space = 5
+        self.phi_space = 3
+
+        if separate_zf:
+            in_channels = 2 * in_channels
+            out_channels = 2 * out_channels
+            self.zf_norm = nn.LayerNorm(in_channels) if zf_norm else nn.Identity()
+
+        if decouple_mu:
+            self.df_space = 4
+            df_full_resolution = df_base_resolution
+            df_patch_size = [df_patch_size[0]] + df_patch_size[2:]
+            df_window_size = [df_window_size[0]] + df_window_size[2:]
+            self.df_deoupled_dim = df_full_resolution[1]
+            self.df_base_resolution = [df_full_resolution[0]] + df_full_resolution[2:]
+            # positional information for velocity mixing
+            self.vel_pe = PositionalEmbedding(in_channels, list(df_full_resolution))
+
+            in_channels = in_channels * self.df_deoupled_dim
+            out_channels = out_channels * self.df_deoupled_dim
 
         self.df_unet = SwinUnet(
-            5,
+            self.df_space,
             dim=dim,
-            base_resolution=df_base_resolution,
+            base_resolution=self.df_base_resolution,
             patch_size=df_patch_size,
             window_size=df_window_size,
             depth=depth,
@@ -232,7 +329,7 @@ class SwinXnet(nn.Module):
         )
 
         self.phi_unet = SwinUnet(
-            3,
+            self.phi_space,
             dim=dim,
             base_resolution=phi_base_resolution,
             patch_size=phi_patch_size,
@@ -260,138 +357,161 @@ class SwinXnet(nn.Module):
         self.phi_up_blocks = self.phi_unet.up_blocks
         self.phi_down_blocks = self.phi_unet.down_blocks
 
-        self.flux_blocks = None
-        self.flux_readout = None
+        self.flux_head = None
         if flux_head:
-            flux_blocks = []
-            flux_latent_size = 0
-            for phi_dim in self.phi_unet.down_dims[::-1]:
-                flux_blocks.append(FluxDecoder(phi_dim, 8, attn_drop=0.1))
-                flux_latent_size += phi_dim
-
-            self.flux_blocks = nn.ModuleList(flux_blocks)
-            self.flux_readout = MLP([flux_latent_size, flux_latent_size // 2, 1])
-
-        if latent_cross_attn:
-            # down/middle direction
-            df_mixing = []
-            phi_mixing = []
-            for df_dim, phi_dim in zip(self.df_unet.down_dims, self.phi_unet.down_dims):
-                df_mixing.append(LatentMixingTransformer(df_dim, 8, attn_drop=0.1))
-                phi_mixing.append(LatentMixingTransformer(phi_dim, 8, attn_drop=0.1))
-            self.df_mixing = nn.ModuleList(df_mixing)
-            self.phi_mixing = nn.ModuleList(phi_mixing)
-            # up direction
-            df_mixing_up = []
-            phi_mixing_up = []
-            for df_blk, phi_blk in zip(self.df_up_blocks, self.phi_up_blocks):
-                df_mixing_up.append(
-                    LatentMixingTransformer(df_blk.dim, 8, attn_drop=0.1)
-                )
-                phi_mixing_up.append(
-                    LatentMixingTransformer(phi_blk.dim, 8, attn_drop=0.1)
-                )
-            self.df_mixing_up = nn.ModuleList(df_mixing_up)
-            self.phi_mixing_up = nn.ModuleList(phi_mixing_up)
-
-            df_patch_dim = self.df_unet.unpatch.dim * (2 if patch_skip else 1)
-            phi_patch_dim = self.phi_unet.unpatch.dim * (2 if patch_skip else 1)
-            self.df_mixing_unpatch = LatentMixingTransformer(
-                df_patch_dim, 8, attn_drop=0.1
+            self.flux_head = FluxDecoder(
+                self.phi_unet.down_dims[::-1],
+                num_heads=8,
+                drop=flux_drop,
+                attn_drop=0.1,
             )
-            self.phi_mixing_unpatch = LatentMixingTransformer(
-                phi_patch_dim, 8, attn_drop=0.1
-            )
-        else:
-            df_mixing = []
-            phi_mixing = []
-            for (df_dim, phi_dim), (df_grid, phi_grid) in zip(
-                zip(self.df_unet.down_dims, self.phi_unet.down_dims),
-                zip(self.df_unet.grid_sizes, self.phi_unet.grid_sizes),
-            ):
-                df_mixing.append(LatentMixingMLP(df_dim, phi_dim, phi_grid))
-                phi_mixing.append(LatentMixingMLP(phi_dim, df_dim, df_grid))
-            self.df_mixing = nn.ModuleList(df_mixing)
-            self.phi_mixing = nn.ModuleList(phi_mixing)
+
+        # down/middle direction
+        df_mix = []
+        phi_mix = []
+        for df_dim, phi_dim in zip(self.df_unet.down_dims, self.phi_unet.down_dims):
+            df_mix.append(MixingBlock(df_dim, 8, attn_drop=0.1))
+            phi_mix.append(MixingBlock(phi_dim, 8, attn_drop=0.1))
+        self.df_mix = nn.ModuleList(df_mix)
+        self.phi_mix = nn.ModuleList(phi_mix)
+        # up direction
+        df_mix_up = []
+        phi_mix_up = []
+        for df_blk, phi_blk in zip(self.df_up_blocks, self.phi_up_blocks):
+            df_mix_up.append(MixingBlock(df_blk.dim, 8, attn_drop=0.1))
+            phi_mix_up.append(MixingBlock(phi_blk.dim, 8, attn_drop=0.1))
+        self.df_mix_up = nn.ModuleList(df_mix_up)
+        self.phi_mix_up = nn.ModuleList(phi_mix_up)
+
+        df_patch_dim = self.df_unet.unpatch.dim * (2 if patch_skip else 1)
+        phi_patch_dim = self.phi_unet.unpatch.dim * (2 if patch_skip else 1)
+        self.df_mix_unpatch = MixingBlock(df_patch_dim, 8, attn_drop=0.1)
+        self.phi_mix_unpatch = MixingBlock(phi_patch_dim, 8, attn_drop=0.1)
 
     def forward(
         self, df: torch.Tensor, phi: torch.Tensor, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # compress to patch space
-        df, df_pad_axes = self.df_unet.patch_encode(df)
-        phi, phi_pad_axes = self.phi_unet.patch_encode(phi)
+
+        df, phi, df_pad_axes, phi_pad_axes = self.patch_encode(df, phi)
+
         if self.patch_skip:
             df0 = df.clone()
             phi0 = phi.clone()
 
         # parameter conditioning
+        # TODO why have two?
         df_cond = self.df_unet.condition(kwargs)
         phi_cond = self.phi_unet.condition(kwargs)
 
         # down paths
-        df_feature_maps = []
-        phi_feature_maps = []
+        df_features = []
+        phi_features = []
         for df_blk, phi_blk, df_mix, phi_mix in zip(
             self.df_down_blocks,
             self.phi_down_blocks,
-            self.df_mixing[:-1],
-            self.phi_mixing[:-1],
+            self.df_mix[:-1],
+            self.phi_mix[:-1],
         ):
             # mix latents
             df, phi = df_mix(df, phi), phi_mix(phi, df)
             # down blocks
             df, df_pre = df_blk(df, **df_cond)
             phi, phi_pre = phi_blk(phi, **phi_cond)
-            df_feature_maps.append(df_pre)
-            phi_feature_maps.append(phi_pre)
+            df_features.append(df_pre)
+            phi_features.append(phi_pre)
 
-        # middle blocks + latent fusion
+        # middle blocks + latent mixing
         flux_lats = []
         df = self.df_unet.middle_pe(df)
         phi = self.phi_unet.middle_pe(phi)
 
-        df, phi = self.df_mixing[-1](df, phi), self.phi_mixing[-1](phi, df)
+        df, phi = self.df_mix[-1](df, phi), self.phi_mix[-1](phi, df)
 
         df = self.df_unet.middle(df, **df_cond)
         phi = self.phi_unet.middle(phi, **phi_cond)
 
-        if self.flux_blocks is not None:
-            flux_lats.append(self.flux_blocks[0](phi, df))
+        if self.flux_head is not None:
+            flux_lats.append(self.flux_head.mix(0, phi, df))
 
         df = self.df_unet.middle_upscale(df)
         phi = self.phi_unet.middle_upscale(phi)
 
         # up path
-        df_feature_maps = df_feature_maps[::-1]
-        phi_feature_maps = phi_feature_maps[::-1]
+        df_features = df_features[::-1]
+        phi_features = phi_features[::-1]
         for i, (df_blk, phi_blk, df_mix, phi_mix) in enumerate(
-            zip(
-                self.df_up_blocks,
-                self.phi_up_blocks,
-                self.df_mixing_up,
-                self.phi_mixing_up,
-            )
+            zip(self.df_up_blocks, self.phi_up_blocks, self.df_mix_up, self.phi_mix_up)
         ):
             # mix latents
             df, phi = df_mix(df, phi), phi_mix(phi, df)
             # up blocks
-            df = df_blk(df, s=df_feature_maps[i], **df_cond)
-            phi = phi_blk(phi, s=phi_feature_maps[i], **phi_cond)
-            if self.flux_blocks is not None:
-                flux_lats.append(self.flux_blocks[i + 1](phi, df))
+            df, df_ = df_blk(df, s=df_features[i], return_skip=True, **df_cond)
+            phi, phi_ = phi_blk(phi, s=phi_features[i], return_skip=True, **phi_cond)
+            # multiscale flux latents
+            if self.flux_head is not None:
+                flux_lats.append(self.flux_head.mix(i + 1, phi_, df_))
 
         # expand to original
         if self.patch_skip:
             df = torch.cat([df, df0], -1)
             phi = torch.cat([phi, phi0], -1)
 
-        # expand to original
-        df, phi = self.df_mixing_unpatch(df, phi), self.phi_mixing_unpatch(phi, df)
-        df = self.df_unet.patch_decode(df, df_cond["condition"], df_pad_axes)
-        phi = self.phi_unet.patch_decode(phi, phi_cond["condition"], phi_pad_axes)
+        df, phi = self.patch_decode(
+            df,
+            phi,
+            df_cond=df_cond["condition"],
+            phi_cond=phi_cond["condition"],
+            df_pad_axes=df_pad_axes,
+            phi_pad_axes=phi_pad_axes,
+        )
 
         flux = None
-        if self.flux_readout is not None:
-            flux = self.flux_readout(torch.cat(flux_lats, dim=-1))
-
+        if self.flux_head is not None:
+            flux = self.flux_head(flux_lats)
         return df, phi, flux
+
+    def patch_encode(self, df: torch.Tensor, phi: torch.Tensor):
+        if self.separate_zf:
+            # split zonal flow
+            zf = df.mean(-1, True).repeat(1, 1, 1, 1, 1, 1, df.shape[-1])
+            no_zf = df - zf
+            df = torch.cat([zf, no_zf], dim=1)  # stack on channels
+            df = rearrange(df, "b c ... -> b ... c")
+            df = self.zf_norm(df)
+            df = rearrange(df, "b ... c -> b c ...")
+
+        # decouple mu and add positional information
+        if self.decouple_mu:
+            df = rearrange(df, "b c ... -> b ... c")
+            df = self.vel_pe(df)
+            df = rearrange(df, "b vp mu ... c -> b (c mu) vp ...")
+        # compress to patch space
+        df, df_pad_axes = self.df_unet.patch_encode(df)
+        phi, phi_pad_axes = self.phi_unet.patch_encode(phi)
+
+        return df, phi, df_pad_axes, phi_pad_axes
+
+    def patch_decode(
+        self,
+        zdf: torch.Tensor,
+        zphi: torch.Tensor,
+        df_cond: torch.Tensor,
+        phi_cond: torch.Tensor,
+        df_pad_axes: Sequence,
+        phi_pad_axes: Sequence,
+    ):
+        # final mixing
+        df, phi = self.df_mix_unpatch(zdf, zphi), self.phi_mix_unpatch(zphi, zdf)
+        # expand to original
+        df = self.df_unet.patch_decode(df, df_cond, df_pad_axes)
+        phi = self.phi_unet.patch_decode(phi, phi_cond, phi_pad_axes)
+        # move mu back to spatials
+        if self.decouple_mu:
+            df = rearrange(
+                df, "b vp ... (c mu) -> b c vp mu ...", mu=self.df_deoupled_dim
+            )
+        # recompose zonal flow
+        if self.separate_zf:
+            df = torch.cat([df[:, 0::2].sum(1, True), df[:, 1::2].sum(1, True)], dim=1)
+
+        return df, phi

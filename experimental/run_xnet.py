@@ -61,9 +61,10 @@ def get_xnet(cfg, dataset):
     abs_pe = cfg.model.swin.abs_pe
     patch_skip = cfg.model.swin.patch_skip
     modulation = cfg.model.swin.modulation
-    latent_cross_attn = cfg.model.swin.latent_cross_attn
     flux_head = cfg.model.swin.flux_head
     act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
+    decouple_mu = cfg.model.swin.decouple_mu
+    separate_zf = cfg.model.swin.separate_zf
 
     cond_fn = None
     n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
@@ -96,8 +97,9 @@ def get_xnet(cfg, dataset):
         act_fn=act_fn,
         patch_skip=patch_skip,
         modulation=modulation,
-        latent_cross_attn=latent_cross_attn,
         flux_head=flux_head,
+        decouple_mu=decouple_mu,
+        separate_zf=separate_zf,
     )
 
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
