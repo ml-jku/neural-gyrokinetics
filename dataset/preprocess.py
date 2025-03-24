@@ -75,10 +75,10 @@ def get_stats(filenames, spatial_ifft=False, separate_zf=False, per_mode_norm=Fa
             if old_running_stats is None:
                 # load old stats
                 old_file = h5py.File(h5_filename, "r")
-                old_mean = old_file['metadata']['k_mean'][:]
-                old_var = old_file['metadata']['k_std'][:] ** 2
-                old_min = old_file['metadata']['k_min'][:]
-                old_max = old_file['metadata']['k_max'][:]
+                old_mean = old_file["metadata"]["k_mean"][:]
+                old_var = old_file["metadata"]["k_std"][:] ** 2
+                old_min = old_file["metadata"]["k_min"][:]
+                old_max = old_file["metadata"]["k_max"][:]
                 old_running_stats = RunningMeanStd(shape=old_mean.shape)
                 old_running_stats.mean = old_mean
                 old_running_stats.var = old_var
@@ -167,19 +167,19 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
     per_mode_tag = "_per_mode" if per_mode_norm else ""
     split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
     # axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
-    # norm_axes_tag = f"_norm_{'_'.join([axes_desc[ax-1] for ax in norm_axes])}"
+    # norm_axes_tag = f"_norm_{"_".join([axes_desc[ax-1] for ax in norm_axes])}"
     h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}.h5"
     if os.path.exists(h5_filename):
         if per_mode_norm:
             # update stats with new stats
             with h5py.File(h5_filename, "r+") as file:
-                file['metadata']['k_mean'] = stats.mean
-                file['metadata']['k_var'] = np.sqrt(stats.var)
-                file['metadata']['k_min'] = stats.min
-                file['metadata']['k_max'] = stats.max
+                file["metadata"]["k_mean"] = stats.mean
+                file["metadata"]["k_var"] = np.sqrt(stats.var)
+                file["metadata"]["k_min"] = stats.min
+                file["metadata"]["k_max"] = stats.max
 
         print(f"File {h5_filename} already exists, skipping...")
-        return h5_filename
+        return h5_filename, True
 
     ks = K_files(dir_in)
     potens, ts_slices = poten_files(dir_in)
@@ -248,7 +248,7 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
         data_group = file.create_group("data")
         for idx, (k, pot) in tqdm(
             enumerate(zip(ks, potens)),
-            f"Processing {filename} -> {filename + ifft_tag + zf_tag + per_mode_tag + split_into_bands_tag + '.h5'}",
+            f"Processing {filename} -> {filename + ifft_tag + zf_tag + per_mode_tag + split_into_bands_tag + ".h5"}",
             total=len(ks),
         ):
             # Load the full distribution function data
@@ -289,7 +289,7 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
                         separated_modes.append(ifft_knth_no_zf)
 
                     knth = np.concatenate(separated_modes, axis=0)
-                    assert check_ifft(knth, orig_knth), "Error transforming back to original space"
+                    assert check_ifft(knth.copy(), orig_knth), "Error transforming back to original space"
                 else:
                     knth = do_ifft(knth)
 
@@ -315,10 +315,10 @@ def preprocess(filename, spatial_ifft=False, separate_zf=False, stats=None, per_
         metadata_group.create_dataset("k_min", data=stats.min)
         metadata_group.create_dataset("k_max", data=stats.max)
 
-        return h5_filename
+        return h5_filename, False
 
 IFFT = True
-separate_zf = True
+separate_zf = False
 per_mode_norm = False
 split_into_bands = None
 norm_axes = (1,2,3,4,5)
@@ -327,42 +327,74 @@ zf_tag = "_separate_zf" if separate_zf else ""
 per_mode_tag = "_per_mode" if per_mode_norm else ""
 split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
 # axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
-# norm_axes_tag = f"_norm_{'_'.join([axes_desc[ax-1] for ax in norm_axes])}"
+# norm_axes_tag = f"_norm_{"_".join([axes_desc[ax-1] for ax in norm_axes])}"
 datasets = [
-    "cyclone12_2_diffInit",
-    "cyclone12_2_diffInit2",
-    "cyclone12_2_diffInit3",
+    "cyclone17_2",
+    "cyclone4_2_2",
+    "cyclone20_2",
     "cyclone5_2_diffInit",
-    "cyclone5_2_diffInit2",
     "cyclone5_2_diffInit3",
-    "cyclone8_2_diffInit",
-    "cyclone8_2_diffInit2",
+    "cyclone8_2",
+    "cyclone10_2",
     "cyclone8_2_diffInit3",
+    "cyclone8_2_diffInit2",
+    "cyclone9_2",
+    "cyclone5_2",
+    "cyclone18_2",
+    "cyclone9_2_diffInit",
+    "cyclone12_2_diffInit",
+    "cyclone15_2",
+    "cyclone14_2",
+    "cyclone22_2_diffInit3",
+    "cyclone9_2_diffInit3",
+    "cyclone12_2_diffInit3",
+    "cyclone20_2_diffInit",
+    "cyclone5_2_diffInit2",
+    "cyclone9_2_diffInit2",
+    "cyclone8_2_diffInit",
+    "cyclone6_2",
+    "cyclone20_2_diffInit2",
+    "cyclone22_2_diffInit2",
+    "cyclone13_2",
+    "cyclone16_2",
+    "cyclone7_2",
+    "cyclone11_2",
+    "cyclone12_2",
+    "cyclone20_2_diffInit3",
+    "cyclone21_2",
+    "cyclone12_2_diffInit2",
+    "cyclone22_2",
+    "cyclone22_2_diffInit",
+    "cyclone19_2"
 ]
+
 
 stats = get_stats(datasets, IFFT, separate_zf, per_mode_norm) if per_mode_norm else None
 for f in datasets:
-    h5_filename = preprocess(f, spatial_ifft=IFFT, separate_zf=separate_zf, stats=stats, per_mode_norm=per_mode_norm,
+    h5_filename, skipped = preprocess(f, spatial_ifft=IFFT, separate_zf=separate_zf, stats=stats, per_mode_norm=per_mode_norm,
                              split_into_bands=split_into_bands, norm_axes=norm_axes)
     # set rwx permissions
     try:
         os.chmod(h5_filename, 0o777)
     except PermissionError:
         pass
-    # read in the structure and example field of the created h5 file
-    with h5py.File(h5_filename, "r") as h5f:
-        # Read the 'metadata/timesteps' dataset
-        timesteps = len(h5f["data"])
-        rlt = h5f["metadata/ion_temp_grad"][:]
-        timestep_0 = h5f["data/timestep_00000"][:]
-        mean, std = h5f["metadata/k_mean"][0], h5f["metadata/k_std"][0]
-        min_, max_ = h5f["metadata/k_min"][0], h5f["metadata/k_max"][0]
-        print(
-            f"{h5_filename}:\n "
-            f"\tpoints: {timesteps}, shape of timestep_00000: {timestep_0.shape}\n"
-            f"\trlt: {rlt}\n"
-        )
 
-for filename in datasets:
-    h5_filename = f"{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}.h5"
-    os.system(f"rsync -ah --info=progress {ROOT}/preprocessed/{h5_filename} /local00/bioinf/gyrokinetics/preprocessed/{h5_filename}")
+    if not skipped:
+        # read in the structure and example field of the created h5 file
+        with h5py.File(h5_filename, "r") as h5f:
+            # Read the "metadata/timesteps" dataset
+            timesteps = len(h5f["data"])
+            rlt = h5f["metadata/ion_temp_grad"][:]
+            timestep_0 = h5f["data/timestep_00000"][:]
+            mean, std = h5f["metadata/k_mean"][0], h5f["metadata/k_std"][0]
+            min_, max_ = h5f["metadata/k_min"][0], h5f["metadata/k_max"][0]
+            print(
+                f"{h5_filename}:\n "
+                f"\tpoints: {timesteps}, shape of timestep_00000: {timestep_0.shape}\n"
+                f"\trlt: {rlt}\n"
+            )
+
+
+# for filename in datasets:
+#     h5_filename = f"{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}.h5"
+#     os.system(f"rsync -ah --info=progress {ROOT}/preprocessed/{h5_filename} /local00/bioinf/gyrokinetics/preprocessed/{h5_filename}")

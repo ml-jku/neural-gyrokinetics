@@ -163,7 +163,8 @@ def compress_src(path):
         compresslevel=9,
     )
     for name in files:
-        if name.endswith(".py") or name.endswith(".yaml"):
+        if name.endswith(".py") or name.endswith(".yaml") or name.endswith(".ipynb") and not "wandb" in name \
+                and not "outputs" in name:
             zf.write(name, arcname=name)
     zf.close()
 

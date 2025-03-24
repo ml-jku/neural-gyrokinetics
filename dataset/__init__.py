@@ -51,9 +51,12 @@ def get_data(cfg):
             partial_holdouts=partial_holdouts,
             cond_filters=cfg.dataset.training_cond_filters,
             subsample=cfg.dataset.subsample,
-            separate_zf=cfg.dataset.separate_zf,
             log_transform=cfg.dataset.log_transform,
             split_into_bands=cfg.dataset.split_into_bands,
+            minmax_beta1=cfg.dataset.minmax_beta1,
+            minmax_beta2=cfg.dataset.minmax_beta2,
+            offset=cfg.dataset.offset,
+            separate_zf=cfg.dataset.separate_zf,
         )
 
         holdout_trajectories_valset = CycloneDataset(
@@ -69,9 +72,12 @@ def get_data(cfg):
             trajectories=cfg.dataset.validation_trajectories,
             cond_filters=cfg.dataset.eval_cond_filters,
             subsample=cfg.dataset.subsample,
-            separate_zf=cfg.dataset.separate_zf,
             log_transform=cfg.dataset.log_transform,
             split_into_bands=cfg.dataset.split_into_bands,
+            minmax_beta1=cfg.dataset.minmax_beta1,
+            minmax_beta2=cfg.dataset.minmax_beta2,
+            offset=cfg.dataset.offset,
+            separate_zf=cfg.dataset.separate_zf,
         )
 
         trainloader = DataLoader(
@@ -102,14 +108,18 @@ def get_data(cfg):
                 random_seed=cfg.seed,
                 normalization=cfg.dataset.normalization,
                 normalization_scope=cfg.dataset.normalization_scope,
+                normalization_stats=trainset.dataset_stats,
                 spatial_ifft=cfg.dataset.spatial_ifft,
                 bundle_seq_length=cfg.model.bundle_seq_length,
                 trajectories=cfg.dataset.training_trajectories,
                 partial_holdouts=partial_holdouts,
                 cond_filters=cfg.dataset.eval_cond_filters,
                 subsample=cfg.dataset.subsample,
-                separate_zf=cfg.dataset.separate_zf,
                 log_transform=cfg.dataset.log_transform,
+                minmax_beta1=cfg.dataset.minmax_beta1,
+                minmax_beta2=cfg.dataset.minmax_beta2,
+                offset=cfg.dataset.offset,
+                separate_zf=cfg.dataset.separate_zf,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,

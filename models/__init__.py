@@ -6,6 +6,9 @@ def get_model(cfg, dataset):
 
     latent_dim = cfg.model.latent_dim
     problem_dim = len(dataset.active_keys)
+    separate_zf = cfg.dataset.separate_zf
+    if separate_zf:
+        problem_dim += 2
 
     if cfg.model.name == "swin":
         from models.swin_unet import SwinUnet

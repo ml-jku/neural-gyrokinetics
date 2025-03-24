@@ -356,6 +356,7 @@ class SwinUnet(nn.Module):
         self.base_resolution = base_resolution
         self.norm_output = norm_output
         self.patch_skip = patch_skip
+        self.problem_dim = in_channels
         padded_base_resolution, _ = pad_to_blocks(base_resolution, patch_size)
 
         if isinstance(num_heads, int):

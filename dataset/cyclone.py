@@ -4,6 +4,7 @@ import os
 import h5py
 from dataclasses import dataclass
 from collections import defaultdict
+import tqdm
 
 import torch
 import numpy as np
@@ -70,22 +71,22 @@ class CycloneDataset(Dataset):
         val_ratio: float = 0.1,
         bundle_seq_length: int = 1,
         subsample: int = 1,
-        separate_zf: bool = False,
         log_transform: bool = False,
-        split_into_bands: int = None
+        split_into_bands: int = None,
+        minmax_beta1: float = 8,
+        minmax_beta2: float = 4,
+        offset: int = 0,
+        separate_zf: bool = False,
     ):
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
         assert split in ["train", "val"]
         self.dtype = dtype
         active_keys = active_keys if active_keys is not None else ["re", "im"]
         assert all([a in ["re", "im"] for a in active_keys])
-        if not separate_zf:
-            self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
+        if split_into_bands:
+            self.active_keys = np.arange(split_into_bands * 2)
         else:
-            if split_into_bands:
-                self.active_keys = np.arange(2 + split_into_bands * 2)
-            else:
-                self.active_keys = np.arange(4)
+            self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
         assert normalization in ["zscore", "minmax", "none", None]
         assert normalization_scope in ["sample", "dataset", "per_mode", "trajectory"]
         self.normalization = normalization if normalization != "none" else None
@@ -95,6 +96,9 @@ class CycloneDataset(Dataset):
         self.cond_filters = cond_filters
         self.subsample = subsample
         self.apply_log = log_transform
+        self.minmax_beta1 = minmax_beta1
+        self.minmax_beta2 = minmax_beta2
+        self.separate_zf = separate_zf
 
         self.dir = path
 
@@ -132,7 +136,7 @@ class CycloneDataset(Dataset):
         # if set, load preprocessed files with ifft
         self.spatial_ifft = spatial_ifft
         if spatial_ifft:
-            if separate_zf and normalization_scope != "per_mode":
+            if split_into_bands and normalization_scope != "per_mode":
                 n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                 self.files = [
                     f if f"_ifft_separate_zf{n_bands_tag}.h5" in f else re.sub(r"\.h5$", f"_ifft_separate_zf{n_bands_tag}.h5", f)
@@ -173,7 +177,7 @@ class CycloneDataset(Dataset):
             # check for holdout samples
             filename = os.path.split(file_path)[-1]
             if spatial_ifft:
-                if separate_zf and normalization_scope != "per_mode":
+                if split_into_bands and normalization_scope != "per_mode":
                     n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                     filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                 elif normalization_scope == "per_mode":
@@ -185,18 +189,18 @@ class CycloneDataset(Dataset):
                 # read the timesteps
                 if n_tail_holdout:
                     if split == "train":
-                        timesteps = f["metadata/timesteps"][:-n_tail_holdout]
-                        orig_t_index = np.arange(len(timesteps))[::subsample]
+                        timesteps = f["metadata/timesteps"][offset:-n_tail_holdout]
+                        orig_t_index = np.arange(len(timesteps))[offset::subsample]
                         timesteps = timesteps[orig_t_index]
                     else:
-                        timesteps = f["metadata/timesteps"][-n_tail_holdout:]
+                        timesteps = f["metadata/timesteps"][offset:-n_tail_holdout:]
                         orig_t_index = np.arange(len(timesteps))[::subsample]
                         timesteps = timesteps[orig_t_index]
                         self.steps_per_file[file_idx] = len(
-                            f["metadata/timesteps"][:][::subsample]
+                            f["metadata/timesteps"][:][offset::subsample]
                         )
                 else:
-                    timesteps = f["metadata/timesteps"][:]
+                    timesteps = f["metadata/timesteps"][:][offset:]
                     orig_t_index = np.arange(len(timesteps))[::subsample]
                     timesteps = timesteps[orig_t_index]
                 # This only works for 1 step training (with pf and rollout aswell)
@@ -219,21 +223,14 @@ class CycloneDataset(Dataset):
                                      self.dataset_stats[file_idx]["max"],
                                      count=len(timesteps))
 
-        if normalization_scope == "dataset" and normalization_stats is None:
-            self.dataset_stats["full"]["mean"] = stats.mean
-            self.dataset_stats["full"]["std"] = stats.var ** (1/2)
-            self.dataset_stats["full"]["min"] = stats.min
-            self.dataset_stats["full"]["max"] = stats.max
-
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
-
-        self.offsets = [0 for _ in range(len(self.files))]
+        self.offsets = [offset for _ in range(len(self.files))]
         # calculate offsets if we are in a partial holdout validation dataset
         if split == "val" and self.partial_holdouts:
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
-                if separate_zf and normalization_scope != "per_mode":
+                if split_into_bands and normalization_scope != "per_mode":
                     n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                     filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
                 elif normalization_scope == "per_mode":
@@ -257,9 +254,54 @@ class CycloneDataset(Dataset):
                 self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, t_index)
                 self.file_and_tstep_to_flat_index[(file_idx, t_index)] = flat_idx
 
+        if offset > 0 and normalization_scope == "dataset" and normalization_stats is None:
+            # overwrite dataset-wide stats with new stats for data after offset only
+            stats = self._get_dataset_stats()
+
+        if normalization_scope == "dataset" and normalization_stats is None:
+            self.dataset_stats["full"]["mean"] = stats.mean
+            self.dataset_stats["full"]["std"] = stats.var ** (1/2)
+            self.dataset_stats["full"]["min"] = stats.min
+            self.dataset_stats["full"]["max"] = stats.max
+
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
+
+    def _separate_zf(self, x):
+        nky = x.shape[-1]
+        zf = np.repeat(x.mean(axis=-1, keepdims=True), repeats=nky, axis=-1)
+        x = np.concatenate([zf, x - zf], axis=0)
+        return x
+
+    def _get_dataset_stats(self):
+        stats = None
+        for t_idx in tqdm.trange(0, self.length, 2, desc="Re-computing normalization stats"):
+            file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
+
+            with h5py.File(self.files[file_index], "r") as f:
+                sample = self._load_data(f, file_index, t_index)
+
+            x = sample["x"]
+            y = sample["gt"]
+            if self.separate_zf:
+                x = self._separate_zf(x)
+                y = self._separate_zf(y)
+
+            if stats is None:
+                stats = RunningMeanStd(shape=x.mean((1,2,3,4,5), keepdims=True).shape)
+
+            stats.update(x.mean((1,2,3,4,5), keepdims=True),
+                         x.var((1,2,3,4,5), keepdims=True),
+                         x.min((1,2,3,4,5), keepdims=True),
+                         x.max((1,2,3,4,5), keepdims=True),)
+
+            stats.update(y.mean((1, 2, 3, 4, 5), keepdims=True),
+                         y.var((1, 2, 3, 4, 5), keepdims=True),
+                         y.min((1, 2, 3, 4, 5), keepdims=True),
+                         y.max((1, 2, 3, 4, 5), keepdims=True), )
+
+        return stats
 
     def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneSample:
         """
@@ -284,6 +326,9 @@ class CycloneDataset(Dataset):
             sample = self._load_data(f, file_index, t_index)
         # k-fields
         x, gt = sample["x"], sample["gt"]
+        if self.separate_zf:
+            x = self._separate_zf(x)
+            gt = self._separate_zf(gt)
         # accessory fields
         poten, flux = sample["gt_poten"], sample["gt_flux"]
         # conditioning fields
@@ -380,8 +425,10 @@ class CycloneDataset(Dataset):
             if self.normalization == "minmax":
                 x_min = expand_as(self.dataset_stats[key]["min"], x)
                 x_max = expand_as(self.dataset_stats[key]["max"], x)
-                shift = x_min
-                scale = x_max - x_min
+                # shift = x_min
+                # scale = x_max - x_min
+                scale = (x_max - x_min) / self.minmax_beta1
+                shift = x_min + scale * self.minmax_beta2
 
         return (x - shift) / scale, shift, scale
 

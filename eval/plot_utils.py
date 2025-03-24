@@ -356,8 +356,8 @@ def generate_val_plots(x_rollout, y, ts, phase):
     val_plots_dict = {
         f"pred (T={ts[0].item():.2f}, {phase})": plot4x4_sided,
         f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
-        f"5D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_5D_raspec,
-        f"pred (spectrum) (T={ts[0].item():.2f}, {phase})": plot4x4_sided_spec,
+        # f"5D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_5D_raspec,
+        # f"pred (spectrum) (T={ts[0].item():.2f}, {phase})": plot4x4_sided_spec,
         # f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
     }
     for name, plot_fn in val_plots_dict.items():

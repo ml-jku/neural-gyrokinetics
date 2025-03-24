@@ -12,7 +12,6 @@ from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from concurrent.futures import ThreadPoolExecutor
-from itertools import chain
 
 from dataset import get_data, CycloneSample
 from models import get_model
@@ -58,7 +57,6 @@ def runner(rank, cfg, world_size):
         trainloader, valloaders = dataloaders
         valloaders = [valloaders]
 
-    problem_dim = len(trainset.active_keys)
     model = get_model(cfg, dataset=trainset)
     model = model.to(device)
     if use_ddp:
@@ -226,7 +224,6 @@ def runner(rank, cfg, world_size):
                 for val_idx, (valset, valloader) in enumerate(zip(valsets, valloaders)):
 
                     rollout_fn = get_rollout_fn(
-                        problem_dim=problem_dim,
                         n_steps=n_eval_steps,
                         bundle_steps=bundle_seq_length,
                         dataset=valset,
@@ -271,7 +268,7 @@ def runner(rank, cfg, world_size):
                             ts_index = sample.timestep_index.to(device)
 
                             # TODO: dont hardcode this
-                            phase_change = 24
+                            phase_change = 24 if cfg.dataset.offset == 0 else 0
                             (
                                 x_list,
                                 y_list,
@@ -389,9 +386,10 @@ def runner(rank, cfg, world_size):
                                             y=y,
                                             ts=ts,
                                             phase=(
+                                                "Saturated Phase"
+                                                if idx == 20 or cfg.dataset.offset > 0
+                                                else
                                                 "Linear Phase"
-                                                if idx == 0
-                                                else "Saturated Phase"
                                             ),
                                         )
                                         val_plots.update(plots)
@@ -460,7 +458,11 @@ def runner(rank, cfg, world_size):
                     ]
                     sat_ts = n_timesteps_acc_model_saving["saturated"]
                     lin_ts = n_timesteps_acc_model_saving["linear"]
-                    val_loss = (mse_sat * sat_ts + mse_lin * lin_ts) / (sat_ts + lin_ts)
+                    if not cfg.dataset.offset:
+                        val_loss = (mse_sat * sat_ts + mse_lin * lin_ts) / (sat_ts + lin_ts)
+                    else:
+                        # skipping linear phase
+                        val_loss = (mse_sat * sat_ts) / sat_ts
                     # Save model if validation loss on trajectories improves
                     loss_val_min = save_model_and_config(
                         model,

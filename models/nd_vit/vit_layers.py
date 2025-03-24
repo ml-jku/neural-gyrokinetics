@@ -6,6 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from einops import rearrange
+from torch.nn.attention import SDPBackend, sdpa_kernel
+import torch.distributed as dist
 
 from models.nd_vit.drop import DropPath
 from models.utils import Film, MLP, DiT, seq_weight_init
@@ -76,7 +78,11 @@ class PatchAttention(nn.Module):
         )
         q, k, v = qkv[0], qkv[1], qkv[2]
 
-        x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
+        if dist.is_initialized():
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
+        else:
+            x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
 
         # attention readout
         x = rearrange(x, "b k n c -> b n (k c)")

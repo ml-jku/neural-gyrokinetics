@@ -7,7 +7,6 @@ from torch.utils.data import Dataset
 
 
 def get_rollout_fn(
-    problem_dim: int,
     n_steps: int,
     bundle_steps: int,
     dataset: Dataset,
@@ -34,6 +33,7 @@ def get_rollout_fn(
         rollout_steps = min(rollout_steps)
 
         tot_ts = rollout_steps * bundle_steps
+        problem_dim = model.module.problem_dim if hasattr(model, "module") else model.problem_dim
         xt = x0.clone()
         if xt.ndim == 7:
             x_rollout = torch.zeros((xt.shape[0], problem_dim, tot_ts, *xt.shape[2:]))

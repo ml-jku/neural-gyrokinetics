@@ -15,6 +15,8 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 from math import ceil
 from functools import partial
+from torch.nn.attention import SDPBackend, sdpa_kernel
+import torch.distributed as dist
 
 from models.nd_vit.drop import DropPath
 from models.nd_vit.patching import unpad, pad_to_blocks
@@ -290,8 +292,12 @@ class WindowAttention(nn.Module):
         # q = q * (self.head_dim**-0.5)
         # TODO find better way to add rpb -> easy OOM here!
         mask = mask + rpb if mask is not None else rpb
-        # with nn.attention.sdpa_kernel(nn.attention.SDPBackend.CUDNN_ATTENTION):
-        x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0))
+
+        if dist.is_initialized():
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0))
+        else:
+            x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0))
 
         # # swinv2 cosine similarity attention
         # attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
