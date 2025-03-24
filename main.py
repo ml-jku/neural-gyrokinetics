@@ -53,6 +53,8 @@ def main(config: DictConfig):
         from experimental.run_refine import runner
     if config.method == "boost":
         from experimental.run_boost import runner
+    if config.method == "baseline":
+        from experimental.baselines.run import runner
 
     try:
         if dict_config["logging"]["run_id"] is None:
