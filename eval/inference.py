@@ -191,15 +191,19 @@ with torch.no_grad():
                 xt_merged = xt.squeeze()[:2] + xt.squeeze()[2:]
             model_corr[ts] = compute_pearson_correlation(xt_merged, yt)
 
+        if parser.rescale:
+            if cfg.dataset.separate_zf:
+                print("Rescaling for ifft_merge not supported, will lead to invalid heat flux...")
+            # re-scale output to unit variance
+            xt = xt / xt.std((2, 3, 4, 5, 6), keepdims=True)
+
         # denormalize
+        b_xt = xt * scale + shift
         if cfg.dataset.separate_zf:
             if parser.ifft_merge:
                 assert shift.shape == xt.mean((2, 3, 4, 5, 6), keepdims=True).shape, "Normalization stats mismatch"
                 assert scale.shape == xt.std((2, 3, 4, 5, 6), keepdims=True).shape, "Normalization stats mismatch"
-                if parser.rescale:
-                    # re-scale output to unit variance
-                    print("Rescaling for ifft_merge not supported...")
-                b_xt = xt * scale + shift
+
                 if parser.zf_last:
                     zf = invert_ifft(b_xt.cpu().numpy().squeeze()[2:, ...])
                     no_zf = invert_ifft(b_xt.cpu().numpy().squeeze()[:2, ...])
@@ -211,20 +215,13 @@ with torch.no_grad():
                 b_xt[..., 1:] = no_zf[..., :-1]
                 b_xt = torch.tensor(np.expand_dims(b_xt, axis=0)).to(xt.device)
             else:
-                b_xt = xt * scale + shift
                 zf = b_xt[:, 2:]
                 no_zf = b_xt[:, :2]
                 b_xt = zf + no_zf
 
-        else:
-            if parser.rescale:
-                # re-scale output to unit variance
-                xt = xt / xt.std((2, 3, 4, 5, 6), keepdims=True)
-
-            b_xt = xt * scale + shift
-
         b_xt = b_xt.squeeze(0).cpu().numpy()
         if cfg.dataset.spatial_ifft and not parser.ifft_merge:
+            # apply fft if not done so already
             b_xt = invert_ifft(b_xt)
 
         b_xt = b_xt.astype("float64").reshape(-1, order="F")
