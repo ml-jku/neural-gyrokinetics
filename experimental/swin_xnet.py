@@ -233,14 +233,14 @@ class FluxDecoder(nn.Module):
         self.blocks = nn.ModuleList(flux_blocks)
         self.flux_mlp = MLP(
             [flux_latent_size, flux_latent_size // 2, 1],
-            last_act_fn=nn.Softplus,
+            # last_act_fn=nn.Softplus,
             dropout_prob=drop,
         )
 
     def mix(self, i: int, left: torch.Tensor, right: Optional[torch.Tensor] = None):
         x = self.blocks[i].forward(left, right)
-        # average spatials out
-        return x.mean(axis=list(range(1, x.ndim - 1)))
+        # pool spatials
+        return x.amax(axis=list(range(1, x.ndim - 1)))
 
     def forward(self, flux_latents: Sequence[torch.Tensor]):
         return self.flux_mlp(torch.cat(flux_latents, dim=-1))
@@ -275,14 +275,14 @@ class SwinXnet(nn.Module):
         decouple_mu: bool = False,
         separate_zf: bool = False,
         zf_norm: bool = False,
-        flux_drop: float = 0.5,
+        flux_drop: float = 0.1,
     ):
         super().__init__()
 
         self.patch_skip = patch_skip
         self.decouple_mu = decouple_mu
         self.separate_zf = separate_zf
-        self.df_base_resolution = df_base_resolution
+        self.df_base_resolution = [int(r) for r in df_base_resolution]
         self.df_space = 5
         self.phi_space = 3
 
@@ -293,7 +293,7 @@ class SwinXnet(nn.Module):
 
         if decouple_mu:
             self.df_space = 4
-            df_full_resolution = df_base_resolution
+            df_full_resolution = self.df_base_resolution
             df_patch_size = [df_patch_size[0]] + df_patch_size[2:]
             df_window_size = [df_window_size[0]] + df_window_size[2:]
             self.df_deoupled_dim = df_full_resolution[1]
@@ -501,14 +501,14 @@ class SwinXnet(nn.Module):
         phi_pad_axes: Sequence,
     ):
         # final mixing
-        df, phi = self.df_mix_unpatch(zdf, zphi), self.phi_mix_unpatch(zphi, zdf)
+        zdf, zphi = self.df_mix_unpatch(zdf, zphi), self.phi_mix_unpatch(zphi, zdf)
         # expand to original
-        df = self.df_unet.patch_decode(df, df_cond, df_pad_axes)
-        phi = self.phi_unet.patch_decode(phi, phi_cond, phi_pad_axes)
+        df = self.df_unet.patch_decode(zdf, df_cond, df_pad_axes)
+        phi = self.phi_unet.patch_decode(zphi, phi_cond, phi_pad_axes)
         # move mu back to spatials
         if self.decouple_mu:
             df = rearrange(
-                df, "b vp ... (c mu) -> b c vp mu ...", mu=self.df_deoupled_dim
+                df, "b (c mu) vp ... -> b c vp mu ...", mu=self.df_deoupled_dim
             )
         # recompose zonal flow
         if self.separate_zf:

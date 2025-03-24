@@ -13,7 +13,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group
 
 from dataset import get_data, CycloneSample
-from train import get_pushforward_fn, relative_norm_mse, pretrain_autoencoder
+from train import relative_norm_mse, pretrain_autoencoder
 from utils import (
     load_model_and_config,
     save_model_and_config,
@@ -107,7 +107,8 @@ def get_rollout_fn(
         rollout_steps = min(rollout_steps)
 
         tot_ts = rollout_steps * bundle_steps
-        if "phi" in target:
+        phi_rollout = None
+        if target == "phi":
             phit = phi.clone()
             phi_rollout = torch.zeros((phi.shape[0], 1, tot_ts, *phit.shape[2:]))
 
@@ -125,23 +126,24 @@ def get_rollout_fn(
             # move bundles forward, rollout in blocks
             for i in range(0, rollout_steps):
                 with torch.autocast(device, dtype=amp_dtype, enabled=use_amp):
-                    if "phi" in target:
+                    if target == "phi":
                         phi_p, flux = model(
                             phit, timestep=tsteps[:, i].to(phi.device), itg=itg
                         )
-                    if "flux" in target:
+                        phit = phi_p.clone().float()
+                        phi_rollout[:, :, i * bundle_steps : (i + 1) * bundle_steps, ...] = (
+                            phi_p.cpu().unsqueeze(2) if phi_p.ndim == 5 else phi_p.cpu()
+                        )
+                    if target == "flux":
                         flux = model(tsteps[:, i].to(phi.device), itg)
-                    if "seq_flux" in target:
+                    if target == "seq_flux":
                         flux_seq = dataset.get_flux_seq(
                             timestep_index.tolist(), file_index.tolist(), window=10
                         )
-                        flux = model(flux_seq, tsteps[:, i].to(phi.device), itg)
+                        flux_seq = flux_seq.to(device, dtype=itg.dtype)
+                        flux = model(flux_seq.unsqueeze(-1), tsteps[:, i].to(phi.device), itg)
                     fluxes.append(flux.cpu())
-                    phit = phi_p.clone().float()
-                phi_rollout[:, :, i * bundle_steps : (i + 1) * bundle_steps, ...] = (
-                    phi_p.cpu().unsqueeze(2) if phi_p.ndim == 5 else phi_p.cpu()
-                )
-        if "phi" in target:
+        if target == "phi":
             phi_rollout = rearrange(phi_rollout, "b c t ... -> t b c ...")
             phi_rollout = phi_rollout[: rollout_steps * bundle_steps, :, ...]
 
@@ -162,7 +164,7 @@ def validation_metrics(
     flux_rollout: Optional[torch.Tensor] = None,
     get_normalized: bool = False,
 ) -> torch.Tensor:
-    n_steps = phi_rollout.shape[0]
+    n_steps = flux_rollout.shape[0]
     assert (
         metrics_fns is not None
     ), "Pleas provide some metrics function for the validation metrics."
@@ -197,20 +199,20 @@ def get_baseline(cfg, dataset):
     latent_dim = cfg.model.latent_dim
     num_layers = cfg.model.num_layers
     n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
-    target = []
+    target = None
 
     if cfg.model.name == "mlp":
         model = FluxMLP(latent_dim, n_cond)
-        target = ["flux"]
+        target = "flux"
 
     if cfg.model.name == "lstm":
         model = FluxLSTM(latent_dim, n_cond, num_layers)
-        target = ["seq_flux"]
+        target = "seq_flux"
 
     if cfg.model.name == "qlknn":
         n_param_cond = 1  # TODO
         model = QLKNN(n_param_cond)
-        target = ["avg_flux"]
+        target = "avg_flux"
 
     if cfg.model.name == "phi":
         problem_dim = 1
@@ -259,7 +261,7 @@ def get_baseline(cfg, dataset):
             block_type=block_type,
         )
 
-        target = ["phi", "flux"]
+        target = "phi"
 
     print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 
@@ -370,7 +372,7 @@ def runner(rank, cfg, world_size):
             for i, sample in enumerate(trainloader):
                 # reset_peak_memory_stats(device)
                 sample: CycloneSample
-                if "phi" in target:
+                if target == "phi":
                     phi = sample.x_poten.to(device, non_blocking=True)
                     y_phi = sample.y_poten.to(device, non_blocking=True)
                 y_flux = sample.y_flux.to(device)
@@ -387,16 +389,16 @@ def runner(rank, cfg, world_size):
                 t_start_fwd = perf_counter_ns()
 
                 with torch.autocast(str(cfg.device), dtype=amp_dtype, enabled=use_amp):
-                    phi_loss = 0.0
-                    flux_loss = 0.0
-                    if "phi" in target:
+                    phi_loss = torch.tensor(0.0, device=device, dtype=ts.dtype)
+                    flux_loss = torch.tensor(0.0, device=device, dtype=ts.dtype)
+                    if target == "phi":
                         pred_phi, pred_flux = model(phi, timestep=ts, itg=itg)
                         if predict_delta:
                             pred_phi = phi + pred_phi
                         phi_loss = relative_norm_mse(pred_phi, y_phi)
-                    elif "flux" in target:
+                    elif target == "flux":
                         pred_flux = model(ts, itg)
-                    elif "seq_flux" in target:
+                    elif target == "seq_flux":
                         flux_seq = trainset.get_flux_seq(
                             sample.timestep_index.tolist(),
                             sample.file_index.tolist(),
@@ -404,12 +406,11 @@ def runner(rank, cfg, world_size):
                         )
                         flux_seq = flux_seq.to(device, dtype=itg.dtype)
                         pred_flux = model(flux_seq.unsqueeze(-1), ts, itg)
-                    elif "avg_flux" in target:
+                    elif target == "avg_flux":
                         pred_avg_flux = model(ts, itg)
                         pred_flux = None
-                        avg_flux = trainset.get_avg_flux(sample.file_index.tolist()).to(
-                            device, dtype=pred_avg_flux.dtype
-                        )
+                        avg_flux = trainset.get_avg_flux(sample.file_index.tolist())
+                        avg_flux = avg_flux.to(device, dtype=pred_avg_flux.dtype)
                         flux_loss = relative_norm_mse(
                             pred_avg_flux, avg_flux.unsqueeze(1)
                         )
@@ -464,7 +465,7 @@ def runner(rank, cfg, world_size):
             if (epoch % val_freq) == 0 or epoch == 1 and not rank:
                 # Validation loop
                 model.eval()
-                if "avg_flux" in target:
+                if target == "avg_flux":
                     # TODO
                     continue
 
@@ -482,15 +483,14 @@ def runner(rank, cfg, world_size):
                         "holdout_trajectories" if val_idx == 0 else "holdout_samples"
                     )
                     # TODO configurable metric list
-                    metric_fn_list = {
-                        # NOTE: average across all dimensions except timesteps
-                        "phi_relative_norm_mse": partial(
+                    metric_fn_list = {}
+                    if target == "phi":
+                        metric_fn_list["phi_relative_norm_mse"] = partial(
                             relative_norm_mse, dim_to_keep=0
-                        ),
-                        "flux_relative_norm_mse": partial(
-                            relative_norm_mse, dim_to_keep=0
-                        ),
-                    }
+                        )
+                    metric_fn_list["flux_relative_norm_mse"] = partial(
+                        relative_norm_mse, dim_to_keep=0
+                    )
                     metrics = {
                         "linear": torch.zeros([len(metric_fn_list), tot_eval_steps]),
                         "saturated": torch.zeros([len(metric_fn_list), tot_eval_steps]),
@@ -551,10 +551,13 @@ def runner(rank, cfg, world_size):
                                 # get the rolled out validation trajectories
                                 phi_rollout, flux_rollout = rollout_fn(
                                     model,
+                                    target=target,
                                     file_idx=file_idx,
                                     ts_index_0=ts_index,
                                     itg=itg,
                                     phi=phi,
+                                    timestep_index=ts_index,
+                                    file_index=file_idx,
                                 )
 
                                 # TODO: smarter (i.e. use timeindex when we output a dataclass from the dataset)
@@ -590,31 +593,32 @@ def runner(rank, cfg, world_size):
                                     metrics[phase] += metrics_i
                                     validated_steps = torch.ones([tot_eval_steps])
                                 n_timesteps_acc[phase] += validated_steps
-
-                                if val_idx == 0:
-                                    # holdout trajectories valset
-                                    if idx in [0, 20]:
-                                        plots = generate_val_plots(
-                                            ts=ts,
-                                            phase=(
-                                                "Linear Phase"
-                                                if idx == 0
-                                                else "Saturated Phase"
-                                            ),
-                                            phi_rollout=phi_rollout,
-                                            y_phi=y_phi,
-                                        )
-                                        val_plots.update(plots)
-                                else:
-                                    # holdout samples valset
-                                    if idx == 0:
-                                        plots = generate_val_plots(
-                                            ts=ts,
-                                            phase="Holdout samples",
-                                            phi_rollout=phi_rollout,
-                                            y_phi=y_phi,
-                                        )
-                                        val_plots.update(plots)
+                                
+                                if target == "phi":
+                                    if val_idx == 0:
+                                        # holdout trajectories valset
+                                        if idx in [0, 20]:
+                                            plots = generate_val_plots(
+                                                ts=ts,
+                                                phase=(
+                                                    "Linear Phase"
+                                                    if idx == 0
+                                                    else "Saturated Phase"
+                                                ),
+                                                phi_rollout=phi_rollout,
+                                                y_phi=y_phi,
+                                            )
+                                            val_plots.update(plots)
+                                    else:
+                                        # holdout samples valset
+                                        if idx == 0:
+                                            plots = generate_val_plots(
+                                                ts=ts,
+                                                phase="Holdout samples",
+                                                phi_rollout=phi_rollout,
+                                                y_phi=y_phi,
+                                            )
+                                            val_plots.update(plots)
 
                     for key in metrics.keys():
                         metrics[key] = metrics[key] / n_timesteps_acc[key].unsqueeze(0)
@@ -632,12 +636,20 @@ def runner(rank, cfg, world_size):
                         n_timesteps_acc_model_saving = n_timesteps_acc
 
                 if cfg.ckpt_path is not None and not rank:
-                    mse_sat = log_metric_dict[
-                        "val_holdout_trajectories/phi_relative_norm_mse_saturated_x1"
-                    ]
-                    mse_lin = log_metric_dict[
-                        "val_holdout_trajectories/phi_relative_norm_mse_linear_x1"
-                    ]
+                    if target == "phi":
+                        mse_sat = log_metric_dict[
+                            "val_holdout_trajectories/phi_relative_norm_mse_saturated_x1"
+                        ]
+                        mse_lin = log_metric_dict[
+                            "val_holdout_trajectories/phi_relative_norm_mse_linear_x1"
+                        ]
+                    else:
+                        mse_sat = log_metric_dict[
+                            "val_holdout_trajectories/flux_relative_norm_mse_saturated_x1"
+                        ]
+                        mse_lin = log_metric_dict[
+                            "val_holdout_trajectories/flux_relative_norm_mse_linear_x1"
+                        ]
                     sat_ts = n_timesteps_acc_model_saving["saturated"]
                     lin_ts = n_timesteps_acc_model_saving["linear"]
                     val_loss = (mse_sat * sat_ts + mse_lin * lin_ts) / (sat_ts + lin_ts)
@@ -675,7 +687,6 @@ def runner(rank, cfg, world_size):
                 info_dict["info/forward_ms"]
                 + info_dict["info/backward_ms"]
                 + info_dict["info/data_ms"]
-                + info_dict["info/pf_ms"]
             )
             if not rank:
                 print(
