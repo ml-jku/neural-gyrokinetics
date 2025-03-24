@@ -24,6 +24,7 @@ class MLP(nn.Module):
         self,
         latents: Sequence[int],
         act_fn: nn.Module = nn.GELU,
+        last_act_fn: Optional[nn.Module] = None,
         bias: Union[bool, Sequence[bool]] = True,
         dropout_prob: float = 0.0,
     ):
@@ -37,6 +38,8 @@ class MLP(nn.Module):
             mlp.append(dropout)
             if i != len(latents) - 2:
                 mlp.append(act_fn())
+        if last_act_fn is not None:
+            mlp.append(last_act_fn())
         self.mlp = nn.Sequential(*mlp)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -100,7 +103,7 @@ class ContinuousConditionEmbed(nn.Module):
         )
         self.cond_dim = 4 * dim
         self.mlp = nn.Sequential(
-            nn.Linear(dim + self.padding, self.cond_dim),
+            nn.Linear(dim, self.cond_dim),
             nn.SiLU(),
         )
 

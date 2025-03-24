@@ -2,23 +2,18 @@ from datetime import datetime, timedelta
 
 from functools import partial
 import torch
-import gc
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
 from torch.nn.utils import clip_grad_norm_
 import warnings
 from tqdm import tqdm
 from time import perf_counter_ns
 from collections import defaultdict
-from diffusers.schedulers import DDPMScheduler
 from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group
 from concurrent.futures import ThreadPoolExecutor
-import torch.distributed as dist
-from collections import OrderedDict
-from copy import deepcopy
 
 from dataset import get_data, CycloneSample
-from models import get_model
 from train import get_pushforward_fn, relative_norm_mse, pretrain_autoencoder
 from eval import get_rollout_fn, validation_metrics, generate_val_plots, get_flux_plot
 from eval.gkw_client import request_gkw_sim, dump_rollout
@@ -30,28 +25,92 @@ from utils import (
 )
 
 
-def ddp_setup(rank, world_size):
-    dist.init_process_group(
-        backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20)
+import torch
+
+
+def get_xnet(cfg, dataset):
+    # TODO need to standardize modules everywhere (eg for different inputs)
+
+    latent_dim = cfg.model.latent_dim
+    if not cfg.dataset.separate_zf:
+        problem_dim = len(cfg.dataset.active_keys)
+    else:
+        problem_dim = 4
+        problem_dim += (
+            (cfg.dataset.split_into_bands - 1) * 2
+            if cfg.dataset.split_into_bands
+            else 0
+        )
+
+    from experimental.swin_xnet import SwinXnet
+    from models.utils import ContinuousConditionEmbed
+
+    df_patch_size = cfg.model.swin.patch_size
+    phi_patch_size = (8, 2, 4)
+    df_window_size = cfg.model.swin.window_size
+    phi_window_size = (7, 4, 12)
+    df_base_resolution = dataset.resolution
+    phi_base_resolution = dataset.phi_resolution
+    num_heads = cfg.model.swin.num_heads
+    depth = cfg.model.swin.depth
+    num_layers = cfg.model.num_layers
+    gradient_checkpoint = cfg.model.swin.gradient_checkpoint
+    patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
+    unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
+    c_multiplier = cfg.model.swin.c_multiplier
+    abs_pe = cfg.model.swin.abs_pe
+    patch_skip = cfg.model.swin.patch_skip
+    modulation = cfg.model.swin.modulation
+    flux_head = cfg.model.swin.flux_head
+    act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
+    decouple_mu = cfg.model.swin.decouple_mu
+    separate_zf = cfg.model.swin.separate_zf
+
+    cond_fn = None
+    n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
+    if n_cond > 0:
+        cond_fn = ContinuousConditionEmbed(32, n_cond)
+
+    if cfg.model.bundle_seq_length > 1:
+        raise NotImplementedError
+
+    model = SwinXnet(
+        dim=latent_dim,
+        df_base_resolution=df_base_resolution,  # TODO
+        phi_base_resolution=phi_base_resolution,  # TODO
+        df_patch_size=df_patch_size,
+        phi_patch_size=phi_patch_size,
+        df_window_size=df_window_size,
+        phi_window_size=phi_window_size,
+        depth=depth,
+        num_heads=num_heads,
+        in_channels=problem_dim,
+        out_channels=problem_dim,
+        num_layers=num_layers,
+        use_checkpoint=gradient_checkpoint,
+        drop_path=0.1,
+        abs_pe=abs_pe,
+        c_multiplier=c_multiplier,
+        merging_hidden_ratio=patching_hidden_ratio,
+        unmerging_hidden_ratio=unmerging_hidden_ratio,
+        conditioning=cond_fn,
+        act_fn=act_fn,
+        patch_skip=patch_skip,
+        modulation=modulation,
+        flux_head=flux_head,
+        decouple_mu=decouple_mu,
+        separate_zf=separate_zf,
     )
 
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 
-@torch.no_grad()
-def update_ema(ema_model, model, decay: float = 0.995):
-    ema_params = OrderedDict(ema_model.named_parameters())
-    if hasattr(model, "module"):
-        model_params = OrderedDict(model.module.named_parameters())
-    else:
-        model_params = OrderedDict(model.named_parameters())
-
-    for name, param in model_params.items():
-        # TODO: Consider applying only to params that require_grad to avoid small numerical changes of pos_embed
-        ema_params[name].mul_(decay).add_(param.data, alpha=1 - decay)
+    return model
 
 
-def requires_grad(model, flag=True):
-    for p in model.parameters():
-        p.requires_grad = flag
+def ddp_setup(rank, world_size):
+    init_process_group(
+        backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20)
+    )
 
 
 def runner(rank, cfg, world_size):
@@ -82,15 +141,29 @@ def runner(rank, cfg, world_size):
         trainloader, valloaders = dataloaders
         valloaders = [valloaders]
 
-    problem_dim = len(trainset.active_keys)
-    model = get_model(cfg, dataset=trainset)
+    if not cfg.dataset.separate_zf:
+        problem_dim = len(cfg.dataset.active_keys)
+    else:
+        problem_dim = 4
+        problem_dim += (
+            (cfg.dataset.split_into_bands - 1) * 2
+            if cfg.dataset.split_into_bands
+            else 0
+        )
+
+    model = get_xnet(cfg, dataset=trainset)
     model = model.to(device)
     if use_ddp:
         model = DDP(model, device_ids=[rank])
-    bundle_seq_length = cfg.model.bundle_seq_length
 
+    bundle_seq_length = cfg.model.bundle_seq_length
     use_gkw = cfg.validation.use_gkw
     if use_gkw:
+        if cfg.dataset.normalization_scope == "sample":
+            raise UserWarning(
+                "Cannot denormalize with `normalization_scope='sample'`. "
+                "Cannot compute correct GKW results."
+            )
         gkw_executor = ThreadPoolExecutor(max_workers=1)
         # TODO hardcoded for now
         gkw_dump_path = "/system/user/publicdata/gyrokinetics/dumps/test_gkw_client"
@@ -135,16 +208,18 @@ def runner(rank, cfg, world_size):
         # and pushforward
         pf_cfg = cfg.training.pushforward
         pushforward_fn = None
-        # if sum(pf_cfg.unrolls) > 0:
-        #     pushforward_fn = get_pushforward_fn(
-        #         n_unrolls_schedule=pf_cfg.unrolls,
-        #         probs_schedule=pf_cfg.probs,
-        #         epoch_schedule=pf_cfg.epochs,
-        #         predict_delta=predict_delta,
-        #         dataset=trainset,
-        #         bundle_steps=bundle_seq_length,
-        #         use_amp=use_amp,
-        #     )
+        # TODO
+        if sum(pf_cfg.unrolls) > 0:
+            pushforward_fn = get_pushforward_fn(
+                n_unrolls_schedule=pf_cfg.unrolls,
+                probs_schedule=pf_cfg.probs,
+                epoch_schedule=pf_cfg.epochs,
+                predict_delta=predict_delta,
+                dataset=trainset,
+                bundle_steps=bundle_seq_length,
+                use_amp=use_amp,
+                use_potentials=True,
+            )
 
         loss_val_min = torch.inf
 
@@ -155,73 +230,12 @@ def runner(rank, cfg, world_size):
             if not hasattr(model, "module") and use_ddp:
                 model = DDP(model, device_ids=[rank])
 
-        # refiner params
-        min_noise_std = 1e-5
-        num_refinement_steps = 2
-
-        betas = [
-            (min_noise_std ** (k / num_refinement_steps)) ** (1 / 3)
-            for k in reversed(range(num_refinement_steps + 1))
-        ]
-
-        ddpm = DDPMScheduler(
-            num_train_timesteps=num_refinement_steps + 1,
-            trained_betas=betas,
-            prediction_type="v_prediction",
-            clip_sample=False,
-        )
-
-        ema = deepcopy(model).to(device)
-        if use_ddp:
-            ema = ema.module
-        requires_grad(ema, False)
-        update_ema(ema, model, decay=0)
-        ema.eval()
-
-        # # noise mask
-        # import pickle
-        # import numpy as np
-
-        # big_std = pickle.load(open("notebooks/big_std.pkl", "rb"))
-        # noise_mask = big_std > np.quantile(big_std, 0.70)
-        # noise_mask = torch.tensor(noise_mask, device=device, requires_grad=False).unsqueeze(0)
-
-        num_train_timesteps = ddpm.config.num_train_timesteps
-
-        # TODO to use refiner set one more conditioning and channels * 2 in the model
-
-        def refine_step(model_fn, x, y, ts, itg):
-            if predict_delta:
-                y = y - x
-            k = torch.randint(0, num_train_timesteps, (x.shape[0],), device=x.device)
-            sigma = ddpm.alphas_cumprod.to(x.device)[k]
-            noise_factor = sigma.view(-1, *[1 for _ in range(x.ndim - 1)])
-            signal_factor = 1 - noise_factor
-            noise = torch.randn_like(y)
-            # noise = noise * noise_mask
-            y_noised = ddpm.add_noise(y, noise, k)
-            if x.ndim > y_noised.ndim:
-                y_noised = y_noised.unsqueeze(2)
-            x_in = torch.cat([x, y_noised], axis=1)
-            target = (noise_factor**0.5) * noise - (signal_factor**0.5) * y
-            pred = model_fn(x_in, timestep=ts, refinement_step=k, itg=itg)
-            return relative_norm_mse(pred, target)
-
-        @torch.no_grad()
-        def predict(model_fn, x, **kwargs):
-            y_noised = torch.randn_like(x, dtype=x.dtype, device=x.device)
-            for k_i in ddpm.timesteps:
-                k = torch.zeros((x.shape[0],), dtype=x.dtype, device=x.device) + k_i
-                x_in = torch.cat([x, y_noised], axis=1)
-                pred = model_fn(x_in, refinement_step=k, **kwargs)
-                y_noised = ddpm.step(pred, k_i, y_noised).prev_sample
-            # NOTE: predict_delta already included in rollout
-            return y_noised
-
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
-
         for epoch in range(1, n_epochs + 1):
             train_mse = 0
+            train_df_mse = 0
+            train_phi_mse = 0
+            train_flux_mse = 0
             model.train()
             info_dict = defaultdict(list)
             t_start_data = perf_counter_ns()
@@ -229,17 +243,20 @@ def runner(rank, cfg, world_size):
             if use_tqdm or (use_ddp and not rank):
                 trainloader = tqdm(trainloader, "Training")
             for i, sample in enumerate(trainloader):
-                reset_peak_memory_stats(device)
+                # reset_peak_memory_stats(device)
                 sample: CycloneSample
-                x = sample.x.to(device, non_blocking=True)
-                y = sample.y.to(device, non_blocking=True)
+                df = sample.x.to(device, non_blocking=True)
+                y_df = sample.y.to(device, non_blocking=True)
+                phi = sample.x_poten.to(device, non_blocking=True)
+                y_phi = sample.y_poten.to(device, non_blocking=True)
+                y_flux = sample.y_flux.to(device)
                 ts = sample.timestep.to(device)
                 itg = sample.itg.to(device)
 
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
                     for aug_fn in augmentations:
-                        x = aug_fn(x)
+                        df = aug_fn(df)
 
                 # dataloading timings
                 info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
@@ -249,8 +266,18 @@ def runner(rank, cfg, world_size):
                     # accessory information for pf (to retreive unrolled target)
                     file_idx = sample.file_index.to(device)
                     ts_index = sample.timestep_index.to(device)
-                    x, ts, y = pushforward_fn(
-                        model, x, ts, itg, ts_index, y, file_idx, epoch
+                    df, phi, ts, y_df, y_phi, y_flux = pushforward_fn(
+                        model,
+                        df,
+                        ts,
+                        itg,
+                        ts_index,
+                        y_df,
+                        file_idx,
+                        epoch,
+                        phi=phi,
+                        y_phi=y_phi,
+                        y_flux=y_flux,
                     )
                     info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
                 else:
@@ -258,9 +285,17 @@ def runner(rank, cfg, world_size):
 
                 t_start_fwd = perf_counter_ns()
 
-                with torch.autocast(str(device), dtype=amp_dtype, enabled=use_amp):
-                    model_fn = model
-                    loss = refine_step(model_fn, x, y, ts, itg)
+                with torch.autocast(str(cfg.device), dtype=amp_dtype, enabled=use_amp):
+                    pred_df, pred_phi, pred_flux = model(df, phi, timestep=ts, itg=itg)
+                    if predict_delta:
+                        pred_df = df + pred_df
+                        pred_phi = phi + pred_phi
+                    df_loss = relative_norm_mse(pred_df, y_df)
+                    phi_loss = relative_norm_mse(pred_phi, y_phi)
+                    flux_loss = 0.0
+                    if pred_flux is not None:
+                        flux_loss = relative_norm_mse(pred_flux, y_flux.unsqueeze(1))
+                    loss = 0.6 * df_loss + 0.4 * phi_loss + 1e-3 * flux_loss
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
@@ -277,22 +312,22 @@ def runner(rank, cfg, world_size):
                     scheduler.step()
 
                 train_mse += loss.item()
-
-                del x
-                del y
-                del loss
-                gc.collect()
-                torch.cuda.empty_cache()
+                train_df_mse += df_loss.item()
+                train_phi_mse += phi_loss.item()
+                train_flux_mse += flux_loss.item()
 
                 info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
                 info_dict["memory_mb"].append(max_memory_allocated(device) / 1024**2)
                 t_start_data = perf_counter_ns()
 
-                update_ema(ema, model)
-
             train_mse /= len(trainloader)
+            train_df_mse /= len(trainloader)
+            train_phi_mse /= len(trainloader)
             train_losses_dict = {
                 "train/relative_norm_mse": train_mse,
+                "train/df_mse": train_df_mse,
+                "train/phi_mse": train_phi_mse,
+                "train/flux_mse": train_flux_mse,
                 "train/lr": (
                     scheduler.get_last_lr()[0]
                     if cfg.training.scheduler
@@ -309,9 +344,9 @@ def runner(rank, cfg, world_size):
             log_metric_dict = {}
             gkw_kfiles = []
             val_plots = {}
-            if (epoch % val_freq) == 0 or epoch == 1:
+            if (epoch % val_freq) == 0 or epoch == 1 and not rank:
                 # Validation loop
-                ema.eval()
+                model.eval()
                 for val_idx, (valset, valloader) in enumerate(zip(valsets, valloaders)):
 
                     rollout_fn = get_rollout_fn(
@@ -331,6 +366,12 @@ def runner(rank, cfg, world_size):
                     metric_fn_list = {
                         # NOTE: average across all dimensions except timesteps
                         "relative_norm_mse": partial(relative_norm_mse, dim_to_keep=0),
+                        "phi_relative_norm_mse": partial(
+                            relative_norm_mse, dim_to_keep=0
+                        ),
+                        "flux_relative_norm_mse": partial(
+                            relative_norm_mse, dim_to_keep=0
+                        ),
                     }
                     metrics = {
                         "linear": torch.zeros([len(metric_fn_list), tot_eval_steps]),
@@ -352,8 +393,10 @@ def runner(rank, cfg, world_size):
                     with torch.no_grad():
                         for idx, sample in enumerate(valloader):
                             sample: CycloneSample
-                            x = sample.x.to(device, non_blocking=True)
+                            df = sample.x.to(device, non_blocking=True)
+                            phi = sample.x_poten.to(device, non_blocking=True)
                             y = sample.y.to(device, non_blocking=True)
+                            y_phi = sample.y_poten.to(device, non_blocking=True)
                             ts = sample.timestep.to(device)
                             itg = sample.itg.to(device)
                             file_idx = sample.file_index.to(device)
@@ -362,54 +405,65 @@ def runner(rank, cfg, world_size):
                             # TODO: dont hardcode this
                             phase_change = 24
                             (
-                                x_list,
+                                df_list,
                                 y_list,
                                 ts_list,
                                 itg_list,
                                 file_idx_list,
                                 ts_index_list,
                                 phase_list,
-                                _,
-                                _,
+                                phi_list,
+                                y_phi_list,
                             ) = split_batch_into_phases(
-                                phase_change, x, y, ts, itg, file_idx, ts_index
+                                phase_change,
+                                df,
+                                y,
+                                ts,
+                                itg,
+                                file_idx,
+                                ts_index,
+                                phi=phi,
+                                y_phi=y_phi,
                             )
 
                             # Iterate over the splits
-                            for i in range(len(x_list)):
-                                x = x_list[i]
+                            for i in range(len(df_list)):
+                                df = df_list[i]
+                                phi = phi_list[i]
                                 y = y_list[i]
+                                y_phi = y_phi_list[i]
                                 ts = ts_list[i]
                                 itg = itg_list[i]
                                 file_idx = file_idx_list[i]
                                 ts_index = ts_index_list[i]
                                 phase = phase_list[i]
 
-                                pred_fn = partial(predict, ema)
                                 # get the rolled out validation trajectories
-                                x_rollout = rollout_fn(
-                                    pred_fn,
-                                    x,
+                                df_rollout, phi_rollout, flux_rollout = rollout_fn(
+                                    model,
+                                    df,
                                     file_idx=file_idx,
                                     ts_index_0=ts_index,
                                     itg=itg,
+                                    phi=phi,
                                 )
 
+                                # denormalize rollout and target for evaluation / plots
                                 if denormalize:
                                     # denormalize rollout and target for evaluation / plots
-                                    x_rollout = torch.stack(
+                                    df_rollout = torch.stack(
                                         [
                                             torch.stack(
                                                 [
                                                     valset.denormalize(
-                                                        x_rollout[t, b], f
+                                                        df_rollout[t, b], f
                                                     )
                                                     for b, f in enumerate(
                                                         file_idx.tolist()
                                                     )
                                                 ]
                                             )
-                                            for t in range(x_rollout.shape[0])
+                                            for t in range(df_rollout.shape[0])
                                         ]
                                     )
                                     y = torch.stack(
@@ -421,18 +475,22 @@ def runner(rank, cfg, world_size):
 
                                 # TODO: smarter (i.e. use timeindex when we output a dataclass from the dataset)
                                 metrics_i = validation_metrics(
-                                    x_rollout,
+                                    df_rollout,
                                     file_idx,
                                     ts_index,
                                     bundle_seq_length,
                                     valset,
-                                    metric_fn_list,
+                                    metrics_fns=metric_fn_list,
+                                    phi_rollout=phi_rollout,
+                                    flux_rollout=flux_rollout,
                                     get_normalized=not denormalize,
                                 )
                                 if use_gkw:
                                     # onestep predictions (time dimension = 0)
                                     rollout_dict = {
-                                        int(t_idx.item()): x_rollout[0, b].cpu().numpy()
+                                        int(t_idx.item()): df_rollout[0, b]
+                                        .cpu()
+                                        .numpy()
                                         for b, t_idx in enumerate(ts_index)
                                     }
                                     # TODO put original file in config?
@@ -454,7 +512,7 @@ def runner(rank, cfg, world_size):
                                     )
 
                                 if metrics_i.shape[-1] < tot_eval_steps:
-                                    # reached end of dataset at some point so we need to pad the tensor
+                                    # end of dataset, need to pad the tensor
                                     diff = tot_eval_steps - metrics_i.shape[-1]
                                     metrics_i = torch.cat(
                                         [
@@ -480,7 +538,7 @@ def runner(rank, cfg, world_size):
                                     # holdout trajectories valset
                                     if idx in [0, 20]:
                                         plots = generate_val_plots(
-                                            x_rollout=x_rollout,
+                                            x_rollout=df_rollout,
                                             y=y,
                                             ts=ts,
                                             phase=(
@@ -488,44 +546,22 @@ def runner(rank, cfg, world_size):
                                                 if idx == 0
                                                 else "Saturated Phase"
                                             ),
+                                            phi_rollout=phi_rollout,
+                                            y_phi=y_phi,
                                         )
                                         val_plots.update(plots)
                                 else:
                                     # holdout samples valset
                                     if idx == 0:
                                         plots = generate_val_plots(
-                                            x_rollout=x_rollout,
+                                            x_rollout=df_rollout,
                                             y=y,
                                             ts=ts,
                                             phase="Holdout samples",
+                                            phi_rollout=phi_rollout,
+                                            y_phi=y_phi,
                                         )
                                         val_plots.update(plots)
-                    if dist.is_initialized():
-                        for key in metrics.keys():
-                            cur_metric = metrics[key].to(device)
-                            cur_ts = n_timesteps_acc[key].to(device)
-                            gathered = [
-                                torch.zeros_like(
-                                    cur_metric,
-                                    dtype=cur_metric.dtype,
-                                    device=cur_metric.device,
-                                )
-                                for _ in range(world_size)
-                            ]
-                            gathered_ts = [
-                                torch.zeros_like(
-                                    cur_metric,
-                                    dtype=cur_metric.dtype,
-                                    device=cur_metric.device,
-                                )
-                                for _ in range(world_size)
-                            ]
-                            dist.all_gather(gathered, cur_metric)
-                            dist.all_gather(gathered_ts, cur_ts)
-                            metrics[key] = gathered
-                            n_timesteps_acc[key] = gathered_ts
-
-                        # TODO: fix all_gather_object for val_plots
 
                     for key in metrics.keys():
                         metrics[key] = metrics[key] / n_timesteps_acc[key].unsqueeze(0)
@@ -594,6 +630,10 @@ def runner(rank, cfg, world_size):
                 # close finished futures
                 for k in done_futures:
                     del gkw_futures[k]
+
+            if use_ddp:
+                # Add barrier for all ranks and wait for rank 0
+                torch.distributed.barrier()
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
             if writer and not rank:
@@ -618,6 +658,10 @@ def runner(rank, cfg, world_size):
                     f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
                     f", step time: {total_time:.2f}ms"
                 )
+        if use_gkw:
+            # TODO wait some more if some gkw process is still hanging
+            pass
+
         if writer:
             writer.finish()
 

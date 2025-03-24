@@ -97,7 +97,9 @@ def get_data(cfg):
             shuffle=False,
             collate_fn=holdout_trajectories_valset.collate,
             pin_memory=cfg.training.pin_memory,
-            sampler=DistributedSampler(holdout_trajectories_valset) if cfg.use_ddp else None,
+            sampler=(
+                DistributedSampler(holdout_trajectories_valset) if cfg.use_ddp else None
+            ),
         )
 
         if partial_holdouts:
@@ -120,6 +122,7 @@ def get_data(cfg):
                 minmax_beta2=cfg.dataset.minmax_beta2,
                 offset=cfg.dataset.offset,
                 separate_zf=cfg.dataset.separate_zf,
+                log_transform=cfg.dataset.log_transform,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,
@@ -128,7 +131,9 @@ def get_data(cfg):
                 shuffle=False,
                 collate_fn=holdout_samples_valset.collate,
                 pin_memory=cfg.training.pin_memory,
-                sampler=DistributedSampler(holdout_samples_valset) if cfg.use_ddp else None,
+                sampler=(
+                    DistributedSampler(holdout_samples_valset) if cfg.use_ddp else None
+                ),
             )
 
         print(f"Train: {len(trainset)} samples")

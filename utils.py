@@ -188,12 +188,19 @@ def expand_as(src: np.ndarray, tgt: np.ndarray):
     return src
 
 
-def split_batch_into_phases(phase_change, x, y, ts, itg, file_idx, ts_index):
+def split_batch_into_phases(
+    phase_change, x, y, ts, itg, file_idx, ts_index, phi=None, y_phi=None
+):
     split_idx = torch.searchsorted(ts, phase_change, right=False)
+    phi_list = None
+    y_phi_list = None
     if split_idx == ts.shape[0]:
         # whole batch in linear
         x_list = [x]
         y_list = [y]
+        if phi is not None:
+            phi_list = [phi]
+            y_phi_list = [y_phi]
         ts_list = [ts]
         itg_list = [itg]
         file_idx_list = [file_idx]
@@ -203,6 +210,9 @@ def split_batch_into_phases(phase_change, x, y, ts, itg, file_idx, ts_index):
         # whole batch in saturated phase
         x_list = [x]
         y_list = [y]
+        if phi is not None:
+            phi_list = [phi]
+            y_phi_list = [y_phi]
         ts_list = [ts]
         itg_list = [itg]
         file_idx_list = [file_idx]
@@ -211,9 +221,22 @@ def split_batch_into_phases(phase_change, x, y, ts, itg, file_idx, ts_index):
     else:
         x_list = [x[:split_idx], x[split_idx:]]
         y_list = [y[:split_idx], y[split_idx:]]
+        if phi is not None:
+            phi_list = [phi[:split_idx], phi[split_idx:]]
+            y_phi_list = [y_phi[:split_idx], y_phi[split_idx:]]
         ts_list = [ts[:split_idx], ts[split_idx:]]
         itg_list = [itg[:split_idx], itg[split_idx:]]
         file_idx_list = [file_idx[:split_idx], file_idx[split_idx:]]
         ts_index_list = [ts_index[:split_idx], ts_index[split_idx:]]
         phase_list = ["linear", "saturated"]
-    return x_list, y_list, ts_list, itg_list, file_idx_list, ts_index_list, phase_list
+    return (
+        x_list,
+        y_list,
+        ts_list,
+        itg_list,
+        file_idx_list,
+        ts_index_list,
+        phase_list,
+        phi_list,
+        y_phi_list,
+    )

@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+import gc
 from functools import partial
 import torch
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
@@ -27,7 +28,10 @@ from utils import (
 
 
 def ddp_setup(rank, world_size):
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20))
+    dist.init_process_group(
+        backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20)
+    )
+
 
 def runner(rank, cfg, world_size):
     device = torch.device(f"cuda:{rank}") if torch.cuda.is_available() else "cpu"
@@ -173,7 +177,7 @@ def runner(rank, cfg, world_size):
 
                 t_start_fwd = perf_counter_ns()
 
-                with torch.autocast(str(cfg.device), dtype=amp_dtype, enabled=use_amp):
+                with torch.autocast(str(device), dtype=amp_dtype, enabled=use_amp):
                     pred_x = model(x, timestep=ts, itg=itg)
                     if predict_delta:
                         pred_x = x + pred_x
@@ -194,6 +198,14 @@ def runner(rank, cfg, world_size):
                     scheduler.step()
 
                 train_mse += loss.item()
+
+                del x
+                del y
+                del pred_x
+                del loss
+
+                gc.collect()
+                torch.cuda.empty_cache()
 
                 info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
                 info_dict["memory_mb"].append(max_memory_allocated(device) / 1024**2)
@@ -277,6 +289,8 @@ def runner(rank, cfg, world_size):
                                 file_idx_list,
                                 ts_index_list,
                                 phase_list,
+                                _,
+                                _,
                             ) = split_batch_into_phases(
                                 phase_change, x, y, ts, itg, file_idx, ts_index
                             )
@@ -306,8 +320,12 @@ def runner(rank, cfg, world_size):
                                         [
                                             torch.stack(
                                                 [
-                                                    valset.denormalize(x_rollout[t, b], f)
-                                                    for b, f in enumerate(file_idx.tolist())
+                                                    valset.denormalize(
+                                                        x_rollout[t, b], f
+                                                    )
+                                                    for b, f in enumerate(
+                                                        file_idx.tolist()
+                                                    )
                                                 ]
                                             )
                                             for t in range(x_rollout.shape[0])
@@ -429,7 +447,9 @@ def runner(rank, cfg, world_size):
                         #     val_plots.update(d)
 
                     for key in metrics.keys():
-                        metrics[key] = metrics[key] / n_timesteps_acc[key].unsqueeze(0)
+                        metrics[key] = metrics[key] / torch.tensor(
+                            n_timesteps_acc[key]
+                        ).unsqueeze(0)
 
                     for idx, metric_name in enumerate(metric_fn_list):
                         for phase, metric in metrics.items():

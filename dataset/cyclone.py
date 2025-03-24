@@ -20,6 +20,7 @@ from utils import expand_as
 class CycloneSample:
     x: torch.Tensor
     y: torch.Tensor
+    x_poten: torch.Tensor
     y_poten: torch.Tensor
     y_flux: torch.Tensor
     timestep: torch.Tensor
@@ -29,8 +30,12 @@ class CycloneSample:
     # TODO: add more fields (e.g. params that we can use for conditioning)
 
     def pin_memory(self):
-        self.x = self.x.pin_memory()
-        self.y = self.y.pin_memory()
+        if self.x is not None:
+            self.x = self.x.pin_memory()
+            self.y = self.y.pin_memory()
+        if self.x_poten is not None:
+            self.x_poten = self.x_poten.pin_memory()
+            self.y_poten = self.y_poten.pin_memory()
         return self
 
 
@@ -78,6 +83,7 @@ class CycloneDataset(Dataset):
         offset: int = 0,
         separate_zf: bool = False,
     ):
+        self.what_to_load = ["df", "phi"]
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
         assert split in ["train", "val"]
         self.dtype = dtype
@@ -267,6 +273,7 @@ class CycloneDataset(Dataset):
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
+            self.phi_resolution = (392, 16, 96)  # TODO
 
     def _separate_zf(self, x):
         nky = x.shape[-1]
@@ -330,22 +337,37 @@ class CycloneDataset(Dataset):
             x = self._separate_zf(x)
             gt = self._separate_zf(gt)
         # accessory fields
-        poten, flux = sample["gt_poten"], sample["gt_flux"]
+        poten, gt_poten, flux = sample["poten"], sample["gt_poten"], sample["gt_flux"]
         # conditioning fields
         timestep, itg = sample["timestep"], sample["itg"]
         if self.normalization is not None and get_normalized:
-            x, shift, scale = self._normalize(x, file_index)
-            gt = (gt - shift) / scale
+            if x is not None:
+                x, shift, scale = self._normalize(x, file_index)
+                gt = (gt - shift) / scale
+
+            # TODO poten normalization
+            if poten is not None:
+                poten_scale = poten.mean()
+                poten_shift = poten.std()
+                poten = (poten - poten_scale) / poten_shift
+                gt_poten = (gt_poten - poten_scale) / poten_shift
 
         return CycloneSample(
-            x=torch.tensor(x, dtype=self.dtype),
-            y=torch.tensor(gt, dtype=self.dtype),
-            y_poten=torch.tensor(poten, dtype=self.dtype),
+            x=torch.tensor(x, dtype=self.dtype) if x is not None else None,
+            y=torch.tensor(gt, dtype=self.dtype) if gt is not None else None,
+            x_poten=(
+                torch.tensor(poten, dtype=self.dtype) if poten is not None else None
+            ),
+            y_poten=(
+                torch.tensor(gt_poten, dtype=self.dtype)
+                if gt_poten is not None
+                else None
+            ),
             y_flux=torch.tensor(flux, dtype=self.dtype),
             timestep=torch.tensor(timestep, dtype=self.dtype),
             itg=torch.tensor(itg, dtype=self.dtype),
-            file_index=torch.tensor(file_index, dtype=self.dtype),
-            timestep_index=torch.tensor(t_index, dtype=self.dtype),
+            file_index=torch.tensor(file_index, dtype=torch.long),
+            timestep_index=torch.tensor(t_index, dtype=torch.long),
         )
 
     def _load_data(
@@ -354,26 +376,33 @@ class CycloneDataset(Dataset):
         original_t_index = t_index + self.offsets[file_index]
         x = []
         gt = []
+        poten = []
         gt_poten = []
         gt_flux = []
         for i in range(self.bundle_seq_length):
             # read the input
             k_name = "timestep_" + str(original_t_index + i).zfill(5)
-            k = data[f"data/{k_name}"][:]
-            # select only active re/im parts
-            x.append(k[self.active_keys])
+            phi_name = "poten_" + str(original_t_index + i).zfill(5)
             # read the gt output (next timestep)
             k_name_gt = "timestep_" + str(
                 original_t_index + self.bundle_seq_length + i
             ).zfill(5)
-            poten_name_gt = "poten_" + str(
+            phi_name_gt = "poten_" + str(
                 original_t_index + self.bundle_seq_length + i
             ).zfill(5)
-            k_gt = data[f"data/{k_name_gt}"][:]
-            poten_gt = data[f"data/{poten_name_gt}"][:]
-            # select only active re/im parts
-            gt.append(k_gt[self.active_keys])
-            gt_poten.append(poten_gt)
+            if "df" in self.what_to_load:
+                k = data[f"data/{k_name}"][:]
+                k_gt = data[f"data/{k_name_gt}"][:]
+                # select only active re/im parts
+                x.append(k[self.active_keys])
+                gt.append(k_gt[self.active_keys])
+            if "phi" in self.what_to_load:
+                phi = data[f"data/{phi_name}"][:]
+                phi_gt = data[f"data/{phi_name_gt}"][:]
+                poten.append(phi)
+                gt_poten.append(phi_gt)
+
+            # target flux
             flux = data["metadata/fluxes"][
                 original_t_index + self.bundle_seq_length + i
             ]
@@ -381,17 +410,30 @@ class CycloneDataset(Dataset):
             gt_flux.append(flux)
 
         sample = {}
-        # stack to shape (c, t, v1, v2, s, x, y)
-        x = np.stack(x, axis=1)
-        gt = np.stack(gt, axis=1)
-        if self.bundle_seq_length == 1:
-            # sqeeze out time if we only have 1 timestep
-            x = x.squeeze(axis=1)
-            gt = gt.squeeze(axis=1)
+        if "df" in self.what_to_load:
+            # stack to shape (c, t, v1, v2, s, x, y)
+            x = np.stack(x, axis=1)
+            gt = np.stack(gt, axis=1)
+            if self.bundle_seq_length == 1:
+                # sqeeze out time if we only have 1 timestep
+                x = x.squeeze(axis=1)
+                gt = gt.squeeze(axis=1)
+        else:
+            x, gt = None, None
+        if "phi" in self.what_to_load:
+            # stack to shape (1, t, x, s, y)
+            poten = np.stack(poten, axis=0)[None]
+            gt_poten = np.stack(gt_poten, axis=0)[None]
+            if self.bundle_seq_length == 1:
+                poten = poten.squeeze(axis=1)
+                gt_poten = gt_poten.squeeze(axis=1)
+        else:
+            poten, gt_poten = None, None
+
         sample["x"] = x
         sample["gt"] = gt
-        # stack to shape (x, s, y)
-        sample["gt_poten"] = np.stack(gt_poten, axis=0)
+        sample["poten"] = poten
+        sample["gt_poten"] = gt_poten
         sample["gt_flux"] = np.array(gt_flux).squeeze()
         sample["timestep"] = data["metadata/timesteps"][original_t_index]
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
@@ -409,8 +451,8 @@ class CycloneDataset(Dataset):
             if self.normalization == "minmax":
                 x_min = x.min((1, 2, 3, 4, 5), keepdims=True)
                 x_max = x.max((1, 2, 3, 4, 5), keepdims=True)
-                shift = x_min
-                scale = x_max - x_min
+                scale = (x_max - x_min) / self.minmax_beta1
+                shift = x_min + scale * self.minmax_beta2
         else:
             if self.normalization_scope == "dataset":
                 key = "full"
@@ -425,8 +467,6 @@ class CycloneDataset(Dataset):
             if self.normalization == "minmax":
                 x_min = expand_as(self.dataset_stats[key]["min"], x)
                 x_max = expand_as(self.dataset_stats[key]["max"], x)
-                # shift = x_min
-                # scale = x_max - x_min
                 scale = (x_max - x_min) / self.minmax_beta1
                 shift = x_min + scale * self.minmax_beta2
 
@@ -449,8 +489,8 @@ class CycloneDataset(Dataset):
             if self.normalization == "minmax":
                 x_min = expand_as(self.dataset_stats[key]["min"], x)
                 x_max = expand_as(self.dataset_stats[key]["max"], x)
-                shift = x_min
-                scale = x_max - x_min
+                scale = (x_max - x_min) / self.minmax_beta1
+                shift = x_min + scale * self.minmax_beta2
         scale = torch.from_numpy(scale).to(x.device)
         shift = torch.from_numpy(shift).to(x.device)
         return x * scale + shift
@@ -551,7 +591,30 @@ class CycloneDataset(Dataset):
     def get_fluxes(self, file_index: int):
         with h5py.File(self.files[file_index], "r") as f:
             fluxes = f["metadata/fluxes"][:]
-        return fluxes[1:]  # discard flux at t=0
+        return torch.tensor(fluxes[1:])  # discard flux at t=0
+
+    def get_avg_flux(self, file_index: List[int]):
+        avg_fluxes = []
+        for f in file_index:
+            fluxes = self.get_fluxes(f)
+            fluxes = fluxes[len(fluxes) // 2 :]  # TODO naive crop linear phase
+            avg_fluxes.append(sum(fluxes) / len(fluxes))
+        return torch.tensor(avg_fluxes)
+
+    def get_flux_seq(
+        self, timestep_index: List[int], file_index: List[int], window: int = 10
+    ):
+        flux_seq = []
+        for f, t in zip(file_index, timestep_index):
+            fluxes = self.get_fluxes(f)
+            start_idx = max(0, t - window)
+            windowed_flux = fluxes[start_idx:t]
+            if len(windowed_flux) < window:
+                pad_size = window - len(windowed_flux)
+                windowed_flux = torch.cat([torch.zeros(pad_size), windowed_flux])
+
+            flux_seq.append(windowed_flux)
+        return torch.stack(flux_seq, 0)  # (b t)
 
     def __len__(self):
         return self.length
@@ -562,9 +625,26 @@ class CycloneDataset(Dataset):
     def collate(self, batch):
         # batch is a list of CycloneSamples
         return CycloneSample(
-            x=torch.stack([sample.x for sample in batch]),
-            y=torch.stack([sample.y for sample in batch]),
-            y_poten=torch.stack([sample.y_poten for sample in batch]),
+            x=(
+                torch.stack([sample.x for sample in batch])
+                if batch[0].x is not None
+                else None
+            ),
+            y=(
+                torch.stack([sample.y for sample in batch])
+                if batch[0].y is not None
+                else None
+            ),
+            x_poten=(
+                torch.stack([sample.x_poten for sample in batch])
+                if batch[0].x_poten is not None
+                else None
+            ),
+            y_poten=(
+                torch.stack([sample.y_poten for sample in batch])
+                if batch[0].y_poten is not None
+                else None
+            ),
             y_flux=torch.stack([sample.y_flux for sample in batch]),
             timestep=torch.stack([sample.timestep for sample in batch]),
             itg=torch.stack([sample.itg for sample in batch]),

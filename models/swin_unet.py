@@ -123,8 +123,7 @@ class SwinBlockDown(nn.Module):
 
         x_merged = self.downsample(x)
         # return skip connection
-        x = (x_merged, x) if return_skip else x_merged
-        return x
+        return (x_merged, x) if return_skip else x_merged
 
 
 class SwinBlockUp(nn.Module):
@@ -240,7 +239,11 @@ class SwinBlockUp(nn.Module):
             self.upsample.reset_parameters(init_weights)
 
     def forward(
-        self, x: torch.Tensor, s: Optional[torch.Tensor] = None, **kwargs
+        self,
+        x: torch.Tensor,
+        s: Optional[torch.Tensor] = None,
+        return_skip: bool = False,
+        **kwargs
     ) -> torch.Tensor:
         """
         Args:
@@ -262,9 +265,11 @@ class SwinBlockUp(nn.Module):
             x = self.pos_embed(x)
 
         x = self.swin_att(x, **kwargs)
+
+        x_upsampled = x
         if self.upsample is not None:
-            x = self.upsample(x)
-        return x
+            x_upsampled = self.upsample(x)
+        return (x_upsampled, x) if return_skip else x_upsampled
 
 
 class SwinUnet(nn.Module):
@@ -379,10 +384,15 @@ class SwinUnet(nn.Module):
                 ModulatedViTLayer = FilmViTLayer
             LocalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
             if swin_bottleneck:
-                GlobalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim,
-                                      window_size=window_size)
+                GlobalLayer = partial(
+                    ModulatedSwinLayer,
+                    cond_dim=self.cond_embed.cond_dim,
+                    window_size=window_size,
+                )
             else:
-                GlobalLayer = partial(ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim)
+                GlobalLayer = partial(
+                    ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim
+                )
 
         self.patch_embed = PatchEmbed(
             space=space,
@@ -516,7 +526,7 @@ class SwinUnet(nn.Module):
             mlp_ratio=unmerging_hidden_ratio,
             act_fn=expand_act_fn,
             patch_skip=self.patch_skip,
-            # cond_dim=self.cond_embed.cond_dim,
+            cond_dim=self.cond_embed.cond_dim if self.cond_embed else None,
         )
         self.reset_parameters()
 
@@ -590,6 +600,8 @@ class SwinUnet(nn.Module):
         return x
 
     def condition(self, kwconds) -> Dict:
+        if len(kwconds) == 0:
+            return {}
         cond = kwconds.get("timestep")
         cond = cond.unsqueeze(-1)
         refine_step = kwconds.get("refinement_step", None)
