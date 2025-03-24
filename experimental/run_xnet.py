@@ -366,6 +366,12 @@ def runner(rank, cfg, world_size):
                     metric_fn_list = {
                         # NOTE: average across all dimensions except timesteps
                         "relative_norm_mse": partial(relative_norm_mse, dim_to_keep=0),
+                        "phi_relative_norm_mse": partial(
+                            relative_norm_mse, dim_to_keep=0
+                        ),
+                        "flux_relative_norm_mse": partial(
+                            relative_norm_mse, dim_to_keep=0
+                        ),
                     }
                     metrics = {
                         "linear": torch.zeros([len(metric_fn_list), tot_eval_steps]),
@@ -433,7 +439,7 @@ def runner(rank, cfg, world_size):
                                 phase = phase_list[i]
 
                                 # get the rolled out validation trajectories
-                                df_rollout, phi_rollout = rollout_fn(
+                                df_rollout, phi_rollout, flux_rollout = rollout_fn(
                                     model,
                                     df,
                                     file_idx=file_idx,
@@ -474,7 +480,9 @@ def runner(rank, cfg, world_size):
                                     ts_index,
                                     bundle_seq_length,
                                     valset,
-                                    metric_fn_list,
+                                    metrics_fns=metric_fn_list,
+                                    phi_rollout=phi_rollout,
+                                    flux_rollout=flux_rollout,
                                     get_normalized=not denormalize,
                                 )
                                 if use_gkw:
