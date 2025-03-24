@@ -122,7 +122,6 @@ def get_data(cfg):
                 minmax_beta2=cfg.dataset.minmax_beta2,
                 offset=cfg.dataset.offset,
                 separate_zf=cfg.dataset.separate_zf,
-                log_transform=cfg.dataset.log_transform,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,
