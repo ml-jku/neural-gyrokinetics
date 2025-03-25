@@ -1,8 +1,7 @@
 from datetime import datetime, timedelta
 
 from functools import partial
-import torch
-from torch.cuda import reset_peak_memory_stats, max_memory_allocated
+from torch.cuda import max_memory_allocated
 from torch.nn.utils import clip_grad_norm_
 import warnings
 from tqdm import tqdm
@@ -64,7 +63,7 @@ def get_xnet(cfg, dataset):
     flux_head = cfg.model.swin.flux_head
     act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
     decouple_mu = cfg.model.swin.decouple_mu
-    separate_zf = cfg.model.swin.separate_zf
+    separate_zf = cfg.dataset.separate_zf
 
     cond_fn = None
     n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
@@ -140,16 +139,6 @@ def runner(rank, cfg, world_size):
         valsets = [valsets]
         trainloader, valloaders = dataloaders
         valloaders = [valloaders]
-
-    if not cfg.dataset.separate_zf:
-        problem_dim = len(cfg.dataset.active_keys)
-    else:
-        problem_dim = 4
-        problem_dim += (
-            (cfg.dataset.split_into_bands - 1) * 2
-            if cfg.dataset.split_into_bands
-            else 0
-        )
 
     model = get_xnet(cfg, dataset=trainset)
     model = model.to(device)
@@ -350,7 +339,6 @@ def runner(rank, cfg, world_size):
                 for val_idx, (valset, valloader) in enumerate(zip(valsets, valloaders)):
 
                     rollout_fn = get_rollout_fn(
-                        problem_dim=problem_dim,
                         n_steps=n_eval_steps,
                         bundle_steps=bundle_seq_length,
                         dataset=valset,

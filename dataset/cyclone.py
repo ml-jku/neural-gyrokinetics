@@ -260,7 +260,8 @@ class CycloneDataset(Dataset):
                 self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, t_index)
                 self.file_and_tstep_to_flat_index[(file_idx, t_index)] = flat_idx
 
-        if offset > 0 and normalization_scope == "dataset" and normalization_stats is None:
+        if offset > 0 and normalization_scope == "dataset" and normalization_stats is None \
+                or (separate_zf and normalization_scope == "dataset" and normalization_stats is None):
             # overwrite dataset-wide stats with new stats for data after offset only
             stats = self._get_dataset_stats()
 

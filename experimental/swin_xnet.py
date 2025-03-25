@@ -285,6 +285,7 @@ class SwinXnet(nn.Module):
         self.df_base_resolution = [int(r) for r in df_base_resolution]
         self.df_space = 5
         self.phi_space = 3
+        self.problem_dim = in_channels
 
         if separate_zf:
             in_channels = 2 * in_channels
@@ -422,8 +423,10 @@ class SwinXnet(nn.Module):
 
         # middle blocks + latent mixing
         flux_lats = []
-        df = self.df_unet.middle_pe(df)
-        phi = self.phi_unet.middle_pe(phi)
+        if hasattr(self.df_unet, "middle_pe"):
+            df = self.df_unet.middle_pe(df)
+        if hasattr(self.phi_unet, "middle_pe"):
+            phi = self.phi_unet.middle_pe(phi)
 
         df, phi = self.df_mix[-1](df, phi), self.phi_mix[-1](phi, df)
 

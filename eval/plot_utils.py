@@ -270,13 +270,13 @@ def plot_potentials(phi, y_phi):
     fig, ax = plt.subplots(2, 1, figsize=(10, 5))
     fig.subplots_adjust(wspace=0.05)
 
-    ax[0].matshow(np.squeeze(phi[:, 8, :]), cmap=c_map)
+    ax[0].matshow(phi.squeeze()[:, 8, :].T, cmap=c_map)
     ax[0].set_title(r"$\phi_{pred}$", fontsize=24)
     ax[0].set_ylabel(r"$y_{\phi}$", fontsize=20)
     ax[0].set_xticks([])
     ax[0].set_yticks([])
 
-    ax[1].matshow(np.squeeze(y_phi[:, 8, :]), cmap=c_map)
+    ax[1].matshow(y_phi.squeeze()[:, 8, :].T, cmap=c_map)
     ax[1].set_title(r"$\phi_{GT}$", fontsize=24)
     ax[1].set_xlabel(r"$x_{\phi}$", fontsize=20)
     ax[1].set_ylabel(r"$y_{\phi}$", fontsize=20)
