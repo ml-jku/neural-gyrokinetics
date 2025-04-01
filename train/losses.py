@@ -36,6 +36,109 @@ def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
         return torch.mean(diff_norms / y_norms, dim=dims)
 
 
+def df_fft(df: torch.Tensor, norm: str = "backward"):
+    df = df.movedim(0, -1).contiguous()
+    df = torch.view_as_complex(df)
+    df = torch.fft.fftn(df, dim=(3, 4), norm=norm)
+    return torch.fft.ifftshift(df, dim=(3,))
+
+
+def phi_to_spc(phi: torch.Tensor, out_shape: Tuple, norm: str = "forward"):
+    # drop channels and apply fft
+    phi = torch.fft.fftn(phi.squeeze(0), dim=(0, 2), norm=norm)
+    phi = torch.fft.fftshift(phi, dim=(2, 0))
+    # unpad (and positive half of spectra)
+    nx, _, ny = out_shape
+    phi = phi[..., phi.shape[-1] // 2 :]
+    xpad = (phi.shape[0] - nx) // 2 + 1
+    return phi[xpad : nx + xpad, :, :ny]
+
+
+@torch.vmap
+def pev_integral_df_phi(
+    df: torch.Tensor,
+    phi: torch.Tensor,
+    geometry: Dict,
+    aggregate: bool = True,
+    magnitude: bool = False,
+):
+    """
+    Computes particle, heat and momentum fluxes based on the distribution function (df)
+    and electrostatic potential (phi).
+
+    Args:
+        df (torch.Tensor): 5D density function. Shape: (b, c, vpar, vmu, s, x, y).
+        phi (torch.Tensor): 3D electrostatic potential. Shape: (b, 1, x, s, y).
+        geometry (Dict): Dictionary containing geometry parameters and settings.
+        aggregate (bool, optional): Whether to return the summed fluxes. Default: True.
+        magnitude (bool, optional): Whether to use df and phi absolutes. Default: False.
+    """
+    ns, nx, ny = df.shape[3:]
+    # df to fourier, phi to fourier and unpad
+    df = df_fft(df)  # (par, mu, s, x, y)
+    phi = phi_to_spc(phi, out_shape=(nx, ns, ny))  # (x, s, y)
+    # expand geometry constants for broadcasting
+    # grids
+    krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
+    kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
+    ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
+    intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
+    intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
+    vpgr = rearrange(geometry["vpgr"], "par -> par 1 1 1 1")
+    mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
+    # settings
+    little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
+    bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
+    efun = rearrange(geometry["efun"], "s -> 1 1 s 1 1")
+    rfun = rearrange(geometry["rfun"], "s -> 1 1 s 1 1")
+    bt_frac = rearrange(geometry["bt_frac"], "s -> 1 1 s 1 1")
+    parseval = rearrange(geometry["parseval"], "y -> 1 1 1 1 y")
+    mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
+    # gyroaveraged phi
+    krloc = torch.sqrt(
+        krho**2 * little_g[0] + 2 * krho * kxrh * little_g[1] + kxrh**2 * little_g[2]
+    )
+    bessel = torch.special.bessel_j0(
+        mas * vthrat * krloc * torch.sqrt(2.0 * mugr / bn) / signz
+    )
+    phi_gyro = bessel * rearrange(phi, "x s y -> 1 1 s x y")
+    # absolute values of df and phi
+    if magnitude:
+        df = -1j * torch.abs(df)
+        phi_gyro = torch.abs(phi_gyro)
+    # grid derivatives
+    dum = parseval * ints * (efun * krho) * df
+    dum1 = dum * torch.conj(phi_gyro)
+    dum2 = dum1 * bn
+    d3X = ints * geometry["d2X"]
+    d3v = intmu * bn * intvp
+    signB = geometry["signB"]
+    # flux fields
+    pflux = d3X * d3v * torch.imag(dum1)
+    eflux = d3X * d3v * (vpgr**2 * torch.imag(dum1) + 2 * mugr * torch.imag(dum2))
+    vflux = d3X * d3v * (torch.imag(dum1) * vpgr * rfun * bt_frac * signB)
+    # sum total fluxes
+    if aggregate:
+        pflux = pflux.sum()
+        eflux = eflux.sum()
+        vflux = vflux.sum()
+    return pflux, eflux, vflux
+
+
+def flux_loss(
+    df: torch.Tensor,
+    phi: torch.Tensor,
+    gt_fluxes: Dict[str, torch.Tensor],
+    geometry: Dict,
+):
+    fluxes = {}
+    fluxes["p"], fluxes["e"], fluxes["v"] = pev_integral_df_phi(df, phi, geometry)
+    loss = 0.0
+    for k in gt_fluxes:
+        loss += relative_norm_mse(fluxes[k].unsqueeze(0), gt_fluxes[k].unsqueeze(0))
+    return loss
+
+
 def get_pushforward_fn(
     n_unrolls_schedule: List[int],
     probs_schedule: List[float],
