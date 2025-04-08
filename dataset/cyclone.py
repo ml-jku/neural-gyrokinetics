@@ -18,10 +18,10 @@ from utils import expand_as
 
 @dataclass
 class CycloneSample:
-    x: torch.Tensor
-    y: torch.Tensor
-    x_poten: torch.Tensor
-    y_poten: torch.Tensor
+    df: torch.Tensor
+    y_df: torch.Tensor
+    phi: torch.Tensor
+    y_phi: torch.Tensor
     y_flux: torch.Tensor
     timestep: torch.Tensor
     itg: torch.Tensor
@@ -30,12 +30,12 @@ class CycloneSample:
     # TODO: add more fields (e.g. params that we can use for conditioning)
 
     def pin_memory(self):
-        if self.x is not None:
-            self.x = self.x.pin_memory()
-            self.y = self.y.pin_memory()
-        if self.x_poten is not None:
-            self.x_poten = self.x_poten.pin_memory()
-            self.y_poten = self.y_poten.pin_memory()
+        if self.df is not None:
+            self.df = self.df.pin_memory()
+            self.y_df = self.y_df.pin_memory()
+        if self.phi is not None:
+            self.phi = self.phi.pin_memory()
+            self.y_phi = self.y_phi.pin_memory()
         return self
 
 
@@ -64,6 +64,7 @@ class CycloneDataset(Dataset):
         path: str = "/restricteddata/ukaea/gyrokinetics/preprocessed",
         split: str = "train",
         active_keys: Optional[List[str]] = None,
+        input_fields: Optional[List[str]] = ["df"],
         trajectories: Optional[List[str]] = None,
         partial_holdouts: Optional[dict] = None,
         normalization: Optional[str] = "zscore",
@@ -83,7 +84,7 @@ class CycloneDataset(Dataset):
         offset: int = 0,
         separate_zf: bool = False,
     ):
-        self.what_to_load = ["df", "phi"]
+        self.input_fields = input_fields
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
         assert split in ["train", "val"]
         self.dtype = dtype
@@ -354,12 +355,12 @@ class CycloneDataset(Dataset):
                 gt_poten = (gt_poten - poten_scale) / poten_shift
 
         return CycloneSample(
-            x=torch.tensor(x, dtype=self.dtype) if x is not None else None,
-            y=torch.tensor(gt, dtype=self.dtype) if gt is not None else None,
-            x_poten=(
+            df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
+            y_df=torch.tensor(gt, dtype=self.dtype) if gt is not None else None,
+            phi=(
                 torch.tensor(poten, dtype=self.dtype) if poten is not None else None
             ),
-            y_poten=(
+            y_phi=(
                 torch.tensor(gt_poten, dtype=self.dtype)
                 if gt_poten is not None
                 else None
@@ -391,13 +392,13 @@ class CycloneDataset(Dataset):
             phi_name_gt = "poten_" + str(
                 original_t_index + self.bundle_seq_length + i
             ).zfill(5)
-            if "df" in self.what_to_load:
+            if "df" in self.input_fields:
                 k = data[f"data/{k_name}"][:]
                 k_gt = data[f"data/{k_name_gt}"][:]
                 # select only active re/im parts
                 x.append(k[self.active_keys])
                 gt.append(k_gt[self.active_keys])
-            if "phi" in self.what_to_load:
+            if "phi" in self.input_fields:
                 phi = data[f"data/{phi_name}"][:]
                 phi_gt = data[f"data/{phi_name_gt}"][:]
                 poten.append(phi)
@@ -411,7 +412,7 @@ class CycloneDataset(Dataset):
             gt_flux.append(flux)
 
         sample = {}
-        if "df" in self.what_to_load:
+        if "df" in self.input_fields:
             # stack to shape (c, t, v1, v2, s, x, y)
             x = np.stack(x, axis=1)
             gt = np.stack(gt, axis=1)
@@ -421,7 +422,7 @@ class CycloneDataset(Dataset):
                 gt = gt.squeeze(axis=1)
         else:
             x, gt = None, None
-        if "phi" in self.what_to_load:
+        if "phi" in self.input_fields:
             # stack to shape (1, t, x, s, y)
             poten = np.stack(poten, axis=0)[None]
             gt_poten = np.stack(gt_poten, axis=0)[None]
@@ -626,24 +627,24 @@ class CycloneDataset(Dataset):
     def collate(self, batch):
         # batch is a list of CycloneSamples
         return CycloneSample(
-            x=(
-                torch.stack([sample.x for sample in batch])
-                if batch[0].x is not None
+            df=(
+                torch.stack([sample.df for sample in batch])
+                if batch[0].df is not None
                 else None
             ),
-            y=(
-                torch.stack([sample.y for sample in batch])
-                if batch[0].y is not None
+            y_df=(
+                torch.stack([sample.y_df for sample in batch])
+                if batch[0].y_df is not None
                 else None
             ),
-            x_poten=(
-                torch.stack([sample.x_poten for sample in batch])
-                if batch[0].x_poten is not None
+            phi=(
+                torch.stack([sample.phi for sample in batch])
+                if batch[0].phi is not None
                 else None
             ),
-            y_poten=(
-                torch.stack([sample.y_poten for sample in batch])
-                if batch[0].y_poten is not None
+            y_phi=(
+                torch.stack([sample.y_phi for sample in batch])
+                if batch[0].y_phi is not None
                 else None
             ),
             y_flux=torch.stack([sample.y_flux for sample in batch]),

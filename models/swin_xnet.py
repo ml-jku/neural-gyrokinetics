@@ -1,9 +1,11 @@
-from typing import Sequence, Union, Optional, Tuple, Type
+from typing import Sequence, Union, Optional, Tuple, Type, List
 
 from torch.nn import functional as F
 import torch
 from torch import nn
 from einops import rearrange
+from torch.nn.attention import SDPBackend, sdpa_kernel
+import torch.distributed as dist
 
 from models.swin_unet import SwinUnet
 from models.nd_vit.drop import DropPath
@@ -63,7 +65,11 @@ class CrossAttention(nn.Module):
             self.kv(right), "b n (t h c) -> t b h n c", t=2, h=self.num_heads
         )
 
-        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop)
+        if dist.is_initialized():
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
+        else:
+            x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
 
         # attention readout
         x = rearrange(x, "b k n c -> b n (k c)")
@@ -250,6 +256,7 @@ class SwinXnet(nn.Module):
     def __init__(
         self,
         dim: int,
+        outputs: List[str],
         df_base_resolution: Sequence[int],
         phi_base_resolution: Sequence[int],
         df_patch_size: Union[Sequence[int], int] = 4,
@@ -267,15 +274,16 @@ class SwinXnet(nn.Module):
         use_checkpoint: bool = False,
         merging_hidden_ratio: float = 8.0,
         unmerging_hidden_ratio: float = 8.0,
-        conditioning: Optional[nn.Module] = None,
+        conditioning: Optional[List[str]] = None,
+        cond_embed: Optional[nn.Module] = None,
         modulation: str = "dit",
         act_fn: nn.Module = nn.GELU,
         patch_skip: bool = False,
-        flux_head: bool = True,
         decouple_mu: bool = False,
         separate_zf: bool = False,
         zf_norm: bool = False,
         flux_drop: float = 0.1,
+        swin_bottleneck: bool = False,
     ):
         super().__init__()
 
@@ -325,8 +333,10 @@ class SwinXnet(nn.Module):
             merging_hidden_ratio=merging_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
             conditioning=conditioning,
+            cond_embed=cond_embed,
             act_fn=act_fn,
             patch_skip=patch_skip,
+            swin_bottleneck=swin_bottleneck,
         )
 
         self.phi_unet = SwinUnet(
@@ -350,16 +360,18 @@ class SwinXnet(nn.Module):
             merging_hidden_ratio=merging_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
             conditioning=conditioning,
+            cond_embed=cond_embed,
             act_fn=act_fn,
             patch_skip=patch_skip,
+            swin_bottleneck=swin_bottleneck,
         )
         self.df_up_blocks = self.df_unet.up_blocks
         self.df_down_blocks = self.df_unet.down_blocks
         self.phi_up_blocks = self.phi_unet.up_blocks
         self.phi_down_blocks = self.phi_unet.down_blocks
 
-        self.flux_head = None
-        if flux_head:
+        self.flux_head = True if "flux" in outputs else None
+        if self.flux_head:
             self.flux_head = FluxDecoder(
                 self.phi_unet.down_dims[::-1],
                 num_heads=8,
@@ -471,7 +483,13 @@ class SwinXnet(nn.Module):
         flux = None
         if self.flux_head is not None:
             flux = self.flux_head(flux_lats)
-        return df, phi, flux
+
+        output = {
+            'df': df,
+            'phi': phi,
+            'flux': flux
+        }
+        return output
 
     def patch_encode(self, df: torch.Tensor, phi: torch.Tensor):
         if self.separate_zf:

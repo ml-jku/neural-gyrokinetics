@@ -1,4 +1,4 @@
-from typing import Sequence, Union, Optional, Type, Tuple, Dict
+from typing import Sequence, Union, Optional, Type, Tuple, Dict, List
 
 from einops import rearrange
 import torch
@@ -336,7 +336,8 @@ class SwinUnet(nn.Module):
         use_checkpoint: bool = False,
         merging_hidden_ratio: float = 8.0,
         unmerging_hidden_ratio: float = 8.0,
-        conditioning: Optional[nn.Module] = None,
+        conditioning: Optional[List[str]] = None,
+        cond_embed: Optional[nn.Module] = None,
         modulation: str = "dit",
         act_fn: nn.Module = nn.GELU,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
@@ -374,7 +375,8 @@ class SwinUnet(nn.Module):
         # set layer type and conditioning
         LocalLayer = SwinLayer
         GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
-        self.cond_embed = conditioning
+        self.cond_embed = cond_embed
+        self.condition_keys = conditioning
         if self.cond_embed is not None:
             if modulation == "dit":
                 ModulatedSwinLayer = DiTSwinLayer
@@ -544,11 +546,11 @@ class SwinUnet(nn.Module):
         self.middle.reset_parameters(self.init_weights)
         self.middle_upscale.reset_parameters(self.init_weights)
 
-    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self, df: torch.Tensor, **kwargs) -> torch.Tensor:
         # compress to patch space
-        x, pad_axes = self.patch_encode(x)
+        df, pad_axes = self.patch_encode(df)
         if self.patch_skip:
-            first_res = x.clone()
+            first_res = df.clone()
 
         # backbone
         cond = self.condition(kwargs)
@@ -556,29 +558,31 @@ class SwinUnet(nn.Module):
         # down path
         feature_maps = []
         for blk in self.down_blocks:
-            x, x_pre = blk(x, **cond)
-            feature_maps.append(x_pre)
+            df, df_pre = blk(df, **cond)
+            feature_maps.append(df_pre)
 
         # middle block
         if hasattr(self, "middle_pe"):
-            x = self.middle_pe(x)
-        x = self.middle(x, **cond)
-        x = self.middle_upscale(x)
+            df = self.middle_pe(df)
+        df = self.middle(df, **cond)
+        df = self.middle_upscale(df)
 
         # up path
         feature_maps = feature_maps[::-1]
         for i, blk in enumerate(self.up_blocks):
-            x = blk(x, s=feature_maps[i], **cond)
+            df = blk(df, s=feature_maps[i], **cond)
 
         # expand to original
         if self.patch_skip:
-            x = torch.cat([x, first_res], -1)
+            df = torch.cat([df, first_res], -1)
 
-        x = self.patch_decode(x, cond["condition"], pad_axes)
+        df = self.patch_decode(df, cond["condition"], pad_axes)
 
         if self.norm_output:
-            x = x / x.std((2, 3, 4, 5, 6), keepdims=True)
-        return x
+            df = df / df.std((2, 3, 4, 5, 6), keepdims=True)
+
+        out_dict = { 'df': df }
+        return out_dict
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         # pad to patch blocks
@@ -602,15 +606,9 @@ class SwinUnet(nn.Module):
     def condition(self, kwconds) -> Dict:
         if len(kwconds) == 0:
             return {}
-        cond = kwconds.get("timestep")
-        cond = cond.unsqueeze(-1)
-        refine_step = kwconds.get("refinement_step", None)
-        if refine_step is not None:
-            cond = torch.cat([cond, refine_step.unsqueeze(-1)], dim=-1)
-        itg = kwconds.get("itg", None)
-        if itg is not None:
-            cond = torch.cat([cond, itg.unsqueeze(-1)], dim=-1)
-        if cond is not None and self.cond_embed is not None:
+        assert sorted(self.condition_keys) == sorted(list(kwconds.keys())), "Mismatch in conditioning keys"
+        cond = torch.cat([kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1)
+        if self.cond_embed is not None:
             # embed conditioning is e.g. sincos
             return {"condition": self.cond_embed(cond)}
         else:

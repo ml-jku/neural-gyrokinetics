@@ -65,6 +65,8 @@ class WandbManager:
         # End the W&B run
         wandb.finish()
 
+def edit_tag(dict, prefix, postfix):
+    return {f'{prefix}/{k}_{postfix}': v for k, v in dict.items()}
 
 def setup_logging(config):
     if config.logging.writer == "tensorboard":
@@ -188,55 +190,35 @@ def expand_as(src: np.ndarray, tgt: np.ndarray):
     return src
 
 
+def split_in_two(dictionary, idx):
+    first = {k: v[:idx] for k, v in dictionary.items()}
+    second = {k: v[idx:] for k, v in dictionary.items()}
+    dictionary = [first, second]
+    return dictionary
+
+
 def split_batch_into_phases(
-    phase_change, x, y, ts, itg, file_idx, ts_index, phi=None, y_phi=None
+    phase_change, inputs, gts, conds, idx_data
 ):
-    split_idx = torch.searchsorted(ts, phase_change, right=False)
-    phi_list = None
-    y_phi_list = None
-    if split_idx == ts.shape[0]:
+    split_idx = torch.searchsorted(conds["timestep"], phase_change, right=False)
+    if split_idx == conds["timestep"].shape[0]:
         # whole batch in linear
-        x_list = [x]
-        y_list = [y]
-        if phi is not None:
-            phi_list = [phi]
-            y_phi_list = [y_phi]
-        ts_list = [ts]
-        itg_list = [itg]
-        file_idx_list = [file_idx]
-        ts_index_list = [ts_index]
+        inputs = [inputs]
+        gts = [gts]
+        conds = [conds]
+        idx_data = [idx_data]
         phase_list = ["linear"]
     elif split_idx == 0:
         # whole batch in saturated phase
-        x_list = [x]
-        y_list = [y]
-        if phi is not None:
-            phi_list = [phi]
-            y_phi_list = [y_phi]
-        ts_list = [ts]
-        itg_list = [itg]
-        file_idx_list = [file_idx]
-        ts_index_list = [ts_index]
+        inputs = [inputs]
+        gts = [gts]
+        conds = [conds]
+        idx_data = [idx_data]
         phase_list = ["saturated"]
     else:
-        x_list = [x[:split_idx], x[split_idx:]]
-        y_list = [y[:split_idx], y[split_idx:]]
-        if phi is not None:
-            phi_list = [phi[:split_idx], phi[split_idx:]]
-            y_phi_list = [y_phi[:split_idx], y_phi[split_idx:]]
-        ts_list = [ts[:split_idx], ts[split_idx:]]
-        itg_list = [itg[:split_idx], itg[split_idx:]]
-        file_idx_list = [file_idx[:split_idx], file_idx[split_idx:]]
-        ts_index_list = [ts_index[:split_idx], ts_index[split_idx:]]
+        inputs = split_in_two(inputs, split_idx)
+        gts = split_in_two(gts, split_idx)
+        conds = split_in_two(conds, split_idx)
+        idx_data = split_in_two(idx_data, split_idx)
         phase_list = ["linear", "saturated"]
-    return (
-        x_list,
-        y_list,
-        ts_list,
-        itg_list,
-        file_idx_list,
-        ts_index_list,
-        phase_list,
-        phi_list,
-        y_phi_list,
-    )
+    return (inputs, gts, conds, idx_data, phase_list,)

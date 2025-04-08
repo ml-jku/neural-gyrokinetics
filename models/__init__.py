@@ -1,7 +1,7 @@
 import torch
 
 
-def get_model(cfg, dataset):
+def get_model(cfg, dataset, train_method="default"):
     # TODO need to standardize modules everywhere (eg for different inputs)
 
     latent_dim = cfg.model.latent_dim
@@ -11,6 +11,7 @@ def get_model(cfg, dataset):
         problem_dim += 2
 
     if cfg.model.name == "swin":
+        assert cfg.dataset.input_fields == ["df"], "No more inputs than df supported for simple 5D-Swin"
         from models.swin_unet import SwinUnet
         from models.utils import ContinuousConditionEmbed
 
@@ -30,11 +31,14 @@ def get_model(cfg, dataset):
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         patch_skip = cfg.model.swin.patch_skip
         modulation = cfg.model.swin.modulation
-        refiner = cfg.method == "refiner"
+        refiner = train_method == "refiner"
+        swin_bottleneck = cfg.model.swin.swin_bottleneck
 
         cond_fn = None
-        n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning
-        n_cond = n_cond + (1 if refiner else 0)
+        conditioning = cfg.model.conditioning
+        if refiner:
+            conditioning += ["refinement_step"]
+        n_cond = len(conditioning)
         if n_cond > 0:
             cond_fn = ContinuousConditionEmbed(128, n_cond)
 
@@ -65,11 +69,81 @@ def get_model(cfg, dataset):
             c_multiplier=c_multiplier,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
-            conditioning=cond_fn,
+            conditioning=conditioning,
+            cond_embed=cond_fn,
             norm_output=norm_output,
             act_fn=act_fn,
             patch_skip=patch_skip,
             modulation=modulation,
+            swin_bottleneck=swin_bottleneck,
+        )
+
+    if cfg.model.name == "xnet":
+        from models.swin_xnet import SwinXnet
+        from models.utils import ContinuousConditionEmbed
+
+        df_patch_size = cfg.model.swin.patch_size
+        phi_patch_size = cfg.model.swin.phi_patch_size
+        df_window_size = cfg.model.swin.window_size
+        phi_window_size = cfg.model.swin.phi_window_size
+        df_base_resolution = dataset.resolution
+        phi_base_resolution = dataset.phi_resolution
+        num_heads = cfg.model.swin.num_heads
+        depth = cfg.model.swin.depth
+        num_layers = cfg.model.num_layers
+        gradient_checkpoint = cfg.model.swin.gradient_checkpoint
+        patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
+        unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
+        c_multiplier = cfg.model.swin.c_multiplier
+        abs_pe = cfg.model.swin.abs_pe
+        patch_skip = cfg.model.swin.patch_skip
+        modulation = cfg.model.swin.modulation
+        act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
+        decouple_mu = cfg.model.decouple_mu
+        separate_zf = cfg.dataset.separate_zf
+        refiner = train_method == "refiner"
+        outputs = cfg.model.losses
+        swin_bottleneck = cfg.model.swin.swin_bottleneck
+
+        cond_fn = None
+        conditioning = cfg.model.conditioning
+        if refiner:
+            conditioning += ["refinement_step"]
+        n_cond = len(conditioning)
+        if n_cond > 0:
+            cond_fn = ContinuousConditionEmbed(128, n_cond)
+
+        if cfg.model.bundle_seq_length > 1:
+            raise NotImplementedError
+
+        model = SwinXnet(
+            dim=latent_dim,
+            outputs=outputs,
+            df_base_resolution=df_base_resolution,
+            phi_base_resolution=phi_base_resolution,
+            df_patch_size=df_patch_size,
+            phi_patch_size=phi_patch_size,
+            df_window_size=df_window_size,
+            phi_window_size=phi_window_size,
+            depth=depth,
+            num_heads=num_heads,
+            in_channels=problem_dim,
+            out_channels=problem_dim,
+            num_layers=num_layers,
+            use_checkpoint=gradient_checkpoint,
+            drop_path=0.1,
+            abs_pe=abs_pe,
+            c_multiplier=c_multiplier,
+            merging_hidden_ratio=patching_hidden_ratio,
+            unmerging_hidden_ratio=unmerging_hidden_ratio,
+            conditioning=conditioning,
+            cond_embed=cond_fn,
+            act_fn=act_fn,
+            patch_skip=patch_skip,
+            modulation=modulation,
+            decouple_mu=decouple_mu,
+            separate_zf=separate_zf,
+            swin_bottleneck=swin_bottleneck,
         )
 
     if cfg.model.name == "swin_flat":
@@ -82,17 +156,12 @@ def get_model(cfg, dataset):
         base_resolution = dataset.resolution
         num_heads = cfg.model.swin.num_heads
         depth = cfg.model.swin.depth
-        num_layers = cfg.model.num_layers
         gradient_checkpoint = cfg.model.swin.gradient_checkpoint
-        patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
-        unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
-        c_multiplier = cfg.model.swin.c_multiplier
-        norm_output = cfg.model.swin.norm_output
         abs_pe = cfg.model.swin.abs_pe
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         patch_skip = cfg.model.swin.patch_skip
         modulation = cfg.model.swin.modulation
-        refiner = cfg.method == "refiner"
+        refiner = train_method == "refiner"
 
         cond_fn = None
         n_cond = cfg.model.swin.timestep_conditioning + cfg.model.swin.itg_conditioning

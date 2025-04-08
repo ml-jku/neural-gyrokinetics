@@ -378,7 +378,8 @@ class SwinTransformerBlock(nn.Module):
 
         assert len(self.window_size) == len(self.shift_size) == space
 
-        self.norm1 = norm_layer(dim) if norm_layer is not None else nn.Identity()
+        # results in correct DiT conditioning
+        self.norm1 = norm_layer(dim, elementwise_affine=False) if norm_layer is not None else nn.Identity()
         self.attn = WindowAttention(
             dim,
             window_size=self.window_size,
@@ -389,7 +390,7 @@ class SwinTransformerBlock(nn.Module):
         )
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.norm2 = norm_layer(dim) if norm_layer is not None else nn.Identity()
+        self.norm2 = norm_layer(dim, elementwise_affine=False) if norm_layer is not None else nn.Identity()
         mlp_hidden_dim = int(dim * mlp_ratio)
 
         self.mlp = MLP([dim, mlp_hidden_dim, self.out_dim], act_fn, dropout_prob=drop)

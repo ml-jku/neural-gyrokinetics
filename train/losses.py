@@ -1,4 +1,4 @@
-from typing import List, Callable, Optional, Dict, Tuple
+from typing import List, Callable, Dict, Optional, Tuple
 import warnings
 import torch
 from torch.special import bessel_j0 as j0, i0
@@ -18,6 +18,9 @@ from dataset.cyclone import CycloneDataset, CycloneSample
 
 
 def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
+    if x.ndim == 2 and y.ndim == 1:
+        y = y.unsqueeze(1)
+    assert x.shape == y.shape, "Mismatch in dimensions for computing loss"
     if dim_to_keep is None:
         y = y.flatten(1)
         diff = x.flatten(1) - y
@@ -248,28 +251,20 @@ def get_pushforward_fn(
     dataset: CycloneDataset,
     bundle_steps: int,
     use_amp: bool = False,
-    use_potentials: bool = False,
+    device: str = None,
 ) -> Callable:
     def _loss_fn(
         model: nn.Module,
-        x: torch.Tensor,
-        ts: torch.Tensor,
-        itg: torch.Tensor,
-        ts_idx: torch.Tensor,
-        y: torch.Tensor,
-        file_idx: torch.Tensor,
+        inputs: Dict,
+        gts: Dict,
+        conds: Dict,
+        idx_data: Dict,
         epoch: int,
-        phi: Optional[torch.Tensor] = None,
-        y_phi: Optional[torch.Tensor] = None,
-        y_flux: Optional[torch.Tensor] = None,
-    ) -> List[float]:
+    ) -> Tuple[Dict[str, torch.Tensor],Dict[str, torch.Tensor],Dict[str, torch.Tensor]]:
         # pushforward scheduler with epoch
         idx = (epoch > np.array(epoch_schedule)).sum()
         if not idx:
-            if use_potentials:
-                return x, phi, ts, y, y_phi, y_flux
-            else:
-                return x, ts, y
+            return inputs, gts, conds
 
         # sample number of steps
         curr_probs = [p / sum(probs_schedule[:idx]) for p in probs_schedule[:idx]]
@@ -277,23 +272,20 @@ def get_pushforward_fn(
 
         # cap the unroll steps depending on the current max timestep
         n_unrolls = []
-        for i, f_idx in enumerate(file_idx.tolist()):
-            sleft = (dataset.num_ts(int(f_idx)) - int(ts_idx[i])) // bundle_steps - 1
+        for i, f_idx in enumerate(idx_data["file_index"].tolist()):
+            sleft = (dataset.num_ts(int(f_idx)) - int(idx_data["timestep_index"][i])) // bundle_steps - 1
             n_unrolls.append(min(sleft, pf_n_unrolls))
         n_unrolls = min(n_unrolls)
 
         if n_unrolls < 2:
-            if use_potentials:
-                return x, phi, ts, y, y_phi, y_flux
-            else:
-                return x, ts, y
+            return inputs, gts, conds
 
         ts_step = bundle_steps
         ts_idxs = [
             list(range(int(ts), int(ts) + n_unrolls * ts_step, ts_step))
-            for ts in ts_idx.tolist()
+            for ts in idx_data["timestep_index"].tolist()
         ]
-        tsteps = dataset.get_timesteps(file_idx, torch.tensor(ts_idxs))
+        tsteps = dataset.get_timesteps(idx_data["file_index"], torch.tensor(ts_idxs))
 
         # get unrolled target in a non-blocking way
         def fetch_target(dataset, file_idx, ts_unrolled):
@@ -304,47 +296,29 @@ def get_pushforward_fn(
 
         executor = ThreadPoolExecutor(max_workers=1)
         with torch.no_grad():
-            ts_unrolled = ts_idx + (n_unrolls - 1) * ts_step
-            future = executor.submit(fetch_target, dataset, file_idx, ts_unrolled)
+            ts_unrolled = idx_data["timestep_index"] + (n_unrolls - 1) * ts_step
+            future = executor.submit(fetch_target, dataset, idx_data["file_index"], ts_unrolled)
 
-            xt = x
-            if use_potentials:
-                phit = phi
+            inputs_t = inputs.copy()
             for i in range(n_unrolls - 1):
                 use_bf16 = use_amp and torch.cuda.is_bf16_supported()
                 amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
                 with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-                    if use_potentials:
-                        x_p, phi_p, _ = model(
-                            xt, phit, timestep=tsteps[:, i].to(xt.device), itg=itg
-                        )
-                    else:
-                        x_p = model(xt, timestep=tsteps[:, i].to(xt.device), itg=itg)
-
+                    conds['timestep'] = tsteps[:, i].to(device)
+                    outputs = model(**inputs_t, **conds)
                     if predict_delta:
-                        x_p = xt + x_p
-                    xt = x_p.clone().float()
-                    if use_potentials:
-                        phit = phi_p.clone().float()
+                        for key in dataset.input_fields:
+                            outputs[key] = outputs[key] + inputs[key]
+
+                    for key in dataset.input_fields:
+                        inputs_t[key] = outputs[key]
+
             # Get the result when needed
             unrolled: CycloneSample = future.result()
 
-        # have to clone xt to avoid view mode grad runtime error
-        if use_potentials:
-            return (
-                xt.clone(),
-                phit.clone(),
-                unrolled.timestep.to(x.device),
-                unrolled.y.to(x.device, non_blocking=True),
-                unrolled.y_poten.to(x.device, non_blocking=True),
-                unrolled.y_flux.to(x.device, non_blocking=True),
-            )
-        else:
-            return (
-                xt.clone(),
-                unrolled.timestep.to(x.device),
-                unrolled.y.to(x.device, non_blocking=True),
-            )
+        gts = {k: getattr(unrolled, k).to(device, non_blocking=True) for k in gts.keys() if k is not None}
+        conds = {k: getattr(unrolled, k).to(device, non_blocking=True) for k in conds.keys() if k is not None}
+        return inputs_t, gts, conds
 
     return _loss_fn
 
