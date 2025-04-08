@@ -1,3 +1,4 @@
+import numpy as np
 from torch.utils.data.dataloader import DataLoader
 
 from dataset.augment import noise_transform
@@ -38,9 +39,10 @@ def get_data(cfg):
                 last_n = entry.last_n
                 partial_holdouts[file] = last_n
 
+        input_fields = np.unique(cfg.dataset.input_fields + cfg.model.losses)
         trainset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
-            input_fields=cfg.dataset.input_fields,
+            input_fields=input_fields,
             path=cfg.dataset.path,
             split="train",
             random_seed=cfg.seed,
@@ -62,7 +64,7 @@ def get_data(cfg):
 
         holdout_trajectories_valset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
-            input_fields=cfg.dataset.input_fields,
+            input_fields=input_fields,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
@@ -107,7 +109,7 @@ def get_data(cfg):
         if partial_holdouts:
             holdout_samples_valset = CycloneDataset(
                 active_keys=cfg.dataset.active_keys,
-                input_fields=cfg.dataset.input_fields,
+                input_fields=input_fields,
                 path=cfg.dataset.path,
                 split="val",
                 random_seed=cfg.seed,
