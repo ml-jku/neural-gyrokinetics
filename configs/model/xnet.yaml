@@ -1,14 +1,17 @@
-name: swin
+name: xnet
 bundle_seq_length: 1
 latent_dim: 256
 num_layers: 1
+decouple_mu: false
 conditioning: ["timestep", "itg"]
-losses: ["df"]
-loss_weights: [1.0]
+losses: ["df", "phi", "flux"]
+loss_weights: [0.6, 0.4, 1e-3]
 
 swin:
   patch_size: [ 4, 2, 4, 8, 4 ]
+  phi_patch_size: [8, 2, 4]
   window_size: [ 4, 2, 2, 8, 4 ]
+  phi_window_size: [7, 4, 12]
   num_heads: [8]
   depth: [2]
   gradient_checkpoint: false
@@ -22,4 +25,4 @@ swin:
   modulation: "film"
   drop_path: 0.1
   swin_bottleneck: true
-  latent_cross_attn: false
+  latent_cross_attn: true

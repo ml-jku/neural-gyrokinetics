@@ -5,6 +5,7 @@ from .plot_utils import (
     generate_val_plots,
     get_flux_plot,
 )
+from .gkw_client import dump_rollout, request_gkw_sim
 
 
 __all__ = [
@@ -14,4 +15,6 @@ __all__ = [
     "plot4x4_sided",
     "generate_val_plots",
     "get_flux_plot",
+    "dump_rollout",
+    "request_gkw_sim"
 ]

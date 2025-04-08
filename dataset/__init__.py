@@ -40,6 +40,7 @@ def get_data(cfg):
 
         trainset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
+            input_fields=cfg.dataset.input_fields,
             path=cfg.dataset.path,
             split="train",
             random_seed=cfg.seed,
@@ -61,6 +62,7 @@ def get_data(cfg):
 
         holdout_trajectories_valset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
+            input_fields=cfg.dataset.input_fields,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
@@ -105,6 +107,7 @@ def get_data(cfg):
         if partial_holdouts:
             holdout_samples_valset = CycloneDataset(
                 active_keys=cfg.dataset.active_keys,
+                input_fields=cfg.dataset.input_fields,
                 path=cfg.dataset.path,
                 split="val",
                 random_seed=cfg.seed,

@@ -9,6 +9,7 @@ import torch
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
+from hydra.core.hydra_config import HydraConfig
 
 from utils import set_seed, compress_src, find_free_port
 
@@ -45,16 +46,18 @@ def main(config: DictConfig):
     else:
         world_size = 1
 
-    if config.method == "default":
+    hydra_cfg = HydraConfig.get()
+    train_method = hydra_cfg['runtime']['choices']['training']
+    if train_method == "default":
         from run import runner
-    if config.method == "xnet":
-        from experimental.run_xnet import runner
-    if config.method == "refiner":
+    elif train_method == "refiner":
         from experimental.run_refine import runner
-    if config.method == "boost":
+    elif config.method == "boosting":
         from experimental.run_boost import runner
-    if config.method == "baseline":
+    elif config.method == "baseline":
         from experimental.baselines.run import runner
+    else:
+        raise NotImplementedError(f"trainer {train_method} not supported!")
 
     try:
         if dict_config["logging"]["run_id"] is None:
@@ -75,10 +78,10 @@ def main(config: DictConfig):
             if "NCCL_SOCKET_IFNAME" in os.environ:
                 # unset nccl comm interface
                 del os.environ["NCCL_SOCKET_IFNAME"]
-            mp.spawn(runner, args=(config, world_size), nprocs=world_size)
+            mp.spawn(runner, args=(config, train_method, world_size), nprocs=world_size)
         else:
             rank = 0
-            runner(rank, config, world_size=1)
+            runner(rank, config, train_method, world_size=1)
     except BaseException:
         traceback.print_exc(file=sys.stderr)
         raise
