@@ -1,12 +1,15 @@
-from typing import List, Callable, Optional
+from typing import List, Callable, Optional, Dict, Tuple
 import warnings
 import torch
+from torch.special import bessel_j0 as j0, i0
+import torch.nn.functional as F
 from torch import nn
 import numpy as np
 from tqdm import tqdm
 from transformers.optimization import get_scheduler
 from torch.nn.utils import clip_grad_norm_
 from torch.distributed import get_rank, is_initialized
+from einops import rearrange
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -36,107 +39,205 @@ def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
         return torch.mean(diff_norms / y_norms, dim=dims)
 
 
-def df_fft(df: torch.Tensor, norm: str = "backward"):
-    df = df.movedim(0, -1).contiguous()
-    df = torch.view_as_complex(df)
-    df = torch.fft.fftn(df, dim=(3, 4), norm=norm)
-    return torch.fft.ifftshift(df, dim=(3,))
+class FluxIntegral(nn.Module):
+    def __init__(self, geometry: Dict):
+        super().__init__()
 
+        self.geometry = geometry
 
-def phi_to_spc(phi: torch.Tensor, out_shape: Tuple, norm: str = "forward"):
-    # drop channels and apply fft
-    phi = torch.fft.fftn(phi.squeeze(0), dim=(0, 2), norm=norm)
-    phi = torch.fft.fftshift(phi, dim=(2, 0))
-    # unpad (and positive half of spectra)
-    nx, _, ny = out_shape
-    phi = phi[..., phi.shape[-1] // 2 :]
-    xpad = (phi.shape[0] - nx) // 2 + 1
-    return phi[xpad : nx + xpad, :, :ny]
+        # expand geometry constants for broadcasting
+        # grids
+        krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
+        self.register_buffer("krho", krho)
+        kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
+        self.register_buffer("kxrh", kxrh)
+        ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
+        self.register_buffer("ints", ints)
+        intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
+        self.register_buffer("intmu", intmu)
+        intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
+        self.register_buffer("intvp", intvp)
+        vpgr = rearrange(geometry["vpgr"], "par -> par 1 1 1 1")
+        self.register_buffer("vpgr", vpgr)
+        mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
+        self.register_buffer("mugr", mugr)
+        # settings
+        little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
+        self.register_buffer("little_g", little_g)
+        bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
+        self.register_buffer("bn", bn)
+        efun = rearrange(geometry["efun"], "s -> 1 1 s 1 1")
+        self.register_buffer("efun", efun)
+        rfun = rearrange(geometry["rfun"], "s -> 1 1 s 1 1")
+        self.register_buffer("rfun", rfun)
+        bt_frac = rearrange(geometry["bt_frac"], "s -> 1 1 s 1 1")
+        self.register_buffer("bt_frac", bt_frac)
+        parseval = rearrange(geometry["parseval"], "y -> 1 1 1 1 y")
+        self.register_buffer("parseval", parseval)
+        mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
+        # bessel for gyroaverage
+        krloc = torch.sqrt(
+            krho**2 * little_g[0]
+            + 2 * krho * kxrh * little_g[1]
+            + kxrh**2 * little_g[2]
+        )
+        bessel = j0(mas * vthrat * krloc * torch.sqrt(2.0 * mugr / bn) / signz)
+        # exponentially scaled bessel i0 function
+        gamma = 0.5 * ((mas * vthrat * krloc) / (signz * bn)) ** 2
+        gamma = i0(gamma) * torch.exp(-gamma)
+        self.register_buffer("bessel", bessel)
+        self.register_buffer("gamma", gamma)
 
+    def _df_fft(self, df: torch.Tensor, norm: str = "backward"):
+        df = df.movedim(0, -1).contiguous()
+        df = torch.view_as_complex(df)
+        df = torch.fft.fftn(df, dim=(3, 4), norm=norm)
+        return torch.fft.ifftshift(df, dim=(3,))
 
-@torch.vmap
-def pev_integral_df_phi(
-    df: torch.Tensor,
-    phi: torch.Tensor,
-    geometry: Dict,
-    aggregate: bool = True,
-    magnitude: bool = False,
-):
-    """
-    Computes particle, heat and momentum fluxes based on the distribution function (df)
-    and electrostatic potential (phi).
+    def _phi_to_spc(self, phi: torch.Tensor, out_shape: Tuple, norm: str = "forward"):
+        # drop channels and apply fft
+        phi = torch.fft.fftn(phi.squeeze(0), dim=(0, 2), norm=norm)
+        phi = torch.fft.fftshift(phi, dim=(0, 2))
+        # unpad (and positive half of spectra)
+        if phi.shape != out_shape:
+            nx, _, ny = out_shape
+            phi = phi[..., phi.shape[-1] // 2 :]
+            xpad = (phi.shape[0] - nx) // 2 + 1
+            phi = phi[xpad : nx + xpad, :, :ny]
+        return rearrange(phi, "x s y -> s x y")
 
-    Args:
-        df (torch.Tensor): 5D density function. Shape: (b, c, vpar, vmu, s, x, y).
-        phi (torch.Tensor): 3D electrostatic potential. Shape: (b, 1, x, s, y).
-        geometry (Dict): Dictionary containing geometry parameters and settings.
-        aggregate (bool, optional): Whether to return the summed fluxes. Default: True.
-        magnitude (bool, optional): Whether to use df and phi absolutes. Default: False.
-    """
-    ns, nx, ny = df.shape[3:]
-    # df to fourier, phi to fourier and unpad
-    df = df_fft(df)  # (par, mu, s, x, y)
-    phi = phi_to_spc(phi, out_shape=(nx, ns, ny))  # (x, s, y)
-    # expand geometry constants for broadcasting
-    # grids
-    krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
-    kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
-    ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
-    intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
-    intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
-    vpgr = rearrange(geometry["vpgr"], "par -> par 1 1 1 1")
-    mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
-    # settings
-    little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
-    bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
-    efun = rearrange(geometry["efun"], "s -> 1 1 s 1 1")
-    rfun = rearrange(geometry["rfun"], "s -> 1 1 s 1 1")
-    bt_frac = rearrange(geometry["bt_frac"], "s -> 1 1 s 1 1")
-    parseval = rearrange(geometry["parseval"], "y -> 1 1 1 1 y")
-    mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
-    # gyroaveraged phi
-    krloc = torch.sqrt(
-        krho**2 * little_g[0] + 2 * krho * kxrh * little_g[1] + kxrh**2 * little_g[2]
-    )
-    bessel = torch.special.bessel_j0(
-        mas * vthrat * krloc * torch.sqrt(2.0 * mugr / bn) / signz
-    )
-    phi_gyro = bessel * rearrange(phi, "x s y -> 1 1 s x y")
-    # absolute values of df and phi
-    if magnitude:
-        df = -1j * torch.abs(df)
-        phi_gyro = torch.abs(phi_gyro)
-    # grid derivatives
-    dum = parseval * ints * (efun * krho) * df
-    dum1 = dum * torch.conj(phi_gyro)
-    dum2 = dum1 * bn
-    d3X = ints * geometry["d2X"]
-    d3v = intmu * bn * intvp
-    signB = geometry["signB"]
-    # flux fields
-    pflux = d3X * d3v * torch.imag(dum1)
-    eflux = d3X * d3v * (vpgr**2 * torch.imag(dum1) + 2 * mugr * torch.imag(dum2))
-    vflux = d3X * d3v * (torch.imag(dum1) * vpgr * rfun * bt_frac * signB)
-    # sum total fluxes
-    if aggregate:
-        pflux = pflux.sum()
-        eflux = eflux.sum()
-        vflux = vflux.sum()
-    return pflux, eflux, vflux
+    def _spc_to_phi(
+        self,
+        spc: torch.Tensor,
+        original_shape: Tuple = (392, 16, 96),
+        norm: str = "forward",
+    ):
+        spc = rearrange(spc, "s x y -> x s y")
+        nx, _, ny = original_shape
+        spc_nx, _, spc_ny = spc.shape
+        # x pad
+        x_pad_total = nx - spc_nx
+        x_pad_left = x_pad_total // 2
+        x_pad_right = x_pad_total - x_pad_left
+        spc = F.pad(spc, (0, 0, 0, 0, x_pad_left, x_pad_right))
+        # y full spectrum and pad
+        spc_flipped_y = torch.flip(spc, dims=[-1])
+        spc = torch.cat([spc_flipped_y, spc], dim=-1)
+        y_pad_total = ny - spc_ny * 2
+        y_pad_left = y_pad_total // 2
+        y_pad_right = y_pad_total - y_pad_left
+        spc = F.pad(spc, (y_pad_left, y_pad_right, 0, 0))
+        # ifft
+        spc = torch.fft.ifftshift(spc, dim=(0, 2))
+        phi = torch.fft.ifftn(spc, dim=(0, 2), norm=norm)
+        return phi.unsqueeze(0)  # (c, x, s, y)
 
+    def pev_fluxes(
+        self,
+        df: torch.Tensor,
+        phi: torch.Tensor,
+        magnitude: bool = False,
+    ):
+        """
+        Computes particle, heat and momentum fluxes based on the distribution function
+        and electrostatic potential.
 
-def flux_loss(
-    df: torch.Tensor,
-    phi: torch.Tensor,
-    gt_fluxes: Dict[str, torch.Tensor],
-    geometry: Dict,
-):
-    fluxes = {}
-    fluxes["p"], fluxes["e"], fluxes["v"] = pev_integral_df_phi(df, phi, geometry)
-    loss = 0.0
-    for k in gt_fluxes:
-        loss += relative_norm_mse(fluxes[k].unsqueeze(0), gt_fluxes[k].unsqueeze(0))
-    return loss
+        Args:
+            df (torch.Tensor): 5D density function. Shape: (b, c, vpar, vmu, s, x, y).
+            phi (torch.Tensor): 3D electrostatic potential. Shape: (1, x, s, y).
+            geometry (Dict): Dictionary containing geometry parameters and settings.
+            magnitude (bool, optional): Use df and phi absolutes. Default: False.
+        """
+        phi_gyro = self.bessel * rearrange(phi.squeeze(), "s x y -> 1 1 s x y")
+        # absolute values of df and phi
+        if magnitude:
+            df = -1j * torch.abs(df)
+            phi_gyro = torch.abs(phi_gyro)
+        # grid derivatives
+        dum = self.parseval * self.ints * (self.efun * self.krho) * df
+        dum1 = dum * torch.conj(phi_gyro)
+        dum2 = dum1 * self.bn
+        d3v = self.ints * self.geometry["d2X"] * self.intmu * self.bn * self.intvp
+        signB = self.geometry["signB"]
+        # flux fields
+        dum1 = torch.imag(dum1)
+        dum2 = torch.imag(dum2)
+        pflux = d3v * dum1
+        eflux = d3v * (self.vpgr**2 * dum1 + 2 * self.mugr * dum2)
+        vflux = d3v * (dum1 * self.vpgr * self.rfun * self.bt_frac * signB)
+        # sum total fluxes
+        return pflux.sum(), eflux.sum(), vflux.sum()
+
+    def phi(self, df: torch.Tensor):
+        ns, nx, ny = df.shape[-3:]
+        # phi tensor
+        phi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
+        bufphi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
+        # density of the species
+        de = 1.0
+        signz, tmp = self.geometry["signz"], self.geometry["tmp"]
+        cfen = torch.zeros_like(self.ints)
+        # poisson terms
+        # integral mapping
+        poisson_int = signz * de * self.intmu * self.intvp * self.bessel * self.bn
+        poisson_int = torch.where(torch.abs(self.intvp) < 1e-9, 0.0, poisson_int)
+        # matz and maty zonal flow correction
+        diagz = (
+            signz
+            * de
+            * (
+                signz * (self.gamma - 1.0) * torch.exp(-cfen) / tmp
+                - torch.exp(-cfen) / tmp
+            )
+        )
+        matz = -self.ints / diagz
+        matz[..., 1:] = 0.0  # only keep y=0 (turb)
+        maty = (-matz * torch.exp(-cfen)).sum((2,), keepdim=True)
+        maty = tmp / (de * torch.exp(-cfen)) + maty / torch.exp(-cfen)
+        maty[..., 0, :] = 1 + 0j
+        maty = torch.where(maty == 0, 1.0, maty)  # avoid infs
+        maty = 1 / maty
+        maty[..., 1:] = 0.0  # only keep y=0 (turb)
+        # diagonal normalization term
+        poisson_diag = torch.exp(-cfen) * (signz**2) * de * (self.gamma - 1.0) / tmp
+        poisson_diag[..., 0, 0] = 0.0
+        poisson_diag = poisson_diag + signz * torch.exp(-cfen) * de / tmp
+        # first usmv
+        phi = (1 + 0j) * poisson_int * df
+        # integrate velocity space
+        phi = phi.sum((0, 1), keepdim=True)
+        # second usmv
+        bufphi = bufphi + (1 + 0j) * matz * phi
+        # surface average
+        bufphi = bufphi.sum(
+            (
+                2,
+                4,
+            ),
+            keepdim=True,
+        )
+        # third usmv
+        phi = phi + (1 + 0j) * maty * bufphi
+        # normalize
+        phi = phi * poisson_diag
+        return phi.squeeze()
+
+    def forward_single(self, df: torch.Tensor, phi: Optional[torch.Tensor] = None):
+        ns, nx, ny = df.shape[3:]
+        # df to fourier
+        df = self._df_fft(df)  # (par, mu, s, x, y)
+        if phi is None:
+            phi = self.phi(df)  # (s, x, y)
+        else:
+            phi_ = self._phi_to_spc(phi, out_shape=(nx, ns, ny))  # (s, x, y)
+        pflux, eflux, vflux = self.pev_fluxes(df, phi_)
+        # phi repad and back to real
+        phi_ = self._spc_to_phi(phi_)
+        return phi, (pflux, eflux, vflux)
+
+    def forward(self, df: torch.Tensor, phi: Optional[torch.Tensor] = None):
+        # return torch.vmap(self.forward_single)(df, phi)
+        self.forward_single(df[0], phi[0])
 
 
 def get_pushforward_fn(
