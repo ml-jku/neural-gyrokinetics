@@ -12,7 +12,6 @@ from omegaconf import DictConfig, OmegaConf
 from hydra.core.hydra_config import HydraConfig
 
 from utils import set_seed, compress_src, find_free_port
-from run import runner
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="main")
@@ -47,7 +46,18 @@ def main(config: DictConfig):
     else:
         world_size = 1
 
-    train_method = "default"  # TODO
+    hydra_cfg = HydraConfig.get()
+    train_method = hydra_cfg['runtime']['choices']['training']
+    if train_method == "default":
+        from run import runner
+    elif train_method == "refiner":
+        from experimental.run_refine import runner
+    elif config.method == "boosting":
+        from experimental.run_boost import runner
+    elif config.method == "baseline":
+        from experimental.baselines.run import runner
+    else:
+        raise NotImplementedError(f"trainer {train_method} not supported!")
 
     try:
         if dict_config["logging"]["run_id"] is None:

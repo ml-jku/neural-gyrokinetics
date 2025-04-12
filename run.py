@@ -14,9 +14,13 @@ from concurrent.futures import ThreadPoolExecutor
 
 from dataset import get_data, CycloneSample
 from models import get_model
-from train import get_pushforward_fn, LossWrapper, pretrain_autoencoder
+from train import get_pushforward_fn, relative_norm_mse, pretrain_autoencoder
 from eval.evaluate import evaluate
-from utils import load_model_and_config, setup_logging, edit_tag, get_geometry
+from utils import (
+    load_model_and_config,
+    setup_logging,
+    edit_tag
+)
 
 
 def ddp_setup(rank, world_size):
@@ -59,6 +63,21 @@ def runner(rank, cfg, train_method, world_size):
         model = DDP(model, device_ids=[rank])
 
     bundle_seq_length = cfg.model.bundle_seq_length
+    use_gkw = cfg.validation.use_gkw
+    gkw_args = {}
+    if use_gkw:
+        if cfg.dataset.normalization_scope == "sample":
+            raise UserWarning(
+                "Cannot denormalize with `normalization_scope='sample'`. "
+                "Cannot compute correct GKW results."
+            )
+        gkw_executor = ThreadPoolExecutor(max_workers=1)
+        # TODO hardcoded for now
+        gkw_dump_path = "/system/user/publicdata/gyrokinetics/dumps/test_gkw_client"
+        gkw_futures = {}
+        gkw_args['executor'] = gkw_executor
+        gkw_args['dump_path'] = gkw_dump_path
+        gkw_args['futures'] = gkw_futures
 
     opt_state_dict = None
     if cfg.load_ckp is True and cfg.ckpt_path is not None:
@@ -96,13 +115,6 @@ def runner(rank, cfg, train_method, world_size):
 
         # configure loss
         predict_delta = cfg.training.predict_delta
-        geometry = get_geometry()
-
-        loss_wrap = LossWrapper(
-            weights=dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights),
-            geometry=geometry,
-            denormalize_fn=trainset.denormalize
-        ).to(device)
         # and pushforward
         pf_cfg = cfg.training.pushforward
         pushforward_fn = None
@@ -125,15 +137,16 @@ def runner(rank, cfg, train_method, world_size):
             if not hasattr(model, "module") and use_ddp:
                 model = DDP(model, device_ids=[rank])
 
-        input_fields = set(cfg.dataset.input_fields)
-        output_fields = list(cfg.model.loss_weights.keys())
+        input_fields = cfg.dataset.input_fields
+        outputs = cfg.model.losses
         conditioning = cfg.model.conditioning
         idx_keys = ["file_index", "timestep_index"]
+        loss_weight_dict = {k: v for k, v in zip(cfg.model.losses, cfg.model.loss_weights)}
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
         loss_val_min = torch.inf
         for epoch in range(1, n_epochs + 1):
-            loss_logs = {k: 0 for k in loss_wrap.active_losses}
-            loss_logs["relative_norm"] = 0.0
+            loss_logs = {k: 0 for k in cfg.model.losses}
+            loss_logs['relative_norm'] = 0.
             model.train()
             info_dict = defaultdict(list)
             t_start_data = perf_counter_ns()
@@ -142,26 +155,11 @@ def runner(rank, cfg, train_method, world_size):
                 trainloader = tqdm(trainloader, "Training")
 
             for i, sample in enumerate(trainloader):
-                try:
-                    reset_peak_memory_stats(device)
-                except:
-                    pass  # only works with cuda device
+                reset_peak_memory_stats(device)
                 sample: CycloneSample
-                inputs = {
-                    k: getattr(sample, k).to(device, non_blocking=True)
-                    for k in input_fields
-                    if k is not None
-                }
-                gts = {
-                    k: getattr(sample, f"y_{k}").to(device, non_blocking=True)
-                    for k in output_fields
-                    if k is not None
-                }
-                conds = {
-                    k: getattr(sample, k).to(device, non_blocking=True)
-                    for k in conditioning
-                    if k is not None
-                }
+                inputs = { k: getattr(sample, k).to(device, non_blocking=True) for k in input_fields if k is not None }
+                gts = {k: getattr(sample, f"y_{k}").to(device, non_blocking=True) for k in outputs if k is not None}
+                conds = { k: getattr(sample, k).to(device, non_blocking=True) for k in conditioning if k is not None }
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
                 # TODO should augmentations take place before moving to GPU?
@@ -176,12 +174,8 @@ def runner(rank, cfg, train_method, world_size):
                     start_pf = perf_counter_ns()
                     # accessory information for pf (to retreive unrolled target)
                     inputs, gts, conds = pushforward_fn(
-                        model,
-                        inputs,
-                        gts,
-                        conds,
-                        idx_data,
-                        epoch,
+                        model, inputs, gts, conds,
+                        idx_data, epoch,
                     )
                     info_dict["pf_ms"].append((perf_counter_ns() - start_pf) / 1e6)
                 else:
@@ -189,13 +183,16 @@ def runner(rank, cfg, train_method, world_size):
 
                 t_start_fwd = perf_counter_ns()
                 with torch.autocast(str(device), dtype=amp_dtype, enabled=use_amp):
-                    preds = model(**inputs, **conds)
+                    outputs = model(**inputs, **conds)
                     if predict_delta:
                         for key in cfg.dataset.input_fields:
-                            preds[key] = preds[key] + inputs[key]
+                            outputs[key] = outputs[key] + inputs[key]
 
-                    # compute losses
-                    loss, losses = loss_wrap(preds, gts, idx_data)
+                    losses = {}
+                    loss = 0.
+                    for key in cfg.model.losses:
+                        losses[key] = relative_norm_mse(outputs[key], gts[key])
+                        loss += loss_weight_dict[key] * losses[key]
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
@@ -211,9 +208,9 @@ def runner(rank, cfg, train_method, world_size):
                 if cfg.training.scheduler is not None:
                     scheduler.step()
 
-                for k in loss_wrap.active_losses:
+                for k in cfg.model.losses:
                     loss_logs[k] += losses[k].item()
-                loss_logs["relative_norm"] += loss.item()
+                loss_logs['relative_norm'] += loss.item()
 
                 del inputs
                 del gts
@@ -228,7 +225,7 @@ def runner(rank, cfg, train_method, world_size):
 
             for k in cfg.model.losses:
                 loss_logs[k] /= len(trainloader)
-            loss_logs["relative_norm"] /= len(trainloader)
+            loss_logs['relative_norm'] /= len(trainloader)
             loss_logs = edit_tag(loss_logs, prefix="train", postfix="mse")
             train_losses_dict = {
                 "train/lr": (
@@ -239,21 +236,9 @@ def runner(rank, cfg, train_method, world_size):
             }
             train_losses_dict = train_losses_dict | loss_logs
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
-            
-            # TODO evaluate integrals on rollout as well
-            log_metric_dict, val_plots, loss_val_min = evaluate(
-                rank,
-                world_size,
-                model,
-                loss_wrap,
-                valsets,
-                valloaders,
-                opt,
-                epoch,
-                cfg,
-                device,
-                loss_val_min,
-            )
+
+            log_metric_dict, val_plots, loss_val_min = evaluate(rank, world_size, model, valsets,
+                     valloaders, opt, epoch, cfg, device, gkw_args, loss_val_min)
 
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict
@@ -280,6 +265,10 @@ def runner(rank, cfg, train_method, world_size):
                     f"{', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}"
                     f", step time: {total_time:.2f}ms"
                 )
+        if use_gkw:
+            # TODO wait some more if some gkw process is still hanging
+            pass
+
         if writer:
             writer.finish()
 

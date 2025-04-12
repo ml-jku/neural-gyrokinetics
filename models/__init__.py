@@ -11,9 +11,7 @@ def get_model(cfg, dataset, train_method="default"):
         problem_dim += 2
 
     if cfg.model.name == "swin":
-        assert cfg.dataset.input_fields == [
-            "df"
-        ], "No more inputs than df supported for simple 5D-Swin"
+        assert cfg.dataset.input_fields == ["df"], "No more inputs than df supported for simple 5D-Swin"
         from models.swin_unet import SwinUnet
         from models.utils import ContinuousConditionEmbed
 
@@ -104,7 +102,7 @@ def get_model(cfg, dataset, train_method="default"):
         decouple_mu = cfg.model.decouple_mu
         separate_zf = cfg.dataset.separate_zf
         refiner = train_method == "refiner"
-        outputs = list(cfg.model.loss_weights.keys())
+        outputs = cfg.model.losses
         swin_bottleneck = cfg.model.swin.swin_bottleneck
 
         cond_fn = None

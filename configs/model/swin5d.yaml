@@ -3,9 +3,8 @@ bundle_seq_length: 1
 latent_dim: 256
 num_layers: 1
 conditioning: ["timestep", "itg"]
-loss_weights:
-  df: 1.0
-extra_loss_weights:
+losses: ["df"]
+loss_weights: [1.0]
 
 swin:
   patch_size: [ 4, 2, 4, 8, 4 ]
