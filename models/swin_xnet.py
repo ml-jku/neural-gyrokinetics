@@ -67,9 +67,13 @@ class CrossAttention(nn.Module):
 
         if dist.is_initialized():
             with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
+                x = F.scaled_dot_product_attention(
+                    q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
+                )
         else:
-            x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
+            x = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
+            )
 
         # attention readout
         x = rearrange(x, "b k n c -> b n (k c)")
@@ -347,8 +351,8 @@ class SwinXnet(nn.Module):
             window_size=phi_window_size,
             depth=depth,
             num_heads=num_heads,
-            in_channels=1,
-            out_channels=1,
+            in_channels=in_channels,
+            out_channels=out_channels,
             num_layers=num_layers,
             use_checkpoint=use_checkpoint,
             drop_path=drop_path,
@@ -484,11 +488,7 @@ class SwinXnet(nn.Module):
         if self.flux_head is not None:
             flux = self.flux_head(flux_lats)
 
-        output = {
-            'df': df,
-            'phi': phi,
-            'flux': flux
-        }
+        output = {"df": df, "phi": phi, "flux": flux}
         return output
 
     def patch_encode(self, df: torch.Tensor, phi: torch.Tensor):

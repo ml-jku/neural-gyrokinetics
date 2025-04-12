@@ -4,8 +4,15 @@ latent_dim: 256
 num_layers: 1
 decouple_mu: false
 conditioning: ["timestep", "itg"]
-losses: ["df", "phi", "flux"]
-loss_weights: [0.6, 0.4, 1e-3]
+loss_weights:
+  df: 0.6
+  phi: 0.4
+  flux: 0.001
+extra_loss_weights:
+  phi_int: 0.1
+  flux_int: 1e-4
+  phi_cross: 1e-3
+  flux_cross: 1e-4
 
 swin:
   patch_size: [ 4, 2, 4, 8, 4 ]

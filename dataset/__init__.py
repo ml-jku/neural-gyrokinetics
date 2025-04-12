@@ -38,8 +38,12 @@ def get_data(cfg):
                 file = entry.trajectory
                 last_n = entry.last_n
                 partial_holdouts[file] = last_n
-
-        input_fields = np.unique(cfg.dataset.input_fields + cfg.model.losses)
+        input_fields = (
+            set(cfg.dataset.input_fields)
+            .union(set(cfg.model.loss_weights.keys()))
+            .union([k.split("_")[0] for k in cfg.model.extra_loss_weights.keys()])
+        )
+        input_fields.remove("flux")  # flux cannot be an input
         trainset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
             input_fields=input_fields,
@@ -70,7 +74,7 @@ def get_data(cfg):
             random_seed=cfg.seed,
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
-            normalization_stats=trainset.dataset_stats,
+            normalization_stats=trainset.norm_stats,
             spatial_ifft=cfg.dataset.spatial_ifft,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,
@@ -115,7 +119,7 @@ def get_data(cfg):
                 random_seed=cfg.seed,
                 normalization=cfg.dataset.normalization,
                 normalization_scope=cfg.dataset.normalization_scope,
-                normalization_stats=trainset.dataset_stats,
+                normalization_stats=trainset.norm_stats,
                 spatial_ifft=cfg.dataset.spatial_ifft,
                 bundle_seq_length=cfg.model.bundle_seq_length,
                 trajectories=cfg.dataset.training_trajectories,

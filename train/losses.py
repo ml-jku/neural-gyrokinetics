@@ -1,5 +1,6 @@
 from typing import List, Callable, Dict, Optional, Tuple
 import warnings
+from functools import partial
 import torch
 from torch.special import bessel_j0 as j0, i0
 import torch.nn.functional as F
@@ -43,7 +44,7 @@ def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
 
 
 class FluxIntegral(nn.Module):
-    def __init__(self, geometry: Dict):
+    def __init__(self, geometry: Dict, dtype: torch.dtype = torch.float32):
         super().__init__()
 
         self.geometry = geometry
@@ -51,32 +52,32 @@ class FluxIntegral(nn.Module):
         # expand geometry constants for broadcasting
         # grids
         krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
-        self.register_buffer("krho", krho)
+        self.register_buffer("krho", krho.to(dtype=dtype))
         kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
-        self.register_buffer("kxrh", kxrh)
+        self.register_buffer("kxrh", kxrh.to(dtype=dtype))
         ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
-        self.register_buffer("ints", ints)
+        self.register_buffer("ints", ints.to(dtype=dtype))
         intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
-        self.register_buffer("intmu", intmu)
+        self.register_buffer("intmu", intmu.to(dtype=dtype))
         intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
-        self.register_buffer("intvp", intvp)
+        self.register_buffer("intvp", intvp.to(dtype=dtype))
         vpgr = rearrange(geometry["vpgr"], "par -> par 1 1 1 1")
-        self.register_buffer("vpgr", vpgr)
+        self.register_buffer("vpgr", vpgr.to(dtype=dtype))
         mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
-        self.register_buffer("mugr", mugr)
+        self.register_buffer("mugr", mugr.to(dtype=dtype))
         # settings
         little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
-        self.register_buffer("little_g", little_g)
+        self.register_buffer("little_g", little_g.to(dtype=dtype))
         bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
-        self.register_buffer("bn", bn)
+        self.register_buffer("bn", bn.to(dtype=dtype))
         efun = rearrange(geometry["efun"], "s -> 1 1 s 1 1")
-        self.register_buffer("efun", efun)
+        self.register_buffer("efun", efun.to(dtype=dtype))
         rfun = rearrange(geometry["rfun"], "s -> 1 1 s 1 1")
-        self.register_buffer("rfun", rfun)
+        self.register_buffer("rfun", rfun.to(dtype=dtype))
         bt_frac = rearrange(geometry["bt_frac"], "s -> 1 1 s 1 1")
-        self.register_buffer("bt_frac", bt_frac)
+        self.register_buffer("bt_frac", bt_frac.to(dtype=dtype))
         parseval = rearrange(geometry["parseval"], "y -> 1 1 1 1 y")
-        self.register_buffer("parseval", parseval)
+        self.register_buffer("parseval", parseval.to(dtype=dtype))
         mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
         # bessel for gyroaverage
         krloc = torch.sqrt(
@@ -88,18 +89,21 @@ class FluxIntegral(nn.Module):
         # exponentially scaled bessel i0 function
         gamma = 0.5 * ((mas * vthrat * krloc) / (signz * bn)) ** 2
         gamma = i0(gamma) * torch.exp(-gamma)
-        self.register_buffer("bessel", bessel)
-        self.register_buffer("gamma", gamma)
+        self.register_buffer("bessel", bessel.to(dtype=dtype))
+        self.register_buffer("gamma", gamma.to(dtype=dtype))
+        
+        self._fwd_vmap = torch.vmap(self.forward_single)
 
-    def _df_fft(self, df: torch.Tensor, norm: str = "backward"):
+    def _df_fft(self, df: torch.Tensor, norm: str = "forward"):
         df = df.movedim(0, -1).contiguous()
         df = torch.view_as_complex(df)
         df = torch.fft.fftn(df, dim=(3, 4), norm=norm)
         return torch.fft.ifftshift(df, dim=(3,))
 
     def _phi_to_spc(self, phi: torch.Tensor, out_shape: Tuple, norm: str = "forward"):
-        # drop channels and apply fft
-        phi = torch.fft.fftn(phi.squeeze(0), dim=(0, 2), norm=norm)
+        phi = phi.movedim(0, -1).contiguous()
+        phi = torch.view_as_complex(phi)
+        phi = torch.fft.fftn(phi, dim=(0, 2), norm=norm)
         phi = torch.fft.fftshift(phi, dim=(0, 2))
         # unpad (and positive half of spectra)
         if phi.shape != out_shape:
@@ -113,27 +117,31 @@ class FluxIntegral(nn.Module):
         self,
         spc: torch.Tensor,
         original_shape: Tuple = (392, 16, 96),
+        repad: bool = False,
         norm: str = "forward",
     ):
         spc = rearrange(spc, "s x y -> x s y")
-        nx, _, ny = original_shape
         spc_nx, _, spc_ny = spc.shape
-        # x pad
-        x_pad_total = nx - spc_nx
-        x_pad_left = x_pad_total // 2
-        x_pad_right = x_pad_total - x_pad_left
-        spc = F.pad(spc, (0, 0, 0, 0, x_pad_left, x_pad_right))
-        # y full spectrum and pad
-        spc_flipped_y = torch.flip(spc, dims=[-1])
-        spc = torch.cat([spc_flipped_y, spc], dim=-1)
-        y_pad_total = ny - spc_ny * 2
-        y_pad_left = y_pad_total // 2
-        y_pad_right = y_pad_total - y_pad_left
-        spc = F.pad(spc, (y_pad_left, y_pad_right, 0, 0))
+        if repad:
+            # pad x
+            nx, _, ny = original_shape
+            x_pad_total = nx - spc_nx
+            x_pad_left = x_pad_total // 2
+            x_pad_right = x_pad_total - x_pad_left
+            spc = F.pad(spc, (0, 0, 0, 0, x_pad_left, x_pad_right))
+            # y full spectrum and pad
+            spc_flipped_y = torch.flip(spc, dims=[-1])
+            spc = torch.cat([spc_flipped_y, spc], dim=-1)
+            y_pad_total = ny - spc_ny * 2
+            y_pad_left = y_pad_total // 2
+            y_pad_right = y_pad_total - y_pad_left
+            spc = F.pad(spc, (y_pad_left, y_pad_right, 0, 0))
         # ifft
-        spc = torch.fft.ifftshift(spc, dim=(0, 2))
-        phi = torch.fft.ifftn(spc, dim=(0, 2), norm=norm)
-        return phi.unsqueeze(0)  # (c, x, s, y)
+        # TODO investigate the shift for phi
+        phi = torch.fft.ifftshift(spc, dim=2)
+        phi = torch.fft.ifftn(phi, dim=(0, 2), norm=norm)
+        phi = torch.view_as_real(phi).movedim(-1, 0).contiguous()
+        return phi  # (c, x, s, y)
 
     def pev_fluxes(
         self,
@@ -172,10 +180,6 @@ class FluxIntegral(nn.Module):
         return pflux.sum(), eflux.sum(), vflux.sum()
 
     def phi(self, df: torch.Tensor):
-        ns, nx, ny = df.shape[-3:]
-        # phi tensor
-        phi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
-        bufphi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
         # density of the species
         de = 1.0
         signz, tmp = self.geometry["signz"], self.geometry["tmp"]
@@ -210,15 +214,9 @@ class FluxIntegral(nn.Module):
         # integrate velocity space
         phi = phi.sum((0, 1), keepdim=True)
         # second usmv
-        bufphi = bufphi + (1 + 0j) * matz * phi
+        bufphi = (1 + 0j) * matz * phi
         # surface average
-        bufphi = bufphi.sum(
-            (
-                2,
-                4,
-            ),
-            keepdim=True,
-        )
+        bufphi = bufphi.sum((2, 4), keepdim=True)
         # third usmv
         phi = phi + (1 + 0j) * maty * bufphi
         # normalize
@@ -229,18 +227,113 @@ class FluxIntegral(nn.Module):
         ns, nx, ny = df.shape[3:]
         # df to fourier
         df = self._df_fft(df)  # (par, mu, s, x, y)
-        if phi is None:
-            phi = self.phi(df)  # (s, x, y)
-        else:
+        phi_int = self.phi(df)  # (s, x, y)
+        phi_ = phi_int.clone()
+        if phi is not None:
             phi_ = self._phi_to_spc(phi, out_shape=(nx, ns, ny))  # (s, x, y)
         pflux, eflux, vflux = self.pev_fluxes(df, phi_)
-        # phi repad and back to real
-        phi_ = self._spc_to_phi(phi_)
-        return phi, (pflux, eflux, vflux)
+        # integrated phi repad and back to real
+        phi_int = self._spc_to_phi(phi_int)
+        return phi_int, (pflux, eflux, vflux)
 
     def forward(self, df: torch.Tensor, phi: Optional[torch.Tensor] = None):
-        # return torch.vmap(self.forward_single)(df, phi)
-        self.forward_single(df[0], phi[0])
+        if phi is not None:
+            return self._fwd_vmap(df, phi)
+        else:
+            return self._fwd_vmap(df)
+
+
+class LossWrapper(nn.Module):
+    def __init__(
+        self,
+        weights: Dict,
+        geometry: Optional[Dict] = None,
+        denormalize_fn: Optional[Callable] = None,
+    ):
+        super().__init__()
+
+        self.weights = weights
+        _extras = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
+        if sum([self.weights.get(k, 0.0) for k in _extras]) > 0:
+            self.integrator = FluxIntegral(geometry)
+            self.denormalize_fn = denormalize_fn
+
+        self.loss_fns = {
+            "df": partial(self.data_loss, "df"),
+            "phi": partial(self.data_loss, "phi"),
+            "flux": partial(self.data_loss, "flux"),
+        }
+
+    def data_loss(
+        self, key: str, preds: Dict[str, torch.Tensor], tgts: Dict[str, torch.Tensor]
+    ):
+        if key == "flux":
+            # NOTE: regular mse for flux otherwise might get nans (for linear phase)
+            return F.mse_loss(preds["flux"].squeeze(), tgts["flux"])
+        else:
+            return relative_norm_mse(preds[key], tgts[key])
+
+    def integral_loss(
+        self,
+        preds: Dict[str, torch.Tensor],
+        tgts: Dict[str, torch.Tensor],
+        idx_data: Dict[str, torch.Tensor],
+    ):
+        assert self.denormalize_fn is not None
+        pred_df = []
+        pred_phi = []
+        tgt_phi = []
+        for b, f in enumerate(idx_data["file_index"].tolist()):
+            pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
+            if "phi" in preds:
+                pred_phi.append(self.denormalize_fn(f, phi=preds["phi"][b]))
+            tgt_phi.append(self.denormalize_fn(f, phi=tgts["phi"][b]))
+        pred_df = torch.stack(pred_df)
+        if len(pred_phi) > 0:
+            pred_phi = torch.stack(pred_phi)
+        else:
+            pred_phi = None
+        tgt_phi = torch.stack(tgt_phi)
+
+        pphi_int, (pflux, eflux, _) = self.integrator(pred_df, pred_phi)
+        int_losses = {}
+        # NOTE: these losses are in unnormalized space
+        int_losses["phi_int"] = relative_norm_mse(pphi_int, tgt_phi)
+        # pflux -> 0, eflux -> heat flux
+        int_losses["flux_int"] = (pflux**2).mean() + F.mse_loss(eflux, tgts["flux"])
+        # mimicry / cross terms in the loss (between prediction heads and integrals)
+        if "phi" in preds:
+            int_losses["phi_cross"] = relative_norm_mse(pphi_int, pred_phi)
+        if "flux" in preds:
+            int_losses["flux_cross"] = F.mse_loss(eflux, preds["flux"].squeeze())
+
+        return int_losses
+
+    def forward(
+        self,
+        preds: Dict[str, torch.Tensor],
+        tgts: Dict[str, torch.Tensor],
+        idx_data: Dict[str, torch.Tensor],
+    ):
+        losses = {}
+        int_losses = None
+        # compute integral only once
+        # newtwork predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
+        # if weight["phi"] > 0 -> weight["phi_int"] = 0 and vice versa
+        if hasattr(self, "integrator"):
+            int_losses = self.integral_loss(preds, tgts, idx_data)
+        for k in self.weights:
+            if "int" in k or "cross" in k:
+                losses[k] = int_losses[k]
+            else:
+                losses[k] = self.loss_fns[k](preds, tgts)
+        
+        loss = sum([w * losses[k] for k, w in self.weights.items()])
+        return loss, losses
+
+    @property
+    def active_losses(self):
+        return [k for k in self.weights if self.weights[k] > 0.0]
 
 
 def get_pushforward_fn(
@@ -260,7 +353,9 @@ def get_pushforward_fn(
         conds: Dict,
         idx_data: Dict,
         epoch: int,
-    ) -> Tuple[Dict[str, torch.Tensor],Dict[str, torch.Tensor],Dict[str, torch.Tensor]]:
+    ) -> Tuple[
+        Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]
+    ]:
         # pushforward scheduler with epoch
         idx = (epoch > np.array(epoch_schedule)).sum()
         if not idx:
@@ -273,7 +368,9 @@ def get_pushforward_fn(
         # cap the unroll steps depending on the current max timestep
         n_unrolls = []
         for i, f_idx in enumerate(idx_data["file_index"].tolist()):
-            sleft = (dataset.num_ts(int(f_idx)) - int(idx_data["timestep_index"][i])) // bundle_steps - 1
+            sleft = (
+                dataset.num_ts(int(f_idx)) - int(idx_data["timestep_index"][i])
+            ) // bundle_steps - 1
             n_unrolls.append(min(sleft, pf_n_unrolls))
         n_unrolls = min(n_unrolls)
 
@@ -297,14 +394,16 @@ def get_pushforward_fn(
         executor = ThreadPoolExecutor(max_workers=1)
         with torch.no_grad():
             ts_unrolled = idx_data["timestep_index"] + (n_unrolls - 1) * ts_step
-            future = executor.submit(fetch_target, dataset, idx_data["file_index"], ts_unrolled)
+            future = executor.submit(
+                fetch_target, dataset, idx_data["file_index"], ts_unrolled
+            )
 
             inputs_t = inputs.copy()
             for i in range(n_unrolls - 1):
                 use_bf16 = use_amp and torch.cuda.is_bf16_supported()
                 amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
                 with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
-                    conds['timestep'] = tsteps[:, i].to(device)
+                    conds["timestep"] = tsteps[:, i].to(device)
                     outputs = model(**inputs_t, **conds)
                     if predict_delta:
                         for key in dataset.input_fields:
@@ -316,8 +415,16 @@ def get_pushforward_fn(
             # Get the result when needed
             unrolled: CycloneSample = future.result()
 
-        gts = {k: getattr(unrolled, k).to(device, non_blocking=True) for k in gts.keys() if k is not None}
-        conds = {k: getattr(unrolled, k).to(device, non_blocking=True) for k in conds.keys() if k is not None}
+        gts = {
+            k: getattr(unrolled, k).to(device, non_blocking=True)
+            for k in gts.keys()
+            if k is not None
+        }
+        conds = {
+            k: getattr(unrolled, k).to(device, non_blocking=True)
+            for k in conds.keys()
+            if k is not None
+        }
         return inputs_t, gts, conds
 
     return _loss_fn
