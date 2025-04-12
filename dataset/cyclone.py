@@ -482,7 +482,7 @@ class CycloneDataset(Dataset):
             field = "phi"
             x = phi
         else:
-            raise ValueError  
+            raise ValueError
 
         scale, shift = self._get_scale_shift(file_index, field, x)
         return (x - shift) / scale, shift, scale
@@ -500,8 +500,8 @@ class CycloneDataset(Dataset):
             field = "phi"
             x = phi
         else:
-            raise ValueError  
-        
+            raise ValueError
+
         scale, shift = self._get_scale_shift(file_index, field, x)
         return x * scale + shift
 
@@ -519,7 +519,7 @@ class CycloneDataset(Dataset):
                     raise UserWarning(f"`{cond_name}` not found in metadata {fname}.")
 
             return True
-    
+
     def _get_scale_shift(self, file_index: int, field: str, x) -> Tuple:
         shift, scale = np.array(0.0), np.array(1.0)
         if self.normalization_scope == "sample":

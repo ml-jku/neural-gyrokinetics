@@ -101,7 +101,7 @@ def runner(rank, cfg, train_method, world_size):
         loss_wrap = LossWrapper(
             weights=dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights),
             geometry=geometry,
-            denormalize_fn=trainset.denormalize
+            denormalize_fn=trainset.denormalize,
         ).to(device)
         # and pushforward
         pf_cfg = cfg.training.pushforward
@@ -239,7 +239,7 @@ def runner(rank, cfg, train_method, world_size):
             }
             train_losses_dict = train_losses_dict | loss_logs
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
-            
+
             # TODO evaluate integrals on rollout as well
             log_metric_dict, val_plots, loss_val_min = evaluate(
                 rank,

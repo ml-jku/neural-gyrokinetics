@@ -91,7 +91,7 @@ class FluxIntegral(nn.Module):
         gamma = i0(gamma) * torch.exp(-gamma)
         self.register_buffer("bessel", bessel.to(dtype=dtype))
         self.register_buffer("gamma", gamma.to(dtype=dtype))
-        
+
         self._fwd_vmap = torch.vmap(self.forward_single)
 
     def _df_fft(self, df: torch.Tensor, norm: str = "forward"):
@@ -327,7 +327,7 @@ class LossWrapper(nn.Module):
                 losses[k] = int_losses[k]
             else:
                 losses[k] = self.loss_fns[k](preds, tgts)
-        
+
         loss = sum([w * losses[k] for k, w in self.weights.items()])
         return loss, losses
 
