@@ -1,5 +1,4 @@
 batch_size: 4
 n_eval_steps: 2
 validate_every_n_epochs: 20
-use_gkw: false
 denormalize: false
