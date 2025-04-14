@@ -295,9 +295,13 @@ class WindowAttention(nn.Module):
 
         if dist.is_initialized():
             with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0))
+                x = F.scaled_dot_product_attention(
+                    q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0)
+                )
         else:
-            x = F.scaled_dot_product_attention(q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0))
+            x = F.scaled_dot_product_attention(
+                q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0)
+            )
 
         # # swinv2 cosine similarity attention
         # attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
@@ -379,7 +383,11 @@ class SwinTransformerBlock(nn.Module):
         assert len(self.window_size) == len(self.shift_size) == space
 
         # results in correct DiT conditioning
-        self.norm1 = norm_layer(dim, elementwise_affine=False) if norm_layer is not None else nn.Identity()
+        self.norm1 = (
+            norm_layer(dim, elementwise_affine=False)
+            if norm_layer is not None
+            else nn.Identity()
+        )
         self.attn = WindowAttention(
             dim,
             window_size=self.window_size,
@@ -390,7 +398,11 @@ class SwinTransformerBlock(nn.Module):
         )
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.norm2 = norm_layer(dim, elementwise_affine=False) if norm_layer is not None else nn.Identity()
+        self.norm2 = (
+            norm_layer(dim, elementwise_affine=False)
+            if norm_layer is not None
+            else nn.Identity()
+        )
         mlp_hidden_dim = int(dim * mlp_ratio)
 
         self.mlp = MLP([dim, mlp_hidden_dim, self.out_dim], act_fn, dropout_prob=drop)

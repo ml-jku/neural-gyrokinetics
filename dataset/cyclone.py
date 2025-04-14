@@ -5,7 +5,6 @@ import h5py
 from dataclasses import dataclass
 from collections import defaultdict
 import tqdm
-import copy
 import torch
 import numpy as np
 from torch.utils.data import Dataset
@@ -492,6 +491,7 @@ class CycloneDataset(Dataset):
         file_index: int,
         df: Optional[torch.Tensor] = None,
         phi: Optional[torch.Tensor] = None,
+        flux: Optional[torch.Tensor] = None,
     ):
         if df is not None:
             field = "df"
@@ -499,6 +499,9 @@ class CycloneDataset(Dataset):
         elif phi is not None:
             field = "phi"
             x = phi
+        elif flux is not None:
+            # TODO ?
+            return flux
         else:
             raise ValueError
 

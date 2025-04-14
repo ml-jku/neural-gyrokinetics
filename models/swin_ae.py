@@ -1,7 +1,6 @@
 import torch
 
-from models.nd_vit.patching import PatchEmbed, PatchUnmerging, PatchMerging
-from models.swin_unet import SwinUnet, SwinLayer
+from models.swin_unet import SwinUnet
 
 
 class SwinAE(SwinUnet):

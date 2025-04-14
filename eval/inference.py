@@ -1,4 +1,5 @@
 import sys
+
 sys.path.append("..")
 import os
 from argparse import ArgumentParser
@@ -8,14 +9,17 @@ from omegaconf import OmegaConf
 import torch
 import numpy as np
 
-from utils import load_model_and_config, expand_as
+from utils import load_model_and_config
 from models import get_model
 from dataset.cyclone import CycloneDataset
+
 
 def create_parser():
     parser = ArgumentParser()
     parser.add_argument("--ckpt", required=True)
-    parser.add_argument("--data_path", default="/restricteddata/ukaea/gyrokinetics/preprocessed")
+    parser.add_argument(
+        "--data_path", default="/restricteddata/ukaea/gyrokinetics/preprocessed"
+    )
     parser.add_argument("--eval_sim", default="cyclone4_2_2.h5")
     parser.add_argument("--onestep", action="store_true")
     parser.add_argument("--last", action="store_true")
@@ -24,6 +28,7 @@ def create_parser():
     parser.add_argument("--start_idx", default=0, type=int)
     parser.add_argument("--zf_last", action="store_true")
     return parser.parse_args()
+
 
 def invert_ifft(x):
     # invert fft on spatial
@@ -35,19 +40,22 @@ def invert_ifft(x):
     knth = np.stack([knth.real, knth.imag]).squeeze().astype("float32")
     return knth
 
+
 def modify_fds_dat(path):
-    with open(path, 'r') as infile:
+    with open(path, "r") as infile:
         content = infile.read()
         content = content.replace("DTIM    =  2.000000000000000E-002", "DTIM    =  0.0")
-        content = content.replace("NT_REMAIN       =           0", "NT_REMAIN       =           1")
+        content = content.replace(
+            "NT_REMAIN       =           0", "NT_REMAIN       =           1"
+        )
         content = content.replace("TIME    =   192.753733197446     ", "TIME    =   0")
 
-    with open(path, 'w') as outfile:
+    with open(path, "w") as outfile:
         outfile.write(content)
 
 
 def modify_input_dat(path):
-    with open(path, 'r') as infile:
+    with open(path, "r") as infile:
         content = infile.read()
         content = content.replace("READ_FILE  = .false.", "READ_FILE  = .true.")
         content = content.replace("DTIM   = 0.02", "DTIM   = 0.0")
@@ -55,8 +63,9 @@ def modify_input_dat(path):
         content = content.replace("keep_dumps = .true.", "! keep_dumps = .true.")
         content = content.replace("ndump_ts = 3", "! ndump_ts = 3")
 
-    with open(path, 'w') as outfile:
+    with open(path, "w") as outfile:
         outfile.write(content)
+
 
 def compute_pearson_correlation(x, y):
     # shape of [c, ...]
@@ -69,6 +78,7 @@ def compute_pearson_correlation(x, y):
     std_x = torch.linalg.norm(x, dim=1)
     std_y = torch.linalg.norm(y, dim=1)
     return torch.mean(cov / (std_x * std_y))
+
 
 parser = create_parser()
 CKP = parser.ckpt
@@ -108,7 +118,7 @@ data = CycloneDataset(
     path=parser.data_path,
     normalization=cfg.dataset.normalization,
     normalization_scope=cfg.dataset.normalization_scope,
-    normalization_stats=traindata.dataset_stats,
+    normalization_stats=traindata.norm_stats,
     spatial_ifft=cfg.dataset.spatial_ifft,
     bundle_seq_length=cfg.model.bundle_seq_length,
     subsample=cfg.dataset.subsample,
@@ -120,11 +130,11 @@ data = CycloneDataset(
 
 print(f"Val: {len(data)}")
 
-assert (traindata.dataset_stats == data.dataset_stats), "Normalization stats mismatch"
+assert traindata.norm_stats == data.norm_stats, "Normalization stats mismatch"
 if cfg.dataset.offset > 0:
     # dump normalization stats so we only need to compute them once
     with open(f"{parser.ckpt}/normalization_stats.pkl", "wb") as out:
-        pickle.dump(traindata.dataset_stats, out)
+        pickle.dump(traindata.norm_stats, out)
 
 model = get_model(cfg, dataset=data)
 last = parser.last
@@ -136,9 +146,9 @@ model = model.to(device)
 model = model.eval()
 
 ONESTEP = parser.onestep
-cyclone_name = '_'.join(data.files[0].split('/')[-1].split('.')[0].split('_')[:-1])
+cyclone_name = "_".join(data.files[0].split("/")[-1].split(".")[0].split("_")[:-1])
 IDX_0 = parser.start_idx
-IDX_END = len(data)-2
+IDX_END = len(data) - 2
 norm_output = "_rescaled" if parser.rescale else ""
 ifft_merge = "_ifft_merge" if parser.ifft_merge else ""
 OUT_DIR = f"{CKP}/{'onestep{}{}'.format(norm_output, ifft_merge) if ONESTEP else 'autoreg_t{}{}{}'.format(IDX_0, norm_output, ifft_merge)}/{cyclone_name}/{'best' if not last else 'ckp'}"
@@ -153,18 +163,23 @@ timesteps = data.get_timesteps(torch.tensor([0], dtype=torch.long))
 delta = (timesteps[:, 1:].squeeze() - timesteps[:, :-1].squeeze()).squeeze()[-1]
 if IDX_END > len(data) - 2:
     # add future timesteps, not observed during training
-    timesteps = torch.cat([timesteps, torch.arange(timesteps[:, -1].item() + delta, IDX_END, delta).unsqueeze(0)],
-                          dim=1)
+    timesteps = torch.cat(
+        [
+            timesteps,
+            torch.arange(timesteps[:, -1].item() + delta, IDX_END, delta).unsqueeze(0),
+        ],
+        dim=1,
+    )
 files = []
 gt_corr = {}
 model_corr = {}
 
 if cfg.dataset.normalization == "zscore":
-    shift = torch.tensor(traindata.dataset_stats["full"]["mean"]).unsqueeze(0).to(device)
-    scale = torch.tensor(traindata.dataset_stats["full"]["std"]).unsqueeze(0).to(device)
+    shift = torch.tensor(traindata.norm_stats["full"]["mean"]).unsqueeze(0).to(device)
+    scale = torch.tensor(traindata.norm_stats["full"]["std"]).unsqueeze(0).to(device)
 elif cfg.dataset.normalization == "minmax":
-    x_min = torch.tensor(traindata.dataset_stats["full"]["min"]).unsqueeze(0).to(device)
-    x_max = torch.tensor(traindata.dataset_stats["full"]["max"]).unsqueeze(0).to(device)
+    x_min = torch.tensor(traindata.norm_stats["full"]["min"]).unsqueeze(0).to(device)
+    x_max = torch.tensor(traindata.norm_stats["full"]["max"]).unsqueeze(0).to(device)
     scale = (x_max - x_min) / cfg.dataset.beta1
     shift = x_min + scale * cfg.dataset.beta2
 
@@ -193,7 +208,9 @@ with torch.no_grad():
 
         if parser.rescale:
             if cfg.dataset.separate_zf:
-                print("Rescaling for ifft_merge not supported, will lead to invalid heat flux...")
+                print(
+                    "Rescaling for ifft_merge not supported, will lead to invalid heat flux..."
+                )
             # re-scale output to unit variance
             xt = xt / xt.std((2, 3, 4, 5, 6), keepdims=True)
 
@@ -201,8 +218,12 @@ with torch.no_grad():
         b_xt = xt * scale + shift
         if cfg.dataset.separate_zf:
             if parser.ifft_merge:
-                assert shift.shape == xt.mean((2, 3, 4, 5, 6), keepdims=True).shape, "Normalization stats mismatch"
-                assert scale.shape == xt.std((2, 3, 4, 5, 6), keepdims=True).shape, "Normalization stats mismatch"
+                assert (
+                    shift.shape == xt.mean((2, 3, 4, 5, 6), keepdims=True).shape
+                ), "Normalization stats mismatch"
+                assert (
+                    scale.shape == xt.std((2, 3, 4, 5, 6), keepdims=True).shape
+                ), "Normalization stats mismatch"
 
                 if parser.zf_last:
                     zf = invert_ifft(b_xt.cpu().numpy().squeeze()[2:, ...])
@@ -227,13 +248,18 @@ with torch.no_grad():
         b_xt = b_xt.astype("float64").reshape(-1, order="F")
         # dump to file
         if OUT_DIR:
-            dirtarget = os.path.join(OUT_DIR, f"K{str((int(idx) + 1 + cfg.dataset.offset) * cfg.dataset.subsample).zfill(2)}")
+            dirtarget = os.path.join(
+                OUT_DIR,
+                f"K{str((int(idx) + 1 + cfg.dataset.offset) * cfg.dataset.subsample).zfill(2)}",
+            )
             os.makedirs(dirtarget, exist_ok=True)
             ftarget = os.path.join(dirtarget, "FDS")
             os.system(
-                f"cp {data.files[0].replace("preprocessed", "raw").replace("_ifft", "").replace("_separate_zf", "").replace(".h5", "")}/input.dat {dirtarget}")
+                f"cp {data.files[0].replace("preprocessed", "raw").replace("_ifft", "").replace("_separate_zf", "").replace(".h5", "")}/input.dat {dirtarget}"
+            )
             os.system(
-                f"cp {data.files[0].replace("preprocessed", "raw").replace("_ifft", "").replace("_separate_zf", "").replace(".h5", "")}/FDS.dat {dirtarget}")
+                f"cp {data.files[0].replace("preprocessed", "raw").replace("_ifft", "").replace("_separate_zf", "").replace(".h5", "")}/FDS.dat {dirtarget}"
+            )
             modify_fds_dat(f"{dirtarget}/FDS.dat")
             modify_input_dat(f"{dirtarget}/input.dat")
             with open(ftarget, "wb") as f:

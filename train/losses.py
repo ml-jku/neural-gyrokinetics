@@ -253,10 +253,9 @@ class LossWrapper(nn.Module):
         super().__init__()
 
         self.weights = weights
-        _extras = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
-        if sum([self.weights.get(k, 0.0) for k in _extras]) > 0:
-            self.integrator = FluxIntegral(geometry)
-            self.denormalize_fn = denormalize_fn
+        self._extras = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
+        self.integrator = FluxIntegral(geometry)
+        self.denormalize_fn = denormalize_fn
 
         self.loss_fns = {
             "df": partial(self.data_loss, "df"),
@@ -269,7 +268,7 @@ class LossWrapper(nn.Module):
     ):
         if key == "flux":
             # NOTE: regular mse for flux otherwise might get nans (for linear phase)
-            return F.mse_loss(preds["flux"].squeeze(), tgts["flux"])
+            return F.mse_loss(preds["flux"], tgts["flux"])
         else:
             return relative_norm_mse(preds[key], tgts[key])
 
@@ -277,63 +276,86 @@ class LossWrapper(nn.Module):
         self,
         preds: Dict[str, torch.Tensor],
         tgts: Dict[str, torch.Tensor],
-        idx_data: Dict[str, torch.Tensor],
+        idx_data: Optional[Dict[str, torch.Tensor]] = None,
     ):
         assert self.denormalize_fn is not None
-        pred_df = []
-        pred_phi = []
-        tgt_phi = []
-        for b, f in enumerate(idx_data["file_index"].tolist()):
-            pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
-            if "phi" in preds:
-                pred_phi.append(self.denormalize_fn(f, phi=preds["phi"][b]))
-            tgt_phi.append(self.denormalize_fn(f, phi=tgts["phi"][b]))
-        pred_df = torch.stack(pred_df)
-        if len(pred_phi) > 0:
-            pred_phi = torch.stack(pred_phi)
+        if self.training:
+            pred_df = []
+            pred_phi = []
+            tgt_phi = []
+            for b, f in enumerate(idx_data["file_index"].tolist()):
+                pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
+                if "phi" in preds:
+                    pred_phi.append(self.denormalize_fn(f, phi=preds["phi"][b]))
+                tgt_phi.append(self.denormalize_fn(f, phi=tgts["phi"][b]))
+            pred_df = torch.stack(pred_df)
+            if len(pred_phi) > 0:
+                pred_phi = torch.stack(pred_phi)
+            else:
+                pred_phi = None
+            tgt_phi = torch.stack(tgt_phi)
         else:
-            pred_phi = None
-        tgt_phi = torch.stack(tgt_phi)
+            # already denormalized for evaluation
+            pred_df = preds["df"]
+            pred_phi = preds["phi"] if "phi" in preds else None
+            tgt_phi = tgts["phi"]
+
+        pred_eflux, tgt_eflux = preds["flux"], tgts["flux"]
 
         pphi_int, (pflux, eflux, _) = self.integrator(pred_df, pred_phi)
         int_losses = {}
         # NOTE: these losses are in unnormalized space
         int_losses["phi_int"] = relative_norm_mse(pphi_int, tgt_phi)
         # pflux -> 0, eflux -> heat flux
-        int_losses["flux_int"] = (pflux**2).mean() + F.mse_loss(eflux, tgts["flux"])
+        int_losses["flux_int"] = (pflux**2).mean() + F.mse_loss(eflux, tgt_eflux)
         # mimicry / cross terms in the loss (between prediction heads and integrals)
         if "phi" in preds:
             int_losses["phi_cross"] = relative_norm_mse(pphi_int, pred_phi)
         if "flux" in preds:
-            int_losses["flux_cross"] = F.mse_loss(eflux, preds["flux"].squeeze())
+            int_losses["flux_cross"] = F.mse_loss(eflux, pred_eflux)
 
-        return int_losses
+        return int_losses, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
 
     def forward(
         self,
         preds: Dict[str, torch.Tensor],
         tgts: Dict[str, torch.Tensor],
-        idx_data: Dict[str, torch.Tensor],
+        idx_data: Optional[Dict[str, torch.Tensor]] = None,
+        eval_integrals: bool = True,
     ):
         losses = {}
         int_losses = None
-        # compute integral only once
-        # newtwork predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
-        # if weight["phi"] > 0 -> weight["phi_int"] = 0 and vice versa
-        if hasattr(self, "integrator"):
-            int_losses = self.integral_loss(preds, tgts, idx_data)
-        for k in self.weights:
+        # NOTE: newtwork predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
+        # NOTE: if weight["phi"] > 0 -> weight["phi_int"] = 0 and vice versa
+        # only compute integrals if requested by weights or in eval
+        eval_integrals = not self.training and eval_integrals
+        if sum([self.weights.get(k, 0.0) for k in self._extras]) > 0 or eval_integrals:
+            int_losses, integrated = self.integral_loss(preds, tgts, idx_data)
+        if self.training:
+            loss_keys = self.weights
+        else:
+            loss_keys = list(self.loss_fns.keys()) + list(int_losses.keys())
+        for k in loss_keys:
             if "int" in k or "cross" in k:
                 losses[k] = int_losses[k]
             else:
                 losses[k] = self.loss_fns[k](preds, tgts)
-
         loss = sum([w * losses[k] for k, w in self.weights.items()])
-        return loss, losses
+        if self.training:
+            return loss, losses
+        else:
+            return loss, losses, integrated
 
     @property
     def active_losses(self):
         return [k for k in self.weights if self.weights[k] > 0.0]
+
+    @property
+    def all_losses(self):
+        return list(self.loss_fns.keys()) + self._extras
+
+    def __len__(self):
+        return len(self.all_losses)
 
 
 def get_pushforward_fn(

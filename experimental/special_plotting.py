@@ -460,3 +460,123 @@ def frequency_filter_4x4(fname, mode="mean", filter_method="fft"):
         x_turb3[0][None],
         average=(mode == "mean"),
     )
+
+
+def plot3D(
+    x,
+    fixed_axes=(2, 3),
+    title="",
+    subs_2d=(1, 1),
+    subs_3d=(1, 1, 1),
+    alpha=1.0,
+    cmap="RdBu_r",
+    bg_alpha=0.2,
+    surface_slices=None,  # Number of Z-slices to show as surfaces
+    edgecolor="white",  # Color of the surface grid lines
+    linewidth=0.3,  # Width of the grid lines
+):
+    # Validate subsampling parameters
+    if len(subs_2d) != 2:
+        raise ValueError("subs_2d must be a tuple of length 2")
+    if len(subs_3d) != 3:
+        raise ValueError("subs_3d must be a tuple of length 3")
+
+    fixed_axis1, fixed_axis2 = fixed_axes
+    slice_axes = [i for i in range(5) if i not in fixed_axes]
+
+    # Determine grid size with axis-specific subsampling
+    n1, n2 = x.shape[fixed_axis1], x.shape[fixed_axis2]
+    plane_indices1 = range(0, n1, subs_2d[0])
+    plane_indices2 = range(0, n2, subs_2d[1])
+    n_rows = len(plane_indices1)
+    n_cols = len(plane_indices2)
+
+    fig = plt.figure(figsize=(2 * len(plane_indices2), 2 * len(plane_indices1)))
+
+    # Find global min/max for consistent coloring
+    global_min = np.inf
+    global_max = -np.inf
+    global_mean_min = np.inf
+    global_mean_max = -np.inf
+    slice_means = []  # Store means for background colors
+
+    for i in plane_indices1:
+        for j in plane_indices2:
+            idx = [slice(None)] * 5
+            idx[fixed_axis1] = i
+            idx[fixed_axis2] = j
+            xx = x[tuple(idx)].numpy()
+            global_min = min(global_min, xx.min())
+            global_max = max(global_max, xx.max())
+            slice_means.append(xx.mean())
+            global_mean_min = min(global_mean_min, xx.mean())
+            global_mean_max = max(global_mean_max, xx.mean())
+
+    norm = plt.Normalize(global_mean_min, global_mean_max)
+
+    def make_faint_color(mean_val):
+        rgba = matplotlib.colormaps[cmap](norm(mean_val))
+        return (rgba[0], rgba[1], rgba[2], bg_alpha)
+
+    bg_colors = [make_faint_color(mean) for mean in slice_means]
+
+    # Create a gridspec with no spacing between subplots
+    gs = fig.add_gridspec(
+        n_rows, n_cols, left=0, right=1, bottom=0, top=1, wspace=0, hspace=0
+    )
+
+    # Create all plots
+    plot_idx = 0
+    for i, row in enumerate(plane_indices1):
+        for j, col in enumerate(plane_indices2):
+            ax = fig.add_subplot(
+                gs[i, j], projection="3d", facecolor=bg_colors[plot_idx], alpha=bg_alpha
+            )
+            plot_idx += 1
+
+            # Get the data slice
+            idx = [slice(None)] * 5
+            idx[fixed_axis1] = row
+            idx[fixed_axis2] = col
+            xx = x[tuple(idx)].numpy()
+
+            # Subsample the data
+            xx = xx[:: subs_3d[0], :: subs_3d[1], :: subs_3d[2]]
+
+            # Create meshgrid for X and Y
+            X, Y = np.meshgrid(
+                np.arange(0, xx.shape[0]), np.arange(0, xx.shape[1]), indexing="ij"
+            )
+
+            # Determine which Z-slices to plot as surfaces
+            if surface_slices is None:
+                # Default to showing 3 surfaces (min, middle, max)
+                z_indices = [0, xx.shape[2] // 2, xx.shape[2] - 1]
+            else:
+                z_indices = np.linspace(0, xx.shape[2] - 1, surface_slices, dtype=int)
+
+            # Plot each surface with decreasing alpha based on Z position
+            for k, z in enumerate(z_indices):
+                Z_val = np.full_like(X, z)
+                ax.plot_surface(
+                    X,
+                    Y,
+                    Z_val,
+                    facecolors=matplotlib.colormaps[cmap](
+                        plt.Normalize(global_min, global_max)(xx[:, :, z])
+                    ),
+                    edgecolor=edgecolor,  # Set grid line color
+                    linewidth=linewidth,  # Set grid line width
+                    alpha=alpha * (1 - 0.2 * k),  # Slightly fade further surfaces
+                    shade=False,
+                    zorder=z,
+                )
+
+            # Remove all axes and frames
+            ax.set_axis_off()
+            ax.grid(False)
+
+    # Adjust the suptitle position to account for no padding
+    fig.subplots_adjust(top=0.95 if title else 1.0)
+
+    return fig

@@ -9,7 +9,6 @@ import torch
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from hydra.core.hydra_config import HydraConfig
 
 from utils import set_seed, compress_src, find_free_port
 from run import runner

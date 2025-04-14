@@ -10,7 +10,6 @@ from collections import defaultdict
 from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-from concurrent.futures import ThreadPoolExecutor
 
 from dataset import get_data, CycloneSample
 from models import get_model
@@ -102,7 +101,7 @@ def runner(rank, cfg, train_method, world_size):
             weights=dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights),
             geometry=geometry,
             denormalize_fn=trainset.denormalize,
-        ).to(device)
+        )
         # and pushforward
         pf_cfg = cfg.training.pushforward
         pushforward_fn = None
@@ -135,6 +134,7 @@ def runner(rank, cfg, train_method, world_size):
             loss_logs = {k: 0 for k in loss_wrap.active_losses}
             loss_logs["relative_norm"] = 0.0
             model.train()
+            loss_wrap.train().to(device)
             info_dict = defaultdict(list)
             t_start_data = perf_counter_ns()
 
@@ -226,9 +226,10 @@ def runner(rank, cfg, train_method, world_size):
                 info_dict["memory_mb"].append(max_memory_allocated(device) / 1024**2)
                 t_start_data = perf_counter_ns()
 
-            for k in cfg.model.losses:
+            for k in loss_logs:
                 loss_logs[k] /= len(trainloader)
             loss_logs["relative_norm"] /= len(trainloader)
+            # logging loss tags (for wandb)
             loss_logs = edit_tag(loss_logs, prefix="train", postfix="mse")
             train_losses_dict = {
                 "train/lr": (
@@ -240,7 +241,6 @@ def runner(rank, cfg, train_method, world_size):
             train_losses_dict = train_losses_dict | loss_logs
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
-            # TODO evaluate integrals on rollout as well
             log_metric_dict, val_plots, loss_val_min = evaluate(
                 rank,
                 world_size,

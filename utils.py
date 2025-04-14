@@ -26,7 +26,7 @@ def wandb_available():
 assert (
     wandb_available()
 ), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
-import wandb
+import wandb  # noqa
 
 
 class WandbManager:
@@ -172,8 +172,8 @@ def compress_src(path):
             name.endswith(".py")
             or name.endswith(".yaml")
             or name.endswith(".ipynb")
-            and not "wandb" in name
-            and not "outputs" in name
+            and "wandb" not in name
+            and "outputs" not in name
         ):
             zf.write(name, arcname=name)
     zf.close()

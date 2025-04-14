@@ -581,7 +581,7 @@ class SwinUnet(nn.Module):
         if self.norm_output:
             df = df / df.std((2, 3, 4, 5, 6), keepdims=True)
 
-        out_dict = { 'df': df }
+        out_dict = {"df": df}
         return out_dict
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -606,8 +606,12 @@ class SwinUnet(nn.Module):
     def condition(self, kwconds) -> Dict:
         if len(kwconds) == 0:
             return {}
-        assert sorted(self.condition_keys) == sorted(list(kwconds.keys())), "Mismatch in conditioning keys"
-        cond = torch.cat([kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1)
+        assert sorted(self.condition_keys) == sorted(
+            list(kwconds.keys())
+        ), "Mismatch in conditioning keys"
+        cond = torch.cat(
+            [kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1
+        )
         if self.cond_embed is not None:
             # embed conditioning is e.g. sincos
             return {"condition": self.cond_embed(cond)}

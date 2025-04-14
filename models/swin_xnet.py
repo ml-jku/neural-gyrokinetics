@@ -10,7 +10,7 @@ import torch.distributed as dist
 from models.swin_unet import SwinUnet
 from models.nd_vit.drop import DropPath
 from models.nd_vit.positional import PositionalEmbedding
-from models.utils import Film, MLP, seq_weight_init
+from models.utils import MLP, seq_weight_init
 
 
 class CrossAttention(nn.Module):
