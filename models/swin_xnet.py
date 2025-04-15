@@ -228,12 +228,16 @@ class SwinXnet(nn.Module):
         self.df_space = 5
         self.phi_space = 3
         self.problem_dim = in_channels
+        
 
         if separate_zf:
             in_channels = 2 * in_channels
             out_channels = 2 * out_channels
             self.zf_norm = nn.LayerNorm(in_channels) if zf_norm else nn.Identity()
 
+        phi_in_channels = in_channels
+        phi_out_channels = out_channels
+        
         if decouple_mu:
             self.df_space = 4
             df_full_resolution = self.df_base_resolution
@@ -244,8 +248,8 @@ class SwinXnet(nn.Module):
             # positional information for velocity mixing
             self.vel_pe = PositionalEmbedding(in_channels, list(df_full_resolution))
 
-            in_channels = in_channels * self.df_deoupled_dim
-            out_channels = out_channels * self.df_deoupled_dim
+            df_in_channels = in_channels * self.df_deoupled_dim
+            df_out_channels = out_channels * self.df_deoupled_dim
 
         self.df_unet = SwinUnet(
             self.df_space,
@@ -255,8 +259,8 @@ class SwinXnet(nn.Module):
             window_size=df_window_size,
             depth=depth,
             num_heads=num_heads,
-            in_channels=in_channels,
-            out_channels=out_channels,
+            in_channels=df_in_channels,
+            out_channels=df_out_channels,
             num_layers=num_layers,
             use_checkpoint=use_checkpoint,
             drop_path=drop_path,
@@ -281,8 +285,8 @@ class SwinXnet(nn.Module):
             window_size=phi_window_size,
             depth=depth,
             num_heads=num_heads,
-            in_channels=in_channels,
-            out_channels=out_channels,
+            in_channels=phi_in_channels,
+            out_channels=phi_out_channels,
             num_layers=num_layers,
             use_checkpoint=use_checkpoint,
             drop_path=drop_path,
