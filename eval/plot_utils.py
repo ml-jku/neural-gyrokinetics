@@ -219,6 +219,7 @@ def plot_4x4_2D_raspec(x1, x2=None, **kwargs):
             [x1[0].permute(i, j, *other).numpy(), x1[1].permute(i, j, *other).numpy()],
             axis=-1,
         )
+        xx = np.nan_to_num(xx)
         xx = np.complex64(xx)
 
         slices = [tuple(np.random.randint(0, dim, size=100)) for dim in xx.shape[2:]]

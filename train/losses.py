@@ -310,9 +310,9 @@ class LossWrapper(nn.Module):
         int_losses["flux_int"] = (pflux**2).mean() + F.mse_loss(eflux, tgt_eflux)
         # mimicry / cross terms in the loss (between prediction heads and integrals)
         if "phi" in preds:
-            int_losses["phi_cross"] = relative_norm_mse(pphi_int, pred_phi)
+            int_losses["phi_cross"] = relative_norm_mse(pred_phi, pphi_int)
         if "flux" in preds:
-            int_losses["flux_cross"] = F.mse_loss(eflux, pred_eflux)
+            int_losses["flux_cross"] = F.mse_loss(pred_eflux, eflux)
 
         return int_losses, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
 
@@ -321,14 +321,14 @@ class LossWrapper(nn.Module):
         preds: Dict[str, torch.Tensor],
         tgts: Dict[str, torch.Tensor],
         idx_data: Optional[Dict[str, torch.Tensor]] = None,
-        eval_integrals: bool = True,
+        integrals: bool = True,
     ):
         losses = {}
         int_losses = None
         # NOTE: newtwork predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
         # NOTE: if weight["phi"] > 0 -> weight["phi_int"] = 0 and vice versa
         # only compute integrals if requested by weights or in eval
-        eval_integrals = not self.training and eval_integrals
+        eval_integrals = not self.training and integrals
         if sum([self.weights.get(k, 0.0) for k in self._extras]) > 0 or eval_integrals:
             int_losses, integrated = self.integral_loss(preds, tgts, idx_data)
         if self.training:

@@ -1,4 +1,4 @@
-from typing import Sequence, Union, Optional, Type, Tuple, Dict
+from typing import Sequence, Union, Optional, Type, Dict
 
 from einops import rearrange
 import torch

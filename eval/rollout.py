@@ -81,7 +81,7 @@ def get_rollout_fn(
                         inputs_t[key] = output[key].clone().float()
 
                 for key in outputs.keys():
-                    outputs[key][..., i * bundle_steps : (i + 1) * bundle_steps] = (
+                    outputs[key][:, :, i * bundle_steps : (i + 1) * bundle_steps] = (
                         output[key].cpu().unsqueeze(2)
                         if output[key].ndim in [5, 7]
                         else output[key].cpu()

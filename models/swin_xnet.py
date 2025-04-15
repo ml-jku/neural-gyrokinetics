@@ -253,7 +253,8 @@ class FluxDecoder(nn.Module):
         return x.amax(axis=list(range(1, x.ndim - 1)))
 
     def forward(self, flux_latents: Sequence[torch.Tensor]):
-        return self.flux_mlp(torch.cat(flux_latents, dim=-1))
+        flux = self.flux_mlp(torch.cat(flux_latents, dim=-1))
+        return flux.squeeze(1)
 
 
 class SwinXnet(nn.Module):
