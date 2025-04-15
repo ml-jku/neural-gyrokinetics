@@ -92,7 +92,7 @@ def get_rollout_fn(
             outputs[key] = rearrange(outputs[key], "b c t ... -> t b c ...")
             outputs[key] = outputs[key][: rollout_steps * bundle_steps, :, ...]
         if len(fluxes) > 0:
-            outputs["flux"] = rearrange(torch.cat(fluxes, dim=-1), "b t -> t b")
+            outputs["flux"] = rearrange(torch.stack(fluxes, dim=-1), "b t -> t b")
         return outputs
 
     return _rollout
