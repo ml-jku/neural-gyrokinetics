@@ -1,87 +1,16 @@
 from typing import Sequence, Union, Optional, Tuple, Type, List
 
-from torch.nn import functional as F
 import torch
 from torch import nn
 from einops import rearrange
 from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn import functional as F
 import torch.distributed as dist
 
 from models.swin_unet import SwinUnet
 from models.nd_vit.drop import DropPath
 from models.nd_vit.positional import PositionalEmbedding
-from models.utils import MLP, seq_weight_init
-
-
-class CrossAttention(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        qkv_bias: bool = False,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-        init_weights: Optional[str] = None,
-    ) -> None:
-
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.attn_drop = attn_drop
-        self.qkv_bias = qkv_bias
-
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-        if init_weights:
-            self.reset_parameters(init_weights)
-
-    def reset_parameters(self, init_weights):
-        if init_weights == "torch" or init_weights is None:
-            return
-        elif init_weights == "xavier_uniform":
-            init_weights_fn = nn.init.xavier_uniform_
-        elif init_weights in ["truncnormal", "truncnormal002"]:
-            init_weights_fn = nn.init.trunc_normal_
-        else:
-            raise NotImplementedError
-
-        init_weights_fn(self.qkv.weight)
-        if self.qkv_bias:
-            nn.init.zeros_(self.qkv.bias)
-        init_weights_fn(self.proj.weight)
-        nn.init.zeros_(self.proj.bias)
-
-    def forward(self, left: torch.Tensor, right: torch.Tensor):
-        b, c = left.shape[0], left.shape[-1]
-        grid_size = left.shape[1:-1]
-        left = rearrange(left, "b ... c -> b (...) c")  # (b, n, c)
-        right = rearrange(right, "b ... c -> b (...) c")  # (b, m, c)
-        q = rearrange(self.q(left), "b n (h c) -> b h n c", h=self.num_heads)
-        k, v = rearrange(
-            self.kv(right), "b n (t h c) -> t b h n c", t=2, h=self.num_heads
-        )
-
-        if dist.is_initialized():
-            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                x = F.scaled_dot_product_attention(
-                    q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
-                )
-        else:
-            x = F.scaled_dot_product_attention(
-                q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
-            )
-
-        # attention readout
-        x = rearrange(x, "b k n c -> b n (k c)")
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        # back to original shape
-        x = x.view(b, *grid_size, c)
-        return x
+from models.utils import MLP, seq_weight_init, AttentionDecoder
 
 
 class MixingBlock(nn.Module):
@@ -106,7 +35,7 @@ class MixingBlock(nn.Module):
         self.init_weights = init_weights
 
         self.norm1 = norm_layer(dim) if norm_layer is not None else nn.Identity()
-        self.attn = CrossAttention(
+        self.attn = AttentionDecoder(
             dim,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
@@ -489,8 +418,7 @@ class SwinXnet(nn.Module):
         if self.flux_head is not None:
             flux = self.flux_head(flux_lats)
 
-        output = {"df": df, "phi": phi, "flux": flux}
-        return output
+        return {"df": df, "phi": phi, "flux": flux}
 
     def patch_encode(self, df: torch.Tensor, phi: torch.Tensor):
         if self.separate_zf:
@@ -537,3 +465,203 @@ class SwinXnet(nn.Module):
             df = torch.cat([df[:, 0::2].sum(1, True), df[:, 1::2].sum(1, True)], dim=1)
 
         return df, phi
+
+
+class VSpaceReduce(AttentionDecoder):
+    def __init__(self, *args, decouple_mu: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.decouple_mu = decouple_mu
+        # learned token to integrate vspace
+        self.integral_token = nn.Parameter(torch.randn(1, 1, self.dim))
+        del self.q
+
+    def forward(self, x: torch.Tensor):
+        if self.decouple_mu:
+            b, _, ns, nx, ny, c = x.shape
+            x = rearrange(x, "b vpar s x y c -> (b s x y) vpar c")
+        else:
+            b, _, _, ns, nx, ny, c = x.shape
+            x = rearrange(x, "b vpar mu s x y c -> (b s x y) (vpar mu) c")
+
+        # qkv embeddings from inputs
+        q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
+        k, v = rearrange(self.kv(x), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
+        # avoid misaligned strides error
+        if dist.is_initialized():
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                x = F.scaled_dot_product_attention(
+                    q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
+                )
+        else:
+            x = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
+            )
+        x = rearrange(x, "b k n c -> b n (k c)")
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x.view(b, ns, nx, ny, c)
+
+
+class SwinXNetMultitask(SwinXnet):
+    def __init__(
+        self,
+        *args,
+        df_base_resolution: Sequence[int],
+        df_patch_size: Union[Sequence[int], int] = 4,
+        df_window_size: Union[Sequence[int], int] = 5,
+        **kwargs
+    ):
+        # NOTE: must use df grids (s, x, y), otherwise shape mismatch
+        phi_base_resolution = df_base_resolution[2:]
+        phi_patch_size = df_patch_size[2:]
+        phi_window_size = df_window_size[2:]
+        kwargs.pop("phi_base_resolution")
+        kwargs.pop("phi_patch_size")
+        kwargs.pop("phi_window_size")
+        super().__init__(
+            *args,
+            df_base_resolution=df_base_resolution,
+            df_patch_size=df_patch_size,
+            df_window_size=df_window_size,
+            phi_base_resolution=phi_base_resolution,
+            phi_patch_size=phi_patch_size,
+            phi_window_size=phi_window_size,
+            **kwargs
+        )
+
+        # remove down path for phi unet
+        del self.phi_unet.down_blocks
+        del self.phi_down_blocks
+        # remove up-mixing
+        self.df_mix_middle = self.df_mix[-1]
+        self.phi_mix_middle = self.phi_mix[-1]
+        del self.df_mix[:-1]
+        del self.phi_mix[:-1]
+
+        self.phi_middle = self.phi_unet.middle
+        self.phi_middle_upscale = self.phi_unet.middle_upscale
+
+        # phi integrator weights
+        vspace_attn_down = []
+        for blk in self.df_unet.down_blocks:
+            vspace_attn_down.append(
+                VSpaceReduce(
+                    dim=blk.dim,
+                    num_heads=8,
+                    attn_drop=0.1,
+                    decouple_mu=self.decouple_mu,
+                )
+            )
+        self.vspace_attn_down = nn.ModuleList(vspace_attn_down)
+        self.vspace_attn_middle = VSpaceReduce(
+            dim=self.df_unet.middle.dim,
+            num_heads=8,
+            attn_drop=0.1,
+            decouple_mu=self.decouple_mu,
+        )
+        if self.patch_skip:
+            self.vspace_attn_patch_skip = VSpaceReduce(
+                dim=self.df_unet.unpatch.dim,
+                num_heads=8,
+                attn_drop=0.1,
+                decouple_mu=self.decouple_mu,
+            )
+
+    def forward(self, df: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
+        df, df_pad_axes = self.patch_encode(df)
+        phi_pad_axes = df_pad_axes[:6]
+
+        if self.patch_skip:
+            df0 = df.clone()
+            phi0 = self.vspace_attn_patch_skip(df0)
+
+        # parameter conditioning
+        # TODO why have two?
+        df_cond = self.df_unet.condition(kwargs)
+        phi_cond = self.phi_unet.condition(kwargs)
+
+        # down paths
+        df_features = []
+        phi_features = []
+        for df_blk, vspace_att in zip(self.df_down_blocks, self.vspace_attn_down):
+            # down blocks
+            df, df_pre = df_blk(df, **df_cond)
+            df_features.append(df_pre)
+            # integrate out velocity space
+            phi_features.append(vspace_att(df_pre))
+
+        # middle blocks + latent mixing
+        flux_lats = []
+        if hasattr(self.df_unet, "middle_pe"):
+            df = self.df_unet.middle_pe(df)
+
+        # integrate out velocity space
+        phi = self.vspace_attn_middle(df)
+        if hasattr(self.phi_unet, "middle_pe"):
+            phi = self.phi_unet.middle_pe(phi)
+
+        df, phi = self.df_mix_middle(df, phi), self.phi_mix_middle(phi, df)
+
+        df = self.df_unet.middle(df, **df_cond)
+        phi = self.phi_middle(phi, **phi_cond)
+
+        if self.flux_head is not None:
+            flux_lats.append(self.flux_head.mix(0, phi, df))
+
+        df = self.df_unet.middle_upscale(df)
+        phi = self.phi_middle_upscale(phi)
+
+        # up path
+        df_features = df_features[::-1]
+        for i, (df_blk, phi_blk, df_mix, phi_mix) in enumerate(
+            zip(self.df_up_blocks, self.phi_up_blocks, self.df_mix_up, self.phi_mix_up)
+        ):
+            # mix latents
+            df, phi = df_mix(df, phi), phi_mix(phi, df)
+            # up blocks
+            df, df_ = df_blk(df, s=df_features[i], return_skip=True, **df_cond)
+            phi, phi_ = phi_blk(phi, s=phi_features[i], return_skip=True, **phi_cond)
+            # multiscale flux latents
+            if self.flux_head is not None:
+                flux_lats.append(self.flux_head.mix(i + 1, phi_, df_))
+        # expand to original
+        if self.patch_skip:
+            df = torch.cat([df, df0], -1)
+            phi = torch.cat([phi, phi0], -1)
+
+        df, phi = self.patch_decode(
+            df,
+            phi,
+            df_cond=df_cond["condition"],
+            phi_cond=phi_cond["condition"],
+            df_pad_axes=df_pad_axes,
+            phi_pad_axes=phi_pad_axes,
+        )
+
+        flux = None
+        if self.flux_head is not None:
+            flux = self.flux_head(flux_lats)
+
+        phi = rearrange(phi, "b c s x y -> b c x s y")
+        return {"df": df, "phi": phi, "flux": flux}
+
+    def patch_encode(self, df: torch.Tensor):
+        if self.separate_zf:
+            # split zonal flow
+            zf = df.mean(-1, True).repeat(1, 1, 1, 1, 1, 1, df.shape[-1])
+            no_zf = df - zf
+            df = torch.cat([zf, no_zf], dim=1)  # stack on channels
+            df = rearrange(df, "b c ... -> b ... c")
+            df = self.zf_norm(df)
+            df = rearrange(df, "b ... c -> b c ...")
+
+        # decouple mu and add positional information
+        if self.decouple_mu:
+            df = rearrange(df, "b c ... -> b ... c")
+            df = self.vel_pe(df)
+            df = rearrange(df, "b vp mu ... c -> b (c mu) vp ...")
+        # compress to patch space
+        df, df_pad_axes = self.df_unet.patch_encode(df)
+
+        return df, df_pad_axes

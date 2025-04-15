@@ -224,14 +224,14 @@ class CycloneDataset(Dataset):
                 self.file_num_samples.append(n_samples)
                 self.file_num_timesteps.append(len(timesteps))
                 per_file_t_indexes.append(orig_t_index)
-                if self.norm_stats is not None:
+                if self.norm_stats is not None and normalization_scope == "dataset":
                     # normalization stats
                     for k in self.input_fields:
                         self.norm_stats[f_id][f"{k}_mean"] = f[f"metadata/{k}_mean"][:]
                         self.norm_stats[f_id][f"{k}_std"] = f[f"metadata/{k}_std"][:]
                         self.norm_stats[f_id][f"{k}_min"] = f[f"metadata/{k}_min"][:]
                         self.norm_stats[f_id][f"{k}_max"] = f[f"metadata/{k}_max"][:]
-                        if k not in stats and normalization_scope == "dataset":
+                        if k not in stats:
                             stats[k] = RunningMeanStd(
                                 shape=self.norm_stats[f_id][f"{k}_mean"].shape
                             )

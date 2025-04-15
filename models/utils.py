@@ -3,6 +3,10 @@ from typing import Optional, Sequence, Union
 from einops import rearrange
 import torch
 from torch import nn
+from torch.nn.attention import SDPBackend, sdpa_kernel
+from torch.nn import functional as F
+import torch.distributed as dist
+
 from kappamodules.functional.pos_embed import get_sincos_1d_from_seqlen
 
 
@@ -44,6 +48,82 @@ class MLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
+
+
+class AttentionDecoder(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        qkv_bias: bool = False,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        init_weights: Optional[str] = None,
+    ) -> None:
+
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.attn_drop = attn_drop
+        self.qkv_bias = qkv_bias
+
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        if init_weights:
+            self.reset_parameters(init_weights)
+
+    def reset_parameters(self, init_weights):
+        if init_weights == "torch" or init_weights is None:
+            return
+        elif init_weights == "xavier_uniform":
+            init_weights_fn = nn.init.xavier_uniform_
+        elif init_weights in ["truncnormal", "truncnormal002"]:
+            init_weights_fn = nn.init.trunc_normal_
+        else:
+            raise NotImplementedError
+
+        init_weights_fn(self.q.weight)
+        init_weights_fn(self.kv.weight)
+        if self.qkv_bias:
+            nn.init.zeros_(self.q.bias)
+            nn.init.zeros_(self.kv.bias)
+        init_weights_fn(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, left: torch.Tensor, right: Optional[torch.Tensor] = None):
+        b, c = left.shape[0], left.shape[-1]
+        grid_size = left.shape[1:-1]
+        left = rearrange(left, "b ... c -> b (...) c")  # (b, n, c)
+        if right is None:
+            right = left
+        else:
+            right = rearrange(right, "b ... c -> b (...) c")  # (b, m, c)
+        # qkv embeddings from inputs
+        q = rearrange(self.q(left), "b n (h c) -> b h n c", h=self.num_heads)
+        k, v = rearrange(
+            self.kv(right), "b m (t h c) -> t b h m c", t=2, h=self.num_heads
+        )
+        # avoid misaligned strides error
+        if dist.is_initialized():
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                x = F.scaled_dot_product_attention(
+                    q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
+                )
+        else:
+            x = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
+            )
+        # attention readout
+        x = rearrange(x, "b k n c -> b n (k c)")
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        # back to original shape
+        x = x.view(b, *grid_size, c)
+        return x
 
 
 class IntegerConditionEmbed(nn.Module):

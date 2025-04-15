@@ -80,8 +80,11 @@ def get_model(cfg, dataset, train_method="default"):
             swin_bottleneck=swin_bottleneck,
         )
 
-    if cfg.model.name == "xnet":
-        from models.swin_xnet import SwinXnet
+    if "xnet" in cfg.model.name:
+        if "multi" in cfg.model.name:
+            from models.swin_xnet import SwinXNetMultitask as SwinXnet
+        else:
+            from models.swin_xnet import SwinXnet
         from models.utils import ContinuousConditionEmbed
 
         df_patch_size = cfg.model.swin.patch_size

@@ -371,6 +371,8 @@ class SwinUnet(nn.Module):
             depth = [depth] * num_layers
 
         assert len(num_heads) == len(depth) == num_layers
+        self.num_heads = num_heads
+        self.depth = depth
 
         # set layer type and conditioning
         LocalLayer = SwinLayer
