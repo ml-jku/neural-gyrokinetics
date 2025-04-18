@@ -8,6 +8,7 @@ import tqdm
 import torch
 import numpy as np
 from torch.utils.data import Dataset
+from torch.utils._pytree import tree_map
 
 import random
 
@@ -26,6 +27,7 @@ class CycloneSample:
     itg: torch.Tensor
     file_index: torch.Tensor
     timestep_index: torch.Tensor
+    geometry: Optional[Dict[str, torch.Tensor]] = None
     # TODO: add more fields (e.g. params that we can use for conditioning)
 
     def pin_memory(self):
@@ -374,6 +376,7 @@ class CycloneDataset(Dataset):
         poten, gt_poten, flux = sample["poten"], sample["gt_poten"], sample["gt_flux"]
         # conditioning fields
         timestep, itg = sample["timestep"], sample["itg"]
+        geometry = sample["geometry"]
         if self.normalization is not None and get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
@@ -397,6 +400,7 @@ class CycloneDataset(Dataset):
             itg=torch.tensor(itg, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
+            geometry=tree_map(lambda x: torch.from_numpy(x), geometry),
         )
 
     def _load_data(
@@ -464,8 +468,11 @@ class CycloneDataset(Dataset):
         sample["poten"] = poten
         sample["gt_poten"] = gt_poten
         sample["gt_flux"] = np.array(gt_flux).squeeze()
+        # load conditioning
         sample["timestep"] = data["metadata/timesteps"][original_t_index]
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
+        # load geometry
+        sample["geometry"] = {k: np.array(v[()]) for k, v in data["geometry"].items()}
         return sample
 
     def normalize(
@@ -687,4 +694,5 @@ class CycloneDataset(Dataset):
             itg=torch.stack([sample.itg for sample in batch]),
             file_index=torch.stack([sample.file_index for sample in batch]),
             timestep_index=torch.stack([sample.timestep_index for sample in batch]),
+            geometry=tree_map(lambda *x: torch.stack(x), *[s.geometry for s in batch]),
         )

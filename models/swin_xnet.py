@@ -228,7 +228,6 @@ class SwinXnet(nn.Module):
         self.df_space = 5
         self.phi_space = 3
         self.problem_dim = in_channels
-        
 
         if separate_zf:
             in_channels = 2 * in_channels
@@ -237,7 +236,7 @@ class SwinXnet(nn.Module):
 
         phi_in_channels = in_channels
         phi_out_channels = out_channels
-        
+
         if decouple_mu:
             self.df_space = 4
             df_full_resolution = self.df_base_resolution

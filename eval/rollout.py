@@ -122,6 +122,7 @@ def validation_metrics(
         )
         for key in rollout.keys():
             gts[key].append(getattr(sample, f"y_{key}"))
+        geometry = sample.geometry
 
     for key in gts.keys():
         if bundle_steps == 1:
@@ -140,7 +141,12 @@ def validation_metrics(
         nth_rollout = {k: rollout[k][n] for k in rollout.keys()}
         nth_gts = {k: gts[k][n] for k in rollout.keys()}
         # TODO proper flux plots?
-        _, nth_losses, _ = loss_wrap(nth_rollout, nth_gts, integrals=eval_integrals)
+        _, nth_losses, _ = loss_wrap(
+            preds=nth_rollout,
+            tgts=nth_gts,
+            geometry=geometry,
+            compute_integrals=eval_integrals,
+        )
         for k in nth_losses:
             metrics[k][n] = nth_losses[k]
     return metrics

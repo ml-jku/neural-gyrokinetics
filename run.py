@@ -10,12 +10,13 @@ from collections import defaultdict
 from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+from torch.utils._pytree import tree_map
 
 from dataset import get_data, CycloneSample
 from models import get_model
 from train import get_pushforward_fn, LossWrapper, pretrain_autoencoder
 from eval.evaluate import evaluate
-from utils import load_model_and_config, setup_logging, edit_tag, get_geometry
+from utils import load_model_and_config, setup_logging, edit_tag
 
 
 def ddp_setup(rank, world_size):
@@ -95,11 +96,9 @@ def runner(rank, cfg, train_method, world_size):
 
         # configure loss
         predict_delta = cfg.training.predict_delta
-        geometry = get_geometry()
 
         loss_wrap = LossWrapper(
             weights=dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights),
-            geometry=geometry,
             denormalize_fn=trainset.denormalize,
         )
         # and pushforward
@@ -163,6 +162,7 @@ def runner(rank, cfg, train_method, world_size):
                     if k is not None
                 }
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
+                geometry = tree_map(lambda g: g.to(device), sample.geometry)
 
                 # TODO should augmentations take place before moving to GPU?
                 if augmentations is not None:
@@ -195,7 +195,7 @@ def runner(rank, cfg, train_method, world_size):
                             preds[key] = preds[key] + inputs[key]
 
                     # compute losses
-                    loss, losses = loss_wrap(preds, gts, idx_data)
+                    loss, losses = loss_wrap(preds, gts, idx_data, geometry=geometry)
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
