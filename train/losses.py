@@ -12,6 +12,10 @@ from torch.distributed import get_rank, is_initialized
 
 from concurrent.futures import ThreadPoolExecutor
 
+from conflictfree.grad_operator import ConFIGOperator
+from conflictfree.momentum_operator import PseudoMomentumOperator
+from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
+
 from utils import save_model_and_config
 from dataset.cyclone import CycloneDataset, CycloneSample
 from train.integrals import FluxIntegral
@@ -132,17 +136,30 @@ class LossWrapper(nn.Module):
         eval_integrals = not self.training and compute_integrals
         if sum([self.weights.get(k, 0.0) for k in self._extras]) > 0 or eval_integrals:
             int_losses, integrated = self.integral_loss(geometry, preds, tgts, idx_data)
-        if self.training:
-            loss_keys = self.weights
-        else:
-            loss_keys = list(self.loss_fns.keys()) + list(int_losses.keys())
-        for k in loss_keys:
-            if "int" in k or "cross" in k:
-                losses[k] = int_losses[k]
-            else:
-                losses[k] = self.loss_fns[k](preds, tgts)
+        loss_keys = (
+            self.weights
+            if self.training
+            else (list(self.loss_fns.keys()) + list(int_losses.keys()))
+        )
+        int_keys = [k for k in loss_keys if "int" in k]
+        cross_keys = [k for k in loss_keys if "cross" in k]
+        data_keys = list(set(loss_keys) - set(int_keys) - set(cross_keys))
+        assert all(
+            [k in preds for k in data_keys]
+        ), "Prediction - DATA loss weight key mismatch."
+        assert all(
+            [k.replace("_cross", "") in preds for k in cross_keys]
+        ), "Prediction - CROSS loss weight key mismatch."
+        # compute losses
+        for k in data_keys:
+            losses[k] = self.loss_fns[k](preds, tgts)
+        for k in int_keys + cross_keys:
+            losses[k] = int_losses[k]
+        # reweight and accumulate
         loss = sum([w * losses[k] for k, w in self.weights.items()])
         if self.training:
+            # filter active losses
+            losses = {k: losses[k] for k, w in self.weights.items() if w > 0.0}
             return loss, losses
         else:
             return loss, losses, integrated
@@ -157,6 +174,63 @@ class LossWrapper(nn.Module):
 
     def __len__(self):
         return len(self.all_losses)
+
+
+class GradientBalancer(nn.Module):
+    def __init__(
+        self,
+        optimizer: torch.optim.Optimizer,
+        mode: str,
+        scaler: torch.amp.GradScaler,
+        clip_grad: bool = True,
+        n_tasks: Optional[int] = None,
+    ):
+        super().__init__()
+
+        self.optimizer = optimizer
+        self.mode = mode
+        self.clip_grad = clip_grad
+        self.scaler = scaler
+        if mode in [None, "none"]:
+            pass
+        # conflict free gradnorm
+        if mode == "pseudo":
+            self.operator = PseudoMomentumOperator(n_tasks)
+            self.loss_selector = OrderedSliceSelector()
+        if mode == "full":
+            self.operator = ConFIGOperator()
+
+    def forward(
+        self, model: nn.Module, weighted_loss: torch.Tensor, losses: List[torch.Tensor]
+    ):
+        """Balances multitask gradients with conflict-free IG."""
+
+        grads = []
+        if self.mode in [None, "none"]:
+            self.optimizer.zero_grad(set_to_none=True)
+            self.scaler.scale(weighted_loss).backward()
+        if self.mode == "pseudo":
+            self.optimizer.zero_grad(set_to_none=True)
+            idx, loss_i = self.loss_selector.select(1, losses)
+            self.scaler.scale(loss_i).backward()
+            self.operator.update_gradient(model, idx, grads=get_gradient_vector(model))
+        if self.mode == "full":
+            for loss_i in losses:
+                self.optimizer.zero_grad(set_to_none=True)
+                # retain graph for multiple backward passes
+                self.scaler.scale(loss_i).backward(retain_graph=True)
+                grads.append(get_gradient_vector(model, none_grad_mode="zero"))
+            # apply conflict-free gradient directions
+            self.operator.update_gradient(model, grads)
+
+        # clipping
+        if self.clip_grad:
+            self.scaler.unscale_(self.optimizer)
+            clip_grad_norm_(model.parameters(), 1.0)
+        # gradient step
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        return model
 
 
 def get_pushforward_fn(

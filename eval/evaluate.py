@@ -153,7 +153,8 @@ def evaluate(
                         rollout,
                         idx_data,
                         bundle_seq_length,
-                        valset,
+                        dataset=valset,
+                        output_fields=output_fields,
                         loss_wrap=loss_wrap,
                         eval_integrals=eval_integrals,
                     )

@@ -1,4 +1,4 @@
-batch_size: 4
+batch_size: 16
 n_eval_steps: 2
 validate_every_n_epochs: 20
 eval_integrals: true

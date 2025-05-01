@@ -14,7 +14,12 @@ from torch.utils._pytree import tree_map
 
 from dataset import get_data, CycloneSample
 from models import get_model
-from train import get_pushforward_fn, LossWrapper, pretrain_autoencoder
+from train import (
+    get_pushforward_fn,
+    LossWrapper,
+    GradientBalancer,
+    pretrain_autoencoder,
+)
 from eval.evaluate import evaluate
 from utils import load_model_and_config, setup_logging, edit_tag
 
@@ -97,9 +102,17 @@ def runner(rank, cfg, train_method, world_size):
         # configure loss
         predict_delta = cfg.training.predict_delta
 
+        weights = dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights)
         loss_wrap = LossWrapper(
-            weights=dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights),
+            weights=weights,
             denormalize_fn=trainset.denormalize,
+        )
+        grad_balancer = GradientBalancer(
+            opt,
+            mode=cfg.training.gradnorm_balancer,
+            scaler=scaler,
+            clip_grad=cfg.training.clip_grad,
+            n_tasks=len(weights),
         )
         # and pushforward
         pf_cfg = cfg.training.pushforward
@@ -139,6 +152,8 @@ def runner(rank, cfg, train_method, world_size):
 
             if use_tqdm or (use_ddp and not rank):
                 trainloader = tqdm(trainloader, "Training")
+
+            ############################# train loop start #############################
 
             for i, sample in enumerate(trainloader):
                 try:
@@ -189,7 +204,9 @@ def runner(rank, cfg, train_method, world_size):
 
                 t_start_fwd = perf_counter_ns()
                 with torch.autocast(str(device), dtype=amp_dtype, enabled=use_amp):
+                    # model prediction
                     preds = model(**inputs, **conds)
+                    # predict residuals
                     if predict_delta:
                         for key in cfg.dataset.input_fields:
                             preds[key] = preds[key] + inputs[key]
@@ -201,13 +218,9 @@ def runner(rank, cfg, train_method, world_size):
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
                 t_start_bkd = perf_counter_ns()
 
-                opt.zero_grad(set_to_none=True)
-                scaler.scale(loss).backward()
-                if cfg.training.clip_grad:
-                    scaler.unscale_(opt)
-                    clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(opt)
-                scaler.update()
+                # backward pass (+optional gradnorm for multitask)
+                model = grad_balancer(model, loss, list(losses.values()))
+                # lr scheduler step
                 if cfg.training.scheduler is not None:
                     scheduler.step()
 
@@ -226,6 +239,8 @@ def runner(rank, cfg, train_method, world_size):
                 info_dict["memory_mb"].append(max_memory_allocated(device) / 1024**2)
                 t_start_data = perf_counter_ns()
 
+            ############################## train loop end ##############################
+
             for k in loss_logs:
                 loss_logs[k] /= len(trainloader)
             loss_logs["relative_norm"] /= len(trainloader)
@@ -241,6 +256,8 @@ def runner(rank, cfg, train_method, world_size):
             train_losses_dict = train_losses_dict | loss_logs
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
+            ############################# evaluation start #############################
+
             log_metric_dict, val_plots, loss_val_min = evaluate(
                 rank,
                 world_size,
@@ -254,6 +271,8 @@ def runner(rank, cfg, train_method, world_size):
                 device,
                 loss_val_min,
             )
+
+            ############################## evaluation end ##############################
 
             # log to wandb
             epoch_logs = train_losses_dict | log_metric_dict

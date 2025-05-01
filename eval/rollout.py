@@ -1,4 +1,4 @@
-from typing import Dict, Callable
+from typing import Dict, Callable, Sequence
 
 from einops import rearrange
 import torch
@@ -35,23 +35,8 @@ def get_rollout_fn(
         rollout_steps = min(rollout_steps)
 
         tot_ts = rollout_steps * bundle_steps
-        problem_dim = (
-            model.module.problem_dim if hasattr(model, "module") else model.problem_dim
-        )
         inputs_t = inputs.copy()
-        outputs = {}
-        for key in inputs_t.keys():
-            shape = inputs_t[key].shape
-            dim = problem_dim
-            if inputs_t[key].ndim in [5, 7]:
-                outputs[key] = torch.zeros((shape[0], dim, tot_ts, *shape[2:]))
-            elif inputs_t[key].ndim in [6, 8]:
-                outputs[key] = torch.zeros((shape[0], dim, tot_ts, *shape[3:]))
-            else:
-                raise Exception(
-                    "x should have 7 (b, c, v1, v2, s, x, y) "
-                    "or 8 (b, c, t, v1, v2, s, x, y) dimensions!"
-                )
+        preds = defaultdict(list)
 
         # get corresponding timesteps
         ts_step = bundle_steps
@@ -68,32 +53,33 @@ def get_rollout_fn(
             for i in range(0, rollout_steps):
                 with torch.autocast(device, dtype=amp_dtype, enabled=use_amp):
                     conds["timestep"] = tsteps[:, i].to(device)
-                    output = model(**inputs_t, **conds)
-                    if "flux" in output:
-                        fluxes.append(output["flux"].cpu())
-                        del output["flux"]
+                    pred = model(**inputs_t, **conds)
+                    if "flux" in pred:
+                        fluxes.append(pred["flux"].cpu())
+                        del pred["flux"]
 
                     if predict_delta:
-                        for key in output.keys():
-                            output[key] = output[key] + inputs_t[key]
+                        for key in pred.keys():
+                            pred[key] = pred[key] + inputs_t[key]
 
-                    for key in output.keys():
-                        inputs_t[key] = output[key].clone().float()
+                    for key in inputs_t.keys():
+                        inputs_t[key] = pred[key].clone().float()
 
-                for key in outputs.keys():
-                    outputs[key][:, :, i * bundle_steps : (i + 1) * bundle_steps] = (
-                        output[key].cpu().unsqueeze(2)
-                        if output[key].ndim in [5, 7]
-                        else output[key].cpu()
+                for key in pred:
+                    # add time dim if not there
+                    preds[key].append(
+                        pred[key].cpu().unsqueeze(2)
+                        if pred[key].ndim in [5, 7]
+                        else pred[key].cpu()
                     )
 
-        for key in outputs.keys():
+        for key in preds.keys():
             # only return desired size
-            outputs[key] = rearrange(outputs[key], "b c t ... -> t b c ...")
-            outputs[key] = outputs[key][: rollout_steps * bundle_steps, :, ...]
+            preds[key] = rearrange(torch.cat(preds[key], 2), "b c t ... -> t b c ...")
+            preds[key] = preds[key][: rollout_steps * bundle_steps, :, ...]
         if len(fluxes) > 0:
-            outputs["flux"] = rearrange(torch.stack(fluxes, dim=-1), "b t -> t b")
-        return outputs
+            preds["flux"] = rearrange(torch.stack(fluxes, dim=-1), "b t -> t b")
+        return preds
 
     return _rollout
 
@@ -103,6 +89,7 @@ def validation_metrics(
     idx_data: Dict,
     bundle_steps: int,
     dataset,
+    output_fields: Sequence[str],
     loss_wrap: nn.Module,
     get_normalized: bool = False,
     eval_integrals: bool = True,
@@ -120,7 +107,7 @@ def validation_metrics(
             (idx_data["timestep_index"] + t).long(),
             get_normalized,
         )
-        for key in rollout.keys():
+        for key in output_fields:
             gts[key].append(getattr(sample, f"y_{key}"))
         geometry = sample.geometry
 
@@ -139,7 +126,7 @@ def validation_metrics(
     for n in range(n_steps):
         # one timestep at a time
         nth_rollout = {k: rollout[k][n] for k in rollout.keys()}
-        nth_gts = {k: gts[k][n] for k in rollout.keys()}
+        nth_gts = {k: gts[k][n] for k in output_fields}
         # TODO proper flux plots?
         _, nth_losses, _ = loss_wrap(
             preds=nth_rollout,
