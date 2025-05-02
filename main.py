@@ -47,11 +47,11 @@ def main(config: DictConfig):
         world_size = 1
 
     train_method = "default"  # TODO
-    
+
     if dict_config["model"]["loss_weights"] is None:
         dict_config["model"]["loss_weights"] = {}
     if dict_config["model"]["extra_loss_weights"] is None:
-        dict_config["model"]["extra_loss_weights"] = {} 
+        dict_config["model"]["extra_loss_weights"] = {}
 
     try:
         if dict_config["logging"]["run_id"] is None:

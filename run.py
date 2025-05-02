@@ -106,6 +106,7 @@ def runner(rank, cfg, train_method, world_size):
         loss_wrap = LossWrapper(
             weights=weights,
             denormalize_fn=trainset.denormalize,
+            separate_zf=cfg.dataset.separate_zf
         )
         grad_balancer = GradientBalancer(
             opt,

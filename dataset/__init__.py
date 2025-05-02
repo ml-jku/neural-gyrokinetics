@@ -38,15 +38,10 @@ def get_data(cfg):
                 file = entry.trajectory
                 last_n = entry.last_n
                 partial_holdouts[file] = last_n
-        input_fields = (
-            set(cfg.dataset.input_fields)
-            .union(set(cfg.model.loss_weights.keys()))
-            .union([k.split("_")[0] for k in cfg.model.extra_loss_weights.keys()])
-        )
-        input_fields.remove("flux")  # flux cannot be an input
+
         trainset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
-            input_fields=input_fields,
+            input_fields=["df", "phi", "flux"],  # TODO figure out how to deal with eval
             path=cfg.dataset.path,
             split="train",
             random_seed=cfg.seed,
@@ -68,7 +63,7 @@ def get_data(cfg):
 
         holdout_trajectories_valset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
-            input_fields=input_fields,
+            input_fields=["df", "phi", "flux"],
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
@@ -113,7 +108,7 @@ def get_data(cfg):
         if partial_holdouts:
             holdout_samples_valset = CycloneDataset(
                 active_keys=cfg.dataset.active_keys,
-                input_fields=input_fields,
+                input_fields=["df", "phi", "flux"],
                 path=cfg.dataset.path,
                 split="val",
                 random_seed=cfg.seed,

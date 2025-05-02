@@ -322,7 +322,7 @@ def generate_val_plots(rollout, gt, ts, phase):
             )
 
         for name, plot_fn in val_plots_dict[key].items():
-            plots[name] = plot_fn(rollout[key][0, 0], x2=gt[key])
+            plots[name] = plot_fn(rollout[key][0], x2=gt[key])
 
     return plots
 

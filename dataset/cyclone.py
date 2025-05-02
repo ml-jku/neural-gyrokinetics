@@ -24,11 +24,15 @@ class CycloneSample:
     y_phi: torch.Tensor
     y_flux: torch.Tensor
     timestep: torch.Tensor
-    itg: torch.Tensor
     file_index: torch.Tensor
     timestep_index: torch.Tensor
+    # conditioning
+    itg: torch.Tensor
+    dg: torch.Tensor
+    s_hat: torch.Tensor
+    q: torch.Tensor
+    # geometric tensors for integrals
     geometry: Optional[Dict[str, torch.Tensor]] = None
-    # TODO: add more fields (e.g. params that we can use for conditioning)
 
     def pin_memory(self):
         if self.df is not None:
@@ -289,7 +293,7 @@ class CycloneDataset(Dataset):
             )
         ):
             # overwrite dataset-wide stats with new stats for data after offset only
-            stats = self._get_norm_stats()
+            stats["df"] = self._df_recompute_stats()
 
         if normalization_scope == "dataset" and normalization_stats is None:
             for k in self.input_fields:
@@ -301,7 +305,7 @@ class CycloneDataset(Dataset):
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
-            self.phi_resolution = (255, 16, 32)  # TODO
+            self.phi_resolution = (self.resolution[3], self.resolution[2], self.resolution[4])
 
     def _separate_zf(self, x):
         nky = x.shape[-1]
@@ -309,7 +313,7 @@ class CycloneDataset(Dataset):
         x = np.concatenate([zf, x - zf], axis=0)
         return x
 
-    def _get_norm_stats(self):
+    def _df_recompute_stats(self):
         stats = None
         for t_idx in tqdm.trange(
             0, self.length, 2, desc="Re-computing normalization stats"
@@ -373,34 +377,37 @@ class CycloneDataset(Dataset):
             x = self._separate_zf(x)
             gt = self._separate_zf(gt)
         # accessory fields
-        poten, gt_poten, flux = sample["poten"], sample["gt_poten"], sample["gt_flux"]
+        phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         # conditioning fields
-        timestep, itg = sample["timestep"], sample["itg"]
+        timestep = sample["timestep"]
+        itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
         geometry = sample["geometry"]
         if self.normalization is not None and get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
                 gt = (gt - shift) / scale
 
-            if poten is not None:
-                poten, shift, scale = self.normalize(file_index, phi=poten)
-                gt_poten = (gt_poten - shift) / scale
+            if phi is not None:
+                phi, shift, scale = self.normalize(file_index, phi=phi)
+                y_phi = (y_phi - shift) / scale
 
         return CycloneSample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
             y_df=torch.tensor(gt, dtype=self.dtype) if gt is not None else None,
-            phi=(torch.tensor(poten, dtype=self.dtype) if poten is not None else None),
+            phi=(torch.tensor(phi, dtype=self.dtype) if phi is not None else None),
             y_phi=(
-                torch.tensor(gt_poten, dtype=self.dtype)
-                if gt_poten is not None
-                else None
+                torch.tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
             ),
             y_flux=torch.tensor(flux, dtype=self.dtype),
             timestep=torch.tensor(timestep, dtype=self.dtype),
-            itg=torch.tensor(itg, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
             geometry=tree_map(lambda x: torch.from_numpy(x), geometry),
+            # conditioning
+            itg=torch.tensor(itg, dtype=self.dtype),
+            dg=torch.tensor(dg, dtype=self.dtype),
+            s_hat=torch.tensor(s_hat, dtype=self.dtype),
+            q=torch.tensor(q, dtype=self.dtype),
         )
 
     def _load_data(
@@ -410,7 +417,7 @@ class CycloneDataset(Dataset):
         x = []
         gt = []
         poten = []
-        gt_poten = []
+        y_poten = []
         gt_flux = []
         for i in range(self.bundle_seq_length):
             # read the input
@@ -433,7 +440,7 @@ class CycloneDataset(Dataset):
                 phi = data[f"data/{phi_name}"][:]
                 phi_gt = data[f"data/{phi_name_gt}"][:]
                 poten.append(phi)
-                gt_poten.append(phi_gt)
+                y_poten.append(phi_gt)
 
             # target flux
             flux = data["metadata/fluxes"][
@@ -456,21 +463,24 @@ class CycloneDataset(Dataset):
         if "phi" in self.input_fields:
             # stack to shape (c, t, x, s, y)
             poten = np.stack(poten, axis=1)
-            gt_poten = np.stack(gt_poten, axis=1)
+            y_poten = np.stack(y_poten, axis=1)
             if self.bundle_seq_length == 1:
                 poten = poten.squeeze(axis=1)
-                gt_poten = gt_poten.squeeze(axis=1)
+                y_poten = y_poten.squeeze(axis=1)
         else:
-            poten, gt_poten = None, None
+            poten, y_poten = None, None
 
         sample["x"] = x
         sample["gt"] = gt
-        sample["poten"] = poten
-        sample["gt_poten"] = gt_poten
+        sample["phi"] = poten
+        sample["y_phi"] = y_poten
         sample["gt_flux"] = np.array(gt_flux).squeeze()
         # load conditioning
         sample["timestep"] = data["metadata/timesteps"][original_t_index]
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
+        sample["dg"] = data["metadata/density_grad"][:].squeeze()
+        sample["s_hat"] = data["metadata/s_hat"][:].squeeze()
+        sample["q"] = data["metadata/q"][:].squeeze()
         # load geometry
         sample["geometry"] = {k: np.array(v[()]) for k, v in data["geometry"].items()}
         return sample
@@ -691,8 +701,11 @@ class CycloneDataset(Dataset):
             ),
             y_flux=torch.stack([sample.y_flux for sample in batch]),
             timestep=torch.stack([sample.timestep for sample in batch]),
-            itg=torch.stack([sample.itg for sample in batch]),
             file_index=torch.stack([sample.file_index for sample in batch]),
             timestep_index=torch.stack([sample.timestep_index for sample in batch]),
             geometry=tree_map(lambda *x: torch.stack(x), *[s.geometry for s in batch]),
+            itg=torch.stack([sample.itg for sample in batch]),
+            dg=torch.stack([sample.dg for sample in batch]),
+            s_hat=torch.stack([sample.s_hat for sample in batch]),
+            q=torch.stack([sample.q for sample in batch]),
         )

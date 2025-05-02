@@ -62,6 +62,8 @@ def evaluate(
     use_amp = cfg.use_amp
     input_fields = cfg.dataset.input_fields
     output_fields = list(cfg.model.loss_weights.keys())
+    if eval_integrals:
+        output_fields = ["df", "phi", "flux"]  # all fields for integral evaluation
     conditioning = cfg.model.conditioning
     idx_keys = ["file_index", "timestep_index"]
     log_metric_dict = {}
@@ -182,16 +184,22 @@ def evaluate(
 
                     if val_idx == 0:
                         # holdout trajectories valset
-                        if idx in [0, 20]:
+                        t_idx = idx_data["timestep_index"].tolist()
+                        phase = None
+                        # TODO compute from dawtaset
+                        if 5 in t_idx:
+                            phase = "Linear"
+                            batch_idx = t_idx.index(5)
+                        if 100 in t_idx or cfg.dataset.offset > 0:
+                            phase = "Saturated"
+                            batch_idx = t_idx.index(100)
+                        if phase:
+                            rollout = {k: rollout[k][:, batch_idx] for k in rollout}
                             plots = generate_val_plots(
                                 rollout=rollout,
                                 gt=gts,
                                 ts=conds["timestep"],
-                                phase=(
-                                    "Saturated Phase"
-                                    if idx == 20 or cfg.dataset.offset > 0
-                                    else "Linear Phase"
-                                ),
+                                phase=f"{phase} Phase"
                             )
                             val_plots.update(plots)
                     else:

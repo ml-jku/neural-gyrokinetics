@@ -213,9 +213,8 @@ class SwinXnet(nn.Module):
         modulation: str = "dit",
         act_fn: nn.Module = nn.GELU,
         patch_skip: bool = False,
-        decouple_mu: bool = False,
         separate_zf: bool = False,
-        zf_norm: bool = False,
+        decouple_mu: bool = False,
         flux_drop: float = 0.1,
         swin_bottleneck: bool = False,
     ):
@@ -223,22 +222,21 @@ class SwinXnet(nn.Module):
 
         self.patch_skip = patch_skip
         self.decouple_mu = decouple_mu
-        self.separate_zf = separate_zf
         self.df_base_resolution = [int(r) for r in df_base_resolution]
         self.df_space = 5
         self.phi_space = 3
         self.problem_dim = in_channels
-
-        if separate_zf:
-            in_channels = 2 * in_channels
-            out_channels = 2 * out_channels
-            self.zf_norm = nn.LayerNorm(in_channels) if zf_norm else nn.Identity()
 
         df_in_channels = in_channels
         df_out_channels = out_channels
 
         phi_in_channels = in_channels
         phi_out_channels = out_channels
+        
+        if separate_zf:
+            # no separate zf on phi
+            phi_in_channels = phi_in_channels - 2
+            phi_out_channels = phi_out_channels - 2
 
         if decouple_mu:
             self.df_space = 4
@@ -427,15 +425,6 @@ class SwinXnet(nn.Module):
         return {"df": df, "phi": phi, "flux": flux}
 
     def patch_encode(self, df: torch.Tensor, phi: torch.Tensor):
-        if self.separate_zf:
-            # split zonal flow
-            zf = df.mean(-1, True).repeat(1, 1, 1, 1, 1, 1, df.shape[-1])
-            no_zf = df - zf
-            df = torch.cat([zf, no_zf], dim=1)  # stack on channels
-            df = rearrange(df, "b c ... -> b ... c")
-            df = self.zf_norm(df)
-            df = rearrange(df, "b ... c -> b c ...")
-
         # decouple mu and add positional information
         if self.decouple_mu:
             df = rearrange(df, "b c ... -> b ... c")
@@ -466,9 +455,6 @@ class SwinXnet(nn.Module):
             df = rearrange(
                 df, "b (c mu) vp ... -> b c vp mu ...", mu=self.df_deoupled_dim
             )
-        # recompose zonal flow
-        if self.separate_zf:
-            df = torch.cat([df[:, 0::2].sum(1, True), df[:, 1::2].sum(1, True)], dim=1)
 
         return df, phi
 
@@ -653,15 +639,6 @@ class SwinXNetMultitask(SwinXnet):
         return {"df": df, "phi": phi, "flux": flux}
 
     def patch_encode(self, df: torch.Tensor):
-        if self.separate_zf:
-            # split zonal flow
-            zf = df.mean(-1, True).repeat(1, 1, 1, 1, 1, 1, df.shape[-1])
-            no_zf = df - zf
-            df = torch.cat([zf, no_zf], dim=1)  # stack on channels
-            df = rearrange(df, "b c ... -> b ... c")
-            df = self.zf_norm(df)
-            df = rearrange(df, "b ... c -> b c ...")
-
         # decouple mu and add positional information
         if self.decouple_mu:
             df = rearrange(df, "b c ... -> b ... c")

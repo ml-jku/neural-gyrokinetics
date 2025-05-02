@@ -51,28 +51,16 @@ class LossWrapper(nn.Module):
         self,
         weights: Dict,
         denormalize_fn: Optional[Callable] = None,
+        separate_zf: bool = False,
     ):
         super().__init__()
 
         self.weights = weights
-        self._extras = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
+        self._data_losses = ["df", "phi", "flux"]
+        self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
         self.integrator = FluxIntegral()
         self.denormalize_fn = denormalize_fn
-
-        self.loss_fns = {
-            "df": partial(self.data_loss, "df"),
-            "phi": partial(self.data_loss, "phi"),
-            "flux": partial(self.data_loss, "flux"),
-        }
-
-    def data_loss(
-        self, key: str, preds: Dict[str, torch.Tensor], tgts: Dict[str, torch.Tensor]
-    ):
-        if key == "flux":
-            # NOTE: regular mse for flux otherwise might get nans (for linear phase)
-            return F.mse_loss(preds["flux"], tgts["flux"])
-        else:
-            return relative_norm_mse(preds[key], tgts[key])
+        self.separate_zf = separate_zf
 
     def integral_loss(
         self,
@@ -105,7 +93,11 @@ class LossWrapper(nn.Module):
             tgt_phi = tgts["phi"]
 
         tgt_eflux = tgts["flux"]
-
+        
+        if self.separate_zf:
+            # recompose zf
+            pred_df = torch.cat([pred_df[:, 0::2].sum(1, True), pred_df[:, 1::2].sum(1, True)], dim=1)
+        
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
         int_losses = {}
         # NOTE: these losses are in unnormalized space
@@ -130,12 +122,11 @@ class LossWrapper(nn.Module):
         compute_integrals: bool = True,
     ):
         losses = {}
-        int_losses = None
+        int_losses = {}
         # NOTE: newtwork predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
-        # NOTE: if weight["phi"] > 0 -> weight["phi_int"] = 0 and vice versa
         # only compute integrals if requested by weights or in eval
-        eval_integrals = not self.training and compute_integrals
-        if sum([self.weights.get(k, 0.0) for k in self._extras]) > 0 or eval_integrals:
+        do_ints = not self.training and compute_integrals
+        if sum([self.weights.get(k, 0.0) for k in self._int_losses]) > 0 or do_ints:
             int_losses, integrated = self.integral_loss(geometry, preds, tgts, idx_data)
         loss_keys = (
             list(self.weights.keys())
@@ -145,15 +136,16 @@ class LossWrapper(nn.Module):
         int_keys = [k for k in loss_keys if "int" in k]
         cross_keys = [k for k in loss_keys if "cross" in k]
         data_keys = list(set(loss_keys) - set(int_keys) - set(cross_keys))
-        assert all(
-            [k in preds for k in data_keys]
-        ), "Prediction - DATA loss weight key mismatch."
-        assert all(
-            [k.replace("_cross", "") in preds for k in cross_keys]
-        ), "Prediction - CROSS loss weight key mismatch."
+        if not all([k in preds for k in data_keys]):
+            raise ValueError("Prediction - DATA loss weight key mismatch.")
+        if not all([k.replace("_cross", "") in preds for k in cross_keys]):
+            raise ValueError("Prediction - CROSS loss weight key mismatch.")
         # compute losses
         for k in data_keys:
-            losses[k] = F.mse_loss(preds[k], tgts[k])
+            if k == "df":
+                losses[k] = relative_norm_mse(preds[k], tgts[k])
+            else:
+                losses[k] = F.mse_loss(preds[k], tgts[k])
         for k in int_keys + cross_keys:
             losses[k] = int_losses[k]
         # reweight and accumulate
@@ -171,7 +163,7 @@ class LossWrapper(nn.Module):
 
     @property
     def all_losses(self):
-        return list(self.loss_fns.keys()) + self._extras
+        return list(self._data_losses) + self._int_losses
 
     def __len__(self):
         return len(self.all_losses)

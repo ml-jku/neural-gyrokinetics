@@ -8,7 +8,7 @@ def get_model(cfg, dataset, train_method="default"):
     problem_dim = len(dataset.active_keys)
     separate_zf = cfg.dataset.separate_zf
     if separate_zf:
-        problem_dim += 2
+        problem_dim = problem_dim + 2  # NOTE: re/im parts for zonal flow 
 
     if cfg.model.name == "swin":
         assert cfg.dataset.input_fields == [
@@ -105,7 +105,6 @@ def get_model(cfg, dataset, train_method="default"):
         modulation = cfg.model.swin.modulation
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         decouple_mu = cfg.model.decouple_mu
-        separate_zf = cfg.dataset.separate_zf
         refiner = train_method == "refiner"
         outputs = list(cfg.model.loss_weights.keys())
         swin_bottleneck = cfg.model.swin.swin_bottleneck
@@ -146,8 +145,8 @@ def get_model(cfg, dataset, train_method="default"):
             act_fn=act_fn,
             patch_skip=patch_skip,
             modulation=modulation,
-            decouple_mu=decouple_mu,
             separate_zf=separate_zf,
+            decouple_mu=decouple_mu,
             swin_bottleneck=swin_bottleneck,
         )
 
