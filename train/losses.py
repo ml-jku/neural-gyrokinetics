@@ -104,18 +104,19 @@ class LossWrapper(nn.Module):
             pred_phi = preds["phi"] if "phi" in preds else None
             tgt_phi = tgts["phi"]
 
-        pred_eflux, tgt_eflux = preds["flux"], tgts["flux"]
+        tgt_eflux = tgts["flux"]
 
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
         int_losses = {}
         # NOTE: these losses are in unnormalized space
-        int_losses["phi_int"] = relative_norm_mse(pphi_int, tgt_phi)
+        int_losses["phi_int"] = F.mse_loss(pphi_int, tgt_phi)
         # pflux -> 0, eflux -> heat flux
         int_losses["flux_int"] = (pflux**2).mean() + F.mse_loss(eflux, tgt_eflux)
         # mimicry / cross terms in the loss (between prediction heads and integrals)
         if "phi" in preds:
-            int_losses["phi_cross"] = relative_norm_mse(pred_phi, pphi_int)
+            int_losses["phi_cross"] = F.mse_loss(pred_phi, pphi_int)
         if "flux" in preds:
+            pred_eflux = preds["flux"] if "flux" in preds else None
             int_losses["flux_cross"] = F.mse_loss(pred_eflux, eflux)
 
         return int_losses, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
@@ -137,9 +138,9 @@ class LossWrapper(nn.Module):
         if sum([self.weights.get(k, 0.0) for k in self._extras]) > 0 or eval_integrals:
             int_losses, integrated = self.integral_loss(geometry, preds, tgts, idx_data)
         loss_keys = (
-            self.weights
+            list(self.weights.keys())
             if self.training
-            else (list(self.loss_fns.keys()) + list(int_losses.keys()))
+            else (list(self.weights.keys()) + list(int_losses.keys()))
         )
         int_keys = [k for k in loss_keys if "int" in k]
         cross_keys = [k for k in loss_keys if "cross" in k]
@@ -152,7 +153,7 @@ class LossWrapper(nn.Module):
         ), "Prediction - CROSS loss weight key mismatch."
         # compute losses
         for k in data_keys:
-            losses[k] = self.loss_fns[k](preds, tgts)
+            losses[k] = F.mse_loss(preds[k], tgts[k])
         for k in int_keys + cross_keys:
             losses[k] = int_losses[k]
         # reweight and accumulate

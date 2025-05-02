@@ -2,13 +2,13 @@ batch_size: 8
 n_epochs: 200
 num_workers: 4
 pin_memory: true
-learning_rate: 1e-3
+learning_rate: 1e-4
 final_learning_rate: 1e-6
 weight_decay: 1e-5
 predict_delta: false
 scheduler: "cosine"
 clip_grad: true
-gradnorm_balancer: "full"  # "none", "full", "pseudo"
+gradnorm_balancer: "none"  # "none", "full", "pseudo"
 pushforward:
   epochs: [100, 130, 160]
   unrolls: [0, 0, 0]

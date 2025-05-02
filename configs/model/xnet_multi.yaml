@@ -2,14 +2,14 @@ name: xnet_multi
 bundle_seq_length: 1
 latent_dim: 256
 num_layers: 1
-decouple_mu: false
-conditioning: ["timestep", "itg"]
+decouple_mu: true
+conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
 loss_weights:
-  df: 0.6
-  phi: 0.4
-  flux: 0.001
+  df: 1.0
+  phi: 0.5
+  flux: 1e-5
 extra_loss_weights:
-  phi_int: 0.0
+  phi_int: 0.1
   flux_int: 1e-4
   phi_cross: 0.0
   flux_cross: 0.0

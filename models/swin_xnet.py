@@ -234,6 +234,9 @@ class SwinXnet(nn.Module):
             out_channels = 2 * out_channels
             self.zf_norm = nn.LayerNorm(in_channels) if zf_norm else nn.Identity()
 
+        df_in_channels = in_channels
+        df_out_channels = out_channels
+
         phi_in_channels = in_channels
         phi_out_channels = out_channels
 
@@ -471,12 +474,12 @@ class SwinXnet(nn.Module):
 
 
 class VSpaceReduce(AttentionDecoder):
-    def __init__(self, *args, decouple_mu: bool = False, **kwargs):
+    def __init__(self, *args, decouple_mu: bool = False, gain: float = 1e-2, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.decouple_mu = decouple_mu
         # learned token to integrate vspace
-        self.integral_token = nn.Parameter(torch.randn(1, 1, self.dim))
+        self.integral_token = nn.Parameter(gain * torch.randn(1, 1, self.dim))
         del self.q
 
     def forward(self, x: torch.Tensor):

@@ -243,7 +243,7 @@ class SwinBlockUp(nn.Module):
         x: torch.Tensor,
         s: Optional[torch.Tensor] = None,
         return_skip: bool = False,
-        **kwargs
+        **kwargs,
     ) -> torch.Tensor:
         """
         Args:
@@ -378,7 +378,7 @@ class SwinUnet(nn.Module):
         LocalLayer = SwinLayer
         GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
         self.cond_embed = cond_embed
-        self.condition_keys = conditioning
+        self.condition_keys = sorted(conditioning)
         if self.cond_embed is not None:
             if modulation == "dit":
                 ModulatedSwinLayer = DiTSwinLayer
@@ -605,12 +605,16 @@ class SwinUnet(nn.Module):
         x = rearrange(x, "b ... c -> b c ...")
         return x
 
-    def condition(self, kwconds) -> Dict:
+    def condition(self, kwconds: Dict[str, torch.Tensor]) -> Dict:
+        # drop input fields
+        kwconds = {k: v for k, v in kwconds.items() if k not in ["df", "phi", "flux"]}
         if len(kwconds) == 0:
             return {}
-        assert sorted(self.condition_keys) == sorted(
-            list(kwconds.keys())
-        ), "Mismatch in conditioning keys"
+
+        assert self.condition_keys == sorted(list(kwconds.keys())), (
+            "Mismatch in conditioning keys "
+            f"{self.condition_keys} != {sorted(list(kwconds.keys()))}"
+        )
         cond = torch.cat(
             [kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1
         )

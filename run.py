@@ -137,7 +137,11 @@ def runner(rank, cfg, train_method, world_size):
                 model = DDP(model, device_ids=[rank])
 
         input_fields = set(cfg.dataset.input_fields)
-        output_fields = list(cfg.model.loss_weights.keys())
+        output_fields = list(
+            (set(cfg.model.loss_weights.keys())).union(
+                [k.split("_")[0] for k in cfg.model.extra_loss_weights.keys()]
+            )
+        )
         conditioning = cfg.model.conditioning
         idx_keys = ["file_index", "timestep_index"]
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
