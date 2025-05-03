@@ -4,6 +4,7 @@ import os
 import h5py
 from dataclasses import dataclass
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 import tqdm
 import torch
 import numpy as np
@@ -88,6 +89,7 @@ class CycloneDataset(Dataset):
         minmax_beta2: float = 4,
         offset: int = 0,
         separate_zf: bool = False,
+        num_workers: int = 4,
     ):
         self.input_fields = input_fields
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
@@ -101,7 +103,8 @@ class CycloneDataset(Dataset):
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
         assert normalization in ["zscore", "minmax", "none", None]
         assert normalization_scope in ["sample", "dataset", "per_mode", "trajectory"]
-        self.normalization = normalization if normalization != "none" else None
+        normalization = normalization if normalization != "none" else None
+        self.normalization = normalization
         if normalization_stats is not None:
             self.norm_stats = normalization_stats
         self.normalization_scope = normalization_scope
@@ -111,11 +114,38 @@ class CycloneDataset(Dataset):
         self.minmax_beta1 = minmax_beta1
         self.minmax_beta2 = minmax_beta2
         self.separate_zf = separate_zf
+        self.num_workers = num_workers
 
         self.dir = path
 
         self.bundle_seq_length = bundle_seq_length
 
+        # with specified files / pattern
+        if trajectories is not None:
+            if split == "val" and partial_holdouts:
+                self.files = []
+                for key in partial_holdouts.keys():
+                    self.files.append(os.path.join(self.dir, key))
+            else:
+                if isinstance(trajectories, str):
+                    # pattern for incremental naming
+                    match = re.match(r"^(.*?)\{([^}]+)\}(.*?)$", trajectories)
+                    if not match:
+                        trajectories = [trajectories]
+                    prefix, ranges_str, suffix = match.groups()
+                    # parse ranges
+                    traj_numbers = []
+                    for part in ranges_str.split(","):
+                        if "-" in part:
+                            start, end = map(int, part.split("-"))
+                            traj_numbers.extend(range(start, end + 1))
+                        else:
+                            traj_numbers.append(int(part))
+
+                    trajectories = [f"{prefix}{num}{suffix}" for num in traj_numbers]
+
+                self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
+        # take all files in path
         if trajectories is None:
             self.trajectories_fnames = os.listdir(path)
             self.files = [
@@ -137,13 +167,6 @@ class CycloneDataset(Dataset):
                 self.files = [self.files[i] for i in train_idx]
             if split == "val":
                 self.files = [self.files[i] for i in val_idx]
-        else:
-            if split == "val" and partial_holdouts:
-                self.files = []
-                for key in partial_holdouts.keys():
-                    self.files.append(os.path.join(self.dir, key))
-            else:
-                self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
 
         # if set, load preprocessed files with ifft
         self.spatial_ifft = spatial_ifft
@@ -282,16 +305,8 @@ class CycloneDataset(Dataset):
                 self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, t_index)
                 self.file_and_tstep_to_flat_index[(file_idx, t_index)] = flat_idx
 
-        if (
-            offset > 0
-            and normalization_scope == "dataset"
-            and normalization_stats is None
-            or (
-                separate_zf
-                and normalization_scope == "dataset"
-                and normalization_stats is None
-            )
-        ):
+        norm_dataset = normalization is not None and normalization_scope == "dataset"
+        if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
             # overwrite dataset-wide stats with new stats for data after offset only
             stats["df"] = self._df_recompute_stats()
 
@@ -305,7 +320,11 @@ class CycloneDataset(Dataset):
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
-            self.phi_resolution = (self.resolution[3], self.resolution[2], self.resolution[4])
+            self.phi_resolution = (
+                self.resolution[3],
+                self.resolution[2],
+                self.resolution[4],
+            )
 
     def _separate_zf(self, x):
         nky = x.shape[-1]
@@ -314,12 +333,10 @@ class CycloneDataset(Dataset):
         return x
 
     def _df_recompute_stats(self):
-        stats = None
-        for t_idx in tqdm.trange(
-            0, self.length, 2, desc="Re-computing normalization stats"
-        ):
-            file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
+        t_indices = list(range(0, self.length, 2))
 
+        def process_t_idx(t_idx):
+            file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
             with h5py.File(self.files[file_index], "r") as f:
                 sample = self._load_data(f, file_index, t_index)
 
@@ -329,24 +346,34 @@ class CycloneDataset(Dataset):
                 x = self._separate_zf(x)
                 y = self._separate_zf(y)
 
-            if stats is None:
-                stats = RunningMeanStd(
-                    shape=x.mean((1, 2, 3, 4, 5), keepdims=True).shape
-                )
+            # Compute metrics for x and y
+            x_mean = x.mean((1, 2, 3, 4, 5), keepdims=True)
+            x_var = x.var((1, 2, 3, 4, 5), keepdims=True)
+            x_min = x.min((1, 2, 3, 4, 5), keepdims=True)
+            x_max = x.max((1, 2, 3, 4, 5), keepdims=True)
 
-            stats.update(
-                x.mean((1, 2, 3, 4, 5), keepdims=True),
-                x.var((1, 2, 3, 4, 5), keepdims=True),
-                x.min((1, 2, 3, 4, 5), keepdims=True),
-                x.max((1, 2, 3, 4, 5), keepdims=True),
+            y_mean = y.mean((1, 2, 3, 4, 5), keepdims=True)
+            y_var = y.var((1, 2, 3, 4, 5), keepdims=True)
+            y_min = y.min((1, 2, 3, 4, 5), keepdims=True)
+            y_max = y.max((1, 2, 3, 4, 5), keepdims=True)
+
+            return (x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max)
+
+        stats = None
+        with ThreadPoolExecutor(self.num_workers) as executor:
+            # indices in parallel, collect results in list
+            metrics_gen = tqdm.tqdm(
+                executor.map(process_t_idx, t_indices),
+                total=len(t_indices),
+                desc="Re-computing normalization stats",
             )
 
-            stats.update(
-                y.mean((1, 2, 3, 4, 5), keepdims=True),
-                y.var((1, 2, 3, 4, 5), keepdims=True),
-                y.min((1, 2, 3, 4, 5), keepdims=True),
-                y.max((1, 2, 3, 4, 5), keepdims=True),
-            )
+            for metrics in metrics_gen:
+                x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max = metrics
+                if stats is None:
+                    stats = RunningMeanStd(shape=x_mean.shape)
+                stats.update(x_mean, x_var, x_min, x_max)
+                stats.update(y_mean, y_var, y_min, y_max)
 
         return stats
 
