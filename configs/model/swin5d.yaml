@@ -2,14 +2,16 @@ name: swin
 bundle_seq_length: 1
 latent_dim: 256
 num_layers: 1
+decouple_mu: true
 conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
 loss_weights:
   df: 1.0
 extra_loss_weights:
+  # flux: 1.0
 
 swin:
   patch_size: [ 4, 2, 4, 5, 4 ]
-  window_size: [ 4, 2, 2, 8, 4 ]
+  window_size: [ 4, 2, 2, 9, 4 ]
   num_heads: [8]
   depth: [2]
   gradient_checkpoint: false
