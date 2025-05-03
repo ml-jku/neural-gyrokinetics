@@ -53,24 +53,28 @@ class MLP(nn.Module):
 class AttentionDecoder(nn.Module):
     def __init__(
         self,
-        dim: int,
+        q_dim: int,
         num_heads: int,
         qkv_bias: bool = False,
+        kv_dim: Optional[int] = None,
+        out_dim: Optional[int] = None,
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         init_weights: Optional[str] = None,
-    ) -> None:
+    ):
 
         super().__init__()
-        self.dim = dim
+        self.q_dim = q_dim
+        self.kv_dim = kv_dim if kv_dim else q_dim
+        self.out_dim = out_dim if out_dim else q_dim
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
+        self.head_dim = q_dim // num_heads
         self.attn_drop = attn_drop
         self.qkv_bias = qkv_bias
 
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
-        self.proj = nn.Linear(dim, dim)
+        self.q = nn.Linear(q_dim, q_dim, bias=qkv_bias)
+        self.kv = nn.Linear(self.kv_dim, q_dim * 2, bias=qkv_bias)
+        self.proj = nn.Linear(q_dim, self.out_dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
         if init_weights:

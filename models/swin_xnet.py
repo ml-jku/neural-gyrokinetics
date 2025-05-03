@@ -1,189 +1,12 @@
-from typing import Sequence, Union, Optional, Tuple, Type, List
+from typing import Sequence, Union, Optional, Tuple, List
 
 import torch
 from torch import nn
 from einops import rearrange
-from torch.nn.attention import SDPBackend, sdpa_kernel
-from torch.nn import functional as F
-import torch.distributed as dist
 
-from models.swin_unet import SwinNDUnet
-from models.nd_vit.drop import DropPath
+from models.swin_unet import SwinNDUnet, Swin5DUnet
 from models.nd_vit.positional import PositionalEmbedding
-from models.utils import MLP, seq_weight_init, AttentionDecoder
-
-
-class MixingBlock(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        num_heads: int,
-        mlp_ratio: float = 2.0,
-        qkv_bias: bool = True,
-        drop: float = 0.0,
-        attn_drop: float = 0.0,
-        drop_path: float = 0.0,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
-        act_fn: nn.Module = nn.GELU,
-        init_weights: Optional[str] = None,
-    ):
-
-        super().__init__()
-        self.dim = dim
-        self.num_heads = num_heads
-        self.mlp_ratio = mlp_ratio
-        self.init_weights = init_weights
-
-        self.norm1 = norm_layer(dim) if norm_layer is not None else nn.Identity()
-        self.attn = AttentionDecoder(
-            dim,
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            attn_drop=attn_drop,
-            proj_drop=drop,
-            init_weights=init_weights,
-        )
-
-        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.norm2 = norm_layer(dim) if norm_layer is not None else nn.Identity()
-        mlp_hidden_dim = int(dim * mlp_ratio)
-
-        self.mlp = MLP([dim, mlp_hidden_dim, dim], act_fn=act_fn, dropout_prob=drop)
-
-        if init_weights:
-            self.reset_parameters(init_weights)
-
-    def reset_parameters(self, init_weights):
-        if init_weights == "torch" or init_weights is None:
-            pass
-        elif init_weights == "xavier_uniform":
-            self.mlp.apply(seq_weight_init(nn.init.xavier_uniform_))
-        elif init_weights in ["truncnormal", "truncnormal002"]:
-            self.mlp.apply(seq_weight_init(nn.init.trunc_normal_))
-        else:
-            raise NotImplementedError
-
-        self.attn.reset_parameters(init_weights)
-
-    def forward(self, left: torch.Tensor, right: Optional[torch.Tensor] = None):
-        right = right if right is not None else left
-        x = left + self.drop_path(self.norm1(self.attn(left, right)))
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
-
-
-class LatentMixingTransformer(nn.Module):
-    def __init__(
-        self,
-        space: int,
-        dim: int,
-        depth: int,
-        num_heads: int,
-        grid_size: Sequence[int],
-        mlp_ratio: float = 4.0,
-        qkv_bias: bool = False,
-        drop_path: Union[Sequence[float], float] = 0.0,
-        drop: float = 0.0,
-        attn_drop: float = 0.0,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
-        act_fn: nn.Module = nn.GELU,
-        init_weights: Optional[str] = None,
-    ):
-
-        super().__init__()
-
-        if isinstance(drop_path, float):
-            drop_path = [drop_path] * depth
-
-        self.depth = depth
-        self.dim = dim
-        self.grid_size = grid_size
-        self.drop_path = drop_path
-
-        assert dim % num_heads == 0
-
-        self.blocks = nn.ModuleList(
-            [
-                MixingBlock(
-                    space,
-                    dim=dim,
-                    grid_size=grid_size,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    drop=drop,
-                    attn_drop=attn_drop,
-                    drop_path=drop_path[i],
-                    norm_layer=norm_layer,
-                    act_fn=act_fn,
-                )
-                for i in range(depth)
-            ]
-        )
-
-        if init_weights is not None:
-            self.reset_parameters(init_weights)
-
-    def reset_parameters(self, init_weights):
-        for blk in self.blocks:
-            blk.reset_parameters(init_weights)
-
-    def forward(self, left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-        for blk in self.blocks:
-            x = blk(left, right)
-        return x
-
-
-class FluxDecoder(nn.Module):
-    def __init__(
-        self,
-        dims: Sequence[int],
-        num_heads: int,
-        mlp_ratio: float = 2.0,
-        qkv_bias: bool = True,
-        drop: float = 0.0,
-        attn_drop: float = 0.0,
-        drop_path: float = 0.0,
-        norm_layer: Type[nn.Module] = nn.LayerNorm,
-        act_fn: nn.Module = nn.GELU,
-        init_weights: Optional[str] = None,
-    ):
-        super().__init__()
-
-        flux_blocks = []
-        flux_latent_size = 0
-        for dim in dims:
-            flux_blocks.append(
-                MixingBlock(
-                    dim,
-                    num_heads,
-                    mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    drop=drop,
-                    attn_drop=attn_drop,
-                    drop_path=drop_path,
-                    norm_layer=norm_layer,
-                    act_fn=act_fn,
-                    init_weights=init_weights,
-                )
-            )
-            flux_latent_size += dim
-
-        self.blocks = nn.ModuleList(flux_blocks)
-        self.flux_mlp = MLP(
-            [flux_latent_size, flux_latent_size // 2, 1],
-            # last_act_fn=nn.Softplus,
-            dropout_prob=drop,
-        )
-
-    def mix(self, i: int, left: torch.Tensor, right: Optional[torch.Tensor] = None):
-        x = self.blocks[i].forward(left, right)
-        # pool spatials
-        return x.amax(axis=list(range(1, x.ndim - 1)))
-
-    def forward(self, flux_latents: Sequence[torch.Tensor]):
-        flux = self.flux_mlp(torch.cat(flux_latents, dim=-1))
-        return flux.squeeze(1)
+from models.nd_vit.x_layers import MixingBlock, FluxDecoder, VSpaceReduce
 
 
 class SwinXnet(nn.Module):
@@ -253,6 +76,7 @@ class SwinXnet(nn.Module):
             df_in_channels = in_channels * self.decoupled_dim
             df_out_channels = out_channels * self.decoupled_dim
 
+        # TODO move to Swin5DUnet to get rid of mu and zf related stuff from here!
         self.df_unet = SwinNDUnet(
             self.df_space,
             dim=dim,
@@ -314,6 +138,7 @@ class SwinXnet(nn.Module):
         if self.flux_head:
             self.flux_head = FluxDecoder(
                 self.phi_unet.down_dims[::-1],
+                self.df_unet.down_dims[::-1],
                 num_heads=8,
                 drop=flux_drop,
                 attn_drop=0.1,
@@ -323,23 +148,41 @@ class SwinXnet(nn.Module):
         df_mix = []
         phi_mix = []
         for df_dim, phi_dim in zip(self.df_unet.down_dims, self.phi_unet.down_dims):
-            df_mix.append(MixingBlock(df_dim, 8, attn_drop=0.1))
-            phi_mix.append(MixingBlock(phi_dim, 8, attn_drop=0.1))
+            df_mix.append(MixingBlock(df_dim, phi_dim, num_heads=8, attn_drop=0.1))
+            phi_mix.append(MixingBlock(phi_dim, df_dim, num_heads=8, attn_drop=0.1))
         self.df_mix = nn.ModuleList(df_mix)
         self.phi_mix = nn.ModuleList(phi_mix)
         # up direction
         df_mix_up = []
         phi_mix_up = []
         for df_blk, phi_blk in zip(self.df_up_blocks, self.phi_up_blocks):
-            df_mix_up.append(MixingBlock(df_blk.dim, 8, attn_drop=0.1))
-            phi_mix_up.append(MixingBlock(phi_blk.dim, 8, attn_drop=0.1))
+            df_mix_up.append(
+                MixingBlock(
+                    left_dim=df_blk.dim,
+                    right_dim=phi_blk.dim,
+                    num_heads=8,
+                    attn_drop=0.1,
+                )
+            )
+            phi_mix_up.append(
+                MixingBlock(
+                    left_dim=phi_blk.dim,
+                    right_dim=df_blk.dim,
+                    num_heads=8,
+                    attn_drop=0.1,
+                )
+            )
         self.df_mix_up = nn.ModuleList(df_mix_up)
         self.phi_mix_up = nn.ModuleList(phi_mix_up)
 
         df_patch_dim = self.df_unet.unpatch.dim * (2 if patch_skip else 1)
         phi_patch_dim = self.phi_unet.unpatch.dim * (2 if patch_skip else 1)
-        self.df_mix_unpatch = MixingBlock(df_patch_dim, 8, attn_drop=0.1)
-        self.phi_mix_unpatch = MixingBlock(phi_patch_dim, 8, attn_drop=0.1)
+        self.df_mix_unpatch = MixingBlock(
+            left_dim=df_patch_dim, right_dim=phi_patch_dim, num_heads=8, attn_drop=0.1
+        )
+        self.phi_mix_unpatch = MixingBlock(
+            left_dim=phi_patch_dim, right_dim=df_patch_dim, num_heads=8, attn_drop=0.1
+        )
 
     def forward(
         self, df: torch.Tensor, phi: torch.Tensor, **kwargs
@@ -467,42 +310,6 @@ class SwinXnet(nn.Module):
         return df, phi
 
 
-class VSpaceReduce(AttentionDecoder):
-    def __init__(self, *args, decouple_mu: bool = False, gain: float = 1e-2, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.decouple_mu = decouple_mu
-        # learned token to integrate vspace
-        self.integral_token = nn.Parameter(gain * torch.randn(1, 1, self.dim))
-        del self.q
-
-    def forward(self, x: torch.Tensor):
-        if self.decouple_mu:
-            b, _, ns, nx, ny, c = x.shape
-            x = rearrange(x, "b vpar s x y c -> (b s x y) vpar c")
-        else:
-            b, _, _, ns, nx, ny, c = x.shape
-            x = rearrange(x, "b vpar mu s x y c -> (b s x y) (vpar mu) c")
-
-        # qkv embeddings from inputs
-        q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
-        k, v = rearrange(self.kv(x), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
-        # avoid misaligned strides error
-        if dist.is_initialized():
-            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                x = F.scaled_dot_product_attention(
-                    q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
-                )
-        else:
-            x = F.scaled_dot_product_attention(
-                q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
-            )
-        x = rearrange(x, "b k n c -> b n (k c)")
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x.view(b, ns, nx, ny, c)
-
-
 class SwinXNetMultitask(SwinXnet):
     def __init__(
         self,
@@ -533,7 +340,7 @@ class SwinXNetMultitask(SwinXnet):
         # remove down path for phi unet
         del self.phi_unet.down_blocks
         del self.phi_down_blocks
-        # remove up-mixing
+        # remove down-mixing
         self.df_mix_middle = self.df_mix[-1]
         self.phi_mix_middle = self.phi_mix[-1]
         del self.df_mix[:-1]
@@ -544,10 +351,11 @@ class SwinXNetMultitask(SwinXnet):
 
         # phi integrator weights
         vspace_attn_down = []
-        for blk in self.df_unet.down_blocks:
+        for df_blk, phi_blk in zip(self.df_down_blocks, self.phi_up_blocks[::-1]):
             vspace_attn_down.append(
                 VSpaceReduce(
-                    dim=blk.dim,
+                    dim=df_blk.dim,
+                    out_dim=phi_blk.dim,
                     num_heads=8,
                     attn_drop=0.1,
                     decouple_mu=self.decouple_mu,
@@ -556,6 +364,7 @@ class SwinXNetMultitask(SwinXnet):
         self.vspace_attn_down = nn.ModuleList(vspace_attn_down)
         self.vspace_attn_middle = VSpaceReduce(
             dim=self.df_unet.middle.dim,
+            out_dim=self.phi_middle.dim,
             num_heads=8,
             attn_drop=0.1,
             decouple_mu=self.decouple_mu,
@@ -563,6 +372,7 @@ class SwinXNetMultitask(SwinXnet):
         if self.patch_skip:
             self.vspace_attn_patch_skip = VSpaceReduce(
                 dim=self.df_unet.unpatch.dim,
+                out_dim=self.phi_unet.unpatch.dim,
                 num_heads=8,
                 attn_drop=0.1,
                 decouple_mu=self.decouple_mu,
