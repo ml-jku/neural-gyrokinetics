@@ -31,8 +31,8 @@ class SwinBlockDown(nn.Module):
         window_size (int | tuple(int)): Window size for the shifted window attention.
         depth (int): Number of swin transformer layers.
         num_heads (int): Number of attention heads in the swin layers.
-        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
-        learnable_pos_embed (bool): Learnable APE (if abs_pe is set). Default is False.
+        use_abs_pe (bool): Absolute positional encoding to the input. Default is False.
+        learnable_pos_embed (bool): Learnable APE (if use_abs_pe set). Default is False.
         drop_path (float): Stochastic depth drop rate. Default is 1/10.
         hidden_mlp_ratio (float): Expansion rate for transformer MLPs. Default is 2.0
         c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
@@ -50,7 +50,7 @@ class SwinBlockDown(nn.Module):
         window_size: Sequence[int],
         num_heads: int,
         depth: int,
-        abs_pe: bool = False,
+        use_abs_pe: bool = False,
         learnable_pos_embed: bool = False,
         drop_path: float = 0.1,
         hidden_mlp_ratio: float = 2.0,
@@ -67,9 +67,9 @@ class SwinBlockDown(nn.Module):
         self.dim = dim
         self.grid_size = grid_size
 
-        if abs_pe:
+        if use_abs_pe:
             self.pos_embed = PositionalEmbedding(
-                dim, grid_size, learnable=learnable_pos_embed
+                dim, grid_size, learnable=learnable_pos_embed, init_weights="sincos"
             )
 
         self.swin_att = LayerType(
@@ -140,8 +140,8 @@ class SwinBlockUp(nn.Module):
         depth (int): Number of swin transformer layers.
         num_heads (int): Number of attention heads in the swin layers.
         target_grid_size (tuple(int)): Output resolution (after upsample).
-        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
-        learnable_pos_embed (bool): Learnable APE (if abs_pe is set). Default is False.
+        use_abs_pe (bool): Add absolute positional encoding to the input. Default is False.
+        learnable_pos_embed (bool): Learnable APE (if use_abs_pe is set). Default is False.
         drop_path (float): Stochastic depth drop rate. Default is 1/10.
         hidden_mlp_ratio (float): Expansion rate for transformer MLPs. Default is 2.0
         c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
@@ -163,7 +163,7 @@ class SwinBlockUp(nn.Module):
         depth: int,
         num_heads: int,
         target_grid_size: Optional[Sequence[int]] = None,
-        abs_pe: bool = False,
+        use_abs_pe: bool = False,
         learnable_pos_embed: bool = False,
         drop_path: float = 0.1,
         hidden_mlp_ratio: float = 2.0,
@@ -182,7 +182,7 @@ class SwinBlockUp(nn.Module):
         self.dim = dim
         self.grid_size = grid_size
 
-        if abs_pe:
+        if use_abs_pe:
             self.pos_embed = PositionalEmbedding(
                 dim, grid_size, learnable=learnable_pos_embed
             )
@@ -295,7 +295,7 @@ class SwinNDUnet(nn.Module):
         out_channels (int): Number of output channels. Default is 2.
         num_layers (int): Number of down/up layers. Each layer applies a down/up-sample.
                         Default is 4.
-        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
+        use_abs_pe (bool): Add absolute positional encoding to the input. Default is False.
         c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
         conv_patch (bool): Use convolutions to patch and unpatch (only 2D or 3D).
                         Default is False.
@@ -326,7 +326,7 @@ class SwinNDUnet(nn.Module):
         in_channels: int = 2,
         out_channels: int = 2,
         num_layers: int = 4,
-        abs_pe: bool = False,
+        use_abs_pe: bool = False,
         c_multiplier: int = 2,
         conv_patch: bool = False,
         drop_path: float = 0.1,
@@ -347,6 +347,8 @@ class SwinNDUnet(nn.Module):
         norm_output: bool = False,
         patch_skip: bool = False,
         swin_bottleneck: bool = False,
+        use_rpb: bool = True,
+        use_rope: bool = False,
     ):
         super().__init__()
         if isinstance(patch_size, int):
@@ -386,12 +388,19 @@ class SwinNDUnet(nn.Module):
             if modulation == "film":
                 ModulatedSwinLayer = FilmSwinLayer
                 ModulatedViTLayer = FilmViTLayer
-            LocalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
+            LocalLayer = partial(
+                ModulatedSwinLayer,
+                cond_dim=self.cond_embed.cond_dim,
+                use_rpb=use_rpb,
+                use_rope=use_rope,
+            )
             if swin_bottleneck:
                 GlobalLayer = partial(
                     ModulatedSwinLayer,
                     cond_dim=self.cond_embed.cond_dim,
                     window_size=window_size,
+                    use_rpb=use_rpb,
+                    use_rope=use_rope,
                 )
             else:
                 GlobalLayer = partial(
@@ -422,7 +431,7 @@ class SwinNDUnet(nn.Module):
                 depth=depth[i],
                 window_size=window_size,
                 num_heads=num_heads[i],
-                abs_pe=abs_pe,
+                use_abs_pe=use_abs_pe,
                 drop_path=drop_path,
                 learnable_pos_embed=False,
                 use_checkpoint=use_checkpoint,
@@ -454,7 +463,7 @@ class SwinNDUnet(nn.Module):
             act_fn=act_fn,
         )
 
-        if abs_pe:
+        if use_abs_pe:
             self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
 
         self.middle_upscale = PatchUnmerging(
@@ -485,7 +494,7 @@ class SwinNDUnet(nn.Module):
                     window_size=window_size,
                     num_heads=up_num_heads[i],
                     depth=up_depth[i],
-                    abs_pe=abs_pe,
+                    use_abs_pe=use_abs_pe,
                     drop_path=drop_path,
                     hidden_mlp_ratio=hidden_mlp_ratio,
                     c_multiplier=c_multiplier,
@@ -505,7 +514,7 @@ class SwinNDUnet(nn.Module):
                 window_size=window_size,
                 num_heads=up_num_heads[-1],
                 depth=up_depth[-1],
-                abs_pe=abs_pe,
+                use_abs_pe=use_abs_pe,
                 drop_path=drop_path,
                 hidden_mlp_ratio=hidden_mlp_ratio,
                 use_checkpoint=use_checkpoint,

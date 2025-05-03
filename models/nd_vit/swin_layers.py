@@ -19,6 +19,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 import torch.distributed as dist
 
 from models.nd_vit.drop import DropPath
+from models.nd_vit.positional import RotaryQueryKeyPE
 from models.nd_vit.patching import unpad, pad_to_blocks
 from models.utils import Film, seq_weight_init, MLP, DiT
 
@@ -175,6 +176,9 @@ class WindowAttention(nn.Module):
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         init_weights: Optional[str] = None,
+        use_rpb: bool = True,
+        use_rope: bool = False,
+        cosine_attn: bool = False,
     ):
 
         super().__init__()
@@ -185,53 +189,53 @@ class WindowAttention(nn.Module):
         self.attn_drop = attn_drop
         self.qkv_bias = qkv_bias
         space = len(window_size)
+        self.use_rpb = use_rpb
+        self.use_rope = use_rope
+        self.cosine_attn = cosine_attn
 
-        # relative position bias (RPB) to learn token distances
-        # for hierarchical vision better than absolute PEs
+        if use_rpb:
+            # swinv2 relative position bias (RPB) to learn token distances
+            # for hierarchical vision better than absolute PEs
+            self.cpb_mlp = MLP(
+                [space, 512, num_heads],
+                act_fn=partial(nn.ReLU, inplace=True),
+                bias=[True, False],
+            )
+            # get relative_coords_table
+            coords_nd = []
+            for w in window_size:
+                coords_nd.append(torch.arange(-(w - 1), w, dtype=torch.float32))
 
-        # # RPB from swin v1
-        # self.rpb = nn.Parameter(
-        #     torch.zeros((np.prod([(2 * w - 1) for w in window_size]), num_heads))
-        # )
-        # nn.init.trunc_normal_(self.rpb, std=.02)
+            rpb = torch.stack(torch.meshgrid(*coords_nd, indexing="ij"))
+            for i in range(space):
+                rpb[i] = rpb[i] / (window_size[i] - 1)
+            rpb = rearrange(rpb, "d ... -> ... d").unsqueeze(0)
+            # normalize to -8, 8
+            rpb = 8 * rpb
+            rpb = torch.sign(rpb) * torch.log2(torch.abs(rpb) + 1.0) / np.log2(8)
+            self.register_buffer("rpb", rpb)  # NOTE: fsdp does not shard buffer
 
-        # RPB from swinv2
-        self.cpb_mlp = MLP(
-            [space, 512, num_heads],
-            act_fn=partial(nn.ReLU, inplace=True),
-            bias=[True, False],
-        )
-        # get relative_coords_table
-        coords_nd = []
-        for w in window_size:
-            coords_nd.append(torch.arange(-(w - 1), w, dtype=torch.float32))
+            # index with distances
+            grid = torch.stack(
+                torch.meshgrid(*[torch.arange(w) for w in window_size], indexing="ij")
+            )  # (space, wD, wH, wW, wU, wV)
+            dists = grid.flatten(1).unsqueeze(-1) - grid.flatten(1).unsqueeze(1)
 
-        rpb = torch.stack(torch.meshgrid(*coords_nd, indexing="ij"))
-        for i in range(space):
-            rpb[i] = rpb[i] / (window_size[i] - 1)
-        rpb = rearrange(rpb, "d ... -> ... d").unsqueeze(0)
-        # normalize to -8, 8
-        rpb = 8 * rpb
-        rpb = torch.sign(rpb) * torch.log2(torch.abs(rpb) + 1.0) / np.log2(8)
-        self.register_buffer("rpb", rpb)  # NOTE: fsdp does not shard buffer
+            for i in range(space):
+                center = max(np.prod([(2 * w - 1) for w in window_size[(i + 1) :]]), 1)
+                dists[i] = (dists[i] + window_size[i] - 1) * center
 
-        # index with distances
-        grid = torch.stack(
-            torch.meshgrid(*[torch.arange(w) for w in window_size], indexing="ij")
-        )  # (space, wD, wH, wW, wU, wV)
-        dists = grid.flatten(1).unsqueeze(-1) - grid.flatten(1).unsqueeze(1)
+            self.register_buffer("rpb_idx", dists.sum(0))
+        if use_rope:
+            self.rope = RotaryQueryKeyPE(self.head_dim, window_size)
 
-        # TODO why?
-        for i in range(space):
-            center = max(np.prod([(2 * w - 1) for w in window_size[(i + 1) :]]), 1)
-            dists[i] = (dists[i] + window_size[i] - 1) * center
-
-        self.register_buffer("rpb_idx", dists.sum(0))
-
-        # # for swinv2 cosine similarity attention
-        # self.logit_scale = nn.Parameter(torch.log(10 * torch.ones((num_heads, 1, 1))))
-        # self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
-        # self.attn_drop = nn.Dropout(attn_drop)
+        if cosine_attn:
+            # for swinv2 cosine similarity attention
+            self.logit_scale = nn.Parameter(
+                torch.log(10 * torch.ones((num_heads, 1, 1)))
+            )
+            self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
+            self.attn_drop = nn.Dropout(attn_drop)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
@@ -240,7 +244,7 @@ class WindowAttention(nn.Module):
         if init_weights:
             self.reset_parameters(init_weights)
 
-    def reset_parameters(self, init_weights):
+    def reset_parameters(self, init_weights: str):
         if init_weights == "torch" or init_weights is None:
             return
         elif init_weights == "xavier_uniform":
@@ -249,15 +253,15 @@ class WindowAttention(nn.Module):
             init_weights_fn = nn.init.trunc_normal_
         else:
             raise NotImplementedError
-
-        self.cpb_mlp.apply(seq_weight_init(init_weights_fn))
         init_weights_fn(self.qkv.weight)
         if self.qkv_bias:
             nn.init.zeros_(self.qkv.bias)
         init_weights_fn(self.proj.weight)
         nn.init.zeros_(self.proj.bias)
+        if self.use_rpb:
+            self.cpb_mlp.apply(seq_weight_init(init_weights_fn))
 
-    def forward(self, x, mask):
+    def forward(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         """Forward function.
         Args:
             x: input features with shape of (num_windows*B, N, C)
@@ -270,51 +274,41 @@ class WindowAttention(nn.Module):
             heads=self.num_heads,
         )
         q, k, v = qkv[0], qkv[1], qkv[2]
-
-        sl = q.shape[2]
-
-        # # rpb from swinv1
-        # rpb = self.rpb[self.rpb_idx[:sl, :sl]]
-
-        # compute relative position bias
-        # rpb from swinv2
-        rpb = self.cpb_mlp(self.rpb).view(-1, self.num_heads)
-        rpb = rpb[self.rpb_idx.flatten()].view(sl, sl, self.num_heads)
-        rpb = 16 * torch.sigmoid(rpb)
-
-        rpb = rearrange(rpb, "slx sly h -> h slx sly").unsqueeze(0).contiguous()
-
-        # swinv1 normal sdpa attention
+        # expand mask to head and batch
         if mask is not None:
             mask = mask.unsqueeze(1)  # head dimension
-            # TODO with broadcasting
-            mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)
-        # q = q * (self.head_dim**-0.5)
-        # TODO find better way to add rpb -> easy OOM here!
-        mask = mask + rpb if mask is not None else rpb
+            mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)  # batch dimension
 
-        if dist.is_initialized():
-            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                x = F.scaled_dot_product_attention(
-                    q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0)
-                )
-        else:
-            x = F.scaled_dot_product_attention(
-                q, k, v, mask, dropout_p=(self.attn_drop if self.training else 0.0)
-            )
+        # positional encoding
+        if self.use_rpb:
+            # rpb from swinv2
+            sl = q.shape[2]
+            rpb = self.cpb_mlp(self.rpb).view(-1, self.num_heads)
+            rpb = rpb[self.rpb_idx.flatten()].view(sl, sl, self.num_heads)
+            rpb = 16 * torch.sigmoid(rpb)
+            rpb = rearrange(rpb, "slx sly h -> h slx sly").unsqueeze(0).contiguous()
+            mask = mask + rpb if mask is not None else rpb
+        if self.use_rope:
+            # rotary positional embedding (faster, sparse mask)
+            q, k = self.rope(q), self.rope(k)
 
-        # # swinv2 cosine similarity attention
-        # attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
-        # logit_scale = torch.clamp(self.logit_scale, max=self.max_logits).exp()
-        # attn = attn * logit_scale
-        # attn = attn + rpb
-        # if mask is not None:
-        #     mask = mask.unsqueeze(1)  # head dimension
-        #     # TODO do with broadcasting
-        #     mask = mask.repeat(q.shape[0] // mask.shape[0], 1, 1, 1)  # batch dimension
-        #     attn = attn + mask
-        # attn = self.attn_drop(F.softmax(attn, dim=-1))
-        # x = attn @ v
+        # window attention
+        if not self.cosine_attn:
+            # swinv1 sdpa attention
+            attn_drop = self.attn_drop if self.training else 0.0
+            if dist.is_initialized():
+                with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                    x = F.scaled_dot_product_attention(q, k, v, mask, attn_drop)
+            else:
+                x = F.scaled_dot_product_attention(q, k, v, mask, attn_drop)
+        if self.cosine_attn:
+            # swinv2 cosine similarity attention
+            attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
+            logit_scale = torch.clamp(self.logit_scale, max=self.max_logits).exp()
+            attn = attn * logit_scale
+            attn = attn + mask
+            attn = self.attn_drop(F.softmax(attn, dim=-1))
+            x = attn @ v
 
         # attention readout
         x = rearrange(x, "b k n c -> b n (k c)")
@@ -365,6 +359,8 @@ class SwinTransformerBlock(nn.Module):
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
+        use_rpb: bool = True,
+        use_rope: bool = False,
     ):
 
         super().__init__()
@@ -395,6 +391,8 @@ class SwinTransformerBlock(nn.Module):
             qkv_bias=qkv_bias,
             attn_drop=attn_drop,
             proj_drop=drop,
+            use_rpb=use_rpb,
+            use_rope=use_rope,
         )
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -578,6 +576,8 @@ class SwinLayer(nn.Module):
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
+        use_rpb: bool = True,
+        use_rope: bool = False,
     ):
 
         super().__init__()
@@ -615,6 +615,8 @@ class SwinLayer(nn.Module):
                     norm_layer=norm_layer,
                     use_checkpoint=use_checkpoint,
                     act_fn=act_fn,
+                    use_rpb=use_rpb,
+                    use_rope=use_rope,
                 )
                 for i in range(depth)
             ]
@@ -684,6 +686,8 @@ class DiTSwinLayer(SwinLayer):
         use_checkpoint: bool = False,
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
+        use_rpb: bool = True,
+        use_rope: bool = False,
     ):
         super().__init__(
             space=space,
@@ -702,6 +706,8 @@ class DiTSwinLayer(SwinLayer):
             use_checkpoint=use_checkpoint,
             act_fn=act_fn,
             init_weights=init_weights,
+            use_rpb=use_rpb,
+            use_rope=use_rope,
         )
 
         self.blocks = nn.ModuleList(
@@ -723,6 +729,8 @@ class DiTSwinLayer(SwinLayer):
                     use_checkpoint=use_checkpoint,
                     act_fn=act_fn,
                     cond_dim=cond_dim,
+                    use_rpb=use_rpb,
+                    use_rope=use_rope,
                 )
                 for i in range(depth)
             ]

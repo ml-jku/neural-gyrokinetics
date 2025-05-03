@@ -26,3 +26,5 @@ swin:
   drop_path: 0.1
   swin_bottleneck: true
   latent_cross_attn: false
+  use_rpb: true
+  use_rope: false

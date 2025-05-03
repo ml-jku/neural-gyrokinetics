@@ -28,12 +28,14 @@ def get_model(cfg, dataset, train_method="default"):
         unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
         c_multiplier = cfg.model.swin.c_multiplier
         norm_output = cfg.model.swin.norm_output
-        abs_pe = cfg.model.swin.abs_pe
+        use_abs_pe = cfg.model.swin.use_abs_pe
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         patch_skip = cfg.model.swin.patch_skip
         modulation = cfg.model.swin.modulation
         refiner = train_method == "refiner"
         swin_bottleneck = cfg.model.swin.swin_bottleneck
+        use_rpb = cfg.model.swin.use_rpb
+        use_rope = cfg.model.swin.use_rope
         decouple_mu = cfg.model.decouple_mu
 
         cond_fn = None
@@ -64,7 +66,7 @@ def get_model(cfg, dataset, train_method="default"):
             num_layers=num_layers,
             use_checkpoint=gradient_checkpoint,
             drop_path=cfg.model.swin.drop_path,
-            abs_pe=abs_pe,
+            use_abs_pe=use_abs_pe,
             conv_patch=False,
             hidden_mlp_ratio=2.0,
             c_multiplier=c_multiplier,
@@ -79,6 +81,8 @@ def get_model(cfg, dataset, train_method="default"):
             swin_bottleneck=swin_bottleneck,
             separate_zf=separate_zf,
             decouple_mu=decouple_mu,
+            use_rpb=use_rpb,
+            use_rope=use_rope,
         )
 
     if "xnet" in cfg.model.name:
@@ -101,7 +105,7 @@ def get_model(cfg, dataset, train_method="default"):
         patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
         unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
         c_multiplier = cfg.model.swin.c_multiplier
-        abs_pe = cfg.model.swin.abs_pe
+        use_abs_pe = cfg.model.swin.use_abs_pe
         patch_skip = cfg.model.swin.patch_skip
         modulation = cfg.model.swin.modulation
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
@@ -109,6 +113,8 @@ def get_model(cfg, dataset, train_method="default"):
         refiner = train_method == "refiner"
         outputs = list(cfg.model.loss_weights.keys())
         swin_bottleneck = cfg.model.swin.swin_bottleneck
+        use_rpb = cfg.model.swin.use_rpb
+        use_rope = cfg.model.swin.use_rope
 
         cond_fn = None
         conditioning = cfg.model.conditioning
@@ -137,7 +143,7 @@ def get_model(cfg, dataset, train_method="default"):
             num_layers=num_layers,
             use_checkpoint=gradient_checkpoint,
             drop_path=0.1,
-            abs_pe=abs_pe,
+            use_abs_pe=use_abs_pe,
             c_multiplier=c_multiplier,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
@@ -149,6 +155,8 @@ def get_model(cfg, dataset, train_method="default"):
             separate_zf=separate_zf,
             decouple_mu=decouple_mu,
             swin_bottleneck=swin_bottleneck,
+            use_rpb=use_rpb,
+            use_rope=use_rope,
         )
 
     if cfg.model.name == "swin_flat":
@@ -162,7 +170,7 @@ def get_model(cfg, dataset, train_method="default"):
         num_heads = cfg.model.swin.num_heads
         depth = cfg.model.swin.depth
         gradient_checkpoint = cfg.model.swin.gradient_checkpoint
-        abs_pe = cfg.model.swin.abs_pe
+        use_abs_pe = cfg.model.swin.use_abs_pe
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         patch_skip = cfg.model.swin.patch_skip
         modulation = cfg.model.swin.modulation
@@ -194,7 +202,7 @@ def get_model(cfg, dataset, train_method="default"):
             out_channels=problem_dim,
             use_checkpoint=gradient_checkpoint,
             drop_path=cfg.model.swin.drop_path,
-            abs_pe=abs_pe,
+            use_abs_pe=use_abs_pe,
             conv_patch=False,
             hidden_mlp_ratio=2.0,
             conditioning=cond_fn,
@@ -218,7 +226,7 @@ def get_model(cfg, dataset, train_method="default"):
         patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
         unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
         c_multiplier = cfg.model.swin.c_multiplier
-        abs_pe = cfg.model.swin.abs_pe
+        use_abs_pe = cfg.model.swin.use_abs_pe
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         modulation = cfg.model.swin.modulation
 
@@ -248,7 +256,7 @@ def get_model(cfg, dataset, train_method="default"):
             num_layers=num_layers,
             use_checkpoint=gradient_checkpoint,
             drop_path=cfg.model.swin.drop_path,
-            abs_pe=abs_pe,
+            use_abs_pe=use_abs_pe,
             conv_patch=False,
             hidden_mlp_ratio=2.0,
             c_multiplier=c_multiplier,
