@@ -1,9 +1,9 @@
 import torch
 
-from models.swin_unet import SwinUnet
+from models.swin_unet import SwinNDUnet
 
 
-class SwinAE(SwinUnet):
+class SwinAE(SwinNDUnet):
     """N-dimensional shifted window transformer autoecoder implementation (v1/v2)."""
 
     def __init__(self, *args, **kwargs):

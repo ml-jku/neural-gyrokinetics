@@ -24,7 +24,6 @@ from eval.plot_utils import plot_potentials
 from typing import Dict, Callable, Optional
 
 from einops import rearrange
-import torch
 from torch import nn
 from torch.utils.data import Dataset
 
@@ -131,7 +130,7 @@ def get_rollout_fn(
                             phit, timestep=tsteps[:, i].to(phi.device), itg=itg
                         )
                         phit = phi_p.clone().float()
-                        phi_rollout[:, :, i * bundle_steps : (i + 1) * bundle_steps, ...] = (
+                        phi_rollout[:, :, i * bundle_steps : (i + 1) * bundle_steps] = (
                             phi_p.cpu().unsqueeze(2) if phi_p.ndim == 5 else phi_p.cpu()
                         )
                     if target == "flux":
@@ -141,7 +140,9 @@ def get_rollout_fn(
                             timestep_index.tolist(), file_index.tolist(), window=10
                         )
                         flux_seq = flux_seq.to(device, dtype=itg.dtype)
-                        flux = model(flux_seq.unsqueeze(-1), tsteps[:, i].to(phi.device), itg)
+                        flux = model(
+                            flux_seq.unsqueeze(-1), tsteps[:, i].to(phi.device), itg
+                        )
                     fluxes.append(flux.cpu())
         if target == "phi":
             phi_rollout = rearrange(phi_rollout, "b c t ... -> t b c ...")
@@ -593,7 +594,7 @@ def runner(rank, cfg, world_size):
                                     metrics[phase] += metrics_i
                                     validated_steps = torch.ones([tot_eval_steps])
                                 n_timesteps_acc[phase] += validated_steps
-                                
+
                                 if target == "phi":
                                     if val_idx == 0:
                                         # holdout trajectories valset

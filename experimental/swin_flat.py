@@ -1,12 +1,10 @@
-from typing import Sequence, Union, Optional, Type, Tuple, Dict
+from typing import Sequence, Union, Optional, Type, Dict
 
 from einops import rearrange
 import torch
 from torch import nn
 from functools import partial
 
-from models.utils import seq_weight_init
-from models.nd_vit.vit_layers import ViTLayer, DiTLayer, FilmViTLayer, LayerModes
 from models.nd_vit.swin_layers import SwinLayer, DiTSwinLayer, FilmSwinLayer
 from models.nd_vit.positional import PositionalEmbedding
 from models.nd_vit.patching import (
