@@ -1,6 +1,5 @@
 from typing import List, Callable, Dict, Optional, Tuple
 import warnings
-from functools import partial
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -93,11 +92,13 @@ class LossWrapper(nn.Module):
             tgt_phi = tgts["phi"]
 
         tgt_eflux = tgts["flux"]
-        
+
         if self.separate_zf:
             # recompose zf
-            pred_df = torch.cat([pred_df[:, 0::2].sum(1, True), pred_df[:, 1::2].sum(1, True)], dim=1)
-        
+            pred_df = torch.cat(
+                [pred_df[:, 0::2].sum(1, True), pred_df[:, 1::2].sum(1, True)], dim=1
+            )
+
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
         int_losses = {}
         # NOTE: these losses are in unnormalized space

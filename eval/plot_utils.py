@@ -312,16 +312,17 @@ def generate_val_plots(rollout, gt, ts, phase):
         else:
             raise NotImplementedError("Unknown shapes for plotting...")
 
-        if rollout[key].shape[2] != 2:
+        if rollout[key].shape[1] != 2:  # separate zonal flow, sum and recompose
             rollout[key] = torch.cat(
                 [
-                    rollout[key][:, :, 0::2].sum(axis=2, keepdims=True),
-                    rollout[key][:, :, 1::2].sum(axis=2, keepdims=True),
+                    rollout[key][:, 0::2].sum(axis=1, keepdims=True),
+                    rollout[key][:, 1::2].sum(axis=1, keepdims=True),
                 ],
-                dim=2,
+                dim=1,
             )
 
         for name, plot_fn in val_plots_dict[key].items():
+            # rollout[0] for first rolled timestep
             plots[name] = plot_fn(rollout[key][0], x2=gt[key])
 
     return plots

@@ -79,6 +79,9 @@ def get_rollout_fn(
             preds[key] = preds[key][: rollout_steps * bundle_steps, :, ...]
         if len(fluxes) > 0:
             preds["flux"] = rearrange(torch.stack(fluxes, dim=-1), "b t -> t b")
+        # to float32 for integrals etc
+        # TODO is this the best approach?
+        preds = {k: p.to(dtype=torch.float32) for k, p in preds.items()}
         return preds
 
     return _rollout

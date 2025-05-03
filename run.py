@@ -3,7 +3,6 @@ from datetime import datetime, timedelta
 import gc
 import torch
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
-from torch.nn.utils import clip_grad_norm_
 from tqdm import tqdm
 from time import perf_counter_ns
 from collections import defaultdict
@@ -106,7 +105,7 @@ def runner(rank, cfg, train_method, world_size):
         loss_wrap = LossWrapper(
             weights=weights,
             denormalize_fn=trainset.denormalize,
-            separate_zf=cfg.dataset.separate_zf
+            separate_zf=cfg.dataset.separate_zf,
         )
         grad_balancer = GradientBalancer(
             opt,

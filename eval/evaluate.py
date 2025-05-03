@@ -199,7 +199,7 @@ def evaluate(
                                 rollout=rollout,
                                 gt=gts,
                                 ts=conds["timestep"],
-                                phase=f"{phase} Phase"
+                                phase=f"{phase} Phase",
                             )
                             val_plots.update(plots)
                     else:
