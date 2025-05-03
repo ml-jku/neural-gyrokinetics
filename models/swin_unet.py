@@ -651,7 +651,7 @@ class Swin5DUnet(SwinNDUnet):
         if decouple_mu:
             self.decoupled_dim = decoupled_dim
             # positional information for velocity mixing
-            self.vel_pe = PositionalEmbedding(full_in_channels, vel_pe_resolution)
+            self.vel_pe = PositionalEmbedding(full_in_channels, vel_pe_resolution, True)
 
     def patch_encode(self, df: torch.Tensor):
         # decouple mu and add positional information

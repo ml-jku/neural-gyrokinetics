@@ -6,7 +6,7 @@ decouple_mu: true
 conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
 loss_weights:
   df: 1.0
-  phi: 0.5
+  phi: 0.0
   flux: 1e-5
 extra_loss_weights:
   phi_int: 0.1
@@ -15,9 +15,9 @@ extra_loss_weights:
   flux_cross: 0.0
 
 swin:
-  patch_size: [ 4, 2, 4, 8, 4 ]
+  patch_size: [ 4, 2, 4, 5, 4 ]
   phi_patch_size: [8, 2, 4]
-  window_size: [ 4, 2, 2, 8, 4 ]
+  window_size: [ 4, 2, 2, 9, 4 ]
   phi_window_size: [7, 4, 12]
   num_heads: [8]
   depth: [2]

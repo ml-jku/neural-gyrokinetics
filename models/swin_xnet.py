@@ -5,7 +5,6 @@ from torch import nn
 from einops import rearrange
 
 from models.swin_unet import SwinNDUnet, Swin5DUnet
-from models.nd_vit.positional import PositionalEmbedding
 from models.nd_vit.x_layers import MixingBlock, FluxDecoder, VSpaceReduce
 
 
@@ -44,8 +43,6 @@ class SwinXnet(nn.Module):
         super().__init__()
 
         self.patch_skip = patch_skip
-        self.separate_zf = separate_zf
-        self.decouple_mu = decouple_mu
         self.df_base_resolution = [int(r) for r in df_base_resolution]
         self.df_space = 5
         self.phi_space = 3
@@ -62,23 +59,7 @@ class SwinXnet(nn.Module):
             phi_in_channels = phi_in_channels - 2
             phi_out_channels = phi_out_channels - 2
 
-        if decouple_mu:
-            self.df_space = 4
-            df_full_resolution = self.df_base_resolution
-            df_patch_size = [df_patch_size[0]] + df_patch_size[2:]
-            df_window_size = [df_window_size[0]] + df_window_size[2:]
-            self.decoupled_dim = df_full_resolution[1]
-            self.df_base_resolution = [df_full_resolution[0]] + df_full_resolution[2:]
-            # positional information for velocity mixing
-            vel_pe_resolution = [1, self.decoupled_dim, 1, 1, 1]
-            self.vel_pe = PositionalEmbedding(in_channels, vel_pe_resolution)
-
-            df_in_channels = in_channels * self.decoupled_dim
-            df_out_channels = out_channels * self.decoupled_dim
-
-        # TODO move to Swin5DUnet to get rid of mu and zf related stuff from here!
-        self.df_unet = SwinNDUnet(
-            self.df_space,
+        self.df_unet = Swin5DUnet(
             dim=dim,
             base_resolution=self.df_base_resolution,
             patch_size=df_patch_size,
@@ -100,6 +81,8 @@ class SwinXnet(nn.Module):
             cond_embed=cond_embed,
             act_fn=act_fn,
             patch_skip=patch_skip,
+            separate_zf=separate_zf,
+            decouple_mu=decouple_mu,
             swin_bottleneck=swin_bottleneck,
         )
 
@@ -270,15 +253,9 @@ class SwinXnet(nn.Module):
         return {"df": df, "phi": phi, "flux": flux}
 
     def patch_encode(self, df: torch.Tensor, phi: torch.Tensor):
-        # decouple mu and add positional information
-        if self.decouple_mu:
-            df = rearrange(df, "b c ... -> b ... c")
-            df = self.vel_pe(df)
-            df = rearrange(df, "b vp mu ... c -> b (c mu) vp ...")
         # compress to patch space
         df, df_pad_axes = self.df_unet.patch_encode(df)
         phi, phi_pad_axes = self.phi_unet.patch_encode(phi)
-
         return df, phi, df_pad_axes, phi_pad_axes
 
     def patch_decode(
@@ -290,23 +267,11 @@ class SwinXnet(nn.Module):
         df_pad_axes: Sequence,
         phi_pad_axes: Sequence,
     ):
-        # final mixing
+        # patch-space mixing
         zdf, zphi = self.df_mix_unpatch(zdf, zphi), self.phi_mix_unpatch(zphi, zdf)
         # expand to original
         df = self.df_unet.patch_decode(zdf, df_cond, df_pad_axes)
         phi = self.phi_unet.patch_decode(zphi, phi_cond, phi_pad_axes)
-        # move mu back to spatials
-        if self.decouple_mu:
-            df = rearrange(
-                df, "b (c mu) vp ... -> b c vp mu ...", mu=self.decoupled_dim
-            )
-        if self.separate_zf:
-            # replace zf channels with their average
-            df[:, 0:2] = (
-                df[:, 0:2]
-                .mean(axis=-1, keepdims=True)
-                .repeat([1] * (df.ndim - 1) + [df.shape[-1]])
-            )
         return df, phi
 
 
@@ -319,6 +284,7 @@ class SwinXNetMultitask(SwinXnet):
         df_window_size: Union[Sequence[int], int] = 5,
         **kwargs
     ):
+        # TODO check if deleting all the unused members
         # NOTE: must use df grids (s, x, y), otherwise shape mismatch
         phi_base_resolution = df_base_resolution[2:]
         phi_patch_size = df_patch_size[2:]
@@ -358,7 +324,7 @@ class SwinXNetMultitask(SwinXnet):
                     out_dim=phi_blk.dim,
                     num_heads=8,
                     attn_drop=0.1,
-                    decouple_mu=self.decouple_mu,
+                    decouple_mu=self.df_unet.decouple_mu,
                 )
             )
         self.vspace_attn_down = nn.ModuleList(vspace_attn_down)
@@ -367,7 +333,7 @@ class SwinXNetMultitask(SwinXnet):
             out_dim=self.phi_middle.dim,
             num_heads=8,
             attn_drop=0.1,
-            decouple_mu=self.decouple_mu,
+            decouple_mu=self.df_unet.decouple_mu,
         )
         if self.patch_skip:
             self.vspace_attn_patch_skip = VSpaceReduce(
@@ -375,11 +341,11 @@ class SwinXNetMultitask(SwinXnet):
                 out_dim=self.phi_unet.unpatch.dim,
                 num_heads=8,
                 attn_drop=0.1,
-                decouple_mu=self.decouple_mu,
+                decouple_mu=self.df_unet.decouple_mu,
             )
 
     def forward(self, df: torch.Tensor, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-        df, df_pad_axes = self.patch_encode(df)
+        df, df_pad_axes = self.df_unet.patch_encode(df)
         phi_pad_axes = df_pad_axes[:6]
 
         if self.patch_skip:
@@ -455,14 +421,3 @@ class SwinXNetMultitask(SwinXnet):
 
         phi = rearrange(phi, "b c s x y -> b c x s y")
         return {"df": df, "phi": phi, "flux": flux}
-
-    def patch_encode(self, df: torch.Tensor):
-        # decouple mu and add positional information
-        if self.decouple_mu:
-            df = rearrange(df, "b c ... -> b ... c")
-            df = self.vel_pe(df)
-            df = rearrange(df, "b vp mu ... c -> b (c mu) vp ...")
-        # compress to patch space
-        df, df_pad_axes = self.df_unet.patch_encode(df)
-
-        return df, df_pad_axes

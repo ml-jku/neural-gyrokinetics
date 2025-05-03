@@ -15,7 +15,7 @@ class PositionalEmbedding(nn.Module):
         dim: int,
         grid_size: tuple,
         learnable: bool = False,
-        init_weights: str = "sincos",
+        init_weights: str = "rand",
     ) -> None:
         super().__init__()
         self.grid_size = grid_size
@@ -35,14 +35,14 @@ class PositionalEmbedding(nn.Module):
         if self.init_weights == "rand":
             nn.init.trunc_normal_(self.pos_embed, std=0.02)
         elif self.init_weights == "sincos":
+            raise NotImplementedError("TODO investigate why almost all zeros")
             try:
                 from kappamodules.functional.pos_embed import (
                     get_sincos_pos_embed_from_seqlens as sincos_pos_embed,
                 )
             except ImportError:
                 raise ImportError("pip install kappamodules")
-
-            pos_embed = sincos_pos_embed(self.grid_size, self.dim)[None]
+            pos_embed = sincos_pos_embed(self.grid_size, self.dim)
             # replace param
             if isinstance(self.pos_embed, nn.Parameter):
                 self.pos_embed.data.copy_(pos_embed)

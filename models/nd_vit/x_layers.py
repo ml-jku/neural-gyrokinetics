@@ -224,28 +224,28 @@ class VSpaceReduce(AttentionDecoder):
         self.decouple_mu = decouple_mu
         self.out_dim = out_dim
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, df: torch.Tensor):
         if self.decouple_mu:
-            b, _, ns, nx, ny, _ = x.shape
-            x = rearrange(x, "b vpar s x y c -> (b s x y) vpar c")
+            b, _, ns, nx, ny, _ = df.shape
+            df = rearrange(df, "b vpar s x y c -> (b s x y) vpar c")
         else:
             b, _, _, ns, nx, ny, _ = x.shape
-            x = rearrange(x, "b vpar mu s x y c -> (b s x y) (vpar mu) c")
+            df = rearrange(df, "b vpar mu s x y c -> (b s x y) (vpar mu) c")
 
         # qkv embeddings from inputs
         q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
-        k, v = rearrange(self.kv(x), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
+        k, v = rearrange(self.kv(df), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
         # avoid misaligned strides error
         if dist.is_initialized():
             with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                x = F.scaled_dot_product_attention(
+                phi = F.scaled_dot_product_attention(
                     q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
                 )
         else:
-            x = F.scaled_dot_product_attention(
+            phi = F.scaled_dot_product_attention(
                 q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
             )
-        x = rearrange(x, "b k n c -> b n (k c)")
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x.view(b, ns, nx, ny, self.out_dim)
+        phi = rearrange(phi, "b k n c -> b n (k c)")
+        phi = self.proj(phi)
+        phi = self.proj_drop(phi)
+        return phi.view(b, ns, nx, ny, self.out_dim)

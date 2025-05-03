@@ -11,7 +11,7 @@ experiment_id: test
 seed: 0
 output_path: null
 use_ddp: false
-use_amp: true
+use_amp: true  # set to false when using integrals in training (complex / fft)
 mode: "train"
 eval: true
 device: "cuda"
