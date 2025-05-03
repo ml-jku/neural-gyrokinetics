@@ -7,7 +7,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn import functional as F
 import torch.distributed as dist
 
-from models.swin_unet import SwinUnet
+from models.swin_unet import SwinNDUnet
 from models.nd_vit.drop import DropPath
 from models.nd_vit.positional import PositionalEmbedding
 from models.utils import MLP, seq_weight_init, AttentionDecoder
@@ -221,6 +221,7 @@ class SwinXnet(nn.Module):
         super().__init__()
 
         self.patch_skip = patch_skip
+        self.separate_zf = separate_zf
         self.decouple_mu = decouple_mu
         self.df_base_resolution = [int(r) for r in df_base_resolution]
         self.df_space = 5
@@ -232,7 +233,7 @@ class SwinXnet(nn.Module):
 
         phi_in_channels = in_channels
         phi_out_channels = out_channels
-        
+
         if separate_zf:
             # no separate zf on phi
             phi_in_channels = phi_in_channels - 2
@@ -243,15 +244,16 @@ class SwinXnet(nn.Module):
             df_full_resolution = self.df_base_resolution
             df_patch_size = [df_patch_size[0]] + df_patch_size[2:]
             df_window_size = [df_window_size[0]] + df_window_size[2:]
-            self.df_deoupled_dim = df_full_resolution[1]
+            self.decoupled_dim = df_full_resolution[1]
             self.df_base_resolution = [df_full_resolution[0]] + df_full_resolution[2:]
             # positional information for velocity mixing
-            self.vel_pe = PositionalEmbedding(in_channels, list(df_full_resolution))
+            vel_pe_resolution = [1, self.decoupled_dim, 1, 1, 1]
+            self.vel_pe = PositionalEmbedding(in_channels, vel_pe_resolution)
 
-            df_in_channels = in_channels * self.df_deoupled_dim
-            df_out_channels = out_channels * self.df_deoupled_dim
+            df_in_channels = in_channels * self.decoupled_dim
+            df_out_channels = out_channels * self.decoupled_dim
 
-        self.df_unet = SwinUnet(
+        self.df_unet = SwinNDUnet(
             self.df_space,
             dim=dim,
             base_resolution=self.df_base_resolution,
@@ -277,7 +279,7 @@ class SwinXnet(nn.Module):
             swin_bottleneck=swin_bottleneck,
         )
 
-        self.phi_unet = SwinUnet(
+        self.phi_unet = SwinNDUnet(
             self.phi_space,
             dim=dim,
             base_resolution=phi_base_resolution,
@@ -453,9 +455,15 @@ class SwinXnet(nn.Module):
         # move mu back to spatials
         if self.decouple_mu:
             df = rearrange(
-                df, "b (c mu) vp ... -> b c vp mu ...", mu=self.df_deoupled_dim
+                df, "b (c mu) vp ... -> b c vp mu ...", mu=self.decoupled_dim
             )
-
+        if self.separate_zf:
+            # replace zf channels with their average
+            df[:, 0:2] = (
+                df[:, 0:2]
+                .mean(axis=-1, keepdims=True)
+                .repeat([1] * (df.ndim - 1) + [df.shape[-1]])
+            )
         return df, phi
 
 

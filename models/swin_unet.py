@@ -272,7 +272,7 @@ class SwinBlockUp(nn.Module):
         return (x_upsampled, x) if return_skip else x_upsampled
 
 
-class SwinUnet(nn.Module):
+class SwinNDUnet(nn.Module):
     """N-dimensional shifted window transformer UNet implementation (v1/v2). The number
     of spatial/temporal dimensions is set with the argument `space` and the model is
     built accordingly.
@@ -607,7 +607,7 @@ class SwinUnet(nn.Module):
 
     def condition(self, kwconds: Dict[str, torch.Tensor]) -> Dict:
         # drop input fields
-        kwconds = {k: v for k, v in kwconds.items() if k not in ["df", "phi", "flux"]}
+        kwconds = {k: v for k, v in kwconds.items() if k in self.condition_keys}
         if len(kwconds) == 0:
             return {}
 
@@ -623,3 +623,67 @@ class SwinUnet(nn.Module):
             return {"condition": self.cond_embed(cond)}
         else:
             return {}
+
+
+class Swin5DUnet(SwinNDUnet):
+    def __init__(self, separate_zf: bool = False, decouple_mu: bool = False, **kwargs):
+        full_in_channels = kwargs["in_channels"]
+        kwargs["space"] = 5
+        if decouple_mu:
+            kwargs["space"] = 4
+            full_resolution = list(kwargs["base_resolution"])
+            # adjust patch and window size
+            patch_size = kwargs["patch_size"]
+            kwargs["patch_size"] = [patch_size[0]] + patch_size[2:]
+            window_size = kwargs["window_size"]
+            kwargs["window_size"] = [window_size[0]] + window_size[2:]
+            decoupled_dim = full_resolution[1]
+            # adjust resolution and channels
+            kwargs["base_resolution"] = [full_resolution[0]] + full_resolution[2:]
+            kwargs["in_channels"] = full_in_channels * decoupled_dim
+            kwargs["out_channels"] = kwargs["out_channels"] * decoupled_dim
+            vel_pe_resolution = [1, decoupled_dim, 1, 1, 1]
+
+        super().__init__(**kwargs)
+
+        self.separate_zf = separate_zf
+        self.decouple_mu = decouple_mu
+        if decouple_mu:
+            self.decoupled_dim = decoupled_dim
+            # positional information for velocity mixing
+            self.vel_pe = PositionalEmbedding(full_in_channels, vel_pe_resolution)
+
+    def patch_encode(self, df: torch.Tensor):
+        # decouple mu and add positional information
+        if self.decouple_mu:
+            df = rearrange(df, "b c ... -> b ... c")
+            df = self.vel_pe(df)
+            df = rearrange(df, "b vp mu ... c -> b (c mu) vp ...")
+        # pad to patch blocks
+        df = rearrange(df, "b c ... -> b ... c")
+        df, pad_axes = pad_to_blocks(df, self.patch_size)
+        # linear flat patch embedding
+        df = self.patch_embed(df)
+        return df, pad_axes
+
+    def patch_decode(
+        self, z: torch.Tensor, cond: torch.Tensor, pad_axes: torch.Tensor
+    ) -> torch.Tensor:
+        # expand patches to original size
+        df = self.unpatch(z, cond)
+        # unpad output
+        df = unpad(df, pad_axes, self.base_resolution)
+        # return as image
+        df = rearrange(df, "b ... c -> b c ...")
+        if self.decouple_mu:
+            df = rearrange(
+                df, "b (c mu) vp ... -> b c vp mu ...", mu=self.decoupled_dim
+            )
+        if self.separate_zf:
+            # replace zf channels with their average
+            df[:, 0:2] = (
+                df[:, 0:2]
+                .mean(axis=-1, keepdims=True)
+                .repeat([1] * (df.ndim - 1) + [df.shape[-1]])
+            )
+        return df

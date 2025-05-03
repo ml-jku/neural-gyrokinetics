@@ -8,16 +8,15 @@ def get_model(cfg, dataset, train_method="default"):
     problem_dim = len(dataset.active_keys)
     separate_zf = cfg.dataset.separate_zf
     if separate_zf:
-        problem_dim = problem_dim + 2  # NOTE: re/im parts for zonal flow 
+        problem_dim = problem_dim + 2  # NOTE: re/im parts for zonal flow
 
     if cfg.model.name == "swin":
         assert cfg.dataset.input_fields == [
             "df"
         ], "No more inputs than df supported for simple 5D-Swin"
-        from models.swin_unet import SwinUnet
+        from models.swin_unet import Swin5DUnet
         from models.utils import ContinuousConditionEmbed
 
-        space = 5
         patch_size = cfg.model.swin.patch_size
         window_size = cfg.model.swin.window_size
         base_resolution = dataset.resolution
@@ -35,6 +34,7 @@ def get_model(cfg, dataset, train_method="default"):
         modulation = cfg.model.swin.modulation
         refiner = train_method == "refiner"
         swin_bottleneck = cfg.model.swin.swin_bottleneck
+        decouple_mu = cfg.model.decouple_mu
 
         cond_fn = None
         conditioning = cfg.model.conditioning
@@ -52,8 +52,7 @@ def get_model(cfg, dataset, train_method="default"):
             window_size = [bundle_steps] + window_size
             base_resolution = (bundle_steps,) + tuple(base_resolution)
 
-        model = SwinUnet(
-            space=space,
+        model = Swin5DUnet(
             dim=latent_dim,
             base_resolution=base_resolution,  # TODO
             patch_size=patch_size,
@@ -78,6 +77,8 @@ def get_model(cfg, dataset, train_method="default"):
             patch_skip=patch_skip,
             modulation=modulation,
             swin_bottleneck=swin_bottleneck,
+            separate_zf=separate_zf,
+            decouple_mu=decouple_mu,
         )
 
     if "xnet" in cfg.model.name:
