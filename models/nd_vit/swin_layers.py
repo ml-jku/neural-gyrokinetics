@@ -19,7 +19,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 import torch.distributed as dist
 
 from models.nd_vit.drop import DropPath
-from models.nd_vit.positional import RotaryQueryKeyPE
+from models.nd_vit.positional import RealRotaryPE
 from models.nd_vit.patching import unpad, pad_to_blocks
 from models.utils import Film, seq_weight_init, MLP, DiT
 
@@ -227,7 +227,7 @@ class WindowAttention(nn.Module):
 
             self.register_buffer("rpb_idx", dists.sum(0))
         if use_rope:
-            self.rope = RotaryQueryKeyPE(self.head_dim, window_size)
+            self.rope = RealRotaryPE(self.head_dim, window_size)
 
         if cosine_attn:
             # for swinv2 cosine similarity attention

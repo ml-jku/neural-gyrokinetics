@@ -229,7 +229,7 @@ class VSpaceReduce(AttentionDecoder):
             b, _, ns, nx, ny, _ = df.shape
             df = rearrange(df, "b vpar s x y c -> (b s x y) vpar c")
         else:
-            b, _, _, ns, nx, ny, _ = x.shape
+            b, _, _, ns, nx, ny, _ = df.shape
             df = rearrange(df, "b vpar mu s x y c -> (b s x y) (vpar mu) c")
 
         # qkv embeddings from inputs

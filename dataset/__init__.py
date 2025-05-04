@@ -59,6 +59,7 @@ def get_data(cfg):
             minmax_beta2=cfg.dataset.minmax_beta2,
             offset=cfg.dataset.offset,
             separate_zf=cfg.dataset.separate_zf,
+            num_workers=cfg.dataset.num_workers,
         )
 
         holdout_trajectories_valset = CycloneDataset(
@@ -81,6 +82,7 @@ def get_data(cfg):
             minmax_beta2=cfg.dataset.minmax_beta2,
             offset=cfg.dataset.offset,
             separate_zf=cfg.dataset.separate_zf,
+            num_workers=cfg.dataset.num_workers,
         )
 
         trainloader = DataLoader(
@@ -126,6 +128,7 @@ def get_data(cfg):
                 minmax_beta2=cfg.dataset.minmax_beta2,
                 offset=cfg.dataset.offset,
                 separate_zf=cfg.dataset.separate_zf,
+                num_workers=cfg.dataset.num_workers,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,

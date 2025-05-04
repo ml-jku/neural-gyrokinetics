@@ -74,24 +74,27 @@ class LossWrapper(nn.Module):
             pred_df = []
             pred_phi = []
             tgt_phi = []
+            tgt_eflux = []
             for b, f in enumerate(idx_data["file_index"].tolist()):
+                assert "df" in preds, "Integral losses requires df (5D)."
                 pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
                 if "phi" in preds:
                     pred_phi.append(self.denormalize_fn(f, phi=preds["phi"][b]))
                 tgt_phi.append(self.denormalize_fn(f, phi=tgts["phi"][b]))
+                tgt_eflux.append(self.denormalize_fn(f, flux=tgts["flux"][b]))
             pred_df = torch.stack(pred_df)
             if len(pred_phi) > 0:
                 pred_phi = torch.stack(pred_phi)
             else:
                 pred_phi = None
             tgt_phi = torch.stack(tgt_phi)
+            tgt_eflux = torch.stack(tgt_eflux)
         else:
             # already denormalized for evaluation
             pred_df = preds["df"]
             pred_phi = preds["phi"] if "phi" in preds else None
             tgt_phi = tgts["phi"]
-
-        tgt_eflux = tgts["flux"]
+            tgt_eflux = tgts["flux"]
 
         if self.separate_zf:
             # recompose zf
@@ -235,6 +238,7 @@ def get_pushforward_fn(
     dataset: CycloneDataset,
     bundle_steps: int,
     use_amp: bool = False,
+    use_bf16: bool = False,
     device: str = None,
 ) -> Callable:
     def _loss_fn(
@@ -291,7 +295,6 @@ def get_pushforward_fn(
 
             inputs_t = inputs.copy()
             for i in range(n_unrolls - 1):
-                use_bf16 = use_amp and torch.cuda.is_bf16_supported()
                 amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
                 with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp):
                     conds["timestep"] = tsteps[:, i].to(device)
@@ -331,8 +334,9 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                 if t in n:
                     target_modules.append(p)
 
-    scaler = torch.amp.GradScaler(device=device, enabled=cfg.use_amp)
-    use_bf16 = cfg.use_amp and torch.cuda.is_bf16_supported()
+    use_amp = cfg.amp.enable
+    scaler = torch.amp.GradScaler(device=device, enabled=use_amp)
+    use_bf16 = use_amp and cfg.amp.bfloat and torch.cuda.is_bf16_supported()
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
     use_ddp = is_initialized()
     if use_ddp:
@@ -367,7 +371,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
             ts = sample.timestep.to(device)
             itg = sample.itg.to(device)
 
-            with torch.autocast(cfg.device, dtype=amp_dtype, enabled=cfg.use_amp):
+            with torch.autocast(cfg.device, dtype=amp_dtype, enabled=use_amp):
                 if cfg.training.pretraining_kwargs.target_modules == "all":
                     pred_x = model(x, timestep=ts, itg=itg)
                 else:

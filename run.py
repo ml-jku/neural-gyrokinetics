@@ -82,10 +82,9 @@ def runner(rank, cfg, train_method, world_size):
             weight_decay=cfg.training.weight_decay,
         )
 
-        use_amp = cfg.use_amp
-
+        use_amp = cfg.amp.enable
         scaler = torch.amp.GradScaler(device=device, enabled=use_amp)
-        use_bf16 = use_amp and torch.cuda.is_bf16_supported()
+        use_bf16 = use_amp and cfg.amp.bfloat and torch.cuda.is_bf16_supported()
         amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
         if cfg.training.scheduler is not None:
             scheduler = get_scheduler(
@@ -126,6 +125,7 @@ def runner(rank, cfg, train_method, world_size):
                 dataset=trainset,
                 bundle_steps=bundle_seq_length,
                 use_amp=use_amp,
+                use_bf16=use_bf16,
                 device=device,
             )
 

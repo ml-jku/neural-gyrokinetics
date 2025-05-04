@@ -39,6 +39,8 @@ class SwinXnet(nn.Module):
         decouple_mu: bool = False,
         flux_drop: float = 0.1,
         swin_bottleneck: bool = False,
+        use_rpb: bool = True,
+        use_rope: bool = False,
     ):
         super().__init__()
 
@@ -111,6 +113,8 @@ class SwinXnet(nn.Module):
             act_fn=act_fn,
             patch_skip=patch_skip,
             swin_bottleneck=swin_bottleneck,
+            use_rpb=use_rpb,
+            use_rope=use_rope,
         )
         self.df_up_blocks = self.df_unet.up_blocks
         self.df_down_blocks = self.df_unet.down_blocks

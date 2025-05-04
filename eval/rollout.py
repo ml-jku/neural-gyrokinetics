@@ -15,6 +15,7 @@ def get_rollout_fn(
     dataset: Dataset,
     predict_delta: bool = False,
     use_amp: bool = False,
+    use_bf16: bool = False,
     device: str = "cuda",
 ) -> Callable:
     # correct step size by adding last bundle
@@ -46,7 +47,6 @@ def get_rollout_fn(
         ]
         fluxes = []
         tsteps = dataset.get_timesteps(idx_data["file_index"], torch.tensor(ts_idxs))
-        use_bf16 = use_amp and torch.cuda.is_bf16_supported()
         amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
         with torch.no_grad():
             # move bundles forward, rollout in blocks

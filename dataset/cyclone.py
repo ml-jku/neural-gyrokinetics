@@ -1,4 +1,4 @@
-from typing import Type, Optional, List, Tuple, Dict, Sequence
+from typing import Type, Optional, List, Tuple, Dict, Sequence, Union
 import re
 import os
 import h5py
@@ -368,12 +368,12 @@ class CycloneDataset(Dataset):
                 desc="Re-computing normalization stats",
             )
 
-            for metrics in metrics_gen:
-                x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max = metrics
-                if stats is None:
-                    stats = RunningMeanStd(shape=x_mean.shape)
-                stats.update(x_mean, x_var, x_min, x_max)
-                stats.update(y_mean, y_var, y_min, y_max)
+        for metrics in metrics_gen:
+            x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max = metrics
+            if stats is None:
+                stats = RunningMeanStd(shape=x_mean.shape)
+            stats.update(x_mean, x_var, x_min, x_max)
+            stats.update(y_mean, y_var, y_min, y_max)
 
         return stats
 
@@ -417,6 +417,10 @@ class CycloneDataset(Dataset):
             if phi is not None:
                 phi, shift, scale = self.normalize(file_index, phi=phi)
                 y_phi = (y_phi - shift) / scale
+
+            if flux is not None:
+                flux, shift, scale = self.normalize(file_index, flux=flux)
+                flux = (flux - shift) / scale
 
         return CycloneSample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
@@ -517,6 +521,7 @@ class CycloneDataset(Dataset):
         file_index: int,
         df: Optional[torch.Tensor] = None,
         phi: Optional[torch.Tensor] = None,
+        flux: Optional[torch.Tensor] = None,
     ):
         if df is not None:
             field = "df"
@@ -524,6 +529,9 @@ class CycloneDataset(Dataset):
         elif phi is not None:
             field = "phi"
             x = phi
+        elif flux is not None:
+            field = "flux"
+            x = flux
         else:
             raise ValueError
 
@@ -544,8 +552,8 @@ class CycloneDataset(Dataset):
             field = "phi"
             x = phi
         elif flux is not None:
-            # TODO ?
-            return flux
+            field = "flux"
+            x = flux
         else:
             raise ValueError
 
@@ -674,7 +682,9 @@ class CycloneDataset(Dataset):
             fluxes = f["metadata/fluxes"][:]
         return torch.tensor(fluxes[1:])  # discard flux at t=0
 
-    def get_avg_flux(self, file_index: List[int]):
+    def get_avg_flux(self, file_index: Union[int, Sequence[int]]):
+        if not isinstance(file_index, Sequence):
+            file_index = [file_index]
         avg_fluxes = []
         for f in file_index:
             fluxes = self.get_fluxes(f)

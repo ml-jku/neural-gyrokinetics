@@ -59,7 +59,8 @@ def evaluate(
     predict_delta = cfg.training.predict_delta
     eval_integrals = cfg.validation.eval_integrals
     use_tqdm = cfg.logging.tqdm
-    use_amp = cfg.use_amp
+    use_amp = cfg.amp.enable
+    use_bf16 = use_amp and cfg.amp.bfloat and torch.cuda.is_bf16_supported()
     input_fields = cfg.dataset.input_fields
     output_fields = list(cfg.model.loss_weights.keys())
     if eval_integrals:
@@ -83,6 +84,7 @@ def evaluate(
                 predict_delta=predict_delta,
                 device=str(device),
                 use_amp=use_amp,
+                use_bf16=use_bf16,
             )
 
             valname = "val_traj" if val_idx == 0 else "val_samples"
