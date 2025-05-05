@@ -18,26 +18,23 @@ from dataset.cyclone import CycloneDataset, CycloneSample
 
 
 def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
-    if x.ndim == 2 and y.ndim == 1:
-        y = y.unsqueeze(1)
     assert x.shape == y.shape, "Mismatch in dimensions for computing loss"
     if dim_to_keep is None:
+        x = x.flatten(1)
         y = y.flatten(1)
-        diff = x.flatten(1) - y
-        diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
-        y_norms = torch.linalg.norm(y, ord=2, dim=-1)
-        if squared:
-            diff_norms, y_norms = diff_norms**2, y_norms**2
+    else:
+        # inference mode
+        x = x.flatten(2)
+        y = y.flatten(2)
+    diff = x - y
+    diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
+    y_norms = torch.linalg.norm(y, ord=2, dim=-1)
+    if squared:
+        diff_norms, y_norms = diff_norms ** 2, y_norms ** 2
+    if dim_to_keep is None:
         # sum over timesteps and mean over examples in batch
         return torch.mean(diff_norms / y_norms)
     else:
-        # TODO: Check if this is necessary
-        y = y.flatten(2)
-        diff = x.flatten(2) - y
-        diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
-        y_norms = torch.linalg.norm(y, ord=2, dim=-1)
-        if squared:
-            diff_norms, y_norms = diff_norms**2, y_norms**2
         dims = [i for i in range(len(y_norms.shape))][dim_to_keep + 1 :]
         return torch.mean(diff_norms / y_norms, dim=dims)
 

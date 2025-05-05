@@ -100,10 +100,10 @@ def get_model(cfg, dataset, train_method="default"):
         modulation = cfg.model.swin.modulation
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         decouple_mu = cfg.model.decouple_mu
-        separate_zf = cfg.dataset.separate_zf
         refiner = train_method == "refiner"
         outputs = cfg.model.losses
         swin_bottleneck = cfg.model.swin.swin_bottleneck
+        latent_cross_attn = cfg.model.swin.latent_cross_attn
 
         cond_fn = None
         conditioning = cfg.model.conditioning
@@ -142,8 +142,8 @@ def get_model(cfg, dataset, train_method="default"):
             patch_skip=patch_skip,
             modulation=modulation,
             decouple_mu=decouple_mu,
-            separate_zf=separate_zf,
             swin_bottleneck=swin_bottleneck,
+            latent_cross_attn=latent_cross_attn,
         )
 
     if cfg.model.name == "swin_flat":

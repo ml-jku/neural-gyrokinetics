@@ -280,25 +280,17 @@ class SwinXnet(nn.Module):
         act_fn: nn.Module = nn.GELU,
         patch_skip: bool = False,
         decouple_mu: bool = False,
-        separate_zf: bool = False,
-        zf_norm: bool = False,
         flux_drop: float = 0.1,
         swin_bottleneck: bool = False,
+        latent_cross_attn: bool = True,
     ):
         super().__init__()
 
         self.patch_skip = patch_skip
         self.decouple_mu = decouple_mu
-        self.separate_zf = separate_zf
         self.df_base_resolution = [int(r) for r in df_base_resolution]
         self.df_space = 5
         self.phi_space = 3
-        self.problem_dim = in_channels
-
-        if separate_zf:
-            in_channels = 2 * in_channels
-            out_channels = 2 * out_channels
-            self.zf_norm = nn.LayerNorm(in_channels) if zf_norm else nn.Identity()
 
         if decouple_mu:
             self.df_space = 4
@@ -347,8 +339,8 @@ class SwinXnet(nn.Module):
             window_size=phi_window_size,
             depth=depth,
             num_heads=num_heads,
-            in_channels=1,
-            out_channels=1,
+            in_channels=2,
+            out_channels=2,
             num_layers=num_layers,
             use_checkpoint=use_checkpoint,
             drop_path=drop_path,
@@ -376,30 +368,32 @@ class SwinXnet(nn.Module):
                 self.phi_unet.down_dims[::-1],
                 num_heads=8,
                 drop=flux_drop,
-                attn_drop=0.1,
+                attn_drop=0.,
             )
 
-        # down/middle direction
-        df_mix = []
-        phi_mix = []
-        for df_dim, phi_dim in zip(self.df_unet.down_dims, self.phi_unet.down_dims):
-            df_mix.append(MixingBlock(df_dim, 8, attn_drop=0.1))
-            phi_mix.append(MixingBlock(phi_dim, 8, attn_drop=0.1))
-        self.df_mix = nn.ModuleList(df_mix)
-        self.phi_mix = nn.ModuleList(phi_mix)
-        # up direction
-        df_mix_up = []
-        phi_mix_up = []
-        for df_blk, phi_blk in zip(self.df_up_blocks, self.phi_up_blocks):
-            df_mix_up.append(MixingBlock(df_blk.dim, 8, attn_drop=0.1))
-            phi_mix_up.append(MixingBlock(phi_blk.dim, 8, attn_drop=0.1))
-        self.df_mix_up = nn.ModuleList(df_mix_up)
-        self.phi_mix_up = nn.ModuleList(phi_mix_up)
+        if latent_cross_attn:
+            # down/middle direction
+            df_mix = []
+            phi_mix = []
+            for df_dim, phi_dim in zip(self.df_unet.down_dims, self.phi_unet.down_dims):
+                df_mix.append(MixingBlock(df_dim, 8, attn_drop=0.))
+                phi_mix.append(MixingBlock(phi_dim, 8, attn_drop=0.))
+            self.df_mix = nn.ModuleList(df_mix)
+            self.phi_mix = nn.ModuleList(phi_mix)
+            # up direction
+            df_mix_up = []
+            phi_mix_up = []
+            for df_blk, phi_blk in zip(self.df_up_blocks, self.phi_up_blocks):
+                df_mix_up.append(MixingBlock(df_blk.dim, 8, attn_drop=0.))
+                phi_mix_up.append(MixingBlock(phi_blk.dim, 8, attn_drop=0.))
+            self.df_mix_up = nn.ModuleList(df_mix_up)
+            self.phi_mix_up = nn.ModuleList(phi_mix_up)
 
-        df_patch_dim = self.df_unet.unpatch.dim * (2 if patch_skip else 1)
-        phi_patch_dim = self.phi_unet.unpatch.dim * (2 if patch_skip else 1)
-        self.df_mix_unpatch = MixingBlock(df_patch_dim, 8, attn_drop=0.1)
-        self.phi_mix_unpatch = MixingBlock(phi_patch_dim, 8, attn_drop=0.1)
+            df_patch_dim = self.df_unet.unpatch.dim * (2 if patch_skip else 1)
+            phi_patch_dim = self.phi_unet.unpatch.dim * (2 if patch_skip else 1)
+            self.df_mix_unpatch = MixingBlock(df_patch_dim, 8, attn_drop=0.)
+            self.phi_mix_unpatch = MixingBlock(phi_patch_dim, 8, attn_drop=0.)
+
 
     def forward(
         self, df: torch.Tensor, phi: torch.Tensor, **kwargs
@@ -419,14 +413,12 @@ class SwinXnet(nn.Module):
         # down paths
         df_features = []
         phi_features = []
-        for df_blk, phi_blk, df_mix, phi_mix in zip(
+        for i, (df_blk, phi_blk) in enumerate(zip(
             self.df_down_blocks,
-            self.phi_down_blocks,
-            self.df_mix[:-1],
-            self.phi_mix[:-1],
-        ):
-            # mix latents
-            df, phi = df_mix(df, phi), phi_mix(phi, df)
+            self.phi_down_blocks)):
+            if hasattr(self, "df_mix"):
+                # mix latents
+                df, phi = self.df_mix[i](df, phi), self.phi_mix[i](phi, df)
             # down blocks
             df, df_pre = df_blk(df, **df_cond)
             phi, phi_pre = phi_blk(phi, **phi_cond)
@@ -440,7 +432,9 @@ class SwinXnet(nn.Module):
         if hasattr(self.phi_unet, "middle_pe"):
             phi = self.phi_unet.middle_pe(phi)
 
-        df, phi = self.df_mix[-1](df, phi), self.phi_mix[-1](phi, df)
+        if hasattr(self, "df_mix"):
+            # mix latents
+            df, phi = self.df_mix[-1](df, phi), self.phi_mix[-1](phi, df)
 
         df = self.df_unet.middle(df, **df_cond)
         phi = self.phi_unet.middle(phi, **phi_cond)
@@ -454,11 +448,12 @@ class SwinXnet(nn.Module):
         # up path
         df_features = df_features[::-1]
         phi_features = phi_features[::-1]
-        for i, (df_blk, phi_blk, df_mix, phi_mix) in enumerate(
-            zip(self.df_up_blocks, self.phi_up_blocks, self.df_mix_up, self.phi_mix_up)
+        for i, (df_blk, phi_blk) in enumerate(
+            zip(self.df_up_blocks, self.phi_up_blocks)
         ):
-            # mix latents
-            df, phi = df_mix(df, phi), phi_mix(phi, df)
+            if hasattr(self, "df_mix_up"):
+                # mix latents
+                df, phi = self.df_mix_up[i](df, phi), self.phi_mix_up[i](phi, df)
             # up blocks
             df, df_ = df_blk(df, s=df_features[i], return_skip=True, **df_cond)
             phi, phi_ = phi_blk(phi, s=phi_features[i], return_skip=True, **phi_cond)
@@ -492,15 +487,6 @@ class SwinXnet(nn.Module):
         return output
 
     def patch_encode(self, df: torch.Tensor, phi: torch.Tensor):
-        if self.separate_zf:
-            # split zonal flow
-            zf = df.mean(-1, True).repeat(1, 1, 1, 1, 1, 1, df.shape[-1])
-            no_zf = df - zf
-            df = torch.cat([zf, no_zf], dim=1)  # stack on channels
-            df = rearrange(df, "b c ... -> b ... c")
-            df = self.zf_norm(df)
-            df = rearrange(df, "b ... c -> b c ...")
-
         # decouple mu and add positional information
         if self.decouple_mu:
             df = rearrange(df, "b c ... -> b ... c")
@@ -521,8 +507,9 @@ class SwinXnet(nn.Module):
         df_pad_axes: Sequence,
         phi_pad_axes: Sequence,
     ):
-        # final mixing
-        zdf, zphi = self.df_mix_unpatch(zdf, zphi), self.phi_mix_unpatch(zphi, zdf)
+        if hasattr(self, "df_mix_unpatch"):
+            # final mixing
+            zdf, zphi = self.df_mix_unpatch(zdf, zphi), self.phi_mix_unpatch(zphi, zdf)
         # expand to original
         df = self.df_unet.patch_decode(zdf, df_cond, df_pad_axes)
         phi = self.phi_unet.patch_decode(zphi, phi_cond, phi_pad_axes)
@@ -531,8 +518,4 @@ class SwinXnet(nn.Module):
             df = rearrange(
                 df, "b (c mu) vp ... -> b c vp mu ...", mu=self.df_deoupled_dim
             )
-        # recompose zonal flow
-        if self.separate_zf:
-            df = torch.cat([df[:, 0::2].sum(1, True), df[:, 1::2].sum(1, True)], dim=1)
-
         return df, phi

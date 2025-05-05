@@ -157,9 +157,9 @@ def runner(rank, cfg, train_method, world_size):
             for i, sample in enumerate(trainloader):
                 reset_peak_memory_stats(device)
                 sample: CycloneSample
-                inputs = { k: getattr(sample, k).to(device, non_blocking=True) for k in input_fields if k is not None }
-                gts = {k: getattr(sample, f"y_{k}").to(device, non_blocking=True) for k in outputs if k is not None}
-                conds = { k: getattr(sample, k).to(device, non_blocking=True) for k in conditioning if k is not None }
+                inputs = { k: getattr(sample, k).to(device, non_blocking=True) for k in input_fields if getattr(sample, k) is not None }
+                gts = {k: getattr(sample, f"y_{k}").to(device, non_blocking=True) for k in outputs if getattr(sample, f"y_{k}") is not None}
+                conds = { k: getattr(sample, k).to(device, non_blocking=True) for k in conditioning if getattr(sample, k) is not None }
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
                 # TODO should augmentations take place before moving to GPU?
@@ -202,7 +202,7 @@ def runner(rank, cfg, train_method, world_size):
                 scaler.scale(loss).backward()
                 if cfg.training.clip_grad:
                     scaler.unscale_(opt)
-                    clip_grad_norm_(model.parameters(), 1.0)
+                    clip_grad_norm_(model.parameters(), cfg.training.clip_to)
                 scaler.step(opt)
                 scaler.update()
                 if cfg.training.scheduler is not None:

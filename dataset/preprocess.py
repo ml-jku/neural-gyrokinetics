@@ -1,13 +1,14 @@
+import sys
+sys.path.append("..")
 import os
 import numpy as np
 import h5py
 import re
 from tqdm import tqdm
+import torch
 
-from dataset.utils import RunningMeanStd
-
+from utils import RunningMeanStd, pev_flux_df_phi, load_geometry
 ROOT = "/restricteddata/ukaea/gyrokinetics"
-
 
 def K_files(directory):
     files = os.listdir(directory)
@@ -37,7 +38,7 @@ def parse_input_dat(file_path):
     section_headers = re.findall(r"&(\w+)", content)
     # remove comments
     sections = [
-        section.strip() for section in sections if section[0] != "!" and section.strip()
+        section.strip() for section in sections if len(section) and section[0] != "!" and section.strip()
     ]
     for header, section in zip(section_headers, sections):
         section_dict = {}
@@ -55,12 +56,10 @@ def parse_input_dat(file_path):
 
     return parsed_data
 
-
 def do_ifft(knth):
-    knth = np.fft.ifftn(knth, axes=(3, 4))
+    knth = np.fft.ifftn(knth, axes=(3, 4), norm="forward")
     knth = np.stack([knth.real, knth.imag]).squeeze().astype("float32")
     return knth
-
 
 def get_stats(filenames, spatial_ifft=False, separate_zf=False, per_mode_norm=False):
     running_stats = None
@@ -144,29 +143,48 @@ def get_stats(filenames, spatial_ifft=False, separate_zf=False, per_mode_norm=Fa
 
     return running_stats
 
-
-def check_ifft(transformed, orig):
-    real_parts = transformed[::2]
-    imag_parts = transformed[1::2]
-    sum_real = np.sum(real_parts, axis=0)
-    sum_imag = np.sum(imag_parts, axis=0)
-    orig_ifft = np.concatenate(
-        [np.expand_dims(sum_real, 0), np.expand_dims(sum_imag, 0)], axis=0
-    )
+def check_ifft(transformed, orig, zf_separated=False):
+    if zf_separated:
+        real_parts = transformed[::2]
+        imag_parts = transformed[1::2]
+        sum_real = np.sum(real_parts, axis=0)
+        sum_imag = np.sum(imag_parts, axis=0)
+        orig_ifft = np.concatenate(
+            [np.expand_dims(sum_real, 0), np.expand_dims(sum_imag, 0)], axis=0
+        )
+    else:
+        orig_ifft = transformed
     orig_ifft = np.moveaxis(orig_ifft, 0, -1).copy()
     orig_ifft = orig_ifft.view(dtype=np.complex64)
-    orig_ifft = np.fft.fftn(orig_ifft, axes=(3, 4))
+    orig_ifft = np.fft.fftn(orig_ifft, axes=(3, 4), norm="forward")
     orig_ifft = np.fft.ifftshift(orig_ifft, axes=(3,))
     orig_ifft = np.stack([orig_ifft.real, orig_ifft.imag]).squeeze().astype("float32")
     return np.allclose(orig_ifft, orig, rtol=0, atol=1e-5)
 
+def _check_spc(abs_phi_fft, spc):
+    return np.allclose(abs_phi_fft, spc, rtol=0., atol=1e-3)
+
+def phi_to_spc(phi, gt_spc, out_shape, norm: str = "forward"):
+    phi_fft = np.fft.fftn(phi, axes=(0, 2), norm=norm)
+    phi_fft = np.fft.fftshift(phi_fft, axes=(0, 2))
+    phi_fft = phi_fft[..., phi_fft.shape[-1] // 2:]
+    nkx, _, nky = out_shape
+    xpad = (phi_fft.shape[0] - nkx) // 2
+    xpad = xpad + 1 if (phi_fft.shape[0] % 2 == 0) else xpad
+    phi_fft = phi_fft[xpad: nkx + xpad, :, :nky]
+    assert _check_spc(np.abs(phi_fft), gt_spc), "Spectral space of Phi incorrect"
+    phi_fft = np.fft.ifftshift(phi_fft, axes=(0,))
+    phi_fft = np.fft.ifftn(phi_fft, axes=(0, 2), norm=norm)
+    spc = np.fft.fftn(phi_fft, axes=(0, 2), norm=norm)
+    spc = np.fft.fftshift(spc, axes=(0,))
+    assert _check_spc(np.abs(spc), gt_spc), "Spectral space of phi incorrect"
+    phi = np.stack([phi_fft.real, phi_fft.imag]).astype("float32")
+    return phi, spc
 
 def preprocess(
     filename,
     spatial_ifft=False,
     separate_zf=False,
-    stats=None,
-    per_mode_norm=False,
     split_into_bands=None,
     norm_axes=(1, 2, 3, 4, 5),
 ):
@@ -181,20 +199,9 @@ def preprocess(
     # create h5 file with timestamps and field data
     ifft_tag = "_ifft" if spatial_ifft else ""
     zf_tag = "_separate_zf" if separate_zf else ""
-    per_mode_tag = "_per_mode" if per_mode_norm else ""
     split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-    # axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
-    # norm_axes_tag = f"_norm_{"_".join([axes_desc[ax-1] for ax in norm_axes])}"
-    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}.h5"
+    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{split_into_bands_tag}.h5"
     if os.path.exists(h5_filename):
-        if per_mode_norm:
-            # update stats with new stats
-            with h5py.File(h5_filename, "r+") as file:
-                file["metadata"]["k_mean"] = stats.mean
-                file["metadata"]["k_var"] = np.sqrt(stats.var)
-                file["metadata"]["k_min"] = stats.min
-                file["metadata"]["k_max"] = stats.max
-
         print(f"File {h5_filename} already exists, skipping...")
         return h5_filename, True
 
@@ -239,38 +246,55 @@ def preprocess(
         ts_slices = [np.isclose(orig_times, t).nonzero()[0][0] for t in timesteps]
         fluxes = fluxes[ts_slices]
 
+    orig_fluxes = fluxes.copy()
+    fluxes = np.clip(fluxes, a_min=0., a_max=None)
     # load parameters
     config = parse_input_dat(f"{dir_in}/input.dat")
-    ion_temp_grad = config["SPECIES"]["rlt"]
-    if not per_mode_norm:
-        shape = tuple(
-            [
-                1 if ax in norm_axes else resolution[ax - 1]
-                for ax in np.arange(1, len(resolution) + 1)
-            ]
-        )
-        if zf_tag:
-            if split_into_bands:
-                stats = RunningMeanStd(shape=((split_into_bands + 1) * 2,) + shape)
-            else:
-                stats = RunningMeanStd(shape=(4,) + shape)
+    ion_temp_grad = config["species"]["rlt"]
+    density_grad = config["species"]["rln"]
+    s_hat = config["geom"]["shat"]
+    q = config["geom"]["q"]
+
+    shape = tuple(
+        [
+            1 if ax in norm_axes else resolution[ax - 1]
+            for ax in np.arange(1, len(resolution) + 1)
+        ]
+    )
+    if zf_tag:
+        if split_into_bands:
+            df_stats = RunningMeanStd(shape=((split_into_bands + 1) * 2,) + shape)
         else:
-            stats = RunningMeanStd(shape=(2,) + shape)
+            df_stats = RunningMeanStd(shape=(4,) + shape)
+    else:
+        df_stats = RunningMeanStd(shape=(2,) + shape)
+        phi_stats = RunningMeanStd((2,1,1,1))
+        flux_stats = RunningMeanStd((1,))
 
     with h5py.File(h5_filename, "w") as file:
 
         # group for metadata (e.g. timesteps)
+        geometry = load_geometry(dir_in)
         metadata_group = file.create_group("metadata")
         metadata_group.create_dataset("timesteps", data=timesteps)
-        metadata_group.create_dataset("fluxes", data=fluxes)
         metadata_group.create_dataset("resolution", data=resolution)
         metadata_group.create_dataset("ion_temp_grad", data=ion_temp_grad, shape=(1,))
+        metadata_group.create_dataset("density_grad", data=density_grad, shape=(1,))
+        metadata_group.create_dataset("fluxes", data=fluxes)
+        metadata_group.create_dataset("s_hat", data=s_hat, shape=(1,))
+        metadata_group.create_dataset("q", data=q, shape=(1,))
+        geometry_group = file.create_group("geometry")
+        np_geom = {k: geometry[k] if type(geometry[k]) != torch.Tensor else np.array(geometry[k])
+                   for k in geometry.keys()}
+        for key in np_geom.keys():
+            geometry_group.create_dataset(key, data=np_geom[key])
+        # metadata_group.create_dataset("geometry", data=geometry)
 
         # group for our 6D field data
         data_group = file.create_group("data")
         for idx, (k, pot) in tqdm(
             enumerate(zip(ks, potens)),
-            f"Processing {filename} -> {filename + ifft_tag + zf_tag + per_mode_tag + split_into_bands_tag + ".h5"}",
+            f"Processing {filename} -> {filename + ifft_tag + zf_tag + split_into_bands_tag + ".h5"}",
             total=len(ks),
         ):
             # Load the full distribution function data
@@ -281,8 +305,6 @@ def preprocess(
             knth = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
             orig_knth = knth.copy()
             if spatial_ifft:
-                if per_mode_norm:
-                    knth = (knth - stats.mean) / np.sqrt(stats.var)
                 knth = np.moveaxis(knth, 0, -1).copy()
                 knth = knth.view(dtype=np.complex64)
                 knth = np.fft.fftshift(knth, axes=(3,))
@@ -315,99 +337,79 @@ def preprocess(
                         separated_modes.append(ifft_knth_no_zf)
 
                     knth = np.concatenate(separated_modes, axis=0)
-                    assert check_ifft(
-                        knth.copy(), orig_knth
-                    ), "Error transforming back to original space"
                 else:
                     knth = do_ifft(knth)
 
-            if not per_mode_norm:
-                # update running averages
-                stats.update(
-                    np.mean(knth, axis=norm_axes, keepdims=True),
-                    np.var(knth, axis=norm_axes, keepdims=True),
-                    np.min(knth, axis=norm_axes, keepdims=True),
-                    np.max(knth, axis=norm_axes, keepdims=True),
-                )
-
-            # Add the reshaped data as a dataset to the "data" group
-            k_name = "timestep_" + str(idx).zfill(5)
-            data_group.create_dataset(k_name, data=knth)
+                assert check_ifft(
+                    knth.copy(), orig_knth.copy()
+                ), "Error transforming back to original space"
 
             # load the potential field
             a = np.loadtxt(f"{dir_in}/{pot}")
             phi = np.reshape(a, (nx, ns, ny), order="F").astype("float32").copy()
+            spc_file = pot.replace("Poten", "Spc3d")
+            b = np.loadtxt(f"{dir_in}/{spc_file}")
+            gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
+            phi, phi_fft_unpadded = phi_to_spc(phi, gt_spc, out_shape=(nkx, ns, nky))
+
+            df = np.moveaxis(orig_knth, 0, -1).copy()
+            df = df.view(dtype=np.complex64).squeeze()
+            df = torch.tensor(df)
+            phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
+            _, eflux, _ = pev_flux_df_phi(df, phi_fft_unpadded, geometry)
+            assert np.isclose(eflux.item(), orig_fluxes[idx], rtol=0., atol=1e-2), "Flux integral failed..."
+
+            # update running averages
+            df_stats.update(
+                np.mean(knth, axis=norm_axes, keepdims=True),
+                np.var(knth, axis=norm_axes, keepdims=True),
+                np.min(knth, axis=norm_axes, keepdims=True),
+                np.max(knth, axis=norm_axes, keepdims=True),
+            )
+            flux_stats.update(fluxes[idx], fluxes[idx], fluxes[idx], fluxes[idx])
+            phi_stats.update(
+                np.mean(phi, axis=(1,2,3,), keepdims=True),
+                np.var(phi, axis=(1,2,3,), keepdims=True),
+                np.min(phi, axis=(1,2,3,), keepdims=True),
+                np.max(phi, axis=(1,2,3,), keepdims=True),
+            )
+
+            # Add the reshaped data as a dataset to the "data" group
+            k_name = "timestep_" + str(idx).zfill(5)
+            data_group.create_dataset(k_name, data=knth)
             poten_name = "poten_" + str(idx).zfill(5)
             data_group.create_dataset(poten_name, data=phi)
 
-        metadata_group.create_dataset("k_mean", data=stats.mean)
-        metadata_group.create_dataset("k_std", data=np.sqrt(stats.var))
-        metadata_group.create_dataset("k_min", data=stats.min)
-        metadata_group.create_dataset("k_max", data=stats.max)
+        metadata_group.create_dataset("df_mean", data=df_stats.mean)
+        metadata_group.create_dataset("df_std", data=np.sqrt(df_stats.var))
+        metadata_group.create_dataset("df_min", data=df_stats.min)
+        metadata_group.create_dataset("df_max", data=df_stats.max)
+        metadata_group.create_dataset("phi_mean", data=phi_stats.mean)
+        metadata_group.create_dataset("phi_std", data=np.sqrt(phi_stats.var))
+        metadata_group.create_dataset("phi_min", data=phi_stats.min)
+        metadata_group.create_dataset("phi_max", data=phi_stats.max)
+        metadata_group.create_dataset("flux_mean", data=flux_stats.mean)
+        metadata_group.create_dataset("flux_std", data=np.sqrt(flux_stats.var))
+        metadata_group.create_dataset("flux_min", data=flux_stats.min)
+        metadata_group.create_dataset("flux_max", data=flux_stats.max)
 
         return h5_filename, False
 
 
 IFFT = True
 separate_zf = False
-per_mode_norm = False
 split_into_bands = None
 norm_axes = (1,2,3,4,5)
 ifft_tag = "_ifft" if IFFT else ""
 zf_tag = "_separate_zf" if separate_zf else ""
-per_mode_tag = "_per_mode" if per_mode_norm else ""
 split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-# axes_desc = ["nvpar", "nmu", "ns", "nkx", "nky"]
-# norm_axes_tag = f"_norm_{"_".join([axes_desc[ax-1] for ax in norm_axes])}"
-datasets = [
-    "cyclone17_2",
-    "cyclone4_2_2",
-    "cyclone20_2",
-    "cyclone5_2_diffInit",
-    "cyclone5_2_diffInit3",
-    "cyclone8_2",
-    "cyclone10_2",
-    "cyclone8_2_diffInit3",
-    "cyclone8_2_diffInit2",
-    "cyclone9_2",
-    "cyclone5_2",
-    "cyclone18_2",
-    "cyclone9_2_diffInit",
-    "cyclone12_2_diffInit",
-    "cyclone15_2",
-    "cyclone14_2",
-    "cyclone22_2_diffInit3",
-    "cyclone9_2_diffInit3",
-    "cyclone12_2_diffInit3",
-    "cyclone20_2_diffInit",
-    "cyclone5_2_diffInit2",
-    "cyclone9_2_diffInit2",
-    "cyclone8_2_diffInit",
-    "cyclone6_2",
-    "cyclone20_2_diffInit2",
-    "cyclone22_2_diffInit2",
-    "cyclone13_2",
-    "cyclone16_2",
-    "cyclone7_2",
-    "cyclone11_2",
-    "cyclone12_2",
-    "cyclone20_2_diffInit3",
-    "cyclone21_2",
-    "cyclone12_2_diffInit2",
-    "cyclone22_2",
-    "cyclone22_2_diffInit",
-    "cyclone19_2"
-]
+datasets = [f"iteration_{i}" for i in range(100)]
 
-
-stats = get_stats(datasets, IFFT, separate_zf, per_mode_norm) if per_mode_norm else None
 for f in datasets:
     h5_filename, skipped = preprocess(
         f,
         spatial_ifft=IFFT,
         separate_zf=separate_zf,
-        stats=stats,
-        per_mode_norm=per_mode_norm,
         split_into_bands=split_into_bands,
         norm_axes=norm_axes,
     )
@@ -424,16 +426,16 @@ for f in datasets:
             timesteps = len(h5f["data"])
             rlt = h5f["metadata/ion_temp_grad"][:]
             timestep_0 = h5f["data/timestep_00000"][:]
-            mean, std = h5f["metadata/k_mean"][0], h5f["metadata/k_std"][0]
-            min_, max_ = h5f["metadata/k_min"][0], h5f["metadata/k_max"][0]
+            mean, std = h5f["metadata/df_mean"][0], h5f["metadata/df_std"][0]
+            min_, max_ = h5f["metadata/df_min"][0], h5f["metadata/df_max"][0]
             print(
                 f"{h5_filename}:\n "
                 f"\tpoints: {timesteps}, shape of timestep_00000: {timestep_0.shape}\n"
                 f"\trlt: {rlt}\n"
             )
 
-for filename in datasets:
-    h5_filename = f"{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}.h5"
-    os.system(
-        f"rsync -ah --info=progress {ROOT}/preprocessed/{h5_filename} /local00/bioinf/gyrokinetics/preprocessed/{h5_filename}"
-    )
+# for filename in datasets:
+#     h5_filename = f"{filename}{ifft_tag}{zf_tag}{per_mode_tag}{split_into_bands_tag}.h5"
+#     os.system(
+#         f"rsync -ah --info=progress {ROOT}/preprocessed/{h5_filename} /local00/bioinf/gyrokinetics/preprocessed/{h5_filename}"
+#     )

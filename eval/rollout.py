@@ -7,6 +7,7 @@ from torch.utils.data import Dataset
 from collections import defaultdict
 
 from dataset.cyclone import CycloneSample
+from models.swin_xnet import SwinXnet, SwinUnet
 
 
 def get_rollout_fn(
@@ -35,16 +36,23 @@ def get_rollout_fn(
         rollout_steps = min(rollout_steps)
 
         tot_ts = rollout_steps * bundle_steps
-        problem_dim = model.module.problem_dim if hasattr(model, "module") else model.problem_dim
         inputs_t = inputs.copy()
         outputs = {}
         for key in inputs_t.keys():
             shape = inputs_t[key].shape
-            dim = problem_dim if key != "phi" else 1
+            if hasattr(model, "module"):
+                # We are using DDP
+                if isinstance(model.module, SwinXnet):
+                    problem_dim = getattr(model.module, f"{key}_unet").problem_dim
+                else:
+                    problem_dim = model.module.problem_dim
+            else:
+                problem_dim = model.problem_dim
+
             if inputs_t[key].ndim in [5,7]:
-                outputs[key] = torch.zeros((shape[0], dim, tot_ts, *shape[2:]))
+                outputs[key] = torch.zeros((shape[0], problem_dim, tot_ts, *shape[2:]))
             elif inputs_t[key].ndim in [6,8]:
-                outputs[key] = torch.zeros((shape[0], dim, tot_ts, *shape[3:]))
+                outputs[key] = torch.zeros((shape[0], problem_dim, tot_ts, *shape[3:]))
             else:
                 raise Exception(
                     "x should have 7 (b, c, v1, v2, s, x, y) "
@@ -87,7 +95,7 @@ def get_rollout_fn(
             outputs[key] = rearrange(outputs[key], "b c t ... -> t b c ...")
             outputs[key] = outputs[key][: rollout_steps * bundle_steps, :, ...]
         if len(fluxes) > 0:
-            outputs["flux"] = rearrange(torch.cat(fluxes, dim=-1), "b t -> t 1 b")
+            outputs["flux"] = torch.stack(fluxes)
         return outputs
 
     return _rollout
@@ -120,20 +128,14 @@ def validation_metrics(
     for key in gts.keys():
         if bundle_steps == 1:
             gts[key] = torch.stack(gts[key], dim=0)
-            if gts[key].ndim <= 2:
-                gts[key] = gts[key].unsqueeze(1)
+            if gts[key].ndim > 3:
+                gts[key] = gts[key].squeeze(-1)
         else:
-            if gts[key].ndim > 2:
-                gts[key] = torch.stack(gts[key], dim=2)
-                gts[key] = rearrange(gts[key], "b c t ... -> t b c ...")
-            else:
-                gts[key] = torch.stack(gts[key], dim=1)
-                gts[key] = rearrange(gts[key], "b t -> b 1 t")
+            raise NotImplementedError("bundle_steps > 1 not implemented yet...")
 
     metrics = {k: torch.zeros((len(metrics_fns), n_steps)) for k in rollout.keys()}
     for idx, (name, fn) in enumerate(metrics_fns.items()):
         for key in rollout.keys():
-            assert gts[key].shape == rollout[key].shape, f"Mismatch in shapes for {key}"
             value_result = fn(rollout[key], gts[key])
             metrics[key][idx, ...] = value_result
     return metrics

@@ -12,8 +12,7 @@ from torch.utils.data import Dataset
 
 import random
 
-from dataset.utils import RunningMeanStd
-from utils import expand_as
+from utils import expand_as, RunningMeanStd
 
 
 @dataclass
@@ -25,6 +24,8 @@ class CycloneSample:
     y_flux: torch.Tensor
     timestep: torch.Tensor
     itg: torch.Tensor
+    s_hat: torch.Tensor
+    q: torch.Tensor
     file_index: torch.Tensor
     timestep_index: torch.Tensor
     # TODO: add more fields (e.g. params that we can use for conditioning)
@@ -177,7 +178,7 @@ class CycloneDataset(Dataset):
         self.file_num_timesteps = []
         self.steps_per_file = {}
         if normalization_stats is None:
-            self.dataset_stats = defaultdict(dict)
+            self.dataset_stats = {k: defaultdict(dict) for k in input_fields}
         per_file_t_indexes = []
         stats = None
         for file_idx, file_path in enumerate(self.files):
@@ -217,18 +218,27 @@ class CycloneDataset(Dataset):
                 per_file_t_indexes.append(orig_t_index)
                 if self.dataset_stats is not None:
                     # normalization stats
-                    self.dataset_stats[file_idx]["mean"] = f["metadata/k_mean"][:]
-                    self.dataset_stats[file_idx]["std"] = f["metadata/k_std"][:]
-                    self.dataset_stats[file_idx]["min"] = f["metadata/k_min"][:]
-                    self.dataset_stats[file_idx]["max"] = f["metadata/k_max"][:]
+                    for k in self.dataset_stats.keys():
+                        mean = f[f"metadata/{k}_mean"][:]
+                        std = f[f"metadata/{k}_std"][:]
+                        min = f[f"metadata/{k}_min"][:]
+                        max = f[f"metadata/{k}_max"][:]
+                        self.dataset_stats[k][file_idx][f"{k}_mean"] = mean
+                        self.dataset_stats[k][file_idx][f"{k}_std"] = std
+                        self.dataset_stats[k][file_idx][f"{k}_min"] = min
+                        self.dataset_stats[k][file_idx][f"{k}_max"] = max
+
                     if stats is None and normalization_scope == "dataset":
-                        stats = RunningMeanStd(shape=self.dataset_stats[file_idx]["mean"].shape)
+                        stats = {k: RunningMeanStd(shape=self.dataset_stats[k][file_idx][f"{k}_mean"].shape)
+                                      for k in input_fields}
+
                     if stats is not None:
-                        stats.update(self.dataset_stats[file_idx]["mean"],
-                                     self.dataset_stats[file_idx]["std"]**2,
-                                     self.dataset_stats[file_idx]["min"],
-                                     self.dataset_stats[file_idx]["max"],
-                                     count=len(timesteps))
+                        for k in stats.keys():
+                            stats[k].update(self.dataset_stats[k][file_idx][f"{k}_mean"],
+                                            self.dataset_stats[k][file_idx][f"{k}_std"]**2,
+                                            self.dataset_stats[k][file_idx][f"{k}_min"],
+                                            self.dataset_stats[k][file_idx][f"{k}_max"],
+                                            count=len(timesteps))
 
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
@@ -264,18 +274,19 @@ class CycloneDataset(Dataset):
         if offset > 0 and normalization_scope == "dataset" and normalization_stats is None \
                 or (separate_zf and normalization_scope == "dataset" and normalization_stats is None):
             # overwrite dataset-wide stats with new stats for data after offset only
-            stats = self._get_dataset_stats()
+            stats["df"] = self._get_dataset_stats()
 
         if normalization_scope == "dataset" and normalization_stats is None:
-            self.dataset_stats["full"]["mean"] = stats.mean
-            self.dataset_stats["full"]["std"] = stats.var ** (1/2)
-            self.dataset_stats["full"]["min"] = stats.min
-            self.dataset_stats["full"]["max"] = stats.max
+            for k in input_fields:
+                self.dataset_stats[k]["full"]["mean"] = stats[k].mean
+                self.dataset_stats[k]["full"]["std"] = stats[k].var ** (1/2)
+                self.dataset_stats[k]["full"]["min"] = stats[k].min
+                self.dataset_stats[k]["full"]["max"] = stats[k].max
 
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
             self.resolution = f["metadata/resolution"][:]
-            self.phi_resolution = (392, 16, 96)  # TODO
+            self.phi_resolution = (85, 16, 32)  # TODO
 
     def _separate_zf(self, x):
         nky = x.shape[-1]
@@ -298,7 +309,7 @@ class CycloneDataset(Dataset):
                 y = self._separate_zf(y)
 
             if stats is None:
-                stats = RunningMeanStd(shape=x.mean((1,2,3,4,5), keepdims=True).shape)
+                stats = RunningMeanStd(shape=x.mean((1, 2, 3, 4, 5), keepdims=True).shape)
 
             stats.update(x.mean((1,2,3,4,5), keepdims=True),
                          x.var((1,2,3,4,5), keepdims=True),
@@ -342,17 +353,19 @@ class CycloneDataset(Dataset):
         poten, gt_poten, flux = sample["poten"], sample["gt_poten"], sample["gt_flux"]
         # conditioning fields
         timestep, itg = sample["timestep"], sample["itg"]
+        q, s_hat = sample["q"], sample["s_hat"]
         if self.normalization is not None and get_normalized:
+
+            if self.dataset_stats.get("flux", None):
+                flux, *_ = self._normalize(flux, file_index, "flux")
+
             if x is not None:
-                x, shift, scale = self._normalize(x, file_index)
+                x, shift, scale = self._normalize(x, file_index, "df")
                 gt = (gt - shift) / scale
 
-            # TODO poten normalization
             if poten is not None:
-                poten_scale = poten.mean()
-                poten_shift = poten.std()
-                poten = (poten - poten_scale) / poten_shift
-                gt_poten = (gt_poten - poten_scale) / poten_shift
+                poten, shift, scale = self._normalize(poten, file_index, "phi")
+                gt_poten = (gt_poten - shift) / scale
 
         return CycloneSample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
@@ -368,6 +381,8 @@ class CycloneDataset(Dataset):
             y_flux=torch.tensor(flux, dtype=self.dtype),
             timestep=torch.tensor(timestep, dtype=self.dtype),
             itg=torch.tensor(itg, dtype=self.dtype),
+            q=torch.tensor(q, dtype=self.dtype),
+            s_hat=torch.tensor(s_hat, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
         )
@@ -423,12 +438,12 @@ class CycloneDataset(Dataset):
         else:
             x, gt = None, None
         if "phi" in self.input_fields:
-            # stack to shape (1, t, x, s, y)
-            poten = np.stack(poten, axis=0)[None]
-            gt_poten = np.stack(gt_poten, axis=0)[None]
+            # stack to shape (t, c, x, s, y)
+            poten = np.stack(poten, axis=0)
+            gt_poten = np.stack(gt_poten, axis=0)
             if self.bundle_seq_length == 1:
-                poten = poten.squeeze(axis=1)
-                gt_poten = gt_poten.squeeze(axis=1)
+                poten = poten.squeeze(axis=0)
+                gt_poten = gt_poten.squeeze(axis=0)
         else:
             poten, gt_poten = None, None
 
@@ -439,9 +454,11 @@ class CycloneDataset(Dataset):
         sample["gt_flux"] = np.array(gt_flux).squeeze()
         sample["timestep"] = data["metadata/timesteps"][original_t_index]
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
+        sample["s_hat"] = data["metadata/s_hat"][:].squeeze()
+        sample["q"] = data["metadata/q"][:].squeeze()
         return sample
 
-    def _normalize(self, x, file_index):
+    def _normalize(self, x, file_index, data_key):
         shift, scale = 0.0, 1.0
         if self.apply_log:
             x = np.log(1 + np.abs(np.min(x)) + x)
@@ -464,11 +481,11 @@ class CycloneDataset(Dataset):
                 raise NotImplementedError
 
             if self.normalization == "zscore":
-                shift = expand_as(self.dataset_stats[key]["mean"], x)
-                scale = expand_as(self.dataset_stats[key]["std"], x)
+                shift = expand_as(self.dataset_stats[data_key][key]["mean"], x)
+                scale = expand_as(self.dataset_stats[data_key][key]["std"], x)
             if self.normalization == "minmax":
-                x_min = expand_as(self.dataset_stats[key]["min"], x)
-                x_max = expand_as(self.dataset_stats[key]["max"], x)
+                x_min = expand_as(self.dataset_stats[data_key][key]["min"], x)
+                x_max = expand_as(self.dataset_stats[data_key][key]["max"], x)
                 scale = (x_max - x_min) / self.minmax_beta1
                 shift = x_min + scale * self.minmax_beta2
 
@@ -650,6 +667,8 @@ class CycloneDataset(Dataset):
             y_flux=torch.stack([sample.y_flux for sample in batch]),
             timestep=torch.stack([sample.timestep for sample in batch]),
             itg=torch.stack([sample.itg for sample in batch]),
+            s_hat=torch.stack([sample.s_hat for sample in batch]),
+            q=torch.stack([sample.q for sample in batch]),
             file_index=torch.stack([sample.file_index for sample in batch]),
             timestep_index=torch.stack([sample.timestep_index for sample in batch]),
         )
