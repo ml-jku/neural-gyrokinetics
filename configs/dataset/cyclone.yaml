@@ -10,6 +10,7 @@ spatial_ifft: true
 separate_zf: true
 split_into_bands: null
 log_transform: false
+num_workers: 4
 active_keys: ["re", "im"]
 input_fields: ["df"]
 training_trajectories: "iteration_{0-12}.h5"
