@@ -117,7 +117,7 @@ class CycloneDataset(Dataset):
         self.num_workers = num_workers
         self.dir = path
         self.bundle_seq_length = bundle_seq_length
-        
+
         # with specified files / pattern
         if trajectories is not None:
             if split == "val" and partial_holdouts:
