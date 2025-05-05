@@ -289,41 +289,50 @@ def generate_val_plots(rollout, gt, ts, phase):
         "phi": {
             f"Potentials (T={ts[0].item():.2f}, {phase})": plot_potentials,
         },
+        "phi_int": {
+            f"Integrated potentials (T={ts[0].item():.2f}, {phase})": plot_potentials,
+        },
     }
     for key in rollout.keys():
         if key not in val_plots_dict:
             # TODO: add visualization for flux rollout
             continue
+        
+        gt_key = key
+        if "int" in key:
+            gt_key = key.replace("_int", "")
+            
+        x = rollout[key].clone()
+        y = gt[gt_key].clone()
 
         # first timestep and batch
-        if gt[key].shape[1] != 2:
-            gt[key] = torch.cat(
+        if y.shape[1] != 2:
+            y = torch.cat(
                 [
-                    gt[key][:, 0::2].sum(axis=1, keepdims=True),
-                    gt[key][:, 1::2].sum(axis=1, keepdims=True),
+                    y[:, 0::2].sum(axis=1, keepdims=True), y[:, 1::2].sum(axis=1, keepdims=True),
                 ],
                 dim=1,
             ).cpu()
 
-        if gt[key].ndim <= 7:
-            gt[key] = gt[key][0].to("cpu")
-        elif gt[key].ndim > 7:
-            gt[key][0, 0].to("cpu")
+        if y.ndim <= 7 and gt_key:
+            y = y[0].to("cpu")
+        elif y.ndim > 7:
+            y[0, 0].to("cpu")
         else:
             raise NotImplementedError("Unknown shapes for plotting...")
 
-        if rollout[key].shape[1] != 2:  # separate zonal flow, sum and recompose
-            rollout[key] = torch.cat(
+        if x.shape[1] != 2:  # separate zonal flow, sum and recompose
+            x = torch.cat(
                 [
-                    rollout[key][:, 0::2].sum(axis=1, keepdims=True),
-                    rollout[key][:, 1::2].sum(axis=1, keepdims=True),
+                    x[:, 0::2].sum(axis=1, keepdims=True),
+                    x[:, 1::2].sum(axis=1, keepdims=True),
                 ],
                 dim=1,
             )
 
         for name, plot_fn in val_plots_dict[key].items():
-            # rollout[0] for first rolled timestep
-            plots[name] = plot_fn(rollout[key][0], x2=gt[key])
+            # x[0] for first rolled timestep
+            plots[name] = plot_fn(x[0], x2=y)
 
     return plots
 

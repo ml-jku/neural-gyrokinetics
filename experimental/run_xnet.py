@@ -57,7 +57,7 @@ def get_xnet(cfg, dataset):
     patching_hidden_ratio = cfg.model.swin.merging_hidden_ratio
     unmerging_hidden_ratio = cfg.model.swin.unmerging_hidden_ratio
     c_multiplier = cfg.model.swin.c_multiplier
-    abs_pe = cfg.model.swin.abs_pe
+    use_abs_pe = cfg.model.swin.use_abs_pe
     patch_skip = cfg.model.swin.patch_skip
     modulation = cfg.model.swin.modulation
     flux_head = cfg.model.swin.flux_head
@@ -88,7 +88,7 @@ def get_xnet(cfg, dataset):
         num_layers=num_layers,
         use_checkpoint=gradient_checkpoint,
         drop_path=0.1,
-        abs_pe=abs_pe,
+        use_abs_pe=use_abs_pe,
         c_multiplier=c_multiplier,
         merging_hidden_ratio=patching_hidden_ratio,
         unmerging_hidden_ratio=unmerging_hidden_ratio,

@@ -153,7 +153,7 @@ def evaluate(
                     )
 
                     # TODO: smarter (i.e. use timeindex when we output a dataclass from the dataset)
-                    metrics_i = validation_metrics(
+                    metrics_i, integrated_i = validation_metrics(
                         rollout,
                         idx_data,
                         bundle_seq_length,
@@ -162,6 +162,8 @@ def evaluate(
                         loss_wrap=loss_wrap,
                         eval_integrals=eval_integrals,
                     )
+                    # add integrated potentials to rollout for comparison
+                    rollout["phi_int"] = torch.stack([integrated_i[t]["phi"] for t in range(len(integrated_i))])
 
                     for key in metrics_i.keys():
                         if metrics_i[key].shape[-1] < tot_eval_steps:
