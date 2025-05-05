@@ -39,10 +39,9 @@ def get_data(cfg):
                 last_n = entry.last_n
                 partial_holdouts[file] = last_n
 
-        input_fields = np.unique(cfg.dataset.input_fields + cfg.model.losses)
         trainset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
-            input_fields=input_fields,
+            input_fields=["df", "phi", "flux"],  # TODO figure out how to deal with eval
             path=cfg.dataset.path,
             split="train",
             random_seed=cfg.seed,
@@ -60,17 +59,18 @@ def get_data(cfg):
             minmax_beta2=cfg.dataset.minmax_beta2,
             offset=cfg.dataset.offset,
             separate_zf=cfg.dataset.separate_zf,
+            num_workers=cfg.dataset.num_workers,
         )
 
         holdout_trajectories_valset = CycloneDataset(
             active_keys=cfg.dataset.active_keys,
-            input_fields=input_fields,
+            input_fields=["df", "phi", "flux"],
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
-            normalization_stats=trainset.dataset_stats,
+            normalization_stats=trainset.norm_stats,
             spatial_ifft=cfg.dataset.spatial_ifft,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,
@@ -82,6 +82,7 @@ def get_data(cfg):
             minmax_beta2=cfg.dataset.minmax_beta2,
             offset=cfg.dataset.offset,
             separate_zf=cfg.dataset.separate_zf,
+            num_workers=cfg.dataset.num_workers,
         )
 
         trainloader = DataLoader(
@@ -109,13 +110,13 @@ def get_data(cfg):
         if partial_holdouts:
             holdout_samples_valset = CycloneDataset(
                 active_keys=cfg.dataset.active_keys,
-                input_fields=input_fields,
+                input_fields=["df", "phi", "flux"],
                 path=cfg.dataset.path,
                 split="val",
                 random_seed=cfg.seed,
                 normalization=cfg.dataset.normalization,
                 normalization_scope=cfg.dataset.normalization_scope,
-                normalization_stats=trainset.dataset_stats,
+                normalization_stats=trainset.norm_stats,
                 spatial_ifft=cfg.dataset.spatial_ifft,
                 bundle_seq_length=cfg.model.bundle_seq_length,
                 trajectories=cfg.dataset.training_trajectories,
@@ -127,6 +128,7 @@ def get_data(cfg):
                 minmax_beta2=cfg.dataset.minmax_beta2,
                 offset=cfg.dataset.offset,
                 separate_zf=cfg.dataset.separate_zf,
+                num_workers=cfg.dataset.num_workers,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,

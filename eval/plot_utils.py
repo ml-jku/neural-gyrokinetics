@@ -1,5 +1,4 @@
 import io
-import os
 from PIL import Image as PILImage
 import matplotlib
 import matplotlib.ticker as tkr
@@ -93,16 +92,8 @@ def plot4x4_sided(x1, x2, title="", mark_bad=False, average=True):
             x1_plot = x1[0].mean(other)
             x2_plot = x2[0].mean(other)
         else:
-            x1_plot = (
-                torch.tensor(x1[0])
-                .permute(i, j, *other)
-                .numpy()[:, :, 0, 0, 0]
-            )
-            x2_plot = (
-                torch.tensor(x2[0])
-                .permute(i, j, *other)
-                .numpy()[:, :, 0, 0, 0]
-            )
+            x1_plot = torch.tensor(x1[0]).permute(i, j, *other).numpy()[:, :, 0, 0, 0]
+            x2_plot = torch.tensor(x2[0]).permute(i, j, *other).numpy()[:, :, 0, 0, 0]
 
         if mark_bad:
             x1_std = x1.std(other)
@@ -228,6 +219,7 @@ def plot_4x4_2D_raspec(x1, x2=None, **kwargs):
             [x1[0].permute(i, j, *other).numpy(), x1[1].permute(i, j, *other).numpy()],
             axis=-1,
         )
+        xx = np.nan_to_num(xx)
         xx = np.complex64(xx)
 
         slices = [tuple(np.random.randint(0, dim, size=100)) for dim in xx.shape[2:]]
@@ -292,7 +284,7 @@ def generate_val_plots(rollout, gt, ts, phase):
         "df": {
             f"pred (T={ts[0].item():.2f}, {phase})": plot4x4_sided,
             f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
-            f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec
+            f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
         },
         "phi": {
             f"Potentials (T={ts[0].item():.2f}, {phase})": plot_potentials,
@@ -306,22 +298,32 @@ def generate_val_plots(rollout, gt, ts, phase):
         # first timestep and batch
         if gt[key].shape[1] != 2:
             gt[key] = torch.cat(
-                [gt[key][:, 0::2].sum(axis=1, keepdims=True), gt[key][:, 1::2].sum(axis=1, keepdims=True)],
-                dim=1).cpu()
+                [
+                    gt[key][:, 0::2].sum(axis=1, keepdims=True),
+                    gt[key][:, 1::2].sum(axis=1, keepdims=True),
+                ],
+                dim=1,
+            ).cpu()
 
-        if gt[key].ndim <= 7 :
+        if gt[key].ndim <= 7:
             gt[key] = gt[key][0].to("cpu")
         elif gt[key].ndim > 7:
             gt[key][0, 0].to("cpu")
         else:
             raise NotImplementedError("Unknown shapes for plotting...")
 
-        if rollout[key].shape[2] != 2:
-            rollout[key] = torch.cat([rollout[key][:, :, 0::2].sum(axis=2, keepdims=True),
-                                      rollout[key][:, :, 1::2].sum(axis=2, keepdims=True)], dim=2)
+        if rollout[key].shape[1] != 2:  # separate zonal flow, sum and recompose
+            rollout[key] = torch.cat(
+                [
+                    rollout[key][:, 0::2].sum(axis=1, keepdims=True),
+                    rollout[key][:, 1::2].sum(axis=1, keepdims=True),
+                ],
+                dim=1,
+            )
 
         for name, plot_fn in val_plots_dict[key].items():
-            plots[name] = plot_fn(rollout[key][0, 0], x2=gt[key])
+            # rollout[0] for first rolled timestep
+            plots[name] = plot_fn(rollout[key][0], x2=gt[key])
 
     return plots
 

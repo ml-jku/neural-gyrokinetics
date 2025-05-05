@@ -14,16 +14,20 @@ from utils import load_model_and_config
 from models import get_model
 from dataset.cyclone import CycloneDataset
 
+
 def create_parser():
     parser = ArgumentParser()
     parser.add_argument("--ckpt", required=True)
-    parser.add_argument("--data_path", default="/restricteddata/ukaea/gyrokinetics/preprocessed")
+    parser.add_argument(
+        "--data_path", default="/restricteddata/ukaea/gyrokinetics/preprocessed"
+    )
     parser.add_argument("--eval_sim", default="cyclone4_2_2.h5")
     parser.add_argument("--onestep", action="store_true")
     parser.add_argument("--last", action="store_true")
     parser.add_argument("--ifft_merge", action="store_true")
     parser.add_argument("--start_idx", default=0, type=int)
     return parser.parse_args()
+
 
 def invert_ifft(x):
     # invert fft on spatial
@@ -35,19 +39,22 @@ def invert_ifft(x):
     knth = np.stack([knth.real, knth.imag]).squeeze().astype("float32")
     return knth
 
+
 def modify_fds_dat(path):
-    with open(path, 'r') as infile:
+    with open(path, "r") as infile:
         content = infile.read()
         content = content.replace("DTIM    =  2.000000000000000E-002", "DTIM    =  0.0")
-        content = content.replace("NT_REMAIN       =           0", "NT_REMAIN       =           1")
+        content = content.replace(
+            "NT_REMAIN       =           0", "NT_REMAIN       =           1"
+        )
         content = content.replace("TIME    =   192.753733197446     ", "TIME    =   0")
 
-    with open(path, 'w') as outfile:
+    with open(path, "w") as outfile:
         outfile.write(content)
 
 
 def modify_input_dat(path):
-    with open(path, 'r') as infile:
+    with open(path, "r") as infile:
         content = infile.read()
         content = content.replace("READ_FILE  = .false.", "READ_FILE  = .true.")
         content = content.replace("DTIM   = 0.02", "DTIM   = 0.0")
@@ -55,8 +62,9 @@ def modify_input_dat(path):
         content = content.replace("keep_dumps = .true.", "! keep_dumps = .true.")
         content = content.replace("ndump_ts = 3", "! ndump_ts = 3")
 
-    with open(path, 'w') as outfile:
+    with open(path, "w") as outfile:
         outfile.write(content)
+
 
 def compute_pearson_correlation(x, y):
     # shape of [c, ...]
@@ -139,7 +147,7 @@ data = CycloneDataset(
     path=parser.data_path,
     normalization=cfg.dataset.normalization,
     normalization_scope=cfg.dataset.normalization_scope,
-    normalization_stats=traindata.dataset_stats,
+    normalization_stats=traindata.norm_stats,
     spatial_ifft=cfg.dataset.spatial_ifft,
     bundle_seq_length=cfg.model.bundle_seq_length,
     subsample=cfg.dataset.subsample,
@@ -151,11 +159,11 @@ data = CycloneDataset(
 raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{parser.eval_sim.replace('.h5', '')}"
 print(f"Val: {len(data)}")
 
-assert (traindata.dataset_stats == data.dataset_stats), "Normalization stats mismatch"
+assert traindata.norm_stats == data.norm_stats, "Normalization stats mismatch"
 if cfg.dataset.offset > 0:
     # dump normalization stats so we only need to compute them once
     with open(f"{parser.ckpt}/normalization_stats.pkl", "wb") as out:
-        pickle.dump(traindata.dataset_stats, out)
+        pickle.dump(traindata.norm_stats, out)
 
 model = get_model(cfg, dataset=data)
 last = parser.last
@@ -165,9 +173,10 @@ model = model.to(device)
 model = model.eval()
 
 ONESTEP = parser.onestep
-cyclone_name = '_'.join(data.files[0].split('/')[-1].split('.')[0].split('_')[:-1])
+cyclone_name = "_".join(data.files[0].split("/")[-1].split(".")[0].split("_")[:-1])
 IDX_0 = parser.start_idx
-IDX_END = len(data)-2
+IDX_END = len(data) - 2
+norm_output = "_rescaled" if parser.rescale else ""
 ifft_merge = "_ifft_merge" if parser.ifft_merge else ""
 OUT_DIR = f"{CKP}/{'onestep{}'.format(ifft_merge) if ONESTEP else 'autoreg_t{}{}'.format(IDX_0, ifft_merge)}/{cyclone_name}/{'best' if not last else 'ckp'}"
 os.makedirs(OUT_DIR, exist_ok=True)
@@ -186,8 +195,16 @@ delta = (timesteps[:, 1:].squeeze() - timesteps[:, :-1].squeeze()).squeeze()[-1]
 if IDX_END > len(data) - 2:
     print("Extrapolating in time...")
     # add future timesteps, not observed during training
-    timesteps = torch.cat([timesteps, torch.arange(timesteps[:, -1].item() + delta, IDX_END, delta).unsqueeze(0)],
-                          dim=1)
+    timesteps = torch.cat(
+        [
+            timesteps,
+            torch.arange(timesteps[:, -1].item() + delta, IDX_END, delta).unsqueeze(0),
+        ],
+        dim=1,
+    )
+files = []
+gt_corr = {}
+model_corr = {}
 
 gt_corr = defaultdict(dict)
 model_corr = defaultdict(dict)
@@ -200,11 +217,11 @@ invert_fns = {
 
 for key in input_fields:
     if cfg.dataset.normalization == "zscore":
-        shift = torch.tensor(traindata.dataset_stats[key]["full"]["mean"]).unsqueeze(0).to(device)
-        scale = torch.tensor(traindata.dataset_stats[key]["full"]["std"]).unsqueeze(0).to(device)
+        shift = torch.tensor(traindata.norm_stats[key]["full"]["mean"]).unsqueeze(0).to(device)
+        scale = torch.tensor(traindata.norm_stats[key]["full"]["std"]).unsqueeze(0).to(device)
     elif cfg.dataset.normalization == "minmax":
-        x_min = torch.tensor(traindata.dataset_stats[key]["full"]["min"]).unsqueeze(0).to(device)
-        x_max = torch.tensor(traindata.dataset_stats[key]["full"]["max"]).unsqueeze(0).to(device)
+        x_min = torch.tensor(traindata.norm_stats[key]["full"]["min"]).unsqueeze(0).to(device)
+        x_max = torch.tensor(traindata.norm_stats[key]["full"]["max"]).unsqueeze(0).to(device)
         scale = (x_max - x_min) / cfg.dataset.beta1
         shift = x_min + scale * cfg.dataset.beta2
     shift_scale_dict[key]["shift"] = shift

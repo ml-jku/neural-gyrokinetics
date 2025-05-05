@@ -19,7 +19,7 @@ from copy import deepcopy
 
 from dataset import get_data, CycloneSample
 from models import get_model
-from train import get_pushforward_fn, relative_norm_mse, pretrain_autoencoder
+from train import relative_norm_mse, pretrain_autoencoder
 from eval import get_rollout_fn, validation_metrics, generate_val_plots, get_flux_plot
 from eval.gkw_client import request_gkw_sim, dump_rollout
 from utils import (

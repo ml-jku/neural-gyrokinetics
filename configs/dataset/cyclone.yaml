@@ -12,9 +12,8 @@ split_into_bands: null
 log_transform: false
 active_keys: ["re", "im"]
 input_fields: ["df"]
-training_trajectories: ["cyclone5_2.h5", "cyclone6_2.h5", "cyclone7_2.h5", "cyclone8_2.h5", "cyclone10_2.h5", "cyclone12_2.h5",
-                        "cyclone22_2.h5"]#, "cyclone22_2_diffInit.h5", "cyclone22_2_diffInit2.h5", "cyclone22_2_diffInit3.h5"]
-validation_trajectories: ["cyclone4_2_2.h5"]
+training_trajectories: "iteration_{0-12}.h5"
+validation_trajectories: ["iteration_13.h5"]
 partial_holdouts:
 training_cond_filters:
 eval_cond_filters:

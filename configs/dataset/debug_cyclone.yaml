@@ -1,15 +1,19 @@
 name: cyclone
-path: /local01/bioinf/gyrokinetics/preprocessed
-normalization: zscore
-normalization_scope: trajectory
+path: /restricteddata/ukaea/gyrokinetics/preprocessed
+normalization: none
+normalization_scope: dataset
+minmax_beta1: 8
+minmax_beta2: 4
+offset: 0
 subsample: 1
-no_zf: false
-separate_zf: false
 spatial_ifft: true
+separate_zf: true
+split_into_bands: null
 log_transform: false
 active_keys: ["re", "im"]
-training_trajectories: ["cyclone5_2.h5"]
-validation_trajectories: ["cyclone4_2_2.h5"]
+input_fields: ["df"]
+training_trajectories: ["iteration_24.h5"]
+validation_trajectories: ["iteration_24.h5"]
 partial_holdouts:
 training_cond_filters:
 eval_cond_filters:

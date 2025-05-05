@@ -80,9 +80,13 @@ class PatchAttention(nn.Module):
 
         if dist.is_initialized():
             with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
+                x = F.scaled_dot_product_attention(
+                    q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
+                )
         else:
-            x = F.scaled_dot_product_attention(q, k, v, dropout_p=(self.attn_drop if self.training else 0.0))
+            x = F.scaled_dot_product_attention(
+                q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
+            )
 
         # attention readout
         x = rearrange(x, "b k n c -> b n (k c)")
@@ -133,7 +137,11 @@ class VisionTransformerBlock(nn.Module):
         self.use_checkpoint = use_checkpoint
         self.init_weights = init_weights
 
-        self.norm1 = norm_layer(dim, elementwise_affine=False) if norm_layer is not None else nn.Identity()
+        self.norm1 = (
+            norm_layer(dim, elementwise_affine=True)
+            if norm_layer is not None
+            else nn.Identity()
+        )
         self.attn = PatchAttention(
             dim,
             grid_size=grid_size,
@@ -144,7 +152,11 @@ class VisionTransformerBlock(nn.Module):
         )
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.norm2 = norm_layer(dim, elementwise_affine=False) if norm_layer is not None else nn.Identity()
+        self.norm2 = (
+            norm_layer(dim, elementwise_affine=True)
+            if norm_layer is not None
+            else nn.Identity()
+        )
         mlp_hidden_dim = int(dim * mlp_ratio)
 
         self.mlp = MLP([dim, mlp_hidden_dim, dim], act_fn=act_fn, dropout_prob=drop)

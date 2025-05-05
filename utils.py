@@ -27,7 +27,7 @@ def wandb_available():
 assert (
     wandb_available()
 ), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
-import wandb
+import wandb  # noqa
 
 
 class WandbManager:
@@ -68,7 +68,8 @@ class WandbManager:
         wandb.finish()
 
 def edit_tag(dict, prefix, postfix):
-    return {f'{prefix}/{k}_{postfix}': v for k, v in dict.items()}
+    return {f"{prefix}/{k}_{postfix}": v for k, v in dict.items()}
+
 
 def setup_logging(config):
     if config.logging.writer == "tensorboard":
@@ -167,8 +168,13 @@ def compress_src(path):
         compresslevel=9,
     )
     for name in files:
-        if name.endswith(".py") or name.endswith(".yaml") or name.endswith(".ipynb") and not "wandb" in name \
-                and not "outputs" in name:
+        if (
+            name.endswith(".py")
+            or name.endswith(".yaml")
+            or name.endswith(".ipynb")
+            and "wandb" not in name
+            and "outputs" not in name
+        ):
             zf.write(name, arcname=name)
     zf.close()
 
@@ -199,9 +205,7 @@ def split_in_two(dictionary, idx):
     return dictionary
 
 
-def split_batch_into_phases(
-    phase_change, inputs, gts, conds, idx_data
-):
+def split_batch_into_phases(phase_change, inputs, gts, conds, idx_data):
     split_idx = torch.searchsorted(conds["timestep"], phase_change, right=False)
     if split_idx == conds["timestep"].shape[0]:
         # whole batch in linear
@@ -223,7 +227,119 @@ def split_batch_into_phases(
         conds = split_in_two(conds, split_idx)
         idx_data = split_in_two(idx_data, split_idx)
         phase_list = ["linear", "saturated"]
-    return (inputs, gts, conds, idx_data, phase_list,)
+    return (
+        inputs,
+        gts,
+        conds,
+        idx_data,
+        phase_list,
+    )
+
+
+def is_number(string):
+    pattern = r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$"
+    return bool(re.fullmatch(pattern, string.strip()))
+
+
+def load_geom_dat(file_path):
+    data = {}
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+
+    key = None
+    values = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        parts = line.split()
+        if len(parts) == 1 and not is_number(parts[0]):
+            try:
+                if len(values) == 0:
+                    values.extend(map(float, parts))
+                    data[key] = values[0]
+                    key = None
+                    values = []
+                    continue
+                else:
+                    raise ValueError
+            except:
+                if key is not None:
+                    data[key] = np.array(values, dtype=np.float64)
+                key = parts[0]
+                values = []
+        else:
+            values.extend(map(float, parts))
+
+    if key is not None:
+        data[key] = np.array(values, dtype=np.float64)
+
+    return data
+
+
+def get_geometry(path: str = "/restricteddata/ukaea/gyrokinetics/raw/cyclone4_2_2"):
+    geometry = {}
+
+    geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=torch.float32)
+    geometry["signz"] = 1.0
+    geometry["vthrat"] = 1.0
+    geometry["tmp"] = 1.0
+    geometry["mas"] = 1.0
+    geometry["d2X"] = 1.0
+    geometry["signB"] = 1.0
+
+    geom = load_geom_dat(os.path.join(path, "geom.dat"))
+
+    geometry["kxrh"] = torch.tensor(
+        np.loadtxt(os.path.join(path, "kxrh"))[0], dtype=torch.float32
+    )
+    geometry["krho"] = torch.tensor(
+        np.loadtxt(os.path.join(path, "krho")).T[0] / geom["kthnorm"],
+        dtype=torch.float32,
+    )
+
+    # mugr and intmu
+    mugr = np.zeros(8 + 1)
+    intmu = np.zeros(8 + 1)
+    mumax = 4.5
+    dvperp = np.sqrt(2.0 * mumax) / 8
+    for j in range(8 + 1):
+        vperp = (j - 0.5) * dvperp
+        mugr[j] = vperp**2 / 2.0
+        intmu[j] = abs(
+            np.pi * ((vperp + 0.5 * dvperp) ** 2 - (vperp - 0.5 * dvperp) ** 2)
+        )
+
+    geometry["intmu"] = torch.tensor(intmu[1:], dtype=torch.float32)
+    geometry["mugr"] = torch.tensor(mugr[1:], dtype=torch.float32)
+
+    geometry["intvp"] = torch.tensor(
+        np.loadtxt(os.path.join(path, "intvp.dat"))[0], dtype=torch.float32
+    )
+    geometry["vpgr"] = torch.tensor(
+        np.loadtxt(os.path.join(path, "vpgr.dat"))[0], dtype=torch.float32
+    )
+
+    ints = np.concatenate(
+        [np.array([0.0]), np.diff(np.loadtxt(os.path.join(path, "sgrid")))]
+    )
+    ints[0] = ints[1]
+    geometry["ints"] = torch.tensor(ints, dtype=torch.float32)
+
+    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=torch.float32)
+
+    geometry["little_g"] = torch.tensor(
+        np.stack([geom["g_zeta_zeta"], geom["g_eps_zeta"], geom["g_eps_eps"]], -1),
+        dtype=torch.float32,
+    )
+
+    geometry["bn"] = torch.tensor(geom["bn"])
+    geometry["bt_frac"] = torch.tensor(geom["Bt_frac"])
+    geometry["rfun"] = torch.tensor(geom["R"])
+
+    return geometry
 
 class RunningMeanStd:
     def __init__(self, shape: Sequence[int], epsilon: float = 1e-4):

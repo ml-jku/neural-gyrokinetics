@@ -31,8 +31,8 @@ class SwinBlockDown(nn.Module):
         window_size (int | tuple(int)): Window size for the shifted window attention.
         depth (int): Number of swin transformer layers.
         num_heads (int): Number of attention heads in the swin layers.
-        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
-        learnable_pos_embed (bool): Learnable APE (if abs_pe is set). Default is False.
+        use_abs_pe (bool): Absolute positional encoding to the input. Default is False.
+        learnable_pos_embed (bool): Learnable APE (if use_abs_pe set). Default is False.
         drop_path (float): Stochastic depth drop rate. Default is 1/10.
         hidden_mlp_ratio (float): Expansion rate for transformer MLPs. Default is 2.0
         c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
@@ -50,7 +50,7 @@ class SwinBlockDown(nn.Module):
         window_size: Sequence[int],
         num_heads: int,
         depth: int,
-        abs_pe: bool = False,
+        use_abs_pe: bool = False,
         learnable_pos_embed: bool = False,
         drop_path: float = 0.1,
         hidden_mlp_ratio: float = 2.0,
@@ -67,9 +67,9 @@ class SwinBlockDown(nn.Module):
         self.dim = dim
         self.grid_size = grid_size
 
-        if abs_pe:
+        if use_abs_pe:
             self.pos_embed = PositionalEmbedding(
-                dim, grid_size, learnable=learnable_pos_embed
+                dim, grid_size, learnable=learnable_pos_embed, init_weights="sincos"
             )
 
         self.swin_att = LayerType(
@@ -140,8 +140,8 @@ class SwinBlockUp(nn.Module):
         depth (int): Number of swin transformer layers.
         num_heads (int): Number of attention heads in the swin layers.
         target_grid_size (tuple(int)): Output resolution (after upsample).
-        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
-        learnable_pos_embed (bool): Learnable APE (if abs_pe is set). Default is False.
+        use_abs_pe (bool): Add absolute positional encoding to the input. Default is False.
+        learnable_pos_embed (bool): Learnable APE (if use_abs_pe is set). Default is False.
         drop_path (float): Stochastic depth drop rate. Default is 1/10.
         hidden_mlp_ratio (float): Expansion rate for transformer MLPs. Default is 2.0
         c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
@@ -163,7 +163,7 @@ class SwinBlockUp(nn.Module):
         depth: int,
         num_heads: int,
         target_grid_size: Optional[Sequence[int]] = None,
-        abs_pe: bool = False,
+        use_abs_pe: bool = False,
         learnable_pos_embed: bool = False,
         drop_path: float = 0.1,
         hidden_mlp_ratio: float = 2.0,
@@ -182,7 +182,7 @@ class SwinBlockUp(nn.Module):
         self.dim = dim
         self.grid_size = grid_size
 
-        if abs_pe:
+        if use_abs_pe:
             self.pos_embed = PositionalEmbedding(
                 dim, grid_size, learnable=learnable_pos_embed
             )
@@ -243,7 +243,7 @@ class SwinBlockUp(nn.Module):
         x: torch.Tensor,
         s: Optional[torch.Tensor] = None,
         return_skip: bool = False,
-        **kwargs
+        **kwargs,
     ) -> torch.Tensor:
         """
         Args:
@@ -272,7 +272,7 @@ class SwinBlockUp(nn.Module):
         return (x_upsampled, x) if return_skip else x_upsampled
 
 
-class SwinUnet(nn.Module):
+class SwinNDUnet(nn.Module):
     """N-dimensional shifted window transformer UNet implementation (v1/v2). The number
     of spatial/temporal dimensions is set with the argument `space` and the model is
     built accordingly.
@@ -295,7 +295,7 @@ class SwinUnet(nn.Module):
         out_channels (int): Number of output channels. Default is 2.
         num_layers (int): Number of down/up layers. Each layer applies a down/up-sample.
                         Default is 4.
-        abs_pe (bool): Add absolute positional encoding to the input. Default is False.
+        use_abs_pe (bool): Add absolute positional encoding to the input. Default is False.
         c_multiplier (int): Latent dimensions expansions after downsample. Default is 2.
         conv_patch (bool): Use convolutions to patch and unpatch (only 2D or 3D).
                         Default is False.
@@ -326,7 +326,7 @@ class SwinUnet(nn.Module):
         in_channels: int = 2,
         out_channels: int = 2,
         num_layers: int = 4,
-        abs_pe: bool = False,
+        use_abs_pe: bool = False,
         c_multiplier: int = 2,
         conv_patch: bool = False,
         drop_path: float = 0.1,
@@ -347,6 +347,8 @@ class SwinUnet(nn.Module):
         norm_output: bool = False,
         patch_skip: bool = False,
         swin_bottleneck: bool = False,
+        use_rpb: bool = True,
+        use_rope: bool = False,
     ):
         super().__init__()
         if isinstance(patch_size, int):
@@ -371,12 +373,14 @@ class SwinUnet(nn.Module):
             depth = [depth] * num_layers
 
         assert len(num_heads) == len(depth) == num_layers
+        self.num_heads = num_heads
+        self.depth = depth
 
         # set layer type and conditioning
         LocalLayer = SwinLayer
         GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
         self.cond_embed = cond_embed
-        self.condition_keys = conditioning
+        self.condition_keys = sorted(conditioning)
         if self.cond_embed is not None:
             if modulation == "dit":
                 ModulatedSwinLayer = DiTSwinLayer
@@ -384,12 +388,19 @@ class SwinUnet(nn.Module):
             if modulation == "film":
                 ModulatedSwinLayer = FilmSwinLayer
                 ModulatedViTLayer = FilmViTLayer
-            LocalLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
+            LocalLayer = partial(
+                ModulatedSwinLayer,
+                cond_dim=self.cond_embed.cond_dim,
+                use_rpb=use_rpb,
+                use_rope=use_rope,
+            )
             if swin_bottleneck:
                 GlobalLayer = partial(
                     ModulatedSwinLayer,
                     cond_dim=self.cond_embed.cond_dim,
                     window_size=window_size,
+                    use_rpb=use_rpb,
+                    use_rope=use_rope,
                 )
             else:
                 GlobalLayer = partial(
@@ -420,7 +431,7 @@ class SwinUnet(nn.Module):
                 depth=depth[i],
                 window_size=window_size,
                 num_heads=num_heads[i],
-                abs_pe=abs_pe,
+                use_abs_pe=use_abs_pe,
                 drop_path=drop_path,
                 learnable_pos_embed=False,
                 use_checkpoint=use_checkpoint,
@@ -452,7 +463,7 @@ class SwinUnet(nn.Module):
             act_fn=act_fn,
         )
 
-        if abs_pe:
+        if use_abs_pe:
             self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
 
         self.middle_upscale = PatchUnmerging(
@@ -483,7 +494,7 @@ class SwinUnet(nn.Module):
                     window_size=window_size,
                     num_heads=up_num_heads[i],
                     depth=up_depth[i],
-                    abs_pe=abs_pe,
+                    use_abs_pe=use_abs_pe,
                     drop_path=drop_path,
                     hidden_mlp_ratio=hidden_mlp_ratio,
                     c_multiplier=c_multiplier,
@@ -503,7 +514,7 @@ class SwinUnet(nn.Module):
                 window_size=window_size,
                 num_heads=up_num_heads[-1],
                 depth=up_depth[-1],
-                abs_pe=abs_pe,
+                use_abs_pe=use_abs_pe,
                 drop_path=drop_path,
                 hidden_mlp_ratio=hidden_mlp_ratio,
                 use_checkpoint=use_checkpoint,
@@ -581,7 +592,7 @@ class SwinUnet(nn.Module):
         if self.norm_output:
             df = df / df.std((2, 3, 4, 5, 6), keepdims=True)
 
-        out_dict = { 'df': df }
+        out_dict = {"df": df}
         return out_dict
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
@@ -603,13 +614,85 @@ class SwinUnet(nn.Module):
         x = rearrange(x, "b ... c -> b c ...")
         return x
 
-    def condition(self, kwconds) -> Dict:
+    def condition(self, kwconds: Dict[str, torch.Tensor]) -> Dict:
+        # drop input fields
+        kwconds = {k: v for k, v in kwconds.items() if k in self.condition_keys}
         if len(kwconds) == 0:
             return {}
-        assert sorted(self.condition_keys) == sorted(list(kwconds.keys())), "Mismatch in conditioning keys"
-        cond = torch.cat([kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1)
+
+        assert self.condition_keys == sorted(list(kwconds.keys())), (
+            "Mismatch in conditioning keys "
+            f"{self.condition_keys} != {sorted(list(kwconds.keys()))}"
+        )
+        cond = torch.cat(
+            [kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1
+        )
         if self.cond_embed is not None:
             # embed conditioning is e.g. sincos
             return {"condition": self.cond_embed(cond)}
         else:
             return {}
+
+
+class Swin5DUnet(SwinNDUnet):
+    def __init__(self, separate_zf: bool = False, decouple_mu: bool = False, **kwargs):
+        full_in_channels = kwargs["in_channels"]
+        kwargs["space"] = 5
+        if decouple_mu:
+            kwargs["space"] = 4
+            full_resolution = list(kwargs["base_resolution"])
+            # adjust patch and window size
+            patch_size = kwargs["patch_size"]
+            kwargs["patch_size"] = [patch_size[0]] + patch_size[2:]
+            window_size = kwargs["window_size"]
+            kwargs["window_size"] = [window_size[0]] + window_size[2:]
+            decoupled_dim = full_resolution[1]
+            # adjust resolution and channels
+            kwargs["base_resolution"] = [full_resolution[0]] + full_resolution[2:]
+            kwargs["in_channels"] = full_in_channels * decoupled_dim
+            kwargs["out_channels"] = kwargs["out_channels"] * decoupled_dim
+            vel_pe_resolution = [1, decoupled_dim, 1, 1, 1]
+
+        super().__init__(**kwargs)
+
+        self.separate_zf = separate_zf
+        self.decouple_mu = decouple_mu
+        if decouple_mu:
+            self.decoupled_dim = decoupled_dim
+            # positional information for velocity mixing
+            self.vel_pe = PositionalEmbedding(full_in_channels, vel_pe_resolution, True)
+
+    def patch_encode(self, df: torch.Tensor):
+        # decouple mu and add positional information
+        if self.decouple_mu:
+            df = rearrange(df, "b c ... -> b ... c")
+            df = self.vel_pe(df)
+            df = rearrange(df, "b vp mu ... c -> b (c mu) vp ...")
+        # pad to patch blocks
+        df = rearrange(df, "b c ... -> b ... c")
+        df, pad_axes = pad_to_blocks(df, self.patch_size)
+        # linear flat patch embedding
+        df = self.patch_embed(df)
+        return df, pad_axes
+
+    def patch_decode(
+        self, z: torch.Tensor, cond: torch.Tensor, pad_axes: torch.Tensor
+    ) -> torch.Tensor:
+        # expand patches to original size
+        df = self.unpatch(z, cond)
+        # unpad output
+        df = unpad(df, pad_axes, self.base_resolution)
+        # return as image
+        df = rearrange(df, "b ... c -> b c ...")
+        if self.decouple_mu:
+            df = rearrange(
+                df, "b (c mu) vp ... -> b c vp mu ...", mu=self.decoupled_dim
+            )
+        if self.separate_zf:
+            # replace zf channels with their average
+            df[:, 0:2] = (
+                df[:, 0:2]
+                .mean(axis=-1, keepdims=True)
+                .repeat([1] * (df.ndim - 1) + [df.shape[-1]])
+            )
+        return df

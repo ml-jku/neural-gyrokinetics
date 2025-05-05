@@ -1,4 +1,4 @@
-batch_size: 2
+batch_size: 16
 n_epochs: 100
 num_workers: 1
 pin_memory: false
@@ -8,6 +8,7 @@ weight_decay: 1e-5
 predict_delta: false
 scheduler: "cosine"
 clip_grad: false
+gradnorm_balancer: "pseudo"  # "none", "full", "pseudo"
 pushforward:
   epochs: [-1, 100, 120, 140, 160, 180]
   unrolls: [1, 2, 3, 5, 5, 10]
