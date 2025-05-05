@@ -120,22 +120,24 @@ def validation_metrics(
             if gts[key].ndim > 2:
                 gts[key] = rearrange(torch.stack(gts[key], 2), "b c t ... -> t b c ...")
             else:
-                gts[key] = rearrange(torch.stack(gts[key], 1), "b t -> b t")
+                gts[key] = rearrange(torch.stack(gts[key], 1), "b t -> t b")
 
     for k in rollout:
         assert gts[k].shape == rollout[k].shape, f"Mismatch in shapes for {key}"
     metrics = {k: torch.zeros(n_steps) for k in loss_wrap.all_losses}
+    integrated = []
     for n in range(n_steps):
         # one timestep at a time
         nth_rollout = {k: rollout[k][n] for k in rollout.keys()}
         nth_gts = {k: gts[k][n] for k in output_fields}
         # TODO proper flux plots?
-        _, nth_losses, _ = loss_wrap(
+        _, nth_losses, nth_integrated = loss_wrap(
             preds=nth_rollout,
             tgts=nth_gts,
             geometry=geometry,
             compute_integrals=eval_integrals,
         )
+        integrated.append(nth_integrated)
         for k in nth_losses:
             metrics[k][n] = nth_losses[k]
-    return metrics
+    return metrics, integrated

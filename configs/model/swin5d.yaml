@@ -19,7 +19,7 @@ swin:
   unmerging_hidden_ratio: 8.0
   c_multiplier: 2
   norm_output: false
-  abs_pe: false
+  use_abs_pe: false
   act_fn: GELU
   patch_skip: true
   modulation: "film"

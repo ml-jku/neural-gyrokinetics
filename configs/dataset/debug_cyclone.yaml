@@ -1,15 +1,16 @@
 name: cyclone
 path: /restricteddata/ukaea/gyrokinetics/preprocessed
-normalization: none
+normalization: zscore
 normalization_scope: dataset
 minmax_beta1: 8
 minmax_beta2: 4
 offset: 0
 subsample: 1
 spatial_ifft: true
-separate_zf: true
+separate_zf: false
 split_into_bands: null
 log_transform: false
+num_workers: 1
 active_keys: ["re", "im"]
 input_fields: ["df"]
 training_trajectories: ["iteration_24.h5"]

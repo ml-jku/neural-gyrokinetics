@@ -15,7 +15,7 @@ swin:
   itg_conditioning: true
   c_multiplier: 2
   norm_output: false
-  abs_pe: true
+  use_abs_pe: true
   act_fn: GELU
   patch_skip: true
   modulation: dit
