@@ -130,9 +130,9 @@ class LossWrapper(nn.Module):
         if sum([self.weights.get(k, 0.0) for k in self._int_losses]) > 0 or do_ints:
             int_losses, integrated = self.integral_loss(geometry, preds, tgts, idx_data)
         loss_keys = (
-            list(self.weights.keys())
+            [k for k, w in self.weights.items() if w > 0.0]
             if self.training
-            else (list(self.weights.keys()) + list(int_losses.keys()))
+            else list(set(self.weights.keys()).union(set(int_losses.keys())))
         )
         int_keys = [k for k in loss_keys if "int" in k]
         cross_keys = [k for k in loss_keys if "cross" in k]
@@ -149,13 +149,15 @@ class LossWrapper(nn.Module):
                 losses[k] = F.mse_loss(preds[k], tgts[k])
         for k in int_keys + cross_keys:
             losses[k] = int_losses[k]
-        # reweight and accumulate
-        loss = sum([w * losses[k] for k, w in self.weights.items()])
         if self.training:
+            # reweight and accumulate
+            loss = sum([self.weights[k] * losses[k] for k in loss_keys])
             # filter active losses
             losses = {k: losses[k] for k, w in self.weights.items() if w > 0.0}
             return loss, losses
         else:
+            # no reweight in validation
+            loss = sum([losses[k] for k in loss_keys])
             return loss, losses, integrated
 
     @property
@@ -177,6 +179,7 @@ class GradientBalancer(nn.Module):
         mode: str,
         scaler: torch.amp.GradScaler,
         clip_grad: bool = True,
+        clip_to: float = 1.0,
         n_tasks: Optional[int] = None,
     ):
         super().__init__()
@@ -185,6 +188,7 @@ class GradientBalancer(nn.Module):
         self.mode = mode
         self.clip_grad = clip_grad
         self.scaler = scaler
+        self.clip_to = clip_to
         if mode in [None, "none"]:
             pass
         # conflict free gradnorm
@@ -220,7 +224,7 @@ class GradientBalancer(nn.Module):
         # clipping
         if self.clip_grad:
             self.scaler.unscale_(self.optimizer)
-            clip_grad_norm_(model.parameters(), 1.0)
+            clip_grad_norm_(model.parameters(), self.clip_to)
         # gradient step
         self.scaler.step(self.optimizer)
         self.scaler.update()

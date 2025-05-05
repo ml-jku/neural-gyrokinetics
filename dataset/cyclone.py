@@ -143,6 +143,7 @@ class CycloneDataset(Dataset):
                     trajectories = [f"{prefix}{num}{suffix}" for num in traj_numbers]
 
                 self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
+
         # take all files in path
         if trajectories is None:
             self.trajectories_fnames = os.listdir(path)
