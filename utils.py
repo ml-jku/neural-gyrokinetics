@@ -193,6 +193,7 @@ def find_free_port():
 
 
 def expand_as(src: np.ndarray, tgt: np.ndarray):
+    src = src.squeeze()
     while src.ndim < tgt.ndim:
         src = np.expand_dims(src, axis=-1)
     return src

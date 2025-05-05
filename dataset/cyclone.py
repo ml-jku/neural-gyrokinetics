@@ -115,11 +115,9 @@ class CycloneDataset(Dataset):
         self.minmax_beta2 = minmax_beta2
         self.separate_zf = separate_zf
         self.num_workers = num_workers
-
         self.dir = path
-
         self.bundle_seq_length = bundle_seq_length
-
+        
         # with specified files / pattern
         if trajectories is not None:
             if split == "val" and partial_holdouts:
@@ -368,12 +366,12 @@ class CycloneDataset(Dataset):
                 desc="Re-computing normalization stats",
             )
 
-        for metrics in metrics_gen:
-            x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max = metrics
-            if stats is None:
-                stats = RunningMeanStd(shape=x_mean.shape)
-            stats.update(x_mean, x_var, x_min, x_max)
-            stats.update(y_mean, y_var, y_min, y_max)
+            for metrics in metrics_gen:
+                x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max = metrics
+                if stats is None:
+                    stats = RunningMeanStd(shape=x_mean.shape)
+                stats.update(x_mean, x_var, x_min, x_max)
+                stats.update(y_mean, y_var, y_min, y_max)
 
         return stats
 
