@@ -88,15 +88,10 @@ def evaluate(
             )
 
             valname = "val_traj" if val_idx == 0 else "val_samples"
-            metrics = defaultdict(dict)
-            for phase in ["linear", "saturated"]:
-                for key in loss_wrap.all_losses:
-                    metrics[phase][key] = torch.zeros([tot_eval_steps])
-
-            n_timesteps_acc = {
-                "linear": torch.zeros([tot_eval_steps]),
-                "saturated": torch.zeros([tot_eval_steps]),
-            }
+            metrics = {}
+            for key in loss_wrap.all_losses:
+                metrics[key] = torch.zeros([tot_eval_steps])
+            n_timesteps_acc = torch.zeros([tot_eval_steps])
             if use_tqdm or (dist.is_initialized() and not rank):
                 valloader = tqdm(
                     valloader,
@@ -123,128 +118,129 @@ def evaluate(
                 }
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
-                # TODO: dont hardcode this
-                phase_change = 24 if cfg.dataset.offset == 0 else 0
-                inputs_list, gts_list, conds_list, idx_data_list, phase_list = (
-                    split_batch_into_phases(
-                        phase_change,
-                        inputs,
-                        gts,
-                        conds,
-                        idx_data,
-                    )
-                )
+                # # TODO: dont hardcode this
+                # phase_change = 24 if cfg.dataset.offset == 0 else 0
+                # inputs_list, gts_list, conds_list, idx_data_list, phase_list = (
+                #     split_batch_into_phases(
+                #         phase_change,
+                #         inputs,
+                #         gts,
+                #         conds,
+                #         idx_data,
+                #     )
+                # )
 
                 # Iterate over the splits
-                for i in range(len(inputs_list)):
-                    inputs = inputs_list[i]
-                    gts = gts_list[i]
-                    conds = conds_list[i]
-                    idx_data = idx_data_list[i]
-                    phase = phase_list[i]
+                # for i in range(len(inputs_list)):
+                #     inputs = inputs_list[i]
+                #     gts = gts_list[i]
+                #     conds = conds_list[i]
+                #     idx_data = idx_data_list[i]
+                #     phase = phase_list[i]
 
-                    # get the rolled out validation trajectories
-                    rollout = rollout_fn(model, inputs, idx_data, conds)
+                # get the rolled out validation trajectories
+                rollout = rollout_fn(model, inputs, idx_data, conds)
 
-                    # denormalize rollout and target for evaluation / plots
-                    # NOTE denormalize always true for integrals if denormalize:
-                    rollout, gts = denormalize_rollout(
-                        rollout, gts, idx_data, valset.denormalize
-                    )
+                # denormalize rollout and target for evaluation / plots
+                # NOTE denormalize always true for integrals if denormalize:
+                rollout, gts = denormalize_rollout(
+                    rollout, gts, idx_data, valset.denormalize
+                )
 
-                    # TODO: smarter (i.e. use timeindex when we output a dataclass from the dataset)
-                    metrics_i, integrated_i = validation_metrics(
-                        rollout,
-                        idx_data,
-                        bundle_seq_length,
-                        dataset=valset,
-                        output_fields=output_fields,
-                        loss_wrap=loss_wrap,
-                        eval_integrals=eval_integrals,
-                    )
-                    # add integrated potentials to rollout for comparison
-                    rollout["phi_int"] = torch.stack([integrated_i[t]["phi"] for t in range(len(integrated_i))])
+                # TODO: smarter (i.e. use timeindex when we output a dataclass from the dataset)
+                metrics_i, integrated_i = validation_metrics(
+                    rollout,
+                    idx_data,
+                    bundle_seq_length,
+                    dataset=valset,
+                    output_fields=output_fields,
+                    loss_wrap=loss_wrap,
+                    eval_integrals=eval_integrals,
+                )
+                # add integrated potentials to rollout for comparison
+                rollout["phi_int"] = torch.stack([integrated_i[t]["phi"] for t in range(len(integrated_i))])
 
-                    for key in metrics_i.keys():
-                        if metrics_i[key].shape[-1] < tot_eval_steps:
-                            # end of dataset, need to pad the tensor
-                            diff = tot_eval_steps - metrics_i[key].shape[-1]
-                            metrics_i[key] = torch.cat(
-                                [
-                                    metrics_i[key],
-                                    torch.zeros(diff, dtype=metrics_i[key].dtype),
-                                ],
-                                dim=-1,
-                            )
-                            metrics[phase][key] += metrics_i[key]
-                            validated_steps = (
-                                torch.arange(1, tot_eval_steps + 1)
-                                <= metrics_i[key].shape[-1]
-                            ).to(dtype=metrics_i[key].dtype)
-                        else:
-                            metrics[phase][key] += metrics_i[key]
-                            validated_steps = torch.ones([tot_eval_steps])
-                    n_timesteps_acc[phase] += validated_steps
-
-                    if val_idx == 0:
-                        # holdout trajectories valset
-                        t_idx = idx_data["timestep_index"].tolist()
-                        phase = None
-                        # TODO compute from dawtaset
-                        if 5 in t_idx:
-                            phase = "Linear"
-                            batch_idx = t_idx.index(5)
-                        if 100 in t_idx or cfg.dataset.offset > 0:
-                            phase = "Saturated"
-                            batch_idx = t_idx.index(100)
-                        if phase:
-                            rollout = {k: rollout[k][:, batch_idx] for k in rollout}
-                            plots = generate_val_plots(
-                                rollout=rollout,
-                                gt=gts,
-                                ts=conds["timestep"],
-                                phase=f"{phase} Phase",
-                            )
-                            val_plots.update(plots)
+                for key in metrics_i.keys():
+                    if metrics_i[key].shape[-1] < tot_eval_steps:
+                        # end of dataset, need to pad the tensor
+                        diff = tot_eval_steps - metrics_i[key].shape[-1]
+                        metrics_i[key] = torch.cat(
+                            [
+                                metrics_i[key],
+                                torch.zeros(diff, dtype=metrics_i[key].dtype),
+                            ],
+                            dim=-1,
+                        )
+                        metrics[key] += metrics_i[key]
+                        validated_steps = (
+                            torch.arange(1, tot_eval_steps + 1)
+                            <= metrics_i[key].shape[-1]
+                        ).to(dtype=metrics_i[key].dtype)
                     else:
-                        # holdout samples valset
-                        if idx == 0:
-                            plots = generate_val_plots(
-                                rollout=rollout,
-                                gt=gts,
-                                ts=conds["timestep"],
-                                phase="Holdout samples",
-                            )
-                            val_plots.update(plots)
+                        metrics[key] += metrics_i[key]
+                        validated_steps = torch.ones([tot_eval_steps])
+                n_timesteps_acc += validated_steps
+                if val_idx == 0:
+                    # holdout trajectories valset
+                    t_idx = idx_data["timestep_index"].tolist()
+                    # phase = None
+                    # TODO compute from dawtaset
+                    # if 5 in t_idx:
+                    #     phase = "Linear"
+                    #     batch_idx = t_idx.index(5)
+                    # if 100 in t_idx or cfg.dataset.offset > 0:
+                    #     phase = "Saturated"
+                    #     batch_idx = t_idx.index(100)
+                    # if phase:
+                    # select a random sample from the batch
+                    batch_idx = torch.randint(0, len(t_idx), (1,)).item()
+                    rollout = {k: rollout[k][:, batch_idx] for k in rollout}
+                    plots = generate_val_plots(
+                        rollout=rollout,
+                        gt=gts,
+                        ts=conds["timestep"],
+                        phase=f"Random draw",
+                    )
+                    val_plots.update(plots)
+                else:
+                    # holdout samples valset
+                    if idx == 0:
+                        plots = generate_val_plots(
+                            rollout=rollout,
+                            gt=gts,
+                            ts=conds["timestep"],
+                            phase="Holdout samples",
+                        )
+                        val_plots.update(plots)
 
             if dist.is_initialized():
-                for phase in metrics.keys():
-                    cur_ts = n_timesteps_acc[phase].to(device)
-                    gathered_ts = [
+                # for phase in metrics.keys():
+                cur_ts = n_timesteps_acc.reshape(1, -1).to(device)
+                gathered_ts = [
+                    torch.zeros_like(
+                        cur_ts, dtype=cur_ts.dtype, device=cur_ts.device
+                    )
+                    for _ in range(world_size)
+                ]
+                dist.all_gather(gathered_ts, cur_ts)
+                n_timesteps_acc = torch.cat(gathered_ts).sum(0).cpu()
+
+                for m in metrics.keys():
+                    cur_metric = metrics[m].reshape(1, -1).to(device)
+                    gathered_ms = [
                         torch.zeros_like(
-                            cur_ts, dtype=cur_ts.dtype, device=cur_ts.device
+                            cur_metric,
+                            dtype=cur_metric.dtype,
+                            device=cur_metric.device,
                         )
                         for _ in range(world_size)
                     ]
-                    dist.all_gather(gathered_ts, cur_ts)
-                    n_timesteps_acc[phase] = torch.cat(gathered_ts).sum(0).cpu()
-
-                    for m in metrics[phase].keys():
-                        cur_metric = metrics[phase][m].to(device)
-                        gathered_ms = [
-                            torch.zeros_like(
-                                cur_metric,
-                                dtype=cur_metric.dtype,
-                                device=cur_metric.device,
-                            )
-                            for _ in range(world_size)
-                        ]
-                        dist.all_gather(gathered_ms, cur_metric)
-                        gathered_ms = torch.cat(gathered_ms)
-                        if len(gathered_ms.shape) == 2:
-                            # account for different metrics axis if not present
-                            gathered_ms = gathered_ms.unsqueeze(1)
-                        metrics[phase][m] = gathered_ms.sum(0).cpu()
+                    dist.all_gather(gathered_ms, cur_metric)
+                    gathered_ms = torch.cat(gathered_ms)
+                    # if len(gathered_ms.shape) == 2:
+                    #     # account for different metrics axis if not present
+                    #     gathered_ms = gathered_ms.unsqueeze(1)
+                    metrics[m] = gathered_ms.sum(0).cpu()
 
                 # TODO: for some reason deadlocks
                 # gathered_plots = [object() for _ in range(world_size)]
@@ -253,36 +249,37 @@ def evaluate(
                 # for d in gathered_plots:
                 #     val_plots.update(d)
 
-            for ph in metrics.keys():
-                for m in metrics[ph].keys():
-                    if metrics[ph][m].sum() != 0.0:
-                        metrics[ph][m] = metrics[ph][m] / n_timesteps_acc[ph]
-                        vals = metrics[ph][m]
-                        for t in range(tot_eval_steps):
-                            log_metric_dict[f"{valname}/{m}_{ph}_x{t + 1}"] = vals[t]
+            # for ph in metrics.keys():
+            for m in metrics.keys():
+                if metrics[m].sum() != 0.0:
+                    metrics[m] = metrics[m] / n_timesteps_acc
+                    vals = metrics[m]
+                    for t in range(tot_eval_steps):
+                        log_metric_dict[f"{valname}/{m}_x{t + 1}"] = vals[t]
 
             if val_idx == 0:
                 # trajectoy validation
                 n_timesteps_acc_model_saving = n_timesteps_acc
 
         if cfg.ckpt_path is not None and not rank:
-            mse_sat = log_metric_dict["val_traj/df_saturated_x1"]
-            mse_lin = log_metric_dict["val_traj/df_linear_x1"]
-            sat_ts = n_timesteps_acc_model_saving["saturated"]
-            lin_ts = n_timesteps_acc_model_saving["linear"]
-            if not cfg.dataset.offset:
-                val_loss = (mse_sat * sat_ts + mse_lin * lin_ts) / (sat_ts + lin_ts)
-            else:
-                # skipping linear phase
-                val_loss = (mse_sat * sat_ts) / sat_ts
+            # mse_sat = log_metric_dict["val_traj/df_saturated_x1"]
+            # mse_lin = log_metric_dict["val_traj/df_linear_x1"]
+            # sat_ts = n_timesteps_acc_model_saving["saturated"]
+            # lin_ts = n_timesteps_acc_model_saving["linear"]
+            # if not cfg.dataset.offset:
+            #     val_loss = (mse_sat * sat_ts + mse_lin * lin_ts) / (sat_ts + lin_ts)
+            # else:
+            #     # skipping linear phase
+            #     val_loss = (mse_sat * sat_ts) / sat_ts
             # Save model if validation loss on trajectories improves
+            val_loss = metrics["df"].mean()
             loss_val_min = save_model_and_config(
                 model,
                 optimizer=opt,
                 cfg=cfg,
                 epoch=epoch,
                 # TODO decide target metric
-                val_loss=val_loss.mean(),
+                val_loss=val_loss,
                 loss_val_min=loss_val_min,
             )
         else:

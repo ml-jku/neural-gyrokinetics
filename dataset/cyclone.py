@@ -11,6 +11,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from torch.utils._pytree import tree_map
 import random
+import pickle
 
 from utils import expand_as, RunningMeanStd
 
@@ -254,19 +255,23 @@ class CycloneDataset(Dataset):
                 if self.norm_stats is not None and normalization_scope == "dataset":
                     # normalization stats
                     for k in self.input_fields:
-                        self.norm_stats[k][f_id][f"mean"] = f[f"metadata/{k}_mean"][:]
-                        self.norm_stats[k][f_id][f"std"] = f[f"metadata/{k}_std"][:]
-                        self.norm_stats[k][f_id][f"min"] = f[f"metadata/{k}_min"][:]
-                        self.norm_stats[k][f_id][f"max"] = f[f"metadata/{k}_max"][:]
+                        try:
+                            self.norm_stats[k][f_id][f"mean"] = f[f"metadata/{k}_mean"][:]
+                            self.norm_stats[k][f_id][f"std"] = f[f"metadata/{k}_std"][:]
+                            self.norm_stats[k][f_id][f"min"] = f[f"metadata/{k}_min"][:]
+                            self.norm_stats[k][f_id][f"max"] = f[f"metadata/{k}_max"][:]
+                        except:
+                            print(f_path)
+                            exit(1)
                         if k not in stats:
                             stats[k] = RunningMeanStd(
-                                shape=self.norm_stats[k][f_id][f"{k}_mean"].shape
+                                shape=self.norm_stats[k][f_id][f"mean"].shape
                             )
                         stats[k].update(
-                            self.norm_stats[f_id][f"{k}_mean"],
-                            self.norm_stats[f_id][f"{k}_std"] ** 2,
-                            self.norm_stats[f_id][f"{k}_min"],
-                            self.norm_stats[f_id][f"{k}_max"],
+                            self.norm_stats[k][f_id][f"mean"],
+                            self.norm_stats[k][f_id][f"std"] ** 2,
+                            self.norm_stats[k][f_id][f"min"],
+                            self.norm_stats[k][f_id][f"max"],
                             count=len(timesteps),
                         )
 
@@ -357,21 +362,26 @@ class CycloneDataset(Dataset):
 
             return (x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max)
 
-        stats = None
-        with ThreadPoolExecutor(self.num_workers) as executor:
-            # indices in parallel, collect results in list
-            metrics_gen = tqdm.tqdm(
-                executor.map(process_t_idx, t_indices),
-                total=len(t_indices),
-                desc="Re-computing normalization stats",
-            )
+        if os.path.exists(os.path.join(self.dir, "zf_stats.pkl")):
+            stats = pickle.load(open(os.path.join(self.dir, "zf_stats.pkl"), "rb"))
+        else:
+            stats = None
+            with ThreadPoolExecutor(self.num_workers) as executor:
+                # indices in parallel, collect results in list
+                metrics_gen = tqdm.tqdm(
+                    executor.map(process_t_idx, t_indices),
+                    total=len(t_indices),
+                    desc="Re-computing normalization stats",
+                )
 
-            for metrics in metrics_gen:
-                x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max = metrics
-                if stats is None:
-                    stats = RunningMeanStd(shape=x_mean.shape)
-                stats.update(x_mean, x_var, x_min, x_max)
-                stats.update(y_mean, y_var, y_min, y_max)
+                for metrics in metrics_gen:
+                    x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max = metrics
+                    if stats is None:
+                        stats = RunningMeanStd(shape=x_mean.shape)
+                    stats.update(x_mean, x_var, x_min, x_max)
+                    stats.update(y_mean, y_var, y_min, y_max)
+
+            pickle.dump(stats, open(os.path.join(self.dir, "zf_stats.pkl"), "wb"))
 
         return stats
 
@@ -417,8 +427,7 @@ class CycloneDataset(Dataset):
                 y_phi = (y_phi - shift) / scale
 
             if flux is not None:
-                flux, shift, scale = self.normalize(file_index, flux=flux)
-                flux = (flux - shift) / scale
+                flux, *_ = self.normalize(file_index, flux=flux)
 
         return CycloneSample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,

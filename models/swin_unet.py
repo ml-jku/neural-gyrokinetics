@@ -635,7 +635,7 @@ class SwinNDUnet(nn.Module):
 
 
 class Swin5DUnet(SwinNDUnet):
-    def __init__(self, separate_zf: bool = False, decouple_mu: bool = False, **kwargs):
+    def __init__(self, decouple_mu: bool = False, **kwargs):
         full_in_channels = kwargs["in_channels"]
         kwargs["space"] = 5
         if decouple_mu:
@@ -654,8 +654,6 @@ class Swin5DUnet(SwinNDUnet):
             vel_pe_resolution = [1, decoupled_dim, 1, 1, 1]
 
         super().__init__(**kwargs)
-
-        self.separate_zf = separate_zf
         self.decouple_mu = decouple_mu
         if decouple_mu:
             self.decoupled_dim = decoupled_dim
@@ -687,12 +685,5 @@ class Swin5DUnet(SwinNDUnet):
         if self.decouple_mu:
             df = rearrange(
                 df, "b (c mu) vp ... -> b c vp mu ...", mu=self.decoupled_dim
-            )
-        if self.separate_zf:
-            # replace zf channels with their average
-            df[:, 0:2] = (
-                df[:, 0:2]
-                .mean(axis=-1, keepdims=True)
-                .repeat([1] * (df.ndim - 1) + [df.shape[-1]])
             )
         return df

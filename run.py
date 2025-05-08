@@ -99,7 +99,6 @@ def runner(rank, cfg, train_method, world_size):
 
         # configure loss
         predict_delta = cfg.training.predict_delta
-
         weights = dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights)
         loss_wrap = LossWrapper(
             weights=weights,

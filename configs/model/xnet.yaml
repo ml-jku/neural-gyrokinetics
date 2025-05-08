@@ -3,10 +3,10 @@ bundle_seq_length: 1
 latent_dim: 256
 num_layers: 1
 decouple_mu: false
-conditioning: ["timestep", "itg", "s_hat", "q"]
+conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
 losses: ["df", "phi", "flux"]
 loss_weights:
-  df: 0.6
+  df: 1.0
   phi: 0.4
   flux: 0.001
 extra_loss_weights:

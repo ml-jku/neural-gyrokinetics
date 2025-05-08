@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import wandb
 import warnings
-from pysteps.utils.spectral import rapsd
 
 import torch
 
@@ -201,6 +200,7 @@ def plot_5D_raspec(x, x2):
 
 
 def plot_4x4_2D_raspec(x1, x2=None, **kwargs):
+    from pysteps.utils.spectral import rapsd
     _ = kwargs
     labels = [r"v_{par}", r"v_{\mu}", r"s", r"k_x", r"k_y"]
 

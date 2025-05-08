@@ -11,10 +11,6 @@ from torch.distributed import get_rank, is_initialized
 
 from concurrent.futures import ThreadPoolExecutor
 
-from conflictfree.grad_operator import ConFIGOperator
-from conflictfree.momentum_operator import PseudoMomentumOperator
-from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
-
 from utils import save_model_and_config
 from dataset.cyclone import CycloneDataset, CycloneSample
 from train.integrals import FluxIntegral
@@ -108,9 +104,13 @@ class LossWrapper(nn.Module):
         # mimicry / cross terms in the loss (between prediction heads and integrals)
         if "phi" in preds:
             int_losses["phi_cross"] = F.mse_loss(pred_phi, pphi_int)
+        else:
+            int_losses["phi_cross"] = 0.
         if "flux" in preds:
             pred_eflux = preds["flux"] if "flux" in preds else None
             int_losses["flux_cross"] = F.mse_loss(pred_eflux, eflux)
+        else:
+            int_losses["flux_cross"] = 0.
 
         return int_losses, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
 
@@ -124,7 +124,7 @@ class LossWrapper(nn.Module):
     ):
         losses = {}
         int_losses = {}
-        # NOTE: newtwork predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
+        # NOTE: network predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
         # only compute integrals if requested by weights or in eval
         do_ints = not self.training and compute_integrals
         if sum([self.weights.get(k, 0.0) for k in self._int_losses]) > 0 or do_ints:
@@ -138,7 +138,10 @@ class LossWrapper(nn.Module):
         cross_keys = [k for k in loss_keys if "cross" in k]
         data_keys = list(set(loss_keys) - set(int_keys) - set(cross_keys))
         if not all([k in preds for k in data_keys]):
-            raise ValueError("Prediction - DATA loss weight key mismatch.")
+            # warnings.warn("Prediction - DATA loss weight key mismatch.")
+            missing_keys = [k for k in data_keys if k not in preds]
+            for k in missing_keys:
+                preds[k] = torch.zeros_like(tgts[k]).to(tgts[k].device)
         if not all([k.replace("_cross", "") in preds for k in cross_keys]):
             raise ValueError("Prediction - CROSS loss weight key mismatch.")
         # compute losses
@@ -192,6 +195,11 @@ class GradientBalancer(nn.Module):
         if mode in [None, "none"]:
             pass
         # conflict free gradnorm
+        if mode in ["pseudo", "full"]:
+            from conflictfree.grad_operator import ConFIGOperator
+            from conflictfree.momentum_operator import PseudoMomentumOperator
+            from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
+
         if mode == "pseudo":
             self.operator = PseudoMomentumOperator(n_tasks)
             self.loss_selector = OrderedSliceSelector()

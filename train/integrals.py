@@ -264,7 +264,7 @@ class FluxIntegral(nn.Module):
             Tuple contraining (phi_int, (pflux, eflux, vflux)), where
                 - phi_int is the electrostatic potential
                 - pflux is the summed particle flux
-                - eflux is the s    ummed heat flux
+                - eflux is the summed heat flux
                 - vflux is the summed momentum flux
         """
         geom = self._geom_tensors(geom, df.dtype)
