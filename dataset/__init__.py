@@ -4,7 +4,7 @@ from torch.utils.data.dataloader import DataLoader
 from dataset.augment import noise_transform
 from dataset.cyclone import CycloneDataset, CycloneSample
 from torch.utils.data.distributed import DistributedSampler
-
+import torch.distributed as dist
 
 def check_partial_holdouts(dataset_cfg):
     # check that each trajectory in partial holdouts also appears in training
@@ -29,6 +29,7 @@ def get_data(cfg):
             )
         )
 
+    use_ddp = dist.is_initialized()
     if cfg.dataset.name == "cyclone":
         partial_holdouts = {}
         if cfg.dataset.partial_holdouts:
@@ -89,10 +90,12 @@ def get_data(cfg):
             trainset,
             cfg.training.batch_size,
             num_workers=cfg.training.num_workers,
-            shuffle=True if not cfg.use_ddp else False,
+            shuffle=True if not use_ddp else False,
             collate_fn=trainset.collate,
             pin_memory=cfg.training.pin_memory,
-            sampler=DistributedSampler(trainset) if cfg.use_ddp else None,
+            sampler=DistributedSampler(trainset) if use_ddp else None,
+            persistent_workers=True,
+            prefetch_factor=cfg.training.num_workers,
         )
 
         holdout_trajectories_valloader = DataLoader(
@@ -103,8 +106,10 @@ def get_data(cfg):
             collate_fn=holdout_trajectories_valset.collate,
             pin_memory=cfg.training.pin_memory,
             sampler=(
-                DistributedSampler(holdout_trajectories_valset) if cfg.use_ddp else None
+                DistributedSampler(holdout_trajectories_valset) if use_ddp else None
             ),
+            persistent_workers=True,
+            prefetch_factor=cfg.training.num_workers,
         )
 
         if partial_holdouts:
@@ -138,7 +143,7 @@ def get_data(cfg):
                 collate_fn=holdout_samples_valset.collate,
                 pin_memory=cfg.training.pin_memory,
                 sampler=(
-                    DistributedSampler(holdout_samples_valset) if cfg.use_ddp else None
+                    DistributedSampler(holdout_samples_valset) if use_ddp else None
                 ),
             )
 

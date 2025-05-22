@@ -12,6 +12,7 @@ from torch.utils.data import Dataset
 from torch.utils._pytree import tree_map
 import random
 import pickle
+from functools import partial
 
 from utils import expand_as, RunningMeanStd
 
@@ -199,9 +200,11 @@ class CycloneDataset(Dataset):
         for f in self.files:
             assert os.path.isfile(f), f"Trajectory  '{f}' does not exist!"
 
-        # filter files based on conditioning
+        # we use offsets for flux filtering
         if self.cond_filters:
-            self.files = [f for f in self.files if self._conditioning_filter(f)]
+            threshold = offset if offset > 0 else 80
+            self.files = [f for f in self.files if self._conditioning_filter(f, threshold)]
+            print(f"Using {len(self.files)} sims for {split}...")
 
         if len(self.files) == 0:
             raise RuntimeError(f"No trajectories found! Active filters: {cond_filters}")
@@ -311,7 +314,12 @@ class CycloneDataset(Dataset):
         norm_dataset = normalization is not None and normalization_scope == "dataset"
         if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
             # overwrite dataset-wide stats with new stats for data after offset only
-            stats["df"] = self._df_recompute_stats()
+            if separate_zf and not offset:
+                stats["df"] = self._recompute_stats(key="df")
+            else:
+                for key in self.input_fields:
+                    # TODO: assumes offsets are equal across all sims
+                    stats[key] = self._recompute_stats(key=key, offset=self.offsets[0])
 
         if normalization_scope == "dataset" and normalization_stats is None:
             for k in input_fields:
@@ -335,43 +343,60 @@ class CycloneDataset(Dataset):
         x = np.concatenate([zf, x - zf], axis=0)
         return x
 
-    def _df_recompute_stats(self):
-        t_indices = list(range(0, self.length, 2))
+    def _recompute_stats(self, key: str, offset: int = 0):
+        if key in ["df", "phi"]:
+            t_indices = list(range(0, self.length, 2))
+        else:
+            t_indices = list(range(0, self.length))
 
-        def process_t_idx(t_idx):
+        def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
             with h5py.File(self.files[file_index], "r") as f:
                 sample = self._load_data(f, file_index, t_index)
 
-            x = sample["x"]
-            y = sample["gt"]
+            if key == "df":
+                x = sample["x"]
+                y = sample["gt"]
+                norm_axes = (1,2,3,4,5)
+            elif key == "phi":
+                x, y = sample["phi"], sample["y_phi"]
+                norm_axes = (1,2,3)
+            else:
+                x = np.array([sample["gt_flux"]], dtype=np.float32)
+                y = None
+                norm_axes = (0,)
+
             if self.separate_zf:
                 x = self._separate_zf(x)
                 y = self._separate_zf(y)
 
             # Compute metrics for x and y
-            x_mean = x.mean((1, 2, 3, 4, 5), keepdims=True)
-            x_var = x.var((1, 2, 3, 4, 5), keepdims=True)
-            x_min = x.min((1, 2, 3, 4, 5), keepdims=True)
-            x_max = x.max((1, 2, 3, 4, 5), keepdims=True)
+            x_mean = x.mean(norm_axes, keepdims=True)
+            x_var = x.var(norm_axes, keepdims=True)
+            x_min = x.min(norm_axes, keepdims=True)
+            x_max = x.max(norm_axes, keepdims=True)
 
-            y_mean = y.mean((1, 2, 3, 4, 5), keepdims=True)
-            y_var = y.var((1, 2, 3, 4, 5), keepdims=True)
-            y_min = y.min((1, 2, 3, 4, 5), keepdims=True)
-            y_max = y.max((1, 2, 3, 4, 5), keepdims=True)
+            if y is not None:
+                y_mean = y.mean(norm_axes, keepdims=True)
+                y_var = y.var(norm_axes, keepdims=True)
+                y_min = y.min(norm_axes, keepdims=True)
+                y_max = y.max(norm_axes, keepdims=True)
+            else:
+                y_mean = y_var = y_min = y_max = None
 
             return (x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max)
 
-        if os.path.exists(os.path.join(self.dir, "zf_stats.pkl")):
-            stats = pickle.load(open(os.path.join(self.dir, "zf_stats.pkl"), "rb"))
+        if os.path.exists(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl")):
+            stats = pickle.load(open(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl"), "rb"))
         else:
+            process_inds = partial(process_t_idx, key=key)
             stats = None
             with ThreadPoolExecutor(self.num_workers) as executor:
                 # indices in parallel, collect results in list
                 metrics_gen = tqdm.tqdm(
-                    executor.map(process_t_idx, t_indices),
+                    executor.map(process_inds, t_indices),
                     total=len(t_indices),
-                    desc="Re-computing normalization stats",
+                    desc=f"Re-computing normalization stats for {key}",
                 )
 
                 for metrics in metrics_gen:
@@ -379,9 +404,10 @@ class CycloneDataset(Dataset):
                     if stats is None:
                         stats = RunningMeanStd(shape=x_mean.shape)
                     stats.update(x_mean, x_var, x_min, x_max)
-                    stats.update(y_mean, y_var, y_min, y_max)
+                    if y_mean is not None:
+                        stats.update(y_mean, y_var, y_min, y_max)
 
-            pickle.dump(stats, open(os.path.join(self.dir, "zf_stats.pkl"), "wb"))
+                pickle.dump(stats, open(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl"), "wb"))
 
         return stats
 
@@ -567,14 +593,21 @@ class CycloneDataset(Dataset):
         scale, shift = self._get_scale_shift(file_index, field, x)
         return x * scale + shift
 
-    def _conditioning_filter(self, fname: str) -> bool:
+    def _conditioning_filter(self, fname: str, offset: int) -> bool:
         with h5py.File(fname, "r") as f:
             for cond_name, cond_range in self.cond_filters.items():
+                if len(cond_name.split('_')) > 1:
+                    where, cond_name = cond_name.split('_')
                 if f"metadata/{cond_name}" in f:
                     cond = f[f"metadata/{cond_name}"][:]
                     if not isinstance(cond_range[0], Sequence):
                         cond_range = [cond_range]
                     # check filters
+                    if cond_name == "fluxes":
+                        if where == "first":
+                            cond = np.mean(cond[:offset])
+                        else:
+                            cond = np.mean(cond[-offset:])
                     if not any(min_ <= cond <= max_ for min_, max_ in cond_range):
                         return False
                 else:
@@ -695,7 +728,7 @@ class CycloneDataset(Dataset):
         avg_fluxes = []
         for f in file_index:
             fluxes = self.get_fluxes(f)
-            fluxes = fluxes[len(fluxes) // 2 :]  # TODO naive crop linear phase
+            fluxes = fluxes[-80:]  # TODO naive crop linear phase
             avg_fluxes.append(sum(fluxes) / len(fluxes))
         return torch.tensor(avg_fluxes)
 

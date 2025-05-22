@@ -157,6 +157,7 @@ def get_model(cfg, dataset, train_method="default"):
             use_rope=use_rope,
             latent_cross_attn=latent_cross_attn,
             separate_zf=separate_zf,
+            detach_flux_latents=cfg.model.swin.detach_flux_latents
         )
 
     if cfg.model.name == "swin_flat":
