@@ -10,6 +10,7 @@ from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.utils._pytree import tree_map
+import os
 
 from dataset import get_data, CycloneSample
 from models import get_model
@@ -30,8 +31,12 @@ def ddp_setup(rank, world_size):
 
 
 def runner(rank, cfg, train_method, world_size):
-    device = torch.device(f"cuda:{rank}") if torch.cuda.is_available() else "cpu"
-    if cfg.use_ddp and world_size > 1:
+    if cfg.ddp.enable and cfg.ddp.n_nodes > 1 and world_size > 1:
+        local_rank = int(os.environ["LOCAL_RANK"])
+    else:
+        local_rank = rank
+    device = torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu"
+    if cfg.ddp.enable and world_size > 1:
         ddp_setup(rank, world_size)
         use_ddp = True
     else:
@@ -269,6 +274,7 @@ def runner(rank, cfg, train_method, world_size):
                 valsets,
                 valloaders,
                 opt,
+                scheduler,
                 epoch,
                 cfg,
                 device,
@@ -304,6 +310,9 @@ def runner(rank, cfg, train_method, world_size):
                 )
         if writer:
             writer.finish()
+
+    if use_ddp:
+        dist.destroy_process_group()
 
     if cfg.mode == "rollout":
         raise NotImplementedError("TODO")

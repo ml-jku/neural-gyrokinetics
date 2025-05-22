@@ -92,6 +92,7 @@ def setup_logging(config):
 def save_model_and_config(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler,
     cfg: DictConfig,
     epoch: int,
     val_loss: float,
@@ -126,6 +127,7 @@ def save_model_and_config(
                 "epoch": epoch,
                 "model_state_dict": state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
                 "loss": val_loss,
             },
             f"{cfg.ckpt_path}/best.pth",
@@ -475,13 +477,12 @@ def pev_flux_df_phi(
         vflux_det = vflux_det.sum()
     return pflux_det, eflux_det, vflux_det
 
-def phi_integral(df: torch.Tensor, geometry: Dict, padded_shape: Tuple = (392, 16, 96)):
+def phi_integral(df: torch.Tensor, geometry: Dict):
     ns, nx, ny = df.shape[3:]
-    # df to fourier, phi to fourier and unpad
+    # df to fourier
     df = df.movedim(0, -1).contiguous()
     df = torch.view_as_complex(df)
     # phi tensor
-    phi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
     bufphi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
     # expand geometry constants for broadcasting
     # grids
@@ -563,10 +564,6 @@ def phi_integral(df: torch.Tensor, geometry: Dict, padded_shape: Tuple = (392, 1
     # normalize
     phi = phi * poisson_diag
     phi = rearrange(phi.squeeze(), "s x y -> x s y")
-    # pad phi in fourier to padded_shape
-    if padded_shape is not None:
-        xpad = (padded_shape[0] - phi.shape[0]) // 2 + 1
-        # TODO
     return phi
 
 def is_number(string):

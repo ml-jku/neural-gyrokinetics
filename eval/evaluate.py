@@ -47,6 +47,7 @@ def evaluate(
     valsets: List[Dataset],
     valloaders: List[DataLoader],
     opt: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler,
     epoch: int,
     cfg: Dict,
     device: torch.device,
@@ -276,6 +277,7 @@ def evaluate(
             loss_val_min = save_model_and_config(
                 model,
                 optimizer=opt,
+                scheduler=scheduler,
                 cfg=cfg,
                 epoch=epoch,
                 # TODO decide target metric

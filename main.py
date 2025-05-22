@@ -42,7 +42,8 @@ def main(config: DictConfig):
     compress_src(dict_config["output_path"])
 
     if torch.cuda.is_available():
-        world_size = torch.cuda.device_count()
+        n_gpus = torch.cuda.device_count()
+        world_size = n_gpus * config.ddp.n_nodes
     else:
         world_size = 1
 
@@ -61,7 +62,7 @@ def main(config: DictConfig):
             ] = f"{dict_config['model']['name']}_{date_and_time}"
             config = OmegaConf.create(dict_config)
 
-        if config.use_ddp and world_size > 1:
+        if config.ddp.enable and world_size > 1 and config.ddp.n_nodes == 1:
             if "SLURM_NODELIST" not in os.environ:
                 os.environ["MASTER_ADDR"] = "localhost"
             else:
@@ -73,6 +74,10 @@ def main(config: DictConfig):
                 # unset nccl comm interface
                 del os.environ["NCCL_SOCKET_IFNAME"]
             mp.spawn(runner, args=(config, train_method, world_size), nprocs=world_size)
+        elif config.ddp.enable and world_size > 1 and config.ddp.n_nodes > 1:
+            # script should be launched via torchrun such that env variables have been set
+            rank = int(os.environ["RANK"])
+            runner(rank, config, train_method, world_size=world_size)
         else:
             rank = 0
             runner(rank, config, train_method, world_size=1)

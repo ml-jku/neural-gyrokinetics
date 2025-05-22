@@ -16,10 +16,10 @@ extra_loss_weights:
   flux_cross: 0.0
 
 swin:
-  patch_size: [ 4, 2, 4, 8, 4 ]
-  phi_patch_size: [8, 2, 4]
-  window_size: [ 4, 2, 2, 8, 4 ]
-  phi_window_size: [7, 4, 12]
+  patch_size: [ 4, 2, 4, 5, 4 ]
+  phi_patch_size: [ 5, 4, 4 ]
+  window_size: [ 4, 2, 2, 9, 4 ]
+  phi_window_size: [ 9, 2, 4 ]
   num_heads: [8]
   depth: [2]
   gradient_checkpoint: false

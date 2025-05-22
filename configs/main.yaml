@@ -10,7 +10,9 @@ defaults:
 experiment_id: test
 seed: 0
 output_path: null
-use_ddp: false
+ddp:
+  enable: false
+  n_nodes: 1
 amp: 
   enable: true  # set to false when using rope or integrals in training (complex / fft)
   bfloat: true

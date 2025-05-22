@@ -35,3 +35,4 @@ swin:
   latent_cross_attn: true
   use_rpb: true
   use_rope: false
+  detach_flux_latents: false
