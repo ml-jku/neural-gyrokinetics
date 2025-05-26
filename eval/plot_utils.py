@@ -262,13 +262,16 @@ def plot_potentials(x1, x2):
     fig, ax = plt.subplots(2, 1, figsize=(10, 5))
     fig.subplots_adjust(wspace=0.05)
 
-    ax[0].matshow(x1[0].squeeze()[:, 8, :].T, cmap=c_map)
+    # select only real part if we predicted both real/imag parts of phi
+    x1 = x1[0] if x1.ndim > 3 else x1
+    x2 = x2[0] if x2.ndim > 3 else x2
+    ax[0].matshow(x1.squeeze()[:, 8, :].T, cmap=c_map)
     ax[0].set_title(r"$\phi_{pred}$", fontsize=24)
     ax[0].set_ylabel(r"$y_{\phi}$", fontsize=20)
     ax[0].set_xticks([])
     ax[0].set_yticks([])
 
-    ax[1].matshow(x2[0].squeeze()[:, 8, :].T, cmap=c_map)
+    ax[1].matshow(x2.squeeze()[:, 8, :].T, cmap=c_map)
     ax[1].set_title(r"$\phi_{GT}$", fontsize=24)
     ax[1].set_xlabel(r"$x_{\phi}$", fontsize=20)
     ax[1].set_ylabel(r"$y_{\phi}$", fontsize=20)
@@ -283,7 +286,7 @@ def generate_val_plots(rollout, gt, ts, phase):
     val_plots_dict = {
         "df": {
             f"pred (T={ts[0].item():.2f}, {phase})": plot4x4_sided,
-            f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
+            # f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
             f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
         },
         "phi": {
@@ -295,7 +298,7 @@ def generate_val_plots(rollout, gt, ts, phase):
     }
     for key in rollout.keys():
         if key not in val_plots_dict:
-            # TODO: add visualization for flux rollout
+            # skip flux
             continue
         
         gt_key = key
@@ -306,22 +309,15 @@ def generate_val_plots(rollout, gt, ts, phase):
         y = gt[gt_key].clone()
 
         # first timestep and batch
-        if y.shape[1] != 2:
+        if y.shape[0] != 2 and key == "df":
             y = torch.cat(
                 [
                     y[:, 0::2].sum(axis=1, keepdims=True), y[:, 1::2].sum(axis=1, keepdims=True),
                 ],
                 dim=1,
-            ).cpu()
+            )
 
-        if y.ndim <= 7 and gt_key:
-            y = y[0].to("cpu")
-        elif y.ndim > 7:
-            y[0, 0].to("cpu")
-        else:
-            raise NotImplementedError("Unknown shapes for plotting...")
-
-        if x.shape[1] != 2:  # separate zonal flow, sum and recompose
+        if x.shape[1] != 2 and key == "df":  # separate zonal flow, sum and recompose
             x = torch.cat(
                 [
                     x[:, 0::2].sum(axis=1, keepdims=True),

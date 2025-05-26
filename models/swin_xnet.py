@@ -42,7 +42,9 @@ class SwinXnet(nn.Module):
         latent_cross_attn: bool = True,
         use_rpb: bool = True,
         use_rope: bool = False,
-        detach_flux_latents: bool = False
+        detach_flux_latents: bool = False,
+        real_potens: bool = False,
+        flux_reduce: str = "max",
     ):
         super().__init__()
 
@@ -58,8 +60,8 @@ class SwinXnet(nn.Module):
         df_in_channels = in_channels
         df_out_channels = out_channels
 
-        phi_in_channels = in_channels
-        phi_out_channels = out_channels
+        phi_in_channels = in_channels if not real_potens else 1
+        phi_out_channels = out_channels if not real_potens else 1
 
         if separate_zf:
             # no separate zf on phi
@@ -136,6 +138,7 @@ class SwinXnet(nn.Module):
                 attn_drop=0.1,
                 detach_latents=detach_flux_latents,
                 init_weights="xavier_uniform",
+                reduction=flux_reduce,
             )
 
         if latent_cross_attn:
@@ -345,7 +348,7 @@ class SwinXNetMultitask(SwinXnet):
             detach_flux_latents=detach_flux_latents,
             **kwargs
         )
-        
+
         # remove down path for phi unet
         self.use_phi = "phi" in self.outputs # check if we use phi
         # remove down-mixing
@@ -487,9 +490,9 @@ class SwinXNetMultitask(SwinXnet):
         flux = None
         if self.flux_head is not None:
             flux = self.flux_head(flux_lats)
-            out += [flux]
+        out += [flux]
 
         outputs = {}
         for key, pred in zip(self.outputs, out):
-            outputs[key] = pred
+            outputs[key] = pred.squeeze()
         return outputs

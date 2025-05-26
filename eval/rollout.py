@@ -68,7 +68,7 @@ def get_rollout_fn(
                     # add time dim if not there
                     preds[key].append(
                         pred[key].cpu().unsqueeze(2)
-                        if pred[key].ndim in [5, 7]
+                        if pred[key].ndim in [4, 5, 7]
                         else pred[key].cpu()
                     )
 

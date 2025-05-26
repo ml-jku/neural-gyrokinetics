@@ -90,6 +90,7 @@ class CycloneDataset(Dataset):
         offset: int = 0,
         separate_zf: bool = False,
         num_workers: int = 4,
+        real_potens: bool = False
     ):
         self.input_fields = input_fields
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
@@ -102,7 +103,7 @@ class CycloneDataset(Dataset):
         else:
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
         assert normalization in ["zscore", "minmax", "none", None]
-        assert normalization_scope in ["sample", "dataset", "per_mode", "trajectory"]
+        assert normalization_scope in ["sample", "dataset", "trajectory"]
         normalization = normalization if normalization != "none" else None
         self.normalization = normalization
         if normalization_stats is not None:
@@ -170,7 +171,7 @@ class CycloneDataset(Dataset):
         # if set, load preprocessed files with ifft
         self.spatial_ifft = spatial_ifft
         if spatial_ifft:
-            if split_into_bands and normalization_scope != "per_mode":
+            if split_into_bands:
                 n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
                 self.files = [
                     (
@@ -180,18 +181,10 @@ class CycloneDataset(Dataset):
                     )
                     for f in self.files
                 ]
-            elif normalization_scope == "per_mode":
-                self.files = [
-                    (
-                        f
-                        if "_ifft_separate_zf_per_mode.h5" in f
-                        else re.sub(r"\.h5$", "_ifft_separate_zf_per_mode.h5", f)
-                    )
-                    for f in self.files
-                ]
             else:
+                real_potens_tag = "_realpotens" if real_potens else ""
                 self.files = [
-                    f if "_ifft.h5" in f else re.sub(r"\.h5$", "_ifft.h5", f)
+                    f if f"_ifft{real_potens_tag}.h5" in f else re.sub(r"\.h5$", f"_ifft{real_potens_tag}.h5", f)
                     for f in self.files
                 ]
 
@@ -221,15 +214,14 @@ class CycloneDataset(Dataset):
             # check for holdout samples
             filename = os.path.split(f_path)[-1]
             if spatial_ifft:
-                if split_into_bands and normalization_scope != "per_mode":
+                if split_into_bands:
                     n_bands_tag = (
                         f"_{split_into_bands}bands" if split_into_bands else ""
                     )
                     filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
-                elif normalization_scope == "per_mode":
-                    filename = filename.replace("_ifft_separate_zf_per_mode", "")
                 else:
-                    filename = filename.replace("_ifft", "")
+                    real_potens_tag = "_realpotens" if real_potens else ""
+                    filename = filename.replace(f"_ifft{real_potens_tag}", "")
             n_tail_holdout = self.partial_holdouts.get(filename)
             with h5py.File(f_path, "r") as f:
                 # read the timesteps
@@ -285,15 +277,14 @@ class CycloneDataset(Dataset):
         if split == "val" and self.partial_holdouts:
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
-                if split_into_bands and normalization_scope != "per_mode":
+                if split_into_bands:
                     n_bands_tag = (
                         f"_{split_into_bands}bands" if split_into_bands else ""
                     )
                     filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
-                elif normalization_scope == "per_mode":
-                    filename = filename.replace("_ifft_separate_zf_per_mode", "")
                 else:
-                    filename = filename.replace("_ifft", "")
+                    real_potens_tag = "_realpotens" if real_potens else ""
+                    filename = filename.replace(f"_ifft{real_potens_tag}", "")
                 n_tail_holdout = self.partial_holdouts.get(filename)
                 if n_tail_holdout:
                     self.offsets[file_idx] = (
@@ -323,10 +314,10 @@ class CycloneDataset(Dataset):
 
         if normalization_scope == "dataset" and normalization_stats is None:
             for k in input_fields:
-                self.norm_stats[k]["full"]["mean"] = stats[k].mean
-                self.norm_stats[k]["full"]["std"] = stats[k].var ** (1/2)
-                self.norm_stats[k]["full"]["min"] = stats[k].min
-                self.norm_stats[k]["full"]["max"] = stats[k].max
+                self.norm_stats[k]["full"]["mean"] = stats[k].mean.astype(np.float32)
+                self.norm_stats[k]["full"]["std"] = (stats[k].var ** (1/2)).astype(np.float32)
+                self.norm_stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
+                self.norm_stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
 
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:

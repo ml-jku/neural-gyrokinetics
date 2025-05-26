@@ -61,6 +61,7 @@ def get_data(cfg):
             offset=cfg.dataset.offset,
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
+            real_potens=cfg.dataset.real_potens,
         )
 
         holdout_trajectories_valset = CycloneDataset(
@@ -84,6 +85,7 @@ def get_data(cfg):
             offset=cfg.dataset.offset,
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
+            real_potens=cfg.dataset.real_potens,
         )
 
         trainloader = DataLoader(
@@ -134,6 +136,7 @@ def get_data(cfg):
                 offset=cfg.dataset.offset,
                 separate_zf=cfg.dataset.separate_zf,
                 num_workers=cfg.dataset.num_workers,
+                real_potens=cfg.dataset.real_potens,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,

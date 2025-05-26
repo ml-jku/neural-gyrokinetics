@@ -3,58 +3,18 @@ sys.path.append("..")
 import os
 import numpy as np
 import h5py
-import re
 from tqdm import tqdm
 import torch
 
-from utils import RunningMeanStd, pev_flux_df_phi, load_geometry
+from utils import (
+    RunningMeanStd,
+    pev_flux_df_phi,
+    load_geometry,
+    K_files,
+    poten_files,
+    parse_input_dat
+)
 ROOT = "/restricteddata/ukaea/gyrokinetics"
-
-def K_files(directory):
-    files = os.listdir(directory)
-    digit_files = sorted(
-        [file for file in files if file.isdigit()], key=lambda x: int(x)
-    )
-    k_files = sorted(
-        [file for file in files if file.startswith("K") and not file.endswith(".dat")]
-    )
-    return k_files + digit_files
-
-
-def poten_files(directory):
-    files = os.listdir(directory)
-    poten_files = sorted([file for file in files if file.startswith("Poten")])
-    timestep_slices = [int(f.replace("Poten", "")) for f in poten_files]
-    return poten_files, np.array(timestep_slices) - 1
-
-
-def parse_input_dat(file_path):
-    parsed_data = {}
-    with open(file_path, "r") as file:
-        content = file.read()
-    # split the content by section headers (e.g., &SPECIES, &SPCGENERAL, etc.)
-    sections = re.split(r"&\w+", content)
-    # get all the headers by finding the section names
-    section_headers = re.findall(r"&(\w+)", content)
-    # remove comments
-    sections = [
-        section.strip() for section in sections if len(section) and section[0] != "!" and section.strip()
-    ]
-    for header, section in zip(section_headers, sections):
-        section_dict = {}
-        params = re.findall(r"(\w+)\s*=\s*([-\d\.e\w]+)", section)
-        for param, value in params:
-            try:
-                section_dict[param] = (
-                    float(value) if "e" in value or "." in value else int(value)
-                )
-            except ValueError:
-                section_dict[param] = value.strip()
-        while header in parsed_data:
-            header = f"{header}0"
-        parsed_data[header] = section_dict
-
-    return parsed_data
 
 def do_ifft(knth):
     knth = np.fft.ifftn(knth, axes=(3, 4), norm="forward")
@@ -173,13 +133,27 @@ def phi_to_spc(phi, gt_spc, out_shape, norm: str = "forward"):
     xpad = xpad + 1 if (phi_fft.shape[0] % 2 == 0) else xpad
     phi_fft = phi_fft[xpad: nkx + xpad, :, :nky]
     assert _check_spc(np.abs(phi_fft), gt_spc), "Spectral space of Phi incorrect"
-    phi_fft = np.fft.ifftshift(phi_fft, axes=(0,))
-    phi_fft = np.fft.ifftn(phi_fft, axes=(0, 2), norm=norm)
-    spc = np.fft.fftn(phi_fft, axes=(0, 2), norm=norm)
-    spc = np.fft.fftshift(spc, axes=(0,))
-    assert _check_spc(np.abs(spc), gt_spc), "Spectral space of phi incorrect"
-    phi = np.stack([phi_fft.real, phi_fft.imag]).astype("float32")
-    return phi, spc
+    # phi_fft = np.fft.ifftshift(phi_fft, axes=(0,))
+    # phi_fft = np.fft.ifftn(phi_fft, axes=(0, 2), norm=norm)
+    # spc = np.fft.fftn(phi_fft, axes=(0, 2), norm=norm)
+    # spc = np.fft.fftshift(spc, axes=(0,))
+    # assert _check_spc(np.abs(spc), gt_spc), "Spectral space of phi incorrect"
+    # phi = np.stack([phi_fft.real, phi_fft.imag]).astype("float32")
+    return phi_fft
+
+def phi_fft_to_real(fft, out_shape, norm: str = "forward"):
+    if fft.shape != out_shape:
+        nkx, _, nky = out_shape
+        nx, _, ny = fft.shape
+        xpad = (nkx - nx) // 2 + 1
+        padded = np.zeros(out_shape).astype(fft.dtype)
+        padded[xpad:xpad+nx, :, :ny] = fft
+    else:
+        nkx, _, nky = fft.shape
+        padded = fft
+    phi = np.fft.fftshift(padded, axes=(0,))
+    phi_ifft = np.fft.irfftn(phi, axes=(0, 2), norm=norm, s=[nkx, nky])
+    return phi_ifft
 
 def preprocess(
     filename,
@@ -192,15 +166,16 @@ def preprocess(
         separate_zf and not spatial_ifft
     ), "Need to perform IFFT to maintain shapes for separate_zf"
     dir_in = f"{ROOT}/raw/{filename}"
-    dir_out = f"{ROOT}/preprocessed"
+    dir_out = f"/local00/bioinf/gyrokinetics/preprocessed"
     if not os.path.exists(dir_out):
         os.makedirs(dir_out)
+    filename = filename.replace("/", "_")
 
     # create h5 file with timestamps and field data
     ifft_tag = "_ifft" if spatial_ifft else ""
     zf_tag = "_separate_zf" if separate_zf else ""
     split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{split_into_bands_tag}.h5"
+    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{split_into_bands_tag}_realpotens.h5"
     if os.path.exists(h5_filename):
         print(f"File {h5_filename} already exists, skipping...")
         return h5_filename, True
@@ -268,7 +243,7 @@ def preprocess(
             df_stats = RunningMeanStd(shape=(4,) + shape)
     else:
         df_stats = RunningMeanStd(shape=(2,) + shape)
-        phi_stats = RunningMeanStd((2,1,1,1))
+        phi_stats = RunningMeanStd((1,1,1))
         flux_stats = RunningMeanStd((1,))
 
     with h5py.File(h5_filename, "w") as file:
@@ -294,7 +269,7 @@ def preprocess(
         data_group = file.create_group("data")
         for idx, (k, pot) in tqdm(
             enumerate(zip(ks, potens)),
-            f"Processing {filename} -> {filename + ifft_tag + zf_tag + split_into_bands_tag + ".h5"}",
+            f"Processing {filename} -> {h5_filename}",
             total=len(ks),
         ):
             # Load the full distribution function data
@@ -350,7 +325,8 @@ def preprocess(
             spc_file = pot.replace("Poten", "Spc3d")
             b = np.loadtxt(f"{dir_in}/{spc_file}")
             gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
-            phi, phi_fft_unpadded = phi_to_spc(phi, gt_spc, out_shape=(nkx, ns, nky))
+            phi_fft_unpadded = phi_to_spc(phi, gt_spc, out_shape=(nkx, ns, nky))
+            phi = phi_fft_to_real(phi_fft_unpadded, out_shape=phi_fft_unpadded.shape)
 
             df = np.moveaxis(orig_knth, 0, -1).copy()
             df = df.view(dtype=np.complex64).squeeze()
@@ -368,10 +344,10 @@ def preprocess(
             )
             flux_stats.update(fluxes[idx], fluxes[idx], fluxes[idx], fluxes[idx])
             phi_stats.update(
-                np.mean(phi, axis=(1,2,3,), keepdims=True),
-                np.var(phi, axis=(1,2,3,), keepdims=True),
-                np.min(phi, axis=(1,2,3,), keepdims=True),
-                np.max(phi, axis=(1,2,3,), keepdims=True),
+                np.mean(phi, axis=(0,1,2), keepdims=True),
+                np.var(phi, axis=(0,1,2), keepdims=True),
+                np.min(phi, axis=(0,1,2), keepdims=True),
+                np.max(phi, axis=(0,1,2), keepdims=True),
             )
 
             # Add the reshaped data as a dataset to the "data" group
@@ -404,6 +380,7 @@ ifft_tag = "_ifft" if IFFT else ""
 zf_tag = "_separate_zf" if separate_zf else ""
 split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
 datasets = [f"iteration_{i}" for i in range(100)]
+# datasets = [f"ood/iteration_{i}" for i in range(4)]
 
 for f in datasets:
     h5_filename, skipped = preprocess(

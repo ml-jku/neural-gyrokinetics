@@ -7,7 +7,8 @@ minmax_beta2: 4
 offset: 0
 subsample: 1
 spatial_ifft: true
-separate_zf: true
+separate_zf: false
+real_potens: false
 split_into_bands: null
 log_transform: false
 num_workers: 4
@@ -17,7 +18,11 @@ training_trajectories: "iteration_{0-5,7-12,14-31,33-58,60-67,69-82,84-99}.h5"
 validation_trajectories: ["iteration_13.h5", "iteration_59.h5", "iteration_68.h5"]
 partial_holdouts:
 training_cond_filters:
+  last_fluxes: [1., .inf]
+  first_fluxes: [1., .inf]
 eval_cond_filters:
+  last_fluxes: [1., .inf]
+  first_fluxes: [1., .inf]
 
 augment:
   noise: false

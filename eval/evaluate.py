@@ -119,26 +119,6 @@ def evaluate(
                 }
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
-                # # TODO: dont hardcode this
-                # phase_change = 24 if cfg.dataset.offset == 0 else 0
-                # inputs_list, gts_list, conds_list, idx_data_list, phase_list = (
-                #     split_batch_into_phases(
-                #         phase_change,
-                #         inputs,
-                #         gts,
-                #         conds,
-                #         idx_data,
-                #     )
-                # )
-
-                # Iterate over the splits
-                # for i in range(len(inputs_list)):
-                #     inputs = inputs_list[i]
-                #     gts = gts_list[i]
-                #     conds = conds_list[i]
-                #     idx_data = idx_data_list[i]
-                #     phase = phase_list[i]
-
                 # get the rolled out validation trajectories
                 rollout = rollout_fn(model, inputs, idx_data, conds)
 
@@ -184,18 +164,9 @@ def evaluate(
                 if val_idx == 0:
                     # holdout trajectories valset
                     t_idx = idx_data["timestep_index"].tolist()
-                    # phase = None
-                    # TODO compute from dawtaset
-                    # if 5 in t_idx:
-                    #     phase = "Linear"
-                    #     batch_idx = t_idx.index(5)
-                    # if 100 in t_idx or cfg.dataset.offset > 0:
-                    #     phase = "Saturated"
-                    #     batch_idx = t_idx.index(100)
-                    # if phase:
-                    # select a random sample from the batch
                     batch_idx = torch.randint(0, len(t_idx), (1,)).item()
-                    rollout = {k: rollout[k][:, batch_idx] for k in rollout}
+                    rollout = {k: rollout[k][:, batch_idx].cpu() for k in rollout}
+                    gts = {k: gts[k][batch_idx].cpu() for k in gts}
                     plots = generate_val_plots(
                         rollout=rollout,
                         gt=gts,

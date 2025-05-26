@@ -154,10 +154,14 @@ class FluxDecoder(nn.Module):
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
+        detach_latents: bool = False,
+        reduction: str = "max",
     ):
         super().__init__()
-
+        self.detach_latents = detach_latents
+        self.reduction = reduction
         flux_blocks = []
+        reduction_blocks = []
         flux_latent_size = 0
         for left_dim, right_dim in zip(left_dims, right_dims):
             flux_blocks.append(
@@ -175,9 +179,20 @@ class FluxDecoder(nn.Module):
                     init_weights=init_weights,
                 )
             )
+            if self.reduction == "integral":
+                reduction_blocks.append(
+                    RSpaceReduce(
+                        dim=left_dim,
+                        out_dim=left_dim,
+                        num_heads=8,
+                        attn_drop=0.1,
+                        init_weights="xavier_uniform",
+                    )
+                )
             flux_latent_size += left_dim
-
         self.blocks = nn.ModuleList(flux_blocks)
+        self.reductions = nn.ModuleList(reduction_blocks)
+
         self.flux_mlp = MLP(
             [flux_latent_size, flux_latent_size // 2, 1],
             # last_act_fn=nn.Softplus,
@@ -185,9 +200,18 @@ class FluxDecoder(nn.Module):
         )
 
     def mix(self, i: int, left: torch.Tensor, right: Optional[torch.Tensor] = None):
+        if self.detach_latents:
+            left = left.detach()
+            right = right.detach()
         x = self.blocks[i].forward(left, right)
         # pool spatials
-        return x.amax(axis=list(range(1, x.ndim - 1)))
+        if self.reduction == "max":
+            x = x.amax(axis=list(range(1, x.ndim - 1)))
+        elif self.reduction == "mean":
+            x = x.mean(axis=list(range(1, x.ndim - 1)))
+        else:
+            x = self.reductions[i].forward(x)
+        return x
 
     def forward(self, flux_latents: Sequence[torch.Tensor]):
         flux = self.flux_mlp(torch.cat(flux_latents, dim=-1))
@@ -219,7 +243,8 @@ class VSpaceReduce(AttentionDecoder):
         )
         del self.q
         # learned token to integrate vspace (query projection not needed)
-        self.integral_token = nn.Parameter(gain * torch.randn(1, 1, dim))
+        integral_token = gain * torch.randn(1, 1, dim)
+        self.register_buffer("integral_token", integral_token)
 
         self.decouple_mu = decouple_mu
         self.out_dim = out_dim
@@ -233,19 +258,60 @@ class VSpaceReduce(AttentionDecoder):
             df = rearrange(df, "b vpar mu s x y c -> (b s x y) (vpar mu) c")
 
         # qkv embeddings from inputs
+        df = df.contiguous()
+        assert df.is_contiguous() and self.integral_token.is_contiguous(), "Tensors not contiguous."
         q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
         k, v = rearrange(self.kv(df), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
-        # avoid misaligned strides error
-        if dist.is_initialized():
-            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                phi = F.scaled_dot_product_attention(
-                    q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
-                )
-        else:
-            phi = F.scaled_dot_product_attention(
-                q, k, v, dropout_p=(self.attn_drop if self.training else 0.0)
-            )
+        phi = F.scaled_dot_product_attention(
+            q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
+        )
         phi = rearrange(phi, "b k n c -> b n (k c)")
         phi = self.proj(phi)
         phi = self.proj_drop(phi)
         return phi.view(b, ns, nx, ny, self.out_dim)
+
+
+class RSpaceReduce(AttentionDecoder):
+    def __init__(
+            self,
+            dim: int,
+            out_dim: int,
+            num_heads: int,
+            gain: float = 1e-2,
+            qkv_bias: bool = False,
+            attn_drop: float = 0.0,
+            proj_drop: float = 0.0,
+            init_weights: Optional[str] = None,
+    ):
+        super().__init__(
+            q_dim=dim,
+            kv_dim=dim,
+            out_dim=out_dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+            init_weights=init_weights,
+        )
+        del self.q
+        # learned token to integrate vspace (query projection not needed)
+        integral_token = gain * torch.randn(1, 1, dim)
+        self.register_buffer("integral_token", integral_token)
+        self.out_dim = out_dim
+
+    def forward(self, phi: torch.Tensor):
+        b, ns, nx, ny, _ = phi.shape
+        phi = rearrange(phi, "b s x y c -> b (s x y) c")
+
+        # qkv embeddings from inputs
+        phi = phi.contiguous()
+        assert phi.is_contiguous() and self.integral_token.is_contiguous(), "Tensors not contiguous."
+        q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
+        k, v = rearrange(self.kv(phi), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
+        phi = F.scaled_dot_product_attention(
+            q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
+        )
+        phi = rearrange(phi, "b k n c -> b n (k c)")
+        phi = self.proj(phi)
+        phi = self.proj_drop(phi)
+        return phi.view(b, self.out_dim)
