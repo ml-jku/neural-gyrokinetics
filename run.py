@@ -21,7 +21,13 @@ from train import (
     pretrain_autoencoder,
 )
 from eval.evaluate import evaluate
-from utils import load_model_and_config, setup_logging, edit_tag
+from utils import (
+    load_model_and_config,
+    setup_logging,
+    edit_tag,
+    get_linear_burn_in_fn,
+    remainig_progress
+)
 
 
 def ddp_setup(rank, world_size):
@@ -102,13 +108,21 @@ def runner(rank, cfg, train_method, world_size):
         if opt_state_dict is not None:
             opt.load_state_dict(opt_state_dict)
 
+        loss_scheduler_dict = {}
+        weights = dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights)
+        for key in weights.keys():
+            start = weights[key]
+            if start > 0. and cfg.model.loss_scheduler[key]:
+                loss_scheduler_dict[key] = get_linear_burn_in_fn(start, end=1.0, start_fraction=0.5, end_fraction=0.9)
+
         # configure loss
         predict_delta = cfg.training.predict_delta
-        weights = dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights)
         loss_wrap = LossWrapper(
             weights=weights,
+            schedulers=loss_scheduler_dict,
             denormalize_fn=trainset.denormalize,
             separate_zf=cfg.dataset.separate_zf,
+            real_potens=cfg.dataset.real_potens
         )
         grad_balancer = GradientBalancer(
             opt,
@@ -150,6 +164,7 @@ def runner(rank, cfg, train_method, world_size):
         idx_keys = ["file_index", "timestep_index"]
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
         loss_val_min = torch.inf
+        cur_update_step = 0.
         for epoch in range(1, n_epochs + 1):
             loss_logs = {k: 0 for k in loss_wrap.active_losses}
             loss_logs["relative_norm"] = 0.0
@@ -220,7 +235,9 @@ def runner(rank, cfg, train_method, world_size):
                             preds[key] = preds[key] + inputs[key]
 
                     # compute losses
-                    loss, losses = loss_wrap(preds, gts, idx_data, geometry=geometry)
+                    progress_remaining = remainig_progress(cur_update_step, total_steps)
+                    loss, losses = loss_wrap(preds, gts, idx_data, geometry=geometry,
+                                             progress_remaining=progress_remaining)
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
@@ -232,6 +249,7 @@ def runner(rank, cfg, train_method, world_size):
                 if cfg.training.scheduler is not None:
                     scheduler.step()
 
+                cur_update_step += 1.
                 for k in loss_wrap.active_losses:
                     loss_logs[k] += losses[k].item()
                 loss_logs["relative_norm"] += loss.item()
@@ -261,6 +279,8 @@ def runner(rank, cfg, train_method, world_size):
                     else cfg.training.learning_rate
                 ),
             }
+            for key in loss_scheduler_dict.keys():
+                train_losses_dict[f"train/{key}_schedule"] = loss_scheduler_dict[key](progress_remaining)
             train_losses_dict = train_losses_dict | loss_logs
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 

@@ -665,3 +665,62 @@ def load_geometry(directory):
     geometry["bt_frac"] = torch.tensor(geom["Bt_frac"])
     geometry["rfun"] = torch.tensor(geom["R"])
     return geometry
+
+def get_linear_burn_in_fn(start: float, end: float, end_fraction: float, start_fraction: float):
+
+    def func(progress_remaining: float) -> float:
+        if (1 - progress_remaining) > end_fraction:
+            return end
+        elif (1 - progress_remaining) < start_fraction:
+            return start
+        else:
+            return start + (1 - progress_remaining - start_fraction) * (end - start) / (end_fraction - start_fraction)
+
+    return func
+
+def remainig_progress(cur_step, total_steps):
+    return 1. - (cur_step / total_steps)
+
+def parse_input_dat(file_path):
+    parsed_data = {}
+    with open(file_path, "r") as file:
+        content = file.read()
+    # split the content by section headers (e.g., &SPECIES, &SPCGENERAL, etc.)
+    sections = re.split(r"&\w+", content)
+    # get all the headers by finding the section names
+    section_headers = re.findall(r"&(\w+)", content)
+    # remove comments
+    sections = [
+        section.strip() for section in sections if len(section) and section[0] != "!" and section.strip()
+    ]
+    for header, section in zip(section_headers, sections):
+        section_dict = {}
+        params = re.findall(r"(\w+)\s*=\s*([-\d\.e\w]+)", section)
+        for param, value in params:
+            try:
+                section_dict[param] = (
+                    float(value) if "e" in value or "." in value else int(value)
+                )
+            except ValueError:
+                section_dict[param] = value.strip()
+        while header in parsed_data:
+            header = f"{header}0"
+        parsed_data[header] = section_dict
+
+    return parsed_data
+
+def K_files(directory):
+    files = os.listdir(directory)
+    digit_files = sorted(
+        [file for file in files if file.isdigit()], key=lambda x: int(x)
+    )
+    k_files = sorted(
+        [file for file in files if file.startswith("K") and not file.endswith(".dat")]
+    )
+    return k_files + digit_files
+
+def poten_files(directory):
+    files = os.listdir(directory)
+    poten_files = sorted([file for file in files if file.startswith("Poten")])
+    timestep_slices = [int(f.replace("Poten", "")) for f in poten_files]
+    return poten_files, np.array(timestep_slices) - 1

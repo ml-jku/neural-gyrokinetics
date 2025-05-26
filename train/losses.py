@@ -11,48 +11,52 @@ from torch.distributed import get_rank, is_initialized
 
 from concurrent.futures import ThreadPoolExecutor
 
-from utils import save_model_and_config
+from utils import save_model_and_config, get_linear_burn_in_fn
 from dataset.cyclone import CycloneDataset, CycloneSample
 from train.integrals import FluxIntegral
 
 
 def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
     assert x.shape == y.shape, "Mismatch in dimensions for computing loss"
-    if dim_to_keep is None:
-        x = x.flatten(1)
-        y = y.flatten(1)
-    else:
-        # inference mode
-        x = x.flatten(2)
-        y = y.flatten(2)
+    if x.ndim > 1:
+        if dim_to_keep is None:
+            x = x.flatten(1)
+            y = y.flatten(1)
+        else:
+            # inference mode
+            x = x.flatten(2)
+            y = y.flatten(2)
     diff = x - y
     diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
     y_norms = torch.linalg.norm(y, ord=2, dim=-1)
+    eps = 1e-8
     if squared:
         diff_norms, y_norms = diff_norms ** 2, y_norms ** 2
     if dim_to_keep is None:
         # sum over timesteps and mean over examples in batch
-        return torch.mean(diff_norms / y_norms)
+        return torch.mean(diff_norms / (y_norms + eps))
     else:
         dims = [i for i in range(len(y_norms.shape))][dim_to_keep + 1 :]
-        return torch.mean(diff_norms / y_norms, dim=dims)
+        return torch.mean(diff_norms / (y_norms + eps), dim=dims)
 
 
 class LossWrapper(nn.Module):
     def __init__(
         self,
         weights: Dict,
+        schedulers: Dict,
         denormalize_fn: Optional[Callable] = None,
         separate_zf: bool = False,
+        real_potens: bool = False,
     ):
         super().__init__()
-
         self.weights = weights
         self._data_losses = ["df", "phi", "flux"]
         self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
-        self.integrator = FluxIntegral()
+        self.integrator = FluxIntegral(real_potens=real_potens)
         self.denormalize_fn = denormalize_fn
         self.separate_zf = separate_zf
+        self.schedulers = schedulers
 
     def integral_loss(
         self,
@@ -121,6 +125,7 @@ class LossWrapper(nn.Module):
         idx_data: Optional[Dict[str, torch.Tensor]] = None,
         geometry: Optional[Dict[str, torch.Tensor]] = None,
         compute_integrals: bool = True,
+        progress_remaining: float = 1.,
     ):
         losses = {}
         int_losses = {}
@@ -146,13 +151,17 @@ class LossWrapper(nn.Module):
             raise ValueError("Prediction - CROSS loss weight key mismatch.")
         # compute losses
         for k in data_keys:
-            if k == "df":
+            if k in ["df", "phi"]:
                 losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
                 losses[k] = F.mse_loss(preds[k], tgts[k])
         for k in int_keys + cross_keys:
             losses[k] = int_losses[k]
         if self.training:
+            # reset weight if scheduler is defined
+            for key in self.schedulers.keys():
+                if key in self.weights:
+                    self.weights[key] = self.schedulers[key](progress_remaining)
             # reweight and accumulate
             loss = sum([self.weights[k] * losses[k] for k in loss_keys])
             # filter active losses

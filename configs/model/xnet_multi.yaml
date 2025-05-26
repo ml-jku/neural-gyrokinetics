@@ -4,6 +4,14 @@ latent_dim: 256
 num_layers: 1
 decouple_mu: true
 conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
+loss_scheduler:
+  df: null
+  phi: null
+  flux: null
+  phi_int: null
+  flux_int: null
+  phi_cross: null
+  flux_cross: null
 loss_weights:
   df: 1.0
   phi: 0.4
@@ -36,3 +44,4 @@ swin:
   use_rpb: true
   use_rope: false
   detach_flux_latents: false
+  flux_reduce: "max"

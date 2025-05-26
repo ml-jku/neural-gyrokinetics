@@ -30,9 +30,10 @@ GEOM_KEYS = [
 
 
 class FluxIntegral(nn.Module):
-    def __init__(self):
+    def __init__(self, real_potens:bool = False):
         super().__init__()
 
+        self.real_potens = real_potens
         self._vmap_fwd_df = torch.vmap(
             self.forward_single,
             in_dims=({k: 0 for k in sorted(GEOM_KEYS)}, 0),
@@ -96,8 +97,10 @@ class FluxIntegral(nn.Module):
         shift_axes: Sequence[int] = (0,),
         norm: str = "forward",
     ):
-        phi = phi.movedim(0, -1).contiguous()
-        phi = torch.view_as_complex(phi)
+        if not self.real_potens:
+            # we predicted real and imag of real phi, transform to complex number
+            phi = phi.movedim(0, -1).contiguous()
+            phi = torch.view_as_complex(phi)
         phi = torch.fft.fftn(phi, dim=(0, 2), norm=norm)
         phi = torch.fft.fftshift(phi, dim=shift_axes)
         # unpad (and positive half of spectra)
@@ -118,7 +121,7 @@ class FluxIntegral(nn.Module):
         norm: str = "forward",
     ):
         spc = rearrange(spc, "s x y -> x s y")
-        spc_nx, _, spc_ny = spc.shape
+        spc_nx, spc_ns, spc_ny = spc.shape
         if repad:
             # pad x
             nx, _, ny = original_shape
@@ -135,8 +138,11 @@ class FluxIntegral(nn.Module):
             spc = F.pad(spc, (y_pad_left, y_pad_right, 0, 0))
         # ifft
         phi = torch.fft.ifftshift(spc, dim=shift_axes)
-        phi = torch.fft.ifftn(phi, dim=(0, 2), norm=norm)
-        phi = torch.view_as_real(phi).movedim(-1, 0).contiguous()
+        if self.real_potens:
+            phi = torch.fft.irfftn(phi, dim=(0, 2), norm=norm, s=[spc_nx, spc_ny]).float()
+        else:
+            phi = torch.fft.ifftn(phi, dim=(0, 2), norm=norm)
+            phi = torch.view_as_real(phi).movedim(-1, 0).contiguous()
         return phi  # (c, x, s, y)
 
     def pev_fluxes(
