@@ -281,7 +281,7 @@ def plot_potentials(x1, x2):
     return plt_to_wandb_image(fig)
 
 
-def generate_val_plots(rollout, gt, ts, phase):
+def generate_val_plots(rollout, gt, ts, phase, decoupled_mu=False):
     plots = {}
     val_plots_dict = {
         "df": {
@@ -313,7 +313,7 @@ def generate_val_plots(rollout, gt, ts, phase):
                 [
                     y[0::2].sum(axis=0, keepdims=True), y[1::2].sum(axis=0, keepdims=True),
                 ],
-                dim=1,
+                dim=0,
             )
 
         if x.shape[1] != 2 and key == "df":  # separate zonal flow, sum and recompose
