@@ -287,7 +287,7 @@ def generate_val_plots(rollout, gt, ts, phase):
         "df": {
             f"pred (T={ts[0].item():.2f}, {phase})": plot4x4_sided,
             # f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
-            f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
+            # f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
         },
         "phi": {
             f"Potentials (T={ts[0].item():.2f}, {phase})": plot_potentials,
@@ -308,11 +308,10 @@ def generate_val_plots(rollout, gt, ts, phase):
         x = rollout[key].clone()
         y = gt[gt_key].clone()
 
-        # first timestep and batch
         if y.shape[0] != 2 and key == "df":
             y = torch.cat(
                 [
-                    y[:, 0::2].sum(axis=1, keepdims=True), y[:, 1::2].sum(axis=1, keepdims=True),
+                    y[0::2].sum(axis=0, keepdims=True), y[1::2].sum(axis=0, keepdims=True),
                 ],
                 dim=1,
             )
