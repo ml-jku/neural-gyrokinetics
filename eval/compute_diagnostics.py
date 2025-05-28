@@ -9,6 +9,7 @@ from utils import (
     pev_flux_df_phi,
     parse_input_dat,
     K_files,
+    poten_files
 )
 import numpy as np
 import torch
@@ -28,6 +29,8 @@ def main(args):
         sim = path.split("/")[-1]
         print(f"Computing diagnostics for original sim {sim}")
         k_dirs = K_files(path)
+        potens = poten_files(path)
+        k_poten_dict = dict(zip(k_dirs, potens))
         compute_for_raw = True
         dump_path = os.path.join(path, "python_diagnostics")
         os.makedirs(dump_path, exist_ok=True)
@@ -85,14 +88,37 @@ def main(args):
         W = np.sum(W, axis=0)
         np.savetxt(os.path.join(dir, "kyspec"), W)
 
-        # compute zf profile
+        # compute zf profile from 5D
         fourier_zf = phi_fft.copy()
         fourier_zf[..., 1:] = 0.
         padded = np.zeros((nx, ns, ny)).astype(phi_fft.dtype)
         padded[xpad:xpad + nkx, :, :nky] = fourier_zf
         fourier_zf = np.fft.fftshift(padded, axes=(0,))
         phi_zf = np.fft.irfftn(fourier_zf, axes=(0, 2), norm="forward", s=[135, 96])
-        with open(os.path.join(dir, "zf_profile"), "wb") as f:
+        with open(os.path.join(dir, "df_zf_profile"), "wb") as f:
+            f.write(phi_zf)
+
+        # compute zf profile from 3D potens
+        if compute_for_raw:
+            pred_file = os.path.join(path, dir, k_poten_dict[dir])
+        else:
+            pred_file = os.path.join(path, dir, "Poten")
+
+        # Load dumped phi
+        with open(pred_file, "rb") as fid:
+            ff = np.fromfile(fid, dtype=np.float64)
+        resolution = (ns, nkx, nky)
+        real_phi = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+
+        phi_fft = np.fft.fftn(real_phi, axes=(0, 2), norm="forward")
+        # compute zf profile from 3D
+        fourier_zf = phi_fft.copy()
+        fourier_zf[..., 1:] = 0.
+        padded = np.zeros((nx, ns, ny)).astype(phi_fft.dtype)
+        padded[xpad:xpad + nkx, :, :nky] = fourier_zf
+        fourier_zf = np.fft.fftshift(padded, axes=(0,))
+        phi_zf = np.fft.irfftn(fourier_zf, axes=(0, 2), norm="forward", s=[135, 96])
+        with open(os.path.join(dir, "poten_zf_profile"), "wb") as f:
             f.write(phi_zf)
 
         # compute flux spectrum
@@ -102,7 +128,7 @@ def main(args):
         _, eflux, _ = pev_flux_df_phi(df, torch.tensor(phi_fft), geometry, aggregate=False)
         flux_spectra = eflux.sum((0,1,2,3)).numpy()
         np.savetxt(os.path.join(dir, "eflux_spectra"), flux_spectra)
-        np.savetxt(os.path.join(dir, "eflux"), flux_spectra.sum())
+        np.savetxt(os.path.join(dir, "eflux"), [flux_spectra.sum()])
 
 
 if __name__ == '__main__':

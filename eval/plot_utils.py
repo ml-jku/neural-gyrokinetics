@@ -281,7 +281,7 @@ def plot_potentials(x1, x2):
     return plt_to_wandb_image(fig)
 
 
-def generate_val_plots(rollout, gt, ts, phase, decoupled_mu=False):
+def generate_val_plots(rollout, gt, ts, phase):
     plots = {}
     val_plots_dict = {
         "df": {
