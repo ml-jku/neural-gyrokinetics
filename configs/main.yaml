@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: cyclone
-  - model: swin5d
+  - model: xnet_multi
   - logging: wandb
   - training: default
   - validation: default
