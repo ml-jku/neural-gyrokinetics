@@ -4,6 +4,7 @@ latent_dim: 256
 num_layers: 1
 decouple_mu: true
 conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
+extra_zf_loss: false
 loss_scheduler:
   df: null
   phi: null
