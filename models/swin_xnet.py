@@ -63,7 +63,7 @@ class SwinXnet(nn.Module):
         phi_in_channels = in_channels if not real_potens else 1
         phi_out_channels = out_channels if not real_potens else 1
 
-        if separate_zf:
+        if separate_zf and not real_potens:
             # no separate zf on phi
             phi_in_channels = phi_in_channels - 2
             phi_out_channels = phi_out_channels - 2
