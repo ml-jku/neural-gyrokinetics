@@ -126,6 +126,7 @@ class LossWrapper(nn.Module):
         geometry: Optional[Dict[str, torch.Tensor]] = None,
         compute_integrals: bool = True,
         progress_remaining: float = 1.,
+        separate_zf: bool = False,
     ):
         losses = {}
         int_losses = {}
@@ -152,7 +153,12 @@ class LossWrapper(nn.Module):
         # compute losses
         for k in data_keys:
             if k in ["df", "phi"]:
-                losses[k] = relative_norm_mse(preds[k], tgts[k])
+                if k == "df" and separate_zf:
+                    zf_loss = F.mse_loss(preds[k][:, :2], tgts[k][:, :2])
+                    other_loss = relative_norm_mse(preds[k][:, 2:], tgts[k][:, 2:])
+                    losses[k] = zf_loss + other_loss
+                else:
+                    losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
                 losses[k] = F.mse_loss(preds[k], tgts[k])
         for k in int_keys + cross_keys:

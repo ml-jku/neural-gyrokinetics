@@ -237,7 +237,8 @@ def runner(rank, cfg, train_method, world_size):
                     # compute losses
                     progress_remaining = remainig_progress(cur_update_step, total_steps)
                     loss, losses = loss_wrap(preds, gts, idx_data, geometry=geometry,
-                                             progress_remaining=progress_remaining)
+                                             progress_remaining=progress_remaining,
+                                             separate_zf=cfg.dataset.separate_zf if cfg.model.extra_zf_loss else False)
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
