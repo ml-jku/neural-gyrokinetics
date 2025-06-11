@@ -26,7 +26,7 @@ def get_stats(filenames, spatial_ifft=False, separate_zf=False, per_mode_norm=Fa
     old_running_stats = None
     for filename in filenames:
         dir_in = f"{ROOT}/raw/{filename}"
-        dir_out = "/local00/bioinf/gyrokinetics/preprocessed"
+        dir_out = f"{ROOT}/preprocessed/{filename}"
         if not os.path.exists(dir_out):
             os.makedirs(dir_out)
         # create h5 file with timestamps and field data
@@ -166,7 +166,7 @@ def preprocess(
         separate_zf and not spatial_ifft
     ), "Need to perform IFFT to maintain shapes for separate_zf"
     dir_in = f"{ROOT}/raw/{filename}"
-    dir_out = f"/local00/bioinf/gyrokinetics/preprocessed"
+    dir_out = f"{ROOT}/preprocessed"
     if not os.path.exists(dir_out):
         os.makedirs(dir_out)
     filename = filename.replace("/", "_")
@@ -379,8 +379,7 @@ norm_axes = (1,2,3,4,5)
 ifft_tag = "_ifft" if IFFT else ""
 zf_tag = "_separate_zf" if separate_zf else ""
 split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-datasets = [f"iteration_{i}" for i in range(100)]
-# datasets = [f"ood/iteration_{i}" for i in range(4)]
+datasets = [f"iteration_{i}" for i in range(100, 300)]
 
 for f in datasets:
     h5_filename, skipped = preprocess(
