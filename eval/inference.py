@@ -28,7 +28,6 @@ def create_parser():
     parser.add_argument("--onestep", action="store_true")
     parser.add_argument("--last", action="store_true")
     parser.add_argument("--ifft_merge", action="store_true")
-    parser.add_argument("--start_idx", default=0, type=int)
     parser.add_argument("--predict_on_different", action="store_true")
     return parser.parse_args()
 
@@ -148,12 +147,6 @@ device = "cuda"
 
 cfg = OmegaConf.create(yaml.safe_load(open(f"{CKP}/config.yaml", "r")))
 
-if cfg.dataset.offset > 0 and os.path.exists(f"{parser.ckpt}/normalization_stats.pkl"):
-    with open(f"{parser.ckpt}/normalization_stats.pkl", "rb") as infile:
-        normalization_stats = pickle.load(infile)
-else:
-    normalization_stats = None
-
 train_losses = [k for k, v in cfg.model.loss_weights.items() if v > 0.0]
 input_fields = np.unique(cfg.dataset.input_fields + train_losses)
 traindata = CycloneDataset(
@@ -177,6 +170,7 @@ traindata = CycloneDataset(
     offset=cfg.dataset.offset,
     separate_zf=cfg.dataset.separate_zf,
     num_workers=cfg.dataset.num_workers,
+    real_potens=cfg.dataset.real_potens,
 )
 
 # TODO: hardcoded eval_sim for iteration_13 now
@@ -202,14 +196,12 @@ data = CycloneDataset(
     offset=cfg.dataset.offset,
     separate_zf=cfg.dataset.separate_zf,
     num_workers=cfg.dataset.num_workers,
+    real_potens=cfg.dataset.real_potens,
 )
 
-if not parser.predict_on_different:
-    cyclone_name = "_".join(data.files[0].split("/")[-1].split(".")[0].split("_")[:-1])
-else:
-    cyclone_name = parser.eval_sim
+cyclone_name = parser.eval_sim.replace(".h5", "")
 last = parser.last
-IDX_0 = parser.start_idx
+IDX_0 = cfg.dataset.offset
 ONESTEP = parser.onestep
 ifft_merge = "_ifft_merge" if parser.ifft_merge else ""
 OUT_DIR = f"{CKP}/{'onestep{}'.format(ifft_merge) if ONESTEP else 'autoreg_t{}{}'.format(IDX_0, ifft_merge)}/{cyclone_name}/{'best' if not last else 'ckp'}"
@@ -297,7 +289,7 @@ model_corr = defaultdict(dict)
 shift_scale_dict = defaultdict(dict)
 invert_fns = {
     "df": partial(invert_df, cfg=cfg, parser=parser),
-    "phi": invert_phi,
+    "phi": invert_phi if not cfg.dataset.real_potens else None,
     "flux": None
 }
 
@@ -352,7 +344,7 @@ with torch.no_grad():
             outputs = model(**inputs, **conds)
             # replace inputs with outputs for next timestep
             for key in model_inputs:
-                inputs[key] = outputs[key].clone()
+                inputs[key] = outputs[key].unsqueeze(0).clone()
         fwd_end = time.time()
         fwd_time.append(fwd_end - fwd_start)
 
@@ -380,6 +372,7 @@ with torch.no_grad():
 
             if isinstance(b_xt, torch.Tensor):
                 b_xt = b_xt.cpu().numpy()
+
             b_xt = b_xt.astype("float64").reshape(-1, order="F")
             # dump to file
             if OUT_DIR:

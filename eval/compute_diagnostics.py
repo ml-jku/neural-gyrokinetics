@@ -103,12 +103,12 @@ def main(args):
             pred_file = os.path.join(path, dir, k_poten_dict[dir])
         else:
             pred_file = os.path.join(path, dir, "Poten")
-
+            
         # Load dumped phi
         with open(pred_file, "rb") as fid:
             ff = np.fromfile(fid, dtype=np.float64)
-        resolution = (ns, nkx, nky)
-        real_phi = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+        resolution = (nkx, ns, nky)
+        real_phi = np.reshape(ff, resolution, order="F").astype("float32").copy()
 
         phi_fft = np.fft.fftn(real_phi, axes=(0, 2), norm="forward")
         # compute zf profile from 3D
