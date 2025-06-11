@@ -329,6 +329,8 @@ class CycloneDataset(Dataset):
             )
 
     def _separate_zf(self, x):
+        if not isinstance(x, np.ndarray):
+            x = np.array(x)
         nky = x.shape[-1]
         zf = np.repeat(x.mean(axis=-1, keepdims=True), repeats=nky, axis=-1)
         x = np.concatenate([zf, x - zf], axis=0)
@@ -351,27 +353,30 @@ class CycloneDataset(Dataset):
                 norm_axes = (1,2,3,4,5)
             elif key == "phi":
                 x, y = sample["phi"], sample["y_phi"]
+                if len(x.shape) == 3:
+                    x = np.expand_dims(x, 0)
+                    y = np.expand_dims(y, 0)
                 norm_axes = (1,2,3)
             else:
                 x = np.array([sample["gt_flux"]], dtype=np.float32)
                 y = None
                 norm_axes = (0,)
 
-            if self.separate_zf:
+            if self.separate_zf and key == "df":
                 x = self._separate_zf(x)
                 y = self._separate_zf(y)
 
             # Compute metrics for x and y
-            x_mean = x.mean(norm_axes, keepdims=True)
-            x_var = x.var(norm_axes, keepdims=True)
-            x_min = x.min(norm_axes, keepdims=True)
-            x_max = x.max(norm_axes, keepdims=True)
+            x_mean = np.mean(x, norm_axes, keepdims=True)
+            x_var = np.var(x, norm_axes, keepdims=True)
+            x_min = np.min(x, norm_axes, keepdims=True)
+            x_max = np.max(x, norm_axes, keepdims=True)
 
             if y is not None:
-                y_mean = y.mean(norm_axes, keepdims=True)
-                y_var = y.var(norm_axes, keepdims=True)
-                y_min = y.min(norm_axes, keepdims=True)
-                y_max = y.max(norm_axes, keepdims=True)
+                y_mean = np.mean(y, norm_axes, keepdims=True)
+                y_var = np.var(y, norm_axes, keepdims=True)
+                y_min = np.min(y, norm_axes, keepdims=True)
+                y_max = np.max(y, norm_axes, keepdims=True)
             else:
                 y_mean = y_var = y_min = y_max = None
 
@@ -489,8 +494,12 @@ class CycloneDataset(Dataset):
                 k = data[f"data/{k_name}"][:]
                 k_gt = data[f"data/{k_name_gt}"][:]
                 # select only active re/im parts
-                x.append(k[self.active_keys])
-                gt.append(k_gt[self.active_keys])
+                if all(self.active_keys == np.array([0,1])):
+                    x.append(k)
+                    gt.append(k_gt)
+                else:
+                    x.append(k[self.active_keys])
+                    gt.append(k_gt[self.active_keys])
             if "phi" in self.input_fields:
                 phi = data[f"data/{phi_name}"][:]
                 phi_gt = data[f"data/{phi_name_gt}"][:]
@@ -507,21 +516,24 @@ class CycloneDataset(Dataset):
         sample = {}
         if "df" in self.input_fields:
             # stack to shape (c, t, v1, v2, s, x, y)
-            x = np.stack(x, axis=1)
-            gt = np.stack(gt, axis=1)
             if self.bundle_seq_length == 1:
                 # sqeeze out time if we only have 1 timestep
-                x = x.squeeze(axis=1)
-                gt = gt.squeeze(axis=1)
+                x, gt = x[0], gt[0]
+            else:
+                x = np.stack(x, axis=1)
+                gt = np.stack(gt, axis=1)
         else:
             x, gt = None, None
+
         if "phi" in self.input_fields:
             # stack to shape (c, t, x, s, y)
-            poten = np.stack(poten, axis=1)
-            y_poten = np.stack(y_poten, axis=1)
             if self.bundle_seq_length == 1:
-                poten = poten.squeeze(axis=1)
-                y_poten = y_poten.squeeze(axis=1)
+                poten = poten[0]
+                y_poten = y_poten[0]
+            else:
+                poten = np.stack(poten, axis=1)
+                y_poten = np.stack(y_poten, axis=1)
+                
         else:
             poten, y_poten = None, None
 
