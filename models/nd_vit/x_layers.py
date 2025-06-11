@@ -259,7 +259,9 @@ class VSpaceReduce(AttentionDecoder):
 
         # qkv embeddings from inputs
         df = df.contiguous()
-        assert df.is_contiguous() and self.integral_token.is_contiguous(), "Tensors not contiguous."
+        assert (
+            df.is_contiguous() and self.integral_token.is_contiguous()
+        ), "Tensors not contiguous."
         q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
         k, v = rearrange(self.kv(df), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
         phi = F.scaled_dot_product_attention(
@@ -273,15 +275,15 @@ class VSpaceReduce(AttentionDecoder):
 
 class RSpaceReduce(AttentionDecoder):
     def __init__(
-            self,
-            dim: int,
-            out_dim: int,
-            num_heads: int,
-            gain: float = 1e-2,
-            qkv_bias: bool = False,
-            attn_drop: float = 0.0,
-            proj_drop: float = 0.0,
-            init_weights: Optional[str] = None,
+        self,
+        dim: int,
+        out_dim: int,
+        num_heads: int,
+        gain: float = 1e-2,
+        qkv_bias: bool = False,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        init_weights: Optional[str] = None,
     ):
         super().__init__(
             q_dim=dim,
@@ -305,9 +307,13 @@ class RSpaceReduce(AttentionDecoder):
 
         # qkv embeddings from inputs
         phi = phi.contiguous()
-        assert phi.is_contiguous() and self.integral_token.is_contiguous(), "Tensors not contiguous."
+        assert (
+            phi.is_contiguous() and self.integral_token.is_contiguous()
+        ), "Tensors not contiguous."
         q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
-        k, v = rearrange(self.kv(phi), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
+        k, v = rearrange(
+            self.kv(phi), "b n (t h c) -> t b h n c", t=2, h=self.num_heads
+        )
         phi = F.scaled_dot_product_attention(
             q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
         )

@@ -262,11 +262,11 @@ class SwinXnet(nn.Module):
         df, phi = self.patch_decode(
             df,
             phi,
-            df_cond=df_cond["condition"],
-            phi_cond=None if not use_phi else phi_cond["condition"],
             df_pad_axes=df_pad_axes,
             phi_pad_axes=phi_pad_axes,
             use_phi=use_phi,
+            df_cond=df_cond.get("condition"),
+            phi_cond=None if not use_phi else phi_cond.get("condition"),
         )
 
         flux = None
@@ -298,11 +298,11 @@ class SwinXnet(nn.Module):
         self,
         zdf: torch.Tensor,
         zphi: torch.Tensor,
-        df_cond: torch.Tensor,
-        phi_cond: torch.Tensor,
         df_pad_axes: Sequence,
         phi_pad_axes: Sequence,
         use_phi: bool = True,
+        df_cond: Optional[torch.Tensor] = None,
+        phi_cond: Optional[torch.Tensor] = None,
     ):
         # patch-space mixing
         if hasattr(self, "df_mix_unpatch"):
@@ -311,9 +311,9 @@ class SwinXnet(nn.Module):
             if use_phi:
                 zphi = self.phi_mix_unpatch(zphi, zdf)
         # expand to original
-        df = self.df_unet.patch_decode(zdf, df_cond, df_pad_axes)
+        df = self.df_unet.patch_decode(zdf, df_pad_axes, cond=df_cond)
         if use_phi:
-            phi = self.phi_unet.patch_decode(zphi, phi_cond, phi_pad_axes)
+            phi = self.phi_unet.patch_decode(zphi, phi_pad_axes, cond=phi_cond)
         else:
             phi=None
         return df, phi
@@ -475,11 +475,11 @@ class SwinXNetMultitask(SwinXnet):
         df, phi = self.patch_decode(
             df,
             phi,
-            df_cond=df_cond["condition"],
-            phi_cond=phi_cond["condition"],
             df_pad_axes=df_pad_axes,
             phi_pad_axes=phi_pad_axes,
-            use_phi=self.use_phi
+            use_phi=self.use_phi,
+            df_cond=df_cond.get("condition"),
+            phi_cond=phi_cond.get("condition"),
         )
 
         out = [df]

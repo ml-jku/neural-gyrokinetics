@@ -377,8 +377,6 @@ class SwinNDUnet(nn.Module):
         self.depth = depth
 
         # set layer type and conditioning
-        LocalLayer = SwinLayer
-        GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
         self.cond_embed = cond_embed
         self.condition_keys = sorted(conditioning)
         if self.cond_embed is not None:
@@ -388,25 +386,25 @@ class SwinNDUnet(nn.Module):
             if modulation == "film":
                 ModulatedSwinLayer = FilmSwinLayer
                 ModulatedViTLayer = FilmViTLayer
-            LocalLayer = partial(
-                ModulatedSwinLayer,
-                cond_dim=self.cond_embed.cond_dim,
-                use_rpb=use_rpb,
-                use_rope=use_rope,
-            )
-            if swin_bottleneck:
-                GlobalLayer = partial(
-                    ModulatedSwinLayer,
-                    cond_dim=self.cond_embed.cond_dim,
-                    window_size=window_size,
-                    use_rpb=use_rpb,
-                    use_rope=use_rope,
-                )
-            else:
-                GlobalLayer = partial(
-                    ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim
-                )
-
+            ModulatedSwinLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
+            ModulatedViTLayer = partial(ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim)
+            LocalLayer = ModulatedSwinLayer
+            GlobalLayer = ModulatedSwinLayer if swin_bottleneck else ModulatedViTLayer
+        else:
+            LocalLayer = SwinLayer
+            GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
+        LocalLayer = partial(
+            LocalLayer,
+            use_rpb=use_rpb,
+            use_rope=use_rope,
+        )
+        kwargs = {
+            "use_rpb": use_rpb,
+            "use_rope": use_rope,
+        }
+        if swin_bottleneck:
+            kwargs["window_size"] = window_size
+        GlobalLayer = partial(GlobalLayer, **kwargs)
         self.patch_embed = PatchEmbed(
             space=space,
             base_resolution=padded_base_resolution,
@@ -587,7 +585,7 @@ class SwinNDUnet(nn.Module):
         if self.patch_skip:
             df = torch.cat([df, first_res], -1)
 
-        df = self.patch_decode(df, cond["condition"], pad_axes)
+        df = self.patch_decode(df, pad_axes, cond=cond["condition"])
 
         if self.norm_output:
             df = df / df.std((2, 3, 4, 5, 6), keepdims=True)
@@ -604,7 +602,7 @@ class SwinNDUnet(nn.Module):
         return x, pad_axes
 
     def patch_decode(
-        self, z: torch.Tensor, cond: torch.Tensor, pad_axes: torch.Tensor
+        self, z: torch.Tensor, pad_axes: torch.Tensor, cond: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         # expand patches to original size
         x = self.unpatch(z, cond)
@@ -674,7 +672,7 @@ class Swin5DUnet(SwinNDUnet):
         return df, pad_axes
 
     def patch_decode(
-        self, z: torch.Tensor, cond: torch.Tensor, pad_axes: torch.Tensor
+        self, z: torch.Tensor, pad_axes: torch.Tensor, cond: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         # expand patches to original size
         df = self.unpatch(z, cond)
