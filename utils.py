@@ -99,9 +99,9 @@ def save_model_and_config(
     loss_val_min: float,
 ) -> float:
     # create directory if it s not there
-    os.makedirs(cfg.ckpt_path, exist_ok=True)
+    os.makedirs(cfg.output_path, exist_ok=True)
 
-    with open(os.path.join(cfg.ckpt_path, "config.yaml"), "w") as f:
+    with open(os.path.join(cfg.output_path, "config.yaml"), "w") as f:
         OmegaConf.save(config=cfg, f=f.name)
 
     state_dict = model.state_dict()
@@ -115,9 +115,10 @@ def save_model_and_config(
             "epoch": epoch,
             "model_state_dict": state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
             "loss": val_loss,
         },
-        f"{cfg.ckpt_path}/ckp.pth",
+        f"{cfg.output_path}/ckp.pth",
     )
 
     if val_loss < loss_val_min:
@@ -130,34 +131,32 @@ def save_model_and_config(
                 "scheduler_state_dict": scheduler.state_dict(),
                 "loss": val_loss,
             },
-            f"{cfg.ckpt_path}/best.pth",
+            f"{cfg.output_path}/best.pth",
         )
 
     return loss_val_min
 
 
 def load_model_and_config(
-    ckp_path: str, model: nn.Module, device: torch.DeviceObjType
+    ckp_path: str, model: nn.Module, device: torch.DeviceObjType, for_ddp=False,
 ) -> Tuple[nn.Module, Dict, int]:
     # TODO latest or best?
 
-    loaded_ckp = torch.load(ckp_path, map_location=device, weights_only=True)
-    optimizer_state_dict = loaded_ckp["optimizer_state_dict"]
-    temp_key = list(loaded_ckp["model_state_dict"].keys())[0]
-    if temp_key.startswith("module."):
-        loaded_ckp["model_state_dict"] = {
-            k.replace("module.", ""): v
-            for k, v in loaded_ckp["model_state_dict"].items()
+    loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
+    temp_key = list(loaded_ckpt["model_state_dict"].keys())[0]
+    if for_ddp:
+        loaded_ckpt["model_state_dict"] = {
+            "module."+k: v
+            for k, v in loaded_ckpt["model_state_dict"].items()
         }
-    model.load_state_dict(loaded_ckp["model_state_dict"])
-    resume_epoch = loaded_ckp["epoch"]
-    resume_loss = loaded_ckp["loss"]
+    model.load_state_dict(loaded_ckpt["model_state_dict"])
+    resume_epoch = loaded_ckpt["epoch"]
+    resume_loss = loaded_ckpt["loss"]
     print(
         f"Loading model {ckp_path} (stopped at epoch {resume_epoch}) "
         f"with loss {resume_loss:5f}"
     )
-
-    return model, optimizer_state_dict, resume_epoch
+    return model, loaded_ckpt
 
 
 def compress_src(path):

@@ -29,6 +29,7 @@ def create_parser():
     parser.add_argument("--last", action="store_true")
     parser.add_argument("--ifft_merge", action="store_true")
     parser.add_argument("--predict_on_different", action="store_true")
+    parser.add_argument("--start", type=int, default=0)
     return parser.parse_args()
 
 
@@ -91,7 +92,7 @@ def invert_df(b_xt, cfg, parser):
             b_xt = np.zeros_like(zf)
             b_xt[..., 0] = zf[..., 0]
             b_xt[..., 1:] = no_zf[..., :-1]
-            b_xt = torch.tensor(np.expand_dims(b_xt, axis=0)).to(xt.device)
+            b_xt = torch.tensor(np.expand_dims(b_xt, axis=0)).to(b_xt.device)
         else:
             zf = b_xt[:, :2]
             no_zf = b_xt[:, 2:]
@@ -201,7 +202,7 @@ data = CycloneDataset(
 
 cyclone_name = parser.eval_sim.replace(".h5", "")
 last = parser.last
-IDX_0 = cfg.dataset.offset
+IDX_0 = parser.start
 ONESTEP = parser.onestep
 ifft_merge = "_ifft_merge" if parser.ifft_merge else ""
 OUT_DIR = f"{CKP}/{'onestep{}'.format(ifft_merge) if ONESTEP else 'autoreg_t{}{}'.format(IDX_0, ifft_merge)}/{cyclone_name}/{'best' if not last else 'ckp'}"
@@ -242,7 +243,7 @@ if "ood" in parser.eval_sim:
         params["dg"] = infile["metadata/density_grad"][:]
         params["s_hat"] = infile["metadata/s_hat"][:]
         params["q"] = infile["metadata/q"][:]
-    timesteps = traindata.get_timesteps(torch.tensor([0], dtype=torch.long))
+    timesteps = traindata.get_timesteps(torch.tensor([0], dtype=torch.long), offset=cfg.dataset.offset)
     params["timestep"] = timesteps[:, 0].numpy()
     inputs = { "df": torch.tensor(k).unsqueeze(0).to(device, non_blocking=True) }
     conds = {k: torch.tensor(params[k]).float().to(device, non_blocking=True) for k in params.keys()}
@@ -254,7 +255,7 @@ else:
               getattr(sample, k) is not None}
     conds = {k: getattr(sample, k).unsqueeze(0).to(device, non_blocking=True) for k in conditioning if
              getattr(sample, k) is not None}
-    timesteps = data.get_timesteps(torch.tensor([0], dtype=torch.long))
+    timesteps = data.get_timesteps(torch.tensor([0], dtype=torch.long), offset=cfg.dataset.offset)
 
 if parser.predict_on_different:
     # we only use starting condition of iteration_13
@@ -344,7 +345,8 @@ with torch.no_grad():
             outputs = model(**inputs, **conds)
             # replace inputs with outputs for next timestep
             for key in model_inputs:
-                inputs[key] = outputs[key].unsqueeze(0).clone()
+                inputs[key] = outputs[key].clone()
+
         fwd_end = time.time()
         fwd_time.append(fwd_end - fwd_start)
 

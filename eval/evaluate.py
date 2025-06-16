@@ -233,16 +233,7 @@ def evaluate(
                 # trajectoy validation
                 n_timesteps_acc_model_saving = n_timesteps_acc
 
-        if cfg.ckpt_path is not None and not rank:
-            # mse_sat = log_metric_dict["val_traj/df_saturated_x1"]
-            # mse_lin = log_metric_dict["val_traj/df_linear_x1"]
-            # sat_ts = n_timesteps_acc_model_saving["saturated"]
-            # lin_ts = n_timesteps_acc_model_saving["linear"]
-            # if not cfg.dataset.offset:
-            #     val_loss = (mse_sat * sat_ts + mse_lin * lin_ts) / (sat_ts + lin_ts)
-            # else:
-            #     # skipping linear phase
-            #     val_loss = (mse_sat * sat_ts) / sat_ts
+        if not rank:
             # Save model if validation loss on trajectories improves
             val_loss = metrics["df"].mean()
             loss_val_min = save_model_and_config(
@@ -256,6 +247,6 @@ def evaluate(
                 loss_val_min=loss_val_min,
             )
         else:
-            warnings.warn("`cfg.ckpt_path` is not set: checkpoints will not be stored")
+            warnings.warn(f"checkpoints will not be stored for rank {rank}")
 
     return log_metric_dict, val_plots, loss_val_min

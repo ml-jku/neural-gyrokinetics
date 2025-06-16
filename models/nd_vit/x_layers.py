@@ -264,9 +264,16 @@ class VSpaceReduce(AttentionDecoder):
         ), "Tensors not contiguous."
         q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
         k, v = rearrange(self.kv(df), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
-        phi = F.scaled_dot_product_attention(
-            q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
-        )
+        q = q.expand(k.size(0), -1, -1, -1).contiguous()
+        if dist.is_initialized():
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                phi = F.scaled_dot_product_attention(
+                    q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
+                )
+        else:
+            phi = F.scaled_dot_product_attention(
+                q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
+            )
         phi = rearrange(phi, "b k n c -> b n (k c)")
         phi = self.proj(phi)
         phi = self.proj_drop(phi)
@@ -302,7 +309,7 @@ class RSpaceReduce(AttentionDecoder):
         self.out_dim = out_dim
 
     def forward(self, phi: torch.Tensor):
-        b, ns, nx, ny, _ = phi.shape
+        b, *_ = phi.shape
         phi = rearrange(phi, "b s x y c -> b (s x y) c")
 
         # qkv embeddings from inputs
@@ -314,9 +321,15 @@ class RSpaceReduce(AttentionDecoder):
         k, v = rearrange(
             self.kv(phi), "b n (t h c) -> t b h n c", t=2, h=self.num_heads
         )
-        phi = F.scaled_dot_product_attention(
-            q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
-        )
+        if dist.is_initialized():
+            with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                phi = F.scaled_dot_product_attention(
+                    q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
+            )
+        else:
+            phi = F.scaled_dot_product_attention(
+                q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
+            )
         phi = rearrange(phi, "b k n c -> b n (k c)")
         phi = self.proj(phi)
         phi = self.proj_drop(phi)

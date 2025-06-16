@@ -6,8 +6,10 @@ import sys
 import traceback
 import torch.multiprocessing as mp
 import torch
+import yaml
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from utils import set_seed, compress_src, find_free_port
@@ -28,18 +30,30 @@ def main(config: DictConfig):
 
     dict_config = OmegaConf.to_container(config)
     date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
-    if config.output_path is None:
-        dict_config["output_path"] = osp.join("outputs", date_and_time)
+    if not config.load_ckpt:
+        if config.output_path is None:
+            dict_config["output_path"] = osp.join("outputs", date_and_time)
+        else:
+            dict_config["output_path"] = osp.join(dict_config["output_path"], date_and_time)
+
+        if not os.path.exists(config.output_path):
+            os.makedirs(dict_config["output_path"], exist_ok=True)
+        
+        compress_src(dict_config["output_path"])
+
+        if dict_config["logging"]["run_id"] is None:
+            dict_config["logging"][
+                "run_id"
+            ] = f"{dict_config['model']['name']}_{date_and_time}"
+        config = OmegaConf.create(dict_config)
     else:
-        dict_config["output_path"] = osp.join(dict_config["output_path"], date_and_time)
-
-    dict_config["ckpt_path"] = dict_config["output_path"]
-    config = OmegaConf.create(dict_config)
-
-    if not os.path.exists(config.output_path):
-        os.makedirs(dict_config["output_path"], exist_ok=True)
-
-    compress_src(dict_config["output_path"])
+        # check that output path exists
+        assert os.path.exists(config.output_path), "Output path does not exist, cannot load ckpt"
+        assert os.path.exists(f"{config.output_path}/best.pth"), "Output path does not contain checkpoint best.pt"
+        config = OmegaConf.create(yaml.safe_load(open(f"{config.output_path}/config.yaml", "r")))
+        overrides_dotlist = [str(o) for o in HydraConfig.get().overrides.task]
+        cli_conf = OmegaConf.from_dotlist(overrides_dotlist)
+        config = OmegaConf.merge(config, cli_conf)
 
     if torch.cuda.is_available():
         n_gpus = torch.cuda.device_count()
@@ -48,20 +62,7 @@ def main(config: DictConfig):
         world_size = 1
 
     train_method = "default"  # TODO
-
-    if dict_config["model"]["loss_weights"] is None:
-        dict_config["model"]["loss_weights"] = {}
-    if dict_config["model"]["extra_loss_weights"] is None:
-        dict_config["model"]["extra_loss_weights"] = {}
-
     try:
-        if dict_config["logging"]["run_id"] is None:
-            print(dict_config["model"]["name"])
-            dict_config["logging"][
-                "run_id"
-            ] = f"{dict_config['model']['name']}_{date_and_time}"
-            config = OmegaConf.create(dict_config)
-
         if config.ddp.enable and world_size > 1 and config.ddp.n_nodes == 1:
             if "SLURM_NODELIST" not in os.environ:
                 os.environ["MASTER_ADDR"] = "localhost"

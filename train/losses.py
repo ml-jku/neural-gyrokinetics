@@ -11,7 +11,7 @@ from torch.distributed import get_rank, is_initialized
 
 from concurrent.futures import ThreadPoolExecutor
 
-from utils import save_model_and_config, get_linear_burn_in_fn
+from utils import save_model_and_config
 from dataset.cyclone import CycloneDataset, CycloneSample
 from train.integrals import FluxIntegral
 
@@ -76,7 +76,11 @@ class LossWrapper(nn.Module):
                 assert "df" in preds, "Integral losses requires df (5D)."
                 pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
                 if "phi" in preds:
+                    if preds["phi"].ndim == 3:
+                        preds["phi"] = preds["phi"].unsqueeze(0)
                     pred_phi.append(self.denormalize_fn(f, phi=preds["phi"][b]))
+                if tgts["phi"].ndim == 3:
+                    tgts["phi"] = tgts["phi"].unsqueeze(0)
                 tgt_phi.append(self.denormalize_fn(f, phi=tgts["phi"][b]))
                 tgt_eflux.append(self.denormalize_fn(f, flux=tgts["flux"][b]))
             pred_df = torch.stack(pred_df)
@@ -158,6 +162,8 @@ class LossWrapper(nn.Module):
                     other_loss = relative_norm_mse(preds[k][:, 2:], tgts[k][:, 2:])
                     losses[k] = zf_loss + other_loss
                 else:
+                    if preds[k].shape != tgts[key].shape and k == "phi":
+                        preds[k] = preds[k].unsqueeze(0)
                     losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
                 losses[k] = F.mse_loss(preds[k], tgts[k])
@@ -462,7 +468,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                 if is_main_proc and writer:
                     writer.log({f"pretrain/val_{valname}_relative_norm_mse": val_mse})
 
-            if cfg.ckpt_path is not None and is_main_proc:
+            if is_main_proc:
                 # Save model if validation loss improves
                 loss_val_min = save_model_and_config(
                     model,
@@ -474,7 +480,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                     loss_val_min=loss_val_min,
                 )
             else:
-                warnings.warn("`cfg.ckpt_path` not set: checkpoints will not be stored")
+                warnings.warn(f"checkpoints will not be stored for rank {rank}")
 
         epoch_str = str(epoch).zfill(
             len(str(int(cfg.training.pretraining_kwargs.n_epochs)))

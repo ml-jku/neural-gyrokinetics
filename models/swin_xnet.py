@@ -485,7 +485,7 @@ class SwinXNetMultitask(SwinXnet):
         out = [df]
         if self.use_phi:
             phi = rearrange(phi, "b c s x y -> b c x s y")
-            out += [phi]
+            out += [phi.squeeze()]
 
         flux = None
         if self.flux_head is not None:
@@ -493,6 +493,6 @@ class SwinXNetMultitask(SwinXnet):
         out += [flux]
 
         outputs = {}
-        for key, pred in zip(self.outputs, out):
-            outputs[key] = pred.squeeze()
+        for key, pred in zip(self.outputs, out):            
+            outputs[key] = pred
         return outputs

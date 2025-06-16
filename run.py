@@ -49,8 +49,6 @@ def runner(rank, cfg, train_method, world_size):
         use_ddp = False
 
     if not rank:
-        data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
-        cfg.logging.run_name = f"{cfg.model.name}_{data_and_time}"
         writer = setup_logging(cfg)
     else:
         writer = None
@@ -74,14 +72,6 @@ def runner(rank, cfg, train_method, world_size):
         model = DDP(model, device_ids=[rank])
 
     bundle_seq_length = cfg.model.bundle_seq_length
-
-    opt_state_dict = None
-    if cfg.load_ckp is True and cfg.ckpt_path is not None:
-        # TODO move config loading to here (now in main.py)
-        model, opt_state_dict, _ = load_model_and_config(
-            cfg.ckpt_path, model=model, device=device
-        )
-
     if cfg.mode == "train":
         n_epochs = cfg.training.n_epochs
         total_steps = n_epochs * len(trainloader)
@@ -104,9 +94,6 @@ def runner(rank, cfg, train_method, world_size):
                 num_warmup_steps=total_steps // 6,
                 num_training_steps=total_steps,
             )
-
-        if opt_state_dict is not None:
-            opt.load_state_dict(opt_state_dict)
 
         loss_scheduler_dict = {}
         weights = dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights)
@@ -163,9 +150,22 @@ def runner(rank, cfg, train_method, world_size):
         conditioning = cfg.model.conditioning
         idx_keys = ["file_index", "timestep_index"]
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
-        loss_val_min = torch.inf
-        cur_update_step = 0.
-        for epoch in range(1, n_epochs + 1):
+
+        if cfg.load_ckpt:
+            # choosing best.pt since ckpt.pt does not contain scheduler sd
+            ckpt_path = os.path.join(cfg.output_path, "best.pth")
+            model, ckpt_dict = load_model_and_config(ckpt_path, model, device, for_ddp=use_ddp)
+            opt.load_state_dict(ckpt_dict["optimizer_state_dict"])
+            scheduler.load_state_dict(ckpt_dict["scheduler_state_dict"])
+            start_epoch = ckpt_dict["epoch"]
+            loss_val_min = ckpt_dict["loss"]
+            cur_update_step = start_epoch * cfg.training.batch_size * len(trainloader)
+        else:
+            loss_val_min = torch.inf
+            cur_update_step = 0.
+            start_epoch = 1
+
+        for epoch in range(start_epoch + 1, n_epochs + 1):
             loss_logs = {k: 0 for k in loss_wrap.active_losses}
             loss_logs["relative_norm"] = 0.0
             model.train()

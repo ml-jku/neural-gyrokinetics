@@ -97,7 +97,7 @@ def get_data(cfg):
             pin_memory=cfg.training.pin_memory,
             sampler=DistributedSampler(trainset) if use_ddp else None,
             persistent_workers=True,
-            prefetch_factor=cfg.training.num_workers,
+            prefetch_factor=cfg.training.num_workers // 2,
         )
 
         holdout_trajectories_valloader = DataLoader(
@@ -111,7 +111,7 @@ def get_data(cfg):
                 DistributedSampler(holdout_trajectories_valset) if use_ddp else None
             ),
             persistent_workers=True,
-            prefetch_factor=cfg.training.num_workers,
+            prefetch_factor=cfg.training.num_workers // 2,
         )
 
         if partial_holdouts:

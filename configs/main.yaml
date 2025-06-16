@@ -19,4 +19,4 @@ amp:
 mode: "train"
 eval: true
 device: "cuda"
-load_ckp: false
+load_ckpt: false

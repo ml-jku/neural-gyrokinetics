@@ -659,7 +659,8 @@ class CycloneDataset(Dataset):
         return sample
 
     def get_timesteps(
-        self, file_idx: torch.Tensor, timestep_idx: Optional[torch.Tensor] = None
+        self, file_idx: torch.Tensor, timestep_idx: Optional[torch.Tensor] = None,
+        offset: int = 0
     ):
         # file_idx: (B,)
         if isinstance(file_idx, int):
@@ -705,7 +706,7 @@ class CycloneDataset(Dataset):
             file_index, t_index = self.flat_index_to_file_and_tstep[idx]
 
             with h5py.File(self.files[file_index], "r") as f:
-                timesteps_array = f["metadata/timesteps"][:]
+                timesteps_array = f["metadata/timesteps"][offset:]
                 step_value = timesteps_array[t_index]
 
             timesteps_list.append(torch.tensor(step_value, dtype=self.dtype))
