@@ -223,7 +223,7 @@ if "detach_flux_latents" not in cfg.model.swin:
     cfg.model.swin.detach_flux_latents=False
 model = get_model(cfg, dataset=data)
 path = f"{CKP}/best.pth" if not last else f"{CKP}/ckp.pth"
-model, _, _ = load_model_and_config(path, model, device)
+model, *_ = load_model_and_config(path, model, device)
 model = model.to(device)
 model = model.eval()
 
