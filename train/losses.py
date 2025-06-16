@@ -162,7 +162,7 @@ class LossWrapper(nn.Module):
                     other_loss = relative_norm_mse(preds[k][:, 2:], tgts[k][:, 2:])
                     losses[k] = zf_loss + other_loss
                 else:
-                    if preds[k].shape != tgts[key].shape and k == "phi":
+                    if preds[k].shape != tgts[k].shape and k == "phi":
                         preds[k] = preds[k].unsqueeze(0)
                     losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
