@@ -159,7 +159,7 @@ def runner(rank, cfg, train_method, world_size):
             scheduler.load_state_dict(ckpt_dict["scheduler_state_dict"])
             start_epoch = ckpt_dict["epoch"]
             loss_val_min = ckpt_dict["loss"]
-            cur_update_step = start_epoch * cfg.training.batch_size * len(trainloader)
+            cur_update_step = start_epoch * len(trainloader)
         else:
             loss_val_min = torch.inf
             cur_update_step = 0.
