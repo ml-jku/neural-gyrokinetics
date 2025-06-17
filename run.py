@@ -69,7 +69,7 @@ def runner(rank, cfg, train_method, world_size):
     model = get_model(cfg, dataset=trainset, train_method=train_method)
     model = model.to(device)
     if use_ddp:
-        model = DDP(model, device_ids=[rank])
+        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     bundle_seq_length = cfg.model.bundle_seq_length
     if cfg.mode == "train":
@@ -100,8 +100,10 @@ def runner(rank, cfg, train_method, world_size):
         for key in weights.keys():
             start = weights[key]
             if start > 0. and cfg.model.loss_scheduler[key]:
-                loss_scheduler_dict[key] = get_linear_burn_in_fn(start, end=1.0, start_fraction=0.5, end_fraction=0.9)
-
+                scheduler_params = getattr(cfg.model.loss_scheduler, key)
+                loss_scheduler_dict[key] = get_linear_burn_in_fn(scheduler_params.start, end=scheduler_params.end, 
+                                                                 start_fraction=scheduler_params.start_fraction, 
+                                                                 end_fraction=scheduler_params.end_fraction)
         # configure loss
         predict_delta = cfg.training.predict_delta
         loss_wrap = LossWrapper(
@@ -139,7 +141,7 @@ def runner(rank, cfg, train_method, world_size):
                 model, cfg, trainloader, valloaders, writer, device
             )  # only valuate on the holdout trajectories, not the holdout samples
             if not hasattr(model, "module") and use_ddp:
-                model = DDP(model, device_ids=[rank])
+                model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
         input_fields = set(cfg.dataset.input_fields)
         output_fields = list(

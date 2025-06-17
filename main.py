@@ -36,7 +36,7 @@ def main(config: DictConfig):
         else:
             dict_config["output_path"] = osp.join(dict_config["output_path"], date_and_time)
 
-        if not os.path.exists(config.output_path):
+        if not os.path.exists(dict_config["output_path"]):
             os.makedirs(dict_config["output_path"], exist_ok=True)
         
         compress_src(dict_config["output_path"])
