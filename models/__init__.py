@@ -109,12 +109,15 @@ def get_model(cfg, dataset, train_method="default"):
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         decouple_mu = cfg.model.decouple_mu
         refiner = train_method == "refiner"
-        outputs = [k for k in cfg.model.loss_weights.keys() if cfg.model.loss_weights[k] > 0.0]
+        outputs = [k for k in cfg.model.loss_weights.keys() 
+                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]]
         swin_bottleneck = cfg.model.swin.swin_bottleneck
         use_rpb = cfg.model.swin.use_rpb
         use_rope = cfg.model.swin.use_rope
         latent_cross_attn = cfg.model.swin.latent_cross_attn
         flux_reduce = cfg.model.swin.flux_reduce
+        flux_num_heads = cfg.model.swin.flux_num_heads
+        flux_depth = cfg.model.swin.flux_depth
 
         cond_fn = None
         conditioning = cfg.model.conditioning
@@ -161,6 +164,8 @@ def get_model(cfg, dataset, train_method="default"):
             detach_flux_latents=cfg.model.swin.detach_flux_latents,
             real_potens=cfg.dataset.real_potens,
             flux_reduce=flux_reduce,
+            flux_num_heads=flux_num_heads,
+            flux_depth=flux_depth
         )
 
     if cfg.model.name == "swin_flat":

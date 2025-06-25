@@ -78,12 +78,10 @@ class MixingBlock(nn.Module):
 class LatentMixingTransformer(nn.Module):
     def __init__(
         self,
-        space: int,
         left_dim: int,
         right_dim: int,
         depth: int,
         num_heads: int,
-        grid_size: Sequence[int],
         mlp_ratio: float = 4.0,
         qkv_bias: bool = False,
         drop_path: Union[Sequence[float], float] = 0.0,
@@ -99,10 +97,8 @@ class LatentMixingTransformer(nn.Module):
         if isinstance(drop_path, float):
             drop_path = [drop_path] * depth
 
-        self.depth = depth
         self.left_dim = left_dim
         self.right_dim = right_dim
-        self.grid_size = grid_size
         self.drop_path = drop_path
 
         assert left_dim % num_heads == 0
@@ -110,10 +106,8 @@ class LatentMixingTransformer(nn.Module):
         self.blocks = nn.ModuleList(
             [
                 MixingBlock(
-                    space,
                     left_dim=left_dim,
                     right_dim=right_dim,
-                    grid_size=grid_size,
                     num_heads=num_heads,
                     mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias,
@@ -146,6 +140,7 @@ class FluxDecoder(nn.Module):
         left_dims: Sequence[int],
         right_dims: Sequence[int],
         num_heads: int,
+        depth: int,
         mlp_ratio: float = 2.0,
         qkv_bias: bool = True,
         drop: float = 0.0,
@@ -165,11 +160,11 @@ class FluxDecoder(nn.Module):
         flux_latent_size = 0
         for left_dim, right_dim in zip(left_dims, right_dims):
             flux_blocks.append(
-                MixingBlock(
-                    left_dim,
-                    right_dim,
-                    num_heads,
-                    mlp_ratio,
+                LatentMixingTransformer(
+                    left_dim=left_dim,
+                    right_dim=right_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
                     qkv_bias=qkv_bias,
                     drop=drop,
                     attn_drop=attn_drop,
@@ -177,6 +172,7 @@ class FluxDecoder(nn.Module):
                     norm_layer=norm_layer,
                     act_fn=act_fn,
                     init_weights=init_weights,
+                    depth=depth,
                 )
             )
             if self.reduction == "integral":
@@ -184,7 +180,7 @@ class FluxDecoder(nn.Module):
                     RSpaceReduce(
                         dim=left_dim,
                         out_dim=left_dim,
-                        num_heads=8,
+                        num_heads=num_heads,
                         attn_drop=0.1,
                         init_weights="xavier_uniform",
                     )

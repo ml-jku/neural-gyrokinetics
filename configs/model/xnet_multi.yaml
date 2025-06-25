@@ -7,15 +7,25 @@ conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
 extra_zf_loss: false
 loss_scheduler:
   df: null
-  phi: null
-  flux: 
+  phi:
     type: "linear"
     start: 0
     end: 1
     start_fraction: 0.5
+    end_fraction: 0.7
+  flux: 
+    type: "linear"
+    start: 0
+    end: 1
+    start_fraction: 0.7
     end_fraction: 0.9
   phi_int: null
-  flux_int: null
+  flux_int:
+    type: "linear"
+    start: 0
+    end: 0.01
+    start_fraction: 0.9
+    end_fraction: 1.0
   phi_cross: null
   flux_cross: null
 loss_weights:
@@ -51,3 +61,5 @@ swin:
   use_rope: false
   detach_flux_latents: false
   flux_reduce: "max"
+  flux_num_heads: 8
+  flux_depth: 1

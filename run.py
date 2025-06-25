@@ -98,8 +98,7 @@ def runner(rank, cfg, train_method, world_size):
         loss_scheduler_dict = {}
         weights = dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights)
         for key in weights.keys():
-            start = weights[key]
-            if start > 0. and cfg.model.loss_scheduler[key]:
+            if cfg.model.loss_scheduler[key]:
                 scheduler_params = getattr(cfg.model.loss_scheduler, key)
                 loss_scheduler_dict[key] = get_linear_burn_in_fn(scheduler_params.start, end=scheduler_params.end, 
                                                                  start_fraction=scheduler_params.start_fraction, 
@@ -180,7 +179,7 @@ def runner(rank, cfg, train_method, world_size):
 
             ############################# train loop start #############################
 
-            for i, sample in enumerate(trainloader):
+            for _, sample in enumerate(trainloader):
                 try:
                     reset_peak_memory_stats(device)
                 except:
@@ -254,7 +253,11 @@ def runner(rank, cfg, train_method, world_size):
 
                 cur_update_step += 1.
                 for k in loss_wrap.active_losses:
-                    loss_logs[k] += losses[k].item()
+                    if k not in loss_logs:
+                        # if schedulers start from zero
+                        loss_logs[k] = losses[k]    
+                    else:
+                        loss_logs[k] += losses[k].item()
                 loss_logs["relative_norm"] += loss.item()
 
                 del inputs

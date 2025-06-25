@@ -1,5 +1,5 @@
 batch_size: 16
-n_epochs: 200
+n_epochs: 500
 num_workers: 4
 pin_memory: true
 learning_rate: 3e-4

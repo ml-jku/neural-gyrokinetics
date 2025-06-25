@@ -45,6 +45,8 @@ class SwinXnet(nn.Module):
         detach_flux_latents: bool = False,
         real_potens: bool = False,
         flux_reduce: str = "max",
+        flux_num_heads: int = 8,
+        flux_depth: int = 1
     ):
         super().__init__()
 
@@ -133,7 +135,8 @@ class SwinXnet(nn.Module):
             self.flux_head = FluxDecoder(
                 self.phi_unet.down_dims[::-1],
                 self.df_unet.down_dims[::-1],
-                num_heads=8,
+                num_heads=flux_num_heads,
+                depth=flux_depth,
                 drop=flux_drop,
                 attn_drop=0.1,
                 detach_latents=detach_flux_latents,

@@ -134,6 +134,10 @@ class LossWrapper(nn.Module):
     ):
         losses = {}
         int_losses = {}
+        # reset weight if scheduler is defined
+        for key in self.schedulers.keys():
+            if key in self.weights:
+                self.weights[key] = self.schedulers[key](progress_remaining)
         # NOTE: network predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
         # only compute integrals if requested by weights or in eval
         do_ints = not self.training and compute_integrals
@@ -170,10 +174,6 @@ class LossWrapper(nn.Module):
         for k in int_keys + cross_keys:
             losses[k] = int_losses[k]
         if self.training:
-            # reset weight if scheduler is defined
-            for key in self.schedulers.keys():
-                if key in self.weights:
-                    self.weights[key] = self.schedulers[key](progress_remaining)
             # reweight and accumulate
             loss = sum([self.weights[k] * losses[k] for k in loss_keys])
             # filter active losses

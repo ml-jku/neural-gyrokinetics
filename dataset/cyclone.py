@@ -382,8 +382,8 @@ class CycloneDataset(Dataset):
 
             return (x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max)
 
-        if os.path.exists(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl")):
-            stats = pickle.load(open(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl"), "rb"))
+        if os.path.exists(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl")):
+            stats = pickle.load(open(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl"), "rb"))
         else:
             process_inds = partial(process_t_idx, key=key)
             stats = None
@@ -403,7 +403,7 @@ class CycloneDataset(Dataset):
                     if y_mean is not None:
                         stats.update(y_mean, y_var, y_min, y_max)
 
-                pickle.dump(stats, open(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl"), "wb"))
+                pickle.dump(stats, open(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl"), "wb"))
 
         return stats
 
