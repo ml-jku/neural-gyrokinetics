@@ -20,12 +20,7 @@ loss_scheduler:
     start_fraction: 0.7
     end_fraction: 0.9
   phi_int: null
-  flux_int:
-    type: "linear"
-    start: 0
-    end: 0.01
-    start_fraction: 0.9
-    end_fraction: 1.0
+  flux_int: null
   phi_cross: null
   flux_cross: null
 loss_weights:
@@ -34,7 +29,7 @@ loss_weights:
   flux: 1e-5
 extra_loss_weights:
   phi_int: 0.0
-  flux_int: 1e-4
+  flux_int: 0.0
   phi_cross: 0.0
   flux_cross: 0.0
 
@@ -63,3 +58,6 @@ swin:
   flux_reduce: "max"
   flux_num_heads: 8
   flux_depth: 1
+  init_weights: "kaiming_uniform"
+  patching_init_weights: "kaiming_uniform"
+  cond_init_weights: "normal_smallvar"

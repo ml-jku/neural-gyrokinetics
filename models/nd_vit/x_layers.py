@@ -1,4 +1,5 @@
 from typing import Sequence, Union, Optional, Type
+from functools import partial
 
 import torch
 from torch import nn
@@ -61,6 +62,9 @@ class MixingBlock(nn.Module):
             pass
         elif init_weights == "xavier_uniform":
             self.mlp.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights == "kaiming_uniform":
+            self.mlp.apply(seq_weight_init(partial(nn.init.kaiming_uniform_, 
+                                                   nonlinearity="relu", mode="fan_in", a=0)))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.mlp.apply(seq_weight_init(nn.init.trunc_normal_))
         else:

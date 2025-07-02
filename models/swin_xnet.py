@@ -46,7 +46,10 @@ class SwinXnet(nn.Module):
         real_potens: bool = False,
         flux_reduce: str = "max",
         flux_num_heads: int = 8,
-        flux_depth: int = 1
+        flux_depth: int = 1,
+        init_weights: str = "xavier_uniform",
+        patching_init_weights: str = "xavier_uniform",
+        cond_init_weights: str = "normal_smallvar",
     ):
         super().__init__()
 
@@ -94,6 +97,9 @@ class SwinXnet(nn.Module):
             patch_skip=patch_skip,
             decouple_mu=decouple_mu,
             swin_bottleneck=swin_bottleneck,
+            init_weights=init_weights,
+            cond_init_weights=cond_init_weights,
+            patching_init_weights=patching_init_weights
         )
 
         self.phi_unet = SwinNDUnet(
@@ -123,6 +129,9 @@ class SwinXnet(nn.Module):
             swin_bottleneck=swin_bottleneck,
             use_rpb=use_rpb,
             use_rope=use_rope,
+            init_weights=init_weights,
+            cond_init_weights=cond_init_weights,
+            patching_init_weights=patching_init_weights
         )
         self.phi_up_blocks = self.phi_unet.up_blocks
         self.phi_down_blocks = self.phi_unet.down_blocks
@@ -140,7 +149,7 @@ class SwinXnet(nn.Module):
                 drop=flux_drop,
                 attn_drop=0.1,
                 detach_latents=detach_flux_latents,
-                init_weights="xavier_uniform",
+                init_weights=init_weights,
                 reduction=flux_reduce,
             )
 
@@ -152,9 +161,9 @@ class SwinXnet(nn.Module):
             df_down_dims = self.df_unet.down_dims
             for df_dim, phi_dim in zip(df_down_dims, phi_down_dims):
                 df_mix.append(MixingBlock(df_dim, phi_dim, num_heads=8, attn_drop=0.1,
-                                          init_weights="xavier_uniform"))
+                                          init_weights=init_weights))
                 phi_mix.append(MixingBlock(phi_dim, df_dim, num_heads=8, attn_drop=0.1,
-                                           init_weights="xavier_uniform"))
+                                           init_weights=init_weights))
             self.df_mix = nn.ModuleList(df_mix)
             self.phi_mix = nn.ModuleList(phi_mix)
 
@@ -168,7 +177,7 @@ class SwinXnet(nn.Module):
                         right_dim=phi_blk.dim,
                         num_heads=8,
                         attn_drop=0.1,
-                        init_weights="xavier_uniform",
+                        init_weights=init_weights,
                     )
                 )
                 phi_mix_up.append(
@@ -177,7 +186,7 @@ class SwinXnet(nn.Module):
                         right_dim=df_blk.dim,
                         num_heads=8,
                         attn_drop=0.1,
-                        init_weights="xavier_uniform",
+                        init_weights=init_weights,
                     )
                 )
             self.df_mix_up = nn.ModuleList(df_mix_up)
@@ -187,11 +196,11 @@ class SwinXnet(nn.Module):
             phi_patch_dim = self.phi_unet.unpatch.dim * (2 if patch_skip else 1)
             self.df_mix_unpatch = MixingBlock(
                 left_dim=df_patch_dim, right_dim=phi_patch_dim, num_heads=8, attn_drop=0.1,
-                init_weights="xavier_uniform"
+                init_weights=init_weights
             )
             self.phi_mix_unpatch = MixingBlock(
                 left_dim=phi_patch_dim, right_dim=df_patch_dim, num_heads=8, attn_drop=0.1,
-                init_weights="xavier_uniform"
+                init_weights=init_weights
             )
 
     def forward(

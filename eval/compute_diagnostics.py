@@ -55,7 +55,7 @@ def dump_df_diagnostics(df, geometry, ds, nx, ny, ns, nkx, nky, dir, args,
     padded = np.zeros((nx, ns, ny)).astype(phi_fft.dtype)
     padded[xpad:xpad + nkx, :, :nky] = fourier_zf
     fourier_zf = np.fft.fftshift(padded, axes=(0,))
-    phi_zf = np.fft.irfftn(fourier_zf, axes=(0, 2), norm="forward", s=[135, 96])
+    phi_zf = np.fft.irfftn(fourier_zf, axes=(0, 2), norm="forward", s=[nx, ny])
     filename = f"df_zf_{args.zf_mode}mode_profile"
     if reduced:
         filename += "_reduced"
@@ -78,18 +78,21 @@ def dump_df_diagnostics(df, geometry, ds, nx, ny, ns, nkx, nky, dir, args,
     np.savetxt(os.path.join(dir, filename), [flux_spectra.sum()])
 
 def dump_phi_diagnostics(phi, nx, ns, ny, nkx, nky, dir, args,
-                         reduced=False):
+                         reduced=False, pad=True):
     phi_fft = np.fft.fftn(phi, axes=(0, 2), norm="forward")
     # compute zf profile from 3D
     fourier_zf = phi_fft.copy()
     # mask everything except the zf_mode
     fourier_zf[..., :args.zf_mode] = 0.
     fourier_zf[..., args.zf_mode+1:] = 0.
-    padded = np.zeros((nx, ns, ny)).astype(phi_fft.dtype)
-    xpad = (nx - nkx) // 2 + 1
-    padded[xpad:xpad + nkx, :, :nky] = fourier_zf
+    if pad:
+        padded = np.zeros((nx, ns, ny)).astype(phi_fft.dtype)
+        xpad = (nx - nkx) // 2 + 1
+        padded[xpad:xpad + nkx, :, :nky] = fourier_zf
+    else:
+        padded = fourier_zf
     fourier_zf = np.fft.fftshift(padded, axes=(0,))
-    phi_zf = np.fft.irfftn(fourier_zf, axes=(0, 2), norm="forward", s=[135, 96])
+    phi_zf = np.fft.irfftn(fourier_zf, axes=(0, 2), norm="forward", s=[nx, ny])
     filename = f"poten_zf_{args.zf_mode}mode_profile"
     if reduced:
         filename += "_reduced"
@@ -106,7 +109,7 @@ def main(args):
         sim = path.split("/")[-1]
         print(f"Computing diagnostics for original sim {sim}")
         k_dirs = K_files(path)
-        potens = poten_files(path)
+        potens, _ = poten_files(path)
         k_poten_dict = dict(zip(k_dirs, potens))
         compute_for_raw = True
         dump_path = os.path.join(path, "python_diagnostics")
@@ -148,25 +151,35 @@ def main(args):
 
         resolution = (nvpar, nmu, ns, nkx, nky)
         # Reshape the distribution function (copy for speeed in stat computation)
-        knth = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+        if not compute_for_raw:
+            knth = np.reshape(ff, (2, *resolution)).astype("float32").copy()
+        else:
+            # order changed after inference
+            knth = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
         pred_df.append(knth)
 
         dump_df_diagnostics(knth, geometry, ds, nx, ny, ns, nkx, nky, dir, args)
 
         # compute zf profile from 3D potens
         if compute_for_raw:
-            pred_file = os.path.join(path, dir, k_poten_dict[dir])
+            pred_file = os.path.join(path, k_poten_dict[dir.split('/')[-1]])
         else:
             pred_file = os.path.join(path, dir, "Poten")
             
         # Load dumped phi
-        with open(pred_file, "rb") as fid:
-            ff = np.fromfile(fid, dtype=np.float64)
-        resolution = (nkx, ns, nky)
-        real_phi = np.reshape(ff, resolution, order="F").astype("float32").copy()
+        if not compute_for_raw:
+            with open(pred_file, "rb") as fid:
+                ff = np.fromfile(fid, dtype=np.float64)
+            resolution = (nkx, ns, nky)
+            # order is different if we load from predicted files
+            real_phi = np.reshape(ff, resolution).astype("float32").copy()
+        else:
+            ff = np.loadtxt(pred_file, dtype=np.float64)
+            resolution = (nx, ns, ny)
+            real_phi = np.reshape(ff, resolution, order="F").astype("float32").copy()
         pred_poten.append(real_phi)
         
-        dump_phi_diagnostics(real_phi, nx, ns, ny, nkx, nky, dir, args)
+        dump_phi_diagnostics(real_phi, nx, ns, ny, nkx, nky, dir, args, pad=not compute_for_raw)
 
     # average over predicted df and phi
     pred_poten = np.mean(pred_poten, axis=0)
@@ -175,7 +188,7 @@ def main(args):
 
     # again compute diagnostics
     dump_df_diagnostics(pred_df, geometry, ds, nx, ny, ns, nkx, nky, dir, args, reduced=True)
-    dump_phi_diagnostics(real_phi, nx, ns, ny, nkx, nky, dir, args, reduced=True)
+    dump_phi_diagnostics(real_phi, nx, ns, ny, nkx, nky, dir, args, reduced=True, pad=not compute_for_raw)
 
 if __name__ == '__main__':
     args = parse_args()

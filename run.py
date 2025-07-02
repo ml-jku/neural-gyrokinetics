@@ -26,7 +26,8 @@ from utils import (
     setup_logging,
     edit_tag,
     get_linear_burn_in_fn,
-    remainig_progress
+    remainig_progress,
+    exclude_from_weight_decay
 )
 
 
@@ -69,18 +70,25 @@ def runner(rank, cfg, train_method, world_size):
     model = get_model(cfg, dataset=trainset, train_method=train_method)
     model = model.to(device)
     if use_ddp:
-        model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
 
     bundle_seq_length = cfg.model.bundle_seq_length
     if cfg.mode == "train":
         n_epochs = cfg.training.n_epochs
         total_steps = n_epochs * len(trainloader)
 
+        if cfg.training.exclude_from_wd is not None:
+            params = exclude_from_weight_decay(model, cfg.training.exclude_from_wd, 
+                                               weight_decay=cfg.training.weight_decay)
+        else:
+            params = model.parameters()
+        
         # optimizer config
         opt = torch.optim.Adam(
-            model.parameters(),
+            params,
             lr=cfg.training.learning_rate,
             weight_decay=cfg.training.weight_decay,
+            betas=(0.9, 0.95)
         )
 
         use_amp = cfg.amp.enable
@@ -164,7 +172,7 @@ def runner(rank, cfg, train_method, world_size):
         else:
             loss_val_min = torch.inf
             cur_update_step = 0.
-            start_epoch = 1
+            start_epoch = 0
 
         for epoch in range(start_epoch + 1, n_epochs + 1):
             loss_logs = {k: 0 for k in loss_wrap.active_losses}

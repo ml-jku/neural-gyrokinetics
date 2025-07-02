@@ -5,6 +5,7 @@ pin_memory: true
 learning_rate: 3e-4
 final_learning_rate: 1e-6
 weight_decay: 1e-5
+exclude_from_wd: ["cond"]
 predict_delta: false
 scheduler: "cosine"
 clip_grad: true

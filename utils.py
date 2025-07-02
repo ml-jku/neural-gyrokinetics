@@ -131,7 +131,7 @@ def save_model_and_config(
                 "scheduler_state_dict": scheduler.state_dict(),
                 "loss": val_loss,
             },
-            f"{cfg.output_path}/best.pth",
+            f"{cfg.output_path}/ckp.pth",
         )
 
     return loss_val_min
@@ -143,13 +143,20 @@ def load_model_and_config(
     # TODO latest or best?
 
     loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
-    temp_key = list(loaded_ckpt["model_state_dict"].keys())[0]
     if for_ddp:
         loaded_ckpt["model_state_dict"] = {
             "module."+k: v
             for k, v in loaded_ckpt["model_state_dict"].items()
         }
-    model.load_state_dict(loaded_ckpt["model_state_dict"])
+    new_state_dict = {}
+    for key in loaded_ckpt["model_state_dict"].keys():
+        if "flux_head" in key and not key in loaded_ckpt["model_state_dict"]:
+            # compatibility to earlier code version
+            new_key = re.sub(r"^(flux_head\.blocks\.\d+)\.", r"\1.blocks.0.", key)
+        else:
+            new_key = key
+        new_state_dict[new_key] = loaded_ckpt["model_state_dict"][key]
+    model.load_state_dict(new_state_dict)
     resume_epoch = loaded_ckpt["epoch"]
     resume_loss = loaded_ckpt["loss"]
     print(
@@ -723,3 +730,20 @@ def poten_files(directory):
     poten_files = sorted([file for file in files if file.startswith("Poten")])
     timestep_slices = [int(f.replace("Poten", "")) for f in poten_files]
     return poten_files, np.array(timestep_slices) - 1
+
+def exclude_from_weight_decay(model, param_names, weight_decay):
+    decay, no_decay = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        for param_name in param_names:
+            if param_name in name.lower():
+                no_decay.append(param)
+            #elif len(param.shape) == 1 or name.endswith('.bias'):
+            #    no_decay.append(param)
+            else:
+                decay.append(param)
+    return [
+        {'params': decay, 'weight_decay': weight_decay},
+        {'params': no_decay, 'weight_decay': 0.0}
+    ]

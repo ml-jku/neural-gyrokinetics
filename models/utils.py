@@ -1,5 +1,6 @@
 from typing import Optional, Sequence, Union
 
+from functools import partial
 from einops import rearrange
 import torch
 from torch import nn
@@ -85,6 +86,9 @@ class AttentionDecoder(nn.Module):
             return
         elif init_weights == "xavier_uniform":
             init_weights_fn = nn.init.xavier_uniform_
+        elif init_weights == "kaiming_uniform":
+            init_weights_fn = partial(nn.init.kaiming_uniform_, nonlinearity="relu",
+                                                               mode="fan_in", a=0)
         elif init_weights in ["truncnormal", "truncnormal002"]:
             init_weights_fn = nn.init.trunc_normal_
         else:
@@ -151,6 +155,11 @@ class IntegerConditionEmbed(nn.Module):
             pass
         elif init_weights == "xavier_uniform":
             self.mlp.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights == "kaiming_uniform":
+            self.mlp.apply(seq_weight_init(partial(nn.init.kaiming_uniform_, nonlinearity="relu",
+                                                                            mode="fan_in", a=0)))
+        elif init_weights == "normal_smallvar":
+            self.mlp.apply(seq_weight_init(partial(nn.init.normal_(mean=0.0, std=1e-3))))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.mlp.apply(seq_weight_init(nn.init.trunc_normal_))
         else:
@@ -199,6 +208,11 @@ class ContinuousConditionEmbed(nn.Module):
             pass
         elif init_weights == "xavier_uniform":
             self.mlp.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights == "kaiming_uniform":
+            self.mlp.apply(seq_weight_init(partial(nn.init.kaiming_uniform_, nonlinearity="relu",
+                                                                            mode="fan_in", a=0)))
+        elif init_weights == "normal_smallvar":
+            self.mlp.apply(seq_weight_init(partial(nn.init.normal_, mean=0.0, std=1e-3)))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.mlp.apply(seq_weight_init(nn.init.trunc_normal_))
         else:
@@ -261,6 +275,8 @@ class DiT(nn.Module):
             pass
         elif init_weights == "xavier_uniform":
             nn.init.xavier_uniform_(self.modulation.weight)
+        elif init_weights == "kaiming_uniform":
+            nn.init.kaiming_uniform_(self.modulation.weight, nonlinearity="relu", mode="fan_in", a=0)
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.modulation.apply(nn.init.trunc_normal_)
         else:
