@@ -131,7 +131,7 @@ def save_model_and_config(
                 "scheduler_state_dict": scheduler.state_dict(),
                 "loss": val_loss,
             },
-            f"{cfg.output_path}/ckp.pth",
+            f"{cfg.output_path}/best.pth",
         )
 
     return loss_val_min
