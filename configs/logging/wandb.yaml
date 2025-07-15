@@ -1,6 +1,6 @@
 writer: wandb
 mode: online
-entity: ukaea-mhd
+entity: neugk
 project: debug
 run_id: null
 tqdm: true

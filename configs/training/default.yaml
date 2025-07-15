@@ -1,11 +1,12 @@
 batch_size: 16
 n_epochs: 500
 num_workers: 4
+prefetch_factor: 2
 pin_memory: true
 learning_rate: 3e-4
 final_learning_rate: 1e-6
 weight_decay: 1e-5
-exclude_from_wd: ["cond"]
+exclude_from_weight_decay: ["cond"]
 predict_delta: false
 scheduler: "cosine"
 clip_grad: true
@@ -15,14 +16,3 @@ pushforward:
   epochs: [100, 130, 160]
   unrolls: [0, 0, 0]
   probs: [10, 10, 5]
-pretraining: false
-pretraining_kwargs:
-  freeze_after: false
-  clip_grad: false
-  scheduler: null
-  weight_decay: 1e-5
-  lr: 1e-3
-  n_epochs: 35
-  target_modules: [patch_embed, unpatch]
-  add_noise: false
-

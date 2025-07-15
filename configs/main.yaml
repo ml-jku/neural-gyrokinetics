@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: cyclone
-  - model: xnet_multi
+  - model: multi
   - logging: wandb
   - training: default
   - validation: default
@@ -16,7 +16,6 @@ ddp:
 amp: 
   enable: true  # set to false when using rope or integrals in training (complex / fft)
   bfloat: true
-mode: "train"
 eval: true
 device: "cuda"
 load_ckpt: false

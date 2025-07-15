@@ -12,7 +12,7 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from utils import set_seed, compress_src, find_free_port
+from neugk.utils import set_seed, compress_src, find_free_port
 from run import runner
 
 
@@ -34,23 +34,30 @@ def main(config: DictConfig):
         if config.output_path is None:
             dict_config["output_path"] = osp.join("outputs", date_and_time)
         else:
-            dict_config["output_path"] = osp.join(dict_config["output_path"], date_and_time)
+            dict_config["output_path"] = osp.join(
+                dict_config["output_path"], date_and_time
+            )
 
         if not os.path.exists(dict_config["output_path"]):
             os.makedirs(dict_config["output_path"], exist_ok=True)
-        
+
         compress_src(dict_config["output_path"])
 
         if dict_config["logging"]["run_id"] is None:
-            dict_config["logging"][
-                "run_id"
-            ] = f"{dict_config['model']['name']}_{date_and_time}"
+            run_id = f"{dict_config['model']['name']}_{date_and_time}"
+            dict_config["logging"]["run_id"] = run_id
         config = OmegaConf.create(dict_config)
     else:
         # check that output path exists
-        assert os.path.exists(config.output_path), "Output path does not exist, cannot load ckpt"
-        assert os.path.exists(f"{config.output_path}/best.pth"), "Output path does not contain checkpoint best.pt"
-        config = OmegaConf.create(yaml.safe_load(open(f"{config.output_path}/config.yaml", "r")))
+        assert os.path.exists(
+            config.output_path
+        ), "Output path does not exist, cannot load ckpt"
+        assert os.path.exists(
+            f"{config.output_path}/best.pth"
+        ), "Output path does not contain checkpoint best.pt"
+        config = OmegaConf.create(
+            yaml.safe_load(open(f"{config.output_path}/config.yaml", "r"))
+        )
         overrides_dotlist = [str(o) for o in HydraConfig.get().overrides.task]
         cli_conf = OmegaConf.from_dotlist(overrides_dotlist)
         config = OmegaConf.merge(config, cli_conf)
@@ -61,27 +68,25 @@ def main(config: DictConfig):
     else:
         world_size = 1
 
-    train_method = "default"  # TODO
     try:
         if config.ddp.enable and world_size > 1 and config.ddp.n_nodes == 1:
             if "SLURM_NODELIST" not in os.environ:
                 os.environ["MASTER_ADDR"] = "localhost"
             else:
-                # os.system(f'export MASTER_ADDR=$(scontrol show hostname {os.environ["SLURM_NODELIST"]})')
                 # only works for single node so far, adapt above for multinode
                 os.environ["MASTER_ADDR"] = os.environ["SLURM_NODELIST"]
             os.environ["MASTER_PORT"] = str(find_free_port())
             if "NCCL_SOCKET_IFNAME" in os.environ:
                 # unset nccl comm interface
                 del os.environ["NCCL_SOCKET_IFNAME"]
-            mp.spawn(runner, args=(config, train_method, world_size), nprocs=world_size)
+            mp.spawn(runner, args=(config, world_size), nprocs=world_size)
         elif config.ddp.enable and world_size > 1 and config.ddp.n_nodes > 1:
-            # script should be launched via torchrun such that env variables have been set
+            # script should be launched via torchrun to set env variables
             rank = int(os.environ["RANK"])
-            runner(rank, config, train_method, world_size=world_size)
+            runner(rank, config, world_size=world_size)
         else:
             rank = 0
-            runner(rank, config, train_method, world_size=1)
+            runner(rank, config, world_size=1)
     except BaseException:
         traceback.print_exc(file=sys.stderr)
         raise
