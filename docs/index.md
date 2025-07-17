@@ -10,7 +10,7 @@
   </a>
 </div>
 
-# <img src="imgs/neugk_icon.png" alt="neugk Icon" style="height: 24px;"> Efficiently Modeling 5D Plasma Turbulence Simulations
+# <img src="imgs/neugk_icon.png" alt="neugk Icon" height="24px"> Efficiently Modeling 5D Plasma Turbulence Simulations
 
 
 <figure style="text-align: center;">
@@ -52,12 +52,7 @@ Let $f = f(x, y, s, v_{\parallel}, \mu)$ where:
 
 The perturbed time-evolution of $f$ is governed by the gyrokinetic equation [[5](#ref-gyrokinetics), [6](#ref-gyrokinetics2)], a reduced form of the Vlasov-Maxwell PDE system
 
-$$
-\frac{\partial f}{\partial t} + (v_\parallel \mathbf{b} + \mathbf{v}_D) \cdot \nabla f   
--\frac{\mu B}{m} \frac{\mathbf{B} \cdot \nabla B}{B^2} \frac{\partial f}{\partial v_\parallel}
-+ \mathbf{v}_\chi \cdot \nabla f
-= S
-$$
+$$\frac{\partial f}{\partial t} + (v_\parallel \mathbf{b} + \mathbf{v}_D) \cdot \nabla f -\frac{\mu B}{m} \frac{\mathbf{B} \cdot \nabla B}{B^2} \frac{\partial f}{\partial v_\parallel} + \mathbf{v}_\chi \cdot \nabla f = S$$
 
 Where:
 
@@ -103,7 +98,7 @@ We generalize the local window attention mechanism, together with patching mergi
     </figcaption>
 </figure>
 
-We propose Neural Gyrokinetics, <img src="imgs/neugk_icon.png" alt="neugk Icon" style="height: 12px;"> **NeuGK**. We start from the popular UNet architecture [[14](#ref-unet)] and model the temporal evolution of the distribution function in an autoregressive manner. Accurate predictions of downstream integrated quantities are obtained by time-averaging.
+We propose Neural Gyrokinetics, <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> **NeuGK**. We start from the popular UNet architecture [[14](#ref-unet)] and model the temporal evolution of the distribution function in an autoregressive manner. Accurate predictions of downstream integrated quantities are obtained by time-averaging.
 
 Furthermore, NeuGK goes in the multitask direction by learning 5D distribution function, 3D potential and heat flux simultaneusly. This is achieved through three output branches at different dimensions that share latents with cross attention.
 
@@ -156,7 +151,7 @@ Furthermore, NeuGK goes in the multitask direction by learning 5D distribution f
 <a name="ref-inertial"></a>
 [4] S. Atzeni and J. Meyer-ter-Vehn, *The Physics of Inertial Fusion: Beam Plasma Interaction, Hydrodynamics, Hot Dense Matter*, Oxford University Press, 2004.
 
-<a name="ref-gyrokinetics"></a>  
+<a name="ref-gyrokinetics"></a>
 [5] E. A. Frieman and L. Chen, “Nonlinear gyrokinetic equations for low-frequency electromagnetic waves in general plasma equilibria,” *Phys. Fluids*, vol. 25, no. 3, pp. 502–508, Mar. 1982.
 
 <a name="ref-gyrokinetics2"></a>  
