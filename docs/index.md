@@ -1,5 +1,6 @@
-<div style="text-align: center;">
 
+
+<div style="text-align: center;">
   <a href="https://github.com/ml-jku/neugk" target="_blank">
     <img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=GitHub&logoColor=FFFFFF" alt="code">
   </a>
@@ -8,6 +9,8 @@
     <img src="https://img.shields.io/badge/arXiv-B31B1B?style=for-the-badge&logo=arXiv&logoColor=FFFFFF" alt="paper">
   </a>
 </div>
+
+# <img src="imgs/neugk_icon.png" alt="neugk Icon" style="height: 24px;"> Efficiently Modeling 5D Plasma Turbulence Simulations
 
 
 <figure style="text-align: center;">
@@ -42,10 +45,10 @@ Understanding **plasma turbulence** is crucial for modelling plasma scenarios fo
 
 Let $f = f(x, y, s, v_{\parallel}, \mu)$ where:
 
-- $ x $, $ y $ are spatial coordinates, in real space, cutting the torus radially.
-- $ s $ is the toroidal coordinate along the field line, going around the torus.
-- $ v_{\parallel} $ the parallel velocity component, tangential to the torus.
-- $ \mu $ is the magnetic angular moment, related to the gyrational velocity component.
+- $x$, $y$ are spatial coordinates, in real space, cutting the torus radially.
+- $s$ is the toroidal coordinate along the field line, going around the torus.
+- $v_{\parallel} $ the parallel velocity component, tangential to the torus.
+- $\mu$ is the magnetic angular moment, related to the gyrational velocity component.
 
 The perturbed time-evolution of $f$ is governed by the gyrokinetic equation [[5](#ref-gyrokinetics), [6](#ref-gyrokinetics2)], a reduced form of the Vlasov-Maxwell PDE system
 
@@ -58,20 +61,20 @@ $$
 
 Where:
 
-- $ v_{\parallel} \mathbf{b} $ is the motion along magnetic field lines.  
-- $ \mathbf{b} = \mathbf{B} / B $ is the unit vector along the magnetic field $ \mathbf{B} $ with magnitude $ B $
-- $ \mathbf{v}_D $ is the magnetic drift due to gradients and curvature in $ \mathbf{B} $
-- $ \mathbf{v}_\chi $ describes nonlinear drifts arising from crossing electric and magnetic fields.
+- $v_{\parallel} \mathbf{b}$ is the motion along magnetic field lines.  
+- $\mathbf{b} = \mathbf{B} / B$ is the unit vector along the magnetic field $\mathbf{B}$ with magnitude $ B $
+- $\mathbf{v}_D $ is the magnetic drift due to gradients and curvature in $\mathbf{B}$
+- $\mathbf{v}_\chi$ describes nonlinear drifts arising from crossing electric and magnetic fields.
 
-The **nonlinear term** $ \mathbf{v}_\chi \cdot \nabla f $ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term.
+The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term.
 
 For more details on gyrokinetics and the derivation of the equation, check... TODO
 
 ---
 
 <div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
-    The probabilistic / phase-space view of evolving $ f $ over time is not the only way gyrokinetics can be phrased. Instead, it can also be described with particles where gyrocenter trajectories are tracked directly. With this path-based approach, the distribution function can then be recovered from a large number of these gyro-paths (see particle-in-cell methods, [[7](#ref-pic)]). <br><br>
-    This duality is related to the <strong>Fokker-Planck equation</strong> [[8](#ref-fokker)], which describes the evolution of probability densities under drift and diffusion — analogous to how collisions are modeled in gyrokinetics. Both frames are physically equivalent, but offer different insights and numerical advantages.
+    The probabilistic / phase-space view of evolving the distribution function over time is not the only way gyrokinetics can be phrased. Instead, it can also be described with charged particles, where gyrocenter trajectories are tracked directly. With this path-based approach, the distribution function can then be recovered from a large number of these gyro-paths (see particle-in-cell methods, [<a href="#ref-pic">7</a>]). <br><br>
+    This duality is related to the <strong>Fokker-Planck equation</strong> [<a href="#ref-fokker">8</a>], which describes the evolution of probability densities under drift and diffusion — analogous to how collisions are modeled in gyrokinetics. Both frames are physically equivalent, but offer different insights and numerical advantages.
 </div>
 
 [TODO I think the fokker plank connection sounds weird, maybe just probabilistic vs path-average? ]
@@ -100,7 +103,7 @@ We generalize the local window attention mechanism, together with patching mergi
     </figcaption>
 </figure>
 
-We propose Neural Gyrokinetics (**NeuGK**). We start from the popular UNet [[14](#ref-unet)] architecture and model the temporal evolution of the distribution function in an autoregressive manner. Accurate predictions of downstream integrated quantities are obtained by time-averaging.
+We propose Neural Gyrokinetics, <img src="imgs/neugk_icon.png" alt="neugk Icon" style="height: 12px;"> **NeuGK**. We start from the popular UNet architecture [[14](#ref-unet)] and model the temporal evolution of the distribution function in an autoregressive manner. Accurate predictions of downstream integrated quantities are obtained by time-averaging.
 
 Furthermore, NeuGK goes in the multitask direction by learning 5D distribution function, 3D potential and heat flux simultaneusly. This is achieved through three output branches at different dimensions that share latents with cross attention.
 
@@ -152,6 +155,7 @@ Furthermore, NeuGK goes in the multitask direction by learning 5D distribution f
 
 <a name="ref-inertial"></a>
 [4] S. Atzeni and J. Meyer-ter-Vehn, *The Physics of Inertial Fusion: Beam Plasma Interaction, Hydrodynamics, Hot Dense Matter*, Oxford University Press, 2004.
+
 <a name="ref-gyrokinetics"></a>  
 [5] E. A. Frieman and L. Chen, “Nonlinear gyrokinetic equations for low-frequency electromagnetic waves in general plasma equilibria,” *Phys. Fluids*, vol. 25, no. 3, pp. 502–508, Mar. 1982.
 
