@@ -21,8 +21,9 @@
 </figure>
 
 ## TL;DR
-__Nuclear fusion is hard__, but understanding physical phenomena like plasma turbulence makes it slightly easier. One way to do this is with very expensive large scale gyrokinetics simulations. We propose <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> **NeuGK**, a neural surrogate model based on __swin transformers__ for nonlinear __gyrokinetic equations__, which models the turbulent transport directly in a __5D phase space__ (unlike existing methods which take reduced approaches) and offers a __>1000x speedup__ compared to numerical gyrokinetics solvers.
-
+<div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
+<strong>Nuclear fusion is hard</strong>, but understanding physical phenomena like plasma turbulence makes it slightly easier. One way to do this is with very expensive <strong>gyrokinetics simulations</strong>. We propose <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> <strong>NeuGK</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models the turbulent transport directly in a <strong>5D phase space</strong> (unlike existing methods which take reduced approaches) and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
+</div>
 ## Introduction
 
 Nuclear fusion occurs when two light atoms (nuclei) merge to form a heavier atom (nucleus). During this process a small amount of mass is lost, releasing energy. This is the reaction that happens continuously inside stars and sustains their existance: for example, in the core of the Sun hydrogen atoms get fused to form helium, releasing energy that powers the Sun’s light and radiation, making life on Earth possible and sustainable.
@@ -71,8 +72,6 @@ The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent adve
 
 For more details on gyrokinetics and the derivation of the equation, check _"The non-linear gyro-kinetic flux tube code gkw_" from _Arthur Peeters et al._ [[5](#ref-gyrokinetics)] and _"Gyrokinetics_" by _Xavier Gerbet and Maxime Lesur_ [[6](#ref-gyrokinetics3)].
 
----
-
 <div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
     The probabilistic / phase-space view of evolving the distribution function over time is not the only way gyrokinetics can be phrased. Instead, it can also be described with charged particles, where gyrocenter trajectories are tracked directly. With this path-based approach, the distribution function can then be recovered from a large number of these gyro-paths (see particle-in-cell methods, [<a href="#ref-pic">8</a>]). <br><br>
     This duality is also related to the <strong>Fokker-Planck equation</strong> [<a href="#ref-fokker">9</a>], which describes the evolution of probability densities under drift and diffusion — analogous to how collisions are modeled in gyrokinetics. Both frames are physically equivalent, but offer different insights and numerical advantages.
@@ -81,8 +80,6 @@ For more details on gyrokinetics and the derivation of the equation, check _"The
 [TODO I think the fokker plank connection sounds weird, maybe just probabilistic vs path-average? ]
 
 Fully resolved gyrokinetics simulations are often prohibitively expensive and lead to practictioners relying on **reduced order models**, such as quasilinear models (for example QuaLiKiz [[10](#ref-qualikiz)]), which are fast but severely limited in generalization and accuracy.
-
----
 
 ## Our Approach
 
