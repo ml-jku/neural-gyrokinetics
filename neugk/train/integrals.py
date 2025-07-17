@@ -32,6 +32,11 @@ GEOM_KEYS = [
 
 
 class FluxIntegral(nn.Module):
+    """Torch wrapper for the flux and electrostatic potential integrals.
+    
+    The implementation is based on GKW, a FORTRAN codebase for gyrokinetics.
+    Source and docs for GKW: https://bitbucket.org/gkw/workspace/projects/GKW
+    """
     def __init__(self, real_potens: bool = False):
         super().__init__()
 
@@ -257,9 +262,6 @@ class FluxIntegral(nn.Module):
     ):
         """
         Integrals for particle, heat and momentum fluxes and electrostatic potential.
-
-        The implementation is based on GKW, a FORTRAN codebase for gyrokinetics.
-        Source and docs for GKW: https://bitbucket.org/gkw/workspace/projects/GKW
 
         If a potential phi is passed, then it is ultimately used to compute the fluxes,
         together with the distribution function df. If not, then df is used to compute

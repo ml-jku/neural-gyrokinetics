@@ -1,3 +1,5 @@
+"""Qualitative visualization functions for 5D and 3D data."""
+
 import io
 from PIL import Image as PILImage
 import matplotlib

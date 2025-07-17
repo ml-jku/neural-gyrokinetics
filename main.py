@@ -1,3 +1,5 @@
+"""Hydra entrypoint."""
+
 from datetime import datetime
 import gc
 import os

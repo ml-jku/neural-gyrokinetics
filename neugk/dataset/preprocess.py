@@ -1,3 +1,5 @@
+"""Preprocessing script to go from raw GKW dumps to a processed hdf5 dataset."""
+
 import os
 from tqdm import tqdm
 

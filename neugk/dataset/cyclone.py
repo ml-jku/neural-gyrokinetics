@@ -1,3 +1,5 @@
+"""Dataset for (preprocessed) GKW simulations, based on hdf5."""
+
 from typing import Type, Optional, List, Tuple, Dict, Sequence, Union
 
 import os

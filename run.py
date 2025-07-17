@@ -1,3 +1,9 @@
+"""
+Main runner.
+
+Handles training (multitask, and integral losses) and evaluation (metrics and plotting).
+"""
+
 import os
 from tqdm import tqdm
 from time import perf_counter_ns
