@@ -24,6 +24,7 @@
 <div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
 <strong>Nuclear fusion is hard</strong>, but understanding physical phenomena like plasma turbulence makes it slightly easier. One way to do this is with very expensive <strong>gyrokinetics simulations</strong>. We propose <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> <strong>NeuGK</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models the turbulent transport directly in a <strong>5D phase space</strong> (unlike existing methods which take reduced approaches) and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
 </div>
+
 ## Introduction
 
 Nuclear fusion occurs when two light atoms (nuclei) merge to form a heavier atom (nucleus). During this process a small amount of mass is lost, releasing energy. This is the reaction that happens continuously inside stars and sustains their existance: for example, in the core of the Sun hydrogen atoms get fused to form helium, releasing energy that powers the Sun’s light and radiation, making life on Earth possible and sustainable.
