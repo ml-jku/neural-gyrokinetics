@@ -22,14 +22,13 @@
 
 ## TL;DR
 <div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
-<strong>Nuclear fusion is hard</strong>, but understanding physical phenomena like plasma turbulence makes it slightly easier. One way to do this is with very expensive <strong>gyrokinetics simulations</strong>. We propose <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> <strong>NeuGK</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models the turbulent transport directly in a <strong>5D phase space</strong> (unlike existing methods which take reduced approaches) and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
+<strong>Nuclear fusion is hard</strong>, as it requires understanding physical phenomena like plasma turbulence. One way to do this is with very expensive <strong>numerical simulations, called gyrokinetics</strong>. We propose <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> <strong>NeuGK</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models Plasma turbulence in a <strong>5D phase space</strong>, unlike existing methods which take reduced approaches, and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
 </div>
 
 ## Introduction
 
-Nuclear fusion occurs when two light atoms (nuclei) merge to form a heavier atom (nucleus). During this process a small amount of mass is lost, releasing energy. This is the reaction that happens continuously inside stars and sustains their existance: for example, in the core of the Sun hydrogen atoms get fused to form helium, releasing energy that powers the Sun’s light and radiation, making life on Earth possible and sustainable.
-
-In the context of human energy production, nuclear fusion is currently limited to more unstable hydrogen isotopes (Deuterium, Tritium) [[1](#ref-chen)]. This reaction produces a moderate amount of energy, with helium as a safe and neuter byproduct. 
+Nuclear Fusion is a promising contender for sustainable energy production. It is based on fusing two hydrogen atoms to form helium as a side product and release energy that can be used to power a turbine. The fusion of hydrogen atoms naturally occurs in stars like the sun where the gravitational force overcomes the repelling Coulomb barrier, the repelling force between two hydrogen atoms. The figure below 
+shows the fusion reaction for hydrogen isotopes Deutereum and Tritium.
 
 <figure style="text-align: center;">
     <img src="imgs/dt_fusion.gif" alt="D-T nuclear fusion reaction" width="70%">
@@ -38,25 +37,27 @@ In the context of human energy production, nuclear fusion is currently limited t
     </figcaption>
 </figure>
 
-It is widely recognized that nuclear fusion is incredibly hard.
+
+Since the gravitational force on eartch is insufficient to overcome this barrier, we require massive amounts of energy which is induced via heat in a Plasma. In reality this means heating up a gas to hundreds of millions of degrees which is also called a **Plasma** as the heat forces the hydrogen atoms to split into ions and electrons. Due the amount of heat, the Plasma needs to be confined within a magnetic field, as there does not exist any material that could withstand such heat.
+
+To enable sustainable energy production via nuclear fusion requires confining the Plasma over long periods of time. This is difficult, as the Plasma usually tries to escape its confinement. One contributor to this behavior is turbulence which arises due to temperature gradients within the Plasma. Therefore it is essential to understand and model Plasma turbulence in modern reactors such as Tokamaks. 
+Understanding and modelling Plasma turbulence is an incredibly hard problem that relies on expensive numerical simulations.
 
 > _"Nuclear fusion is not rocket science, because it's way harder."_  
-> — *Will*
+> — *William Hornsby*
 
-However, because it promises near-infinite, safe, and relatively affordable energy source, it remains a key focus in the pursuit of securing our future energy supply.
-
-In general, fusion only happens at extremely high temperatures and pressures (to overcome the repulsive forces between atoms). At these temperatures matter becomes **plasma**, which is inherently **turbulent** and must be confined to sustain the reaction [[1](#ref-chen), [2](#ref-freudenrich)]. With their mass, stars are able to use the gravitational field for confinement. However, on Earth we must rely on methods such as magnetic fields [[3](#ref-tokamaks)] or other forces [[4](#ref-inertial)].
+However, because it promises sustainable, safe, and relatively affordable energy source, it remains a key focus in the pursuit of securing our future energy supply.
 
 ## The Problem
-Understanding **plasma turbulence** is crucial for modelling plasma scenarios for confinement control and reactor design. It is governed by the **nonlinear gyrokinetic equation**, which evolves a **5D distribution function** over time **in phase space**.
 
+Understanding **plasma turbulence** is crucial for modelling plasma scenarios for confinement control and reactor design. Numerically, Plasma turbulence is governed by the **nonlinear gyrokinetic equation**, which evolves a **5D distribution function** over time **in phase space**.
 
 Let $f = f(x, y, s, v_{\parallel}, \mu)$ where:
 
-- $x$, $y$ are spatial coordinates, in real space, cutting the torus radially.
+- $x$, $y$ are spatial coordinates along a toroidal C-section of a torus in real space.
 - $s$ is the toroidal coordinate along the field line, going around the torus.
-- $v_{\parallel} $ the parallel velocity component, tangential to the torus.
-- $\mu$ is the magnetic angular moment, related to the gyrational velocity component.
+- $v_{\parallel} $ the parallel velocity component along the field lines.
+- $\mu$ is the magnetic angular moment, related to the gyral motion of particles.
 
 The perturbed time-evolution of $f$ is governed by the gyrokinetic equation [[5](#ref-gyrokinetics), [6](#ref-gyrokinetics2), [7](#ref-gyrokinetics3)], a reduced form of the Vlasov-Maxwell PDE system
 
@@ -65,13 +66,11 @@ $$\frac{\partial f}{\partial t} + (v_\parallel \mathbf{b} + \mathbf{v}_D) \cdot 
 Where:
 
 - $v_{\parallel} \mathbf{b}$ is the motion along magnetic field lines.  
-- $\mathbf{b} = \mathbf{B} / B$ is the unit vector along the magnetic field $\mathbf{B}$ with magnitude $ B $
-- $\mathbf{v}_D $ is the magnetic drift due to gradients and curvature in $\mathbf{B}$
+- $\mathbf{b} = \mathbf{B} / B$ is the unit vector along the magnetic field $\mathbf{B}$ with magnitude $B$.
+- $\mathbf{v}_D $ is the magnetic drift due to gradients and curvature in $\mathbf{B}$.
 - $\mathbf{v}_\chi$ describes nonlinear drifts arising from crossing electric and magnetic fields.
 
-The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term.
-
-For more details on gyrokinetics and the derivation of the equation, check _"The non-linear gyro-kinetic flux tube code gkw_" from _Arthur Peeters et al._ [[5](#ref-gyrokinetics)] and _"Gyrokinetics_" by _Xavier Gerbet and Maxime Lesur_ [[6](#ref-gyrokinetics3)].
+The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term. For more details on gyrokinetics and the derivation of the equation, check _"The non-linear gyro-kinetic flux tube code gkw_" from _Arthur Peeters et al._ [[5](#ref-gyrokinetics)] and _"Gyrokinetics_" by _Xavier Gerbet and Maxime Lesur_ [[6](#ref-gyrokinetics3)].
 
 <div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
     The probabilistic / phase-space view of evolving the distribution function over time is not the only way gyrokinetics can be phrased. Instead, it can also be described with charged particles, where gyrocenter trajectories are tracked directly. With this path-based approach, the distribution function can then be recovered from a large number of these gyro-paths (see particle-in-cell methods, [<a href="#ref-pic">8</a>]). <br><br>
@@ -80,20 +79,20 @@ For more details on gyrokinetics and the derivation of the equation, check _"The
 
 [TODO I think the fokker plank connection sounds weird, maybe just probabilistic vs path-average? ]
 
-Fully resolved gyrokinetics simulations are often prohibitively expensive and lead to practictioners relying on **reduced order models**, such as quasilinear models (for example QuaLiKiz [[10](#ref-qualikiz)]), which are fast but severely limited in generalization and accuracy.
+Fully resolved gyrokinetics simulations are prohibitively expensive and lead to reliance on **reduced order models**, such as quasilinear models (for example QuaLiKiz [[10](#ref-qualikiz)]), which are fast but severely limited in generalization and accuracy as they entirely neglect the nonlinear term $\mathbf{v}_\chi \cdot \nabla f$. However, machine learning (neural) surrogate models have the potential to overcome this limitation if we develop methodologies that can cope with the complex nature of 5D data.
 
 ## Our Approach
 
-We start from the principle that **modeling the entire 5D distribution function directly is unavoidable** if the goal is to properly capture the physical phenomena. Moreover, challenges of runtime and memory requirements are amplified when dealing with this kind of high-dimensional data.
-
-<strong> <span>&#8618;</span> <em>So, now what?</em> </strong> There is no architecture out there that can natively handle 5D inputs.
+Our intuition is that **modeling the entire 5D distribution function is vital** to accurately model and comprehend turbulence in Plasmas.
+Therefore we require techniques that can process 5D data. The classic repertoire of an ML engineer comprises a variety of different techniques. Let's break it down whether there are suitable to proccess 5D data.
 
 - **Convolutions?** There is no out-of-the-box convolution kernel for &gt;3D, so they need to be implemented either directly, recursively, or in a factorized manner. Regardless, convolutions become expensive and memory-intensive. [[11](#ref-cnn)]
-- **Transformers?** ViTs can be applied to any number of dimension (provided proper patching / unpatching layers), but their quadratic scaling makes them unfeasible in our 5D setting. [[12](#ref-attention), [13](#ref-vit)]
-- **Linear Attention?** Vision Transformers with linear attention such as the Shifted Window Transformer (swin) [[14](#ref-swin)] overcome quadratic scaling by performing attention locally in a simple way, making them an handy candidate for our case.
+- **Transformers?** ViTs can be applied to any number of dimension (provided proper patching / unpatching layers), but their quadratic scaling makes them unfeasible in our 5D setting due to quickly growing sequence lengths. [[12](#ref-attention), [13](#ref-vit)]
+- **Linear Attention?** Vision Transformers with linear attention such as the Shifted Window Transformer (swin) [[14](#ref-swin)] overcome quadratic scaling by performing attention locally in a simple way, making them an handy candidate for our case. However, to date, no implementation of swin Transformer exists that can process 5D data.
 
-We generalize the local window attention mechanism, together with patching merging and unpatching layers, to n-dimensional inputs by generalizing the (patch and window) partitioning strategy used in these layers. Standalone implementation of the n-dimensional swin layers can be found [on github](https://github.com/gerkone/ndswin).
+<strong> <span>&#8618;</span> </strong> There is no architecture out there that can natively handle 5D inputs. <strong><em>So, now what?</em></strong>
 
+We generalize the local window attention mechanism used in Swin Transformers, together with patch merging and unpatching layers, to n-dimensional inputs. To this end, we generalize the (patch and window) partitioning strategy used in these layers to be able to process inputs of arbitrary dimensionalities. A standalone implementation of our n-dimensional swin layers can be found [on github](https://github.com/gerkone/ndswin). The figure below provides an illustration on how we extend (shifted) window attention to n dimensions.
 
 <figure style="text-align: center;">
     <img src="imgs/archv2.png" alt="nD swin attention in the 5D case" width="100%">
@@ -102,9 +101,8 @@ We generalize the local window attention mechanism, together with patching mergi
     </figcaption>
 </figure>
 
-We propose Neural Gyrokinetics, <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> **NeuGK**. We start from the popular UNet architecture [[15](#ref-unet)] and model the temporal evolution of the distribution function in an autoregressive manner. Accurate predictions of downstream integrated quantities are obtained by time-averaging.
+We propose Neural Gyrokinetics, <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> **NeuGK**, the first ever neural surrogate for nonlinear Gyrokinetic simulations. We start from the popular UNet architecture [[15](#ref-unet)] and model the temporal evolution of the distribution function in an autoregressive manner. Furthermore, NeuGK is a multitask model and not only predicts the evolution of the 5D distribution function, but also 3D potential fields and heat flux, which are usually obtained by performing complex integrals on the 5D fields. NeuGK achieves this through three output branches at different dimensions that share latents with cross attention.
 
-Furthermore, NeuGK goes in the multitask direction by learning 5D distribution function, 3D potential and heat flux simultaneusly. This is achieved through three output branches at different dimensions that share latents with cross attention.
 
 <figure style="text-align: center;">
     <img src="imgs/figure1.png" alt="NeuGK architecture compared to quasilinear" width="80%">
@@ -115,18 +113,21 @@ Furthermore, NeuGK goes in the multitask direction by learning 5D distribution f
 
 ## Results
 
-> [TODO: Updated results table]
+### Does NeuGK accurately predict heat flux?
+
+> [TODO: Visualization of heat flux trajectory]
+
+### Does NeuGK capture underlying physics?
 
 > [TODO: Diagnostics plots — zonal flow and spectra]
 
 # Wrapping up
 
-NeuGK can outperform other approaches and machine learning baselines in modelling plasma turbulence, it accurately captures nonlinear phenomena self-consistently, while offering a three order of magnitude speedup compared to the numerical solver GKW [[7](#ref-gyrokinetics3)]. The capability to directly evolve the 5-dimensional phase space, and all the diagnostics and non-linear phenomena studies that originate from it were not present in any prior surrogate or reduced numerical model.
-As a result, NeuGK offers a fruitful alternative to efficient approximation of turbulent transport.
+NeuGK outperforms reduced numerical approaches and machine learning baselines in modelling plasma turbulence. It accurately captures nonlinear phenomena and spectral quantities self-consistently, while offering a three order of magnitude speedup compared to the numerical solver GKW [[7](#ref-gyrokinetics3)]. As a result, NeuGK offers a fruitful alternative to efficient approximation of turbulent transport and opens up a variety of research directions leveraging the potential of neural surrogates for Plasma turbulence modelling. Finally, Plasma turbulence modelling is an incredibly hard problem, but we believe that Machine Learning will disrupt the landscape of Plasma turbulence modelling in the future. 
 
-However, the autoregressive nature of it means that it is still expensive to run compared to other reduced approaches, and most importantly because errors accumulate long term predictions are sometimes problematic and unreliable.
+<!-- However, the autoregressive nature of it means that it is still expensive to run compared to other reduced approaches, and most importantly because errors accumulate long term predictions are sometimes problematic and unreliable.
 
-TODO do we already mention diffusion?
+TODO do we already mention diffusion? -->
 
 <figure style="text-align: center;">
     <img src="imgs/here_to_help.jpg" alt="xkcd 1831: here to help (edited)" width="100%">
