@@ -16,7 +16,7 @@
 <figure style="text-align: center;">
     <img src="imgs/velocity_surfaces.gif" alt="5d distribution function" width="70%">
     <figcaption style="color: white; font-size: 14px; margin-top: 8px;">
-    Figure 1: Visualizing our modeled long-term predicted 5D distribution funciton, as 3D toruses within the 2D velocity space. 5D plotting has never been easier ;)
+    Figure 1: Visualizing the 5D distribution funciton, as 3D toruses within the 2D velocity space. 5D plotting has never been easier ;)
     </figcaption>
 </figure>
 
@@ -73,11 +73,11 @@ Where:
 The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term. For more details on gyrokinetics and the derivation of the equation, check _"The non-linear gyro-kinetic flux tube code gkw_" from _Arthur Peeters et al._ [[5](#ref-gyrokinetics)] and _"Gyrokinetics_" by _Xavier Gerbet and Maxime Lesur_ [[6](#ref-gyrokinetics3)].
 
 <div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
-    The probabilistic / phase-space view of evolving the distribution function over time is not the only way gyrokinetics can be phrased. Instead, it can also be described with charged particles, where gyrocenter trajectories are tracked directly. With this path-based approach, the distribution function can then be recovered from a large number of these gyro-paths (see particle-in-cell methods, [<a href="#ref-pic">8</a>]). <br><br>
-    This duality is also related to the <strong>Fokker-Planck equation</strong> [<a href="#ref-fokker">9</a>], which describes the evolution of probability densities under drift and diffusion — analogous to how collisions are modeled in gyrokinetics. Both frames are physically equivalent, but offer different insights and numerical advantages.
+    The phase-space distribution function (<strong>Eulerian</strong>) is not the only way gyrokinetics can be parametrized. Instead, we can describe it with an ensemble of trajectories governed by an SDE, where gyrocenters are tracked directly as particles (<strong>Lagrangian</strong>). With the Lagrangian approach, the distribution function can then be recovered from by sampling many gyro-paths (particle-in-cell methods, [<a href="#ref-pic">8</a>]). 
+    <strong>Both frames are physically equivalent, but offer different insights and numerical advantages</strong>. <br><br>
+    This duality is related to the <strong>Fokker-Planck equation</strong> [<a href="#ref-fokker">9</a>], which describes the evolution of probability densities under drift and diffusion. Because the Fokker-Planck equation is derived from a given SDE (as the forward Kolmogorov), it links the distribution-based and SDE-based descriptions.
+    <!-- It is also connected to how collisions are modeled in gyrokinetics, with the Vlasov-Fokker-Planck equation.<br><br> -->
 </div>
-
-[TODO I think the fokker plank connection sounds weird, maybe just probabilistic vs path-average? ]
 
 Fully resolved gyrokinetics simulations are prohibitively expensive and lead to reliance on **reduced order models**, such as quasilinear models (for example QuaLiKiz [[10](#ref-qualikiz)]), which are fast but severely limited in generalization and accuracy as they entirely neglect the nonlinear term $\mathbf{v}_\chi \cdot \nabla f$. However, machine learning (neural) surrogate models have the potential to overcome this limitation if we develop methodologies that can cope with the complex nature of 5D data.
 
@@ -124,10 +124,6 @@ We propose Neural Gyrokinetics, <img src="imgs/neugk_icon.png" alt="neugk Icon" 
 # Wrapping up
 
 NeuGK outperforms reduced numerical approaches and machine learning baselines in modelling plasma turbulence. It accurately captures nonlinear phenomena and spectral quantities self-consistently, while offering a three order of magnitude speedup compared to the numerical solver GKW [[7](#ref-gyrokinetics3)]. As a result, NeuGK offers a fruitful alternative to efficient approximation of turbulent transport and opens up a variety of research directions leveraging the potential of neural surrogates for Plasma turbulence modelling. Finally, Plasma turbulence modelling is an incredibly hard problem, but we believe that Machine Learning will disrupt the landscape of Plasma turbulence modelling in the future. 
-
-<!-- However, the autoregressive nature of it means that it is still expensive to run compared to other reduced approaches, and most importantly because errors accumulate long term predictions are sometimes problematic and unreliable.
-
-TODO do we already mention diffusion? -->
 
 <figure style="text-align: center;">
     <img src="imgs/here_to_help.jpg" alt="xkcd 1831: here to help (edited)" width="100%">
