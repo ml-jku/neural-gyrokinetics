@@ -21,7 +21,7 @@
 </figure>
 
 ## TL;DR
-<div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
+<div style="border-left: 4px solid #633d11; background-color: #c27721; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
 <strong>Nuclear fusion is hard</strong>, as it requires understanding physical phenomena like plasma turbulence. One way to do this is with very expensive <strong>numerical simulations, called gyrokinetics</strong>. We propose <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> <strong>NeuGK</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models Plasma turbulence in a <strong>5D phase space</strong>, unlike existing methods which take reduced approaches, and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
 </div>
 
@@ -72,14 +72,14 @@ Where:
 
 The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term. For more details on gyrokinetics and the derivation of the equation, check _"The non-linear gyro-kinetic flux tube code gkw_" from _Arthur Peeters et al._ [[5](#ref-gyrokinetics)] and _"Gyrokinetics_" by _Xavier Gerbet and Maxime Lesur_ [[6](#ref-gyrokinetics3)].
 
-<div style="border-left: 4px solid #c27721; background-color: #3b332b; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
+<div style="border-left: 4px solid #633d11; background-color: #c27721; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
     The phase-space distribution function (<strong>Eulerian</strong>) is not the only way gyrokinetics can be parametrized. Instead, we can describe it with an ensemble of trajectories governed by an SDE, where gyrocenters are tracked directly as particles (<strong>Lagrangian</strong>). With the Lagrangian approach, the distribution function can then be recovered from by sampling many gyro-paths (particle-in-cell methods, [<a href="#ref-pic">8</a>]). 
     <strong>Both frames are physically equivalent, but offer different insights and numerical advantages</strong>. <br><br>
     This duality is related to the <strong>Fokker-Planck equation</strong> [<a href="#ref-fokker">9</a>], which describes the evolution of probability densities under drift and diffusion. Because the Fokker-Planck equation is derived from a given SDE (as the forward Kolmogorov), it links the distribution-based and SDE-based descriptions.
     <!-- It is also connected to how collisions are modeled in gyrokinetics, with the Vlasov-Fokker-Planck equation.<br><br> -->
 </div>
 
-Fully resolved gyrokinetics simulations are prohibitively expensive and lead to reliance on **reduced order models**, such as quasilinear models (for example QuaLiKiz [[10](#ref-qualikiz)]), which are fast but severely limited in generalization and accuracy as they entirely neglect the nonlinear term $\mathbf{v}_\chi \cdot \nabla f$. However, machine learning (neural) surrogate models have the potential to overcome this limitation if we develop methodologies that can cope with the complex nature of 5D data.
+Fully resolved gyrokinetics simulations are prohibitively expensive and often times practitioners need to rely on **reduced order models**, such as quasilinear models (for example QuaLiKiz [[10](#ref-qualikiz)]). QL models are fast but severely limited in generalization and accuracy, as they entirely neglect the nonlinear term $\mathbf{v}_\chi \cdot \nabla f$. However, machine learning (neural) surrogate models have the potential to overcome this limitation if we develop methodologies that can cope with the complex nature of 5D data.
 
 ## Our Approach
 
