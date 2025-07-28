@@ -10,8 +10,9 @@
   </a>
 </div>
 
-# <img src="imgs/neugk_icon.png" alt="neugk Icon" height="24px"> Efficiently Modeling 5D Plasma Turbulence Simulations
+<!-- # <img src="imgs/neugk_icon.png" alt="neugk Icon" height="24px"> Efficiently Modeling 5D Plasma Turbulence Simulations -->
 
+---
 
 <figure style="text-align: center;">
     <img src="imgs/velocity_surfaces.gif" alt="5d distribution function" width="70%">
@@ -27,8 +28,7 @@
 
 ## Introduction
 
-Nuclear Fusion is a promising contender for sustainable energy production. It is based on fusing two hydrogen atoms to form helium as a side product and release energy that can be used to power a turbine. The fusion of hydrogen atoms naturally occurs in stars like the sun where the gravitational force overcomes the repelling Coulomb barrier, the repelling force between two hydrogen atoms. The figure below 
-shows the fusion reaction for hydrogen isotopes Deutereum and Tritium.
+Nuclear Fusion is a promising contender for sustainable energy production. It is based on fusing two hydrogen atoms to form helium as a side product and release energy that can be used to power a turbine. Fusion naturally occurs in stars, where the strong gravitational force produces massive pressures which overcome the repelling force between two hydrogen atoms (_Coulomb barrier_). The figure below shows the fusion reaction for hydrogen isotopes Deutereum and Tritium.
 
 <figure style="text-align: center;">
     <img src="imgs/dt_fusion.gif" alt="D-T nuclear fusion reaction" width="70%">
@@ -37,16 +37,15 @@ shows the fusion reaction for hydrogen isotopes Deutereum and Tritium.
     </figcaption>
 </figure>
 
+Since the gravitational force on planet Earth is insufficient to overcome this barrier, we require massive amounts of heat to increase the probability of atoms fusing. In reality, this means heating up a gas to hundreds of millions of degrees, which is also called a **Plasma**. At these conditions, hydrogen atoms split into ions and electrons. Due the amount of heat, the Plasma has to be confined within magnetic fields, as there is no material that could withstand such extreme temperatures.
 
-Since the gravitational force on eartch is insufficient to overcome this barrier, we require massive amounts of energy which is induced via heat in a Plasma. In reality this means heating up a gas to hundreds of millions of degrees which is also called a **Plasma** as the heat forces the hydrogen atoms to split into ions and electrons. Due the amount of heat, the Plasma needs to be confined within a magnetic field, as there does not exist any material that could withstand such heat.
-
-To enable sustainable energy production via nuclear fusion requires confining the Plasma over long periods of time. This is difficult, as the Plasma usually tries to escape its confinement. One contributor to this behavior is turbulence which arises due to temperature gradients within the Plasma. Therefore it is essential to understand and model Plasma turbulence in modern reactors such as Tokamaks. 
-Understanding and modelling Plasma turbulence is an incredibly hard problem that relies on expensive numerical simulations.
+In order to turn nuclar fusion into a viable energy source, Plasma needs to be confined over long periods of time. This is difficult, as the Plasma is inherently unstable, and often tries to escape confinement. One contributor to this behavior is __turbulence__, which arises due to temperature gradients within the Plasma. Therefore it is essential to understand and model Plasma turbulence in modern reactors such as Tokamaks, in order to downstream design new reactors and confinement control systems.
+However, understanding and modelling Plasma turbulence is an incredibly hard problem, and practictioners must rely on expensive numerical simulations.
 
 > _"Nuclear fusion is not rocket science, because it's way harder."_  
 > — *William Hornsby*
 
-However, because it promises sustainable, safe, and relatively affordable energy source, it remains a key focus in the pursuit of securing our future energy supply.
+Because it promises __sustainable, safe, and relatively affordable energy__, __nuclear fusion__ remains a key focus in the pursuit of securing our __future energy supply.__
 
 ## The Problem
 
@@ -56,10 +55,10 @@ Let $f = f(x, y, s, v_{\parallel}, \mu)$ where:
 
 - $x$, $y$ are spatial coordinates along a toroidal C-section of a torus in real space.
 - $s$ is the toroidal coordinate along the field line, going around the torus.
-- $v_{\parallel} $ the parallel velocity component along the field lines.
+- $v_{\parallel}$ the parallel velocity component along the field lines.
 - $\mu$ is the magnetic angular moment, related to the gyral motion of particles.
 
-The perturbed time-evolution of $f$ is governed by the gyrokinetic equation [[5](#ref-gyrokinetics), [6](#ref-gyrokinetics2), [7](#ref-gyrokinetics3)], a reduced form of the Vlasov-Maxwell PDE system
+The time-evolution of the perturbed distribution $f$, usually called $\delta f$, is governed by the gyrokinetic equation [[5](#ref-gyrokinetics), [6](#ref-gyrokinetics2), [7](#ref-gyrokinetics3)], a reduced form of the Vlasov-Maxwell PDE system
 
 $$\frac{\partial f}{\partial t} + (v_\parallel \mathbf{b} + \mathbf{v}_D) \cdot \nabla f -\frac{\mu B}{m} \frac{\mathbf{B} \cdot \nabla B}{B^2} \frac{\partial f}{\partial v_\parallel} + \mathbf{v}_\chi \cdot \nabla f = S$$
 
@@ -67,15 +66,16 @@ Where:
 
 - $v_{\parallel} \mathbf{b}$ is the motion along magnetic field lines.  
 - $\mathbf{b} = \mathbf{B} / B$ is the unit vector along the magnetic field $\mathbf{B}$ with magnitude $B$.
-- $\mathbf{v}_D $ is the magnetic drift due to gradients and curvature in $\mathbf{B}$.
+- $\mathbf{v}_D$ is the magnetic drift due to gradients and curvature in $\mathbf{B}$.
 - $\mathbf{v}_\chi$ describes nonlinear drifts arising from crossing electric and magnetic fields.
+- $S$ is a forcing term [TODO].
 
-The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term. For more details on gyrokinetics and the derivation of the equation, check _"The non-linear gyro-kinetic flux tube code gkw_" from _Arthur Peeters et al._ [[5](#ref-gyrokinetics)] and _"Gyrokinetics_" by _Xavier Gerbet and Maxime Lesur_ [[6](#ref-gyrokinetics3)].
+The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term. For more details on gyrokinetics and the derivation of the equation, check _"The non-linear gyro-kinetic flux tube code GKW_" from _Arthur Peeters et al._ [[5](#ref-gyrokinetics)] and _"Gyrokinetics_" by _Xavier Gerbet and Maxime Lesur_ [[6](#ref-gyrokinetics3)].
 
 <div style="border-left: 4px solid #633d11; background-color: #c27721; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
     The phase-space distribution function (<strong>Eulerian</strong>) is not the only way gyrokinetics can be parametrized. Instead, we can describe it with an ensemble of trajectories governed by an SDE, where gyrocenters are tracked directly as particles (<strong>Lagrangian</strong>). With the Lagrangian approach, the distribution function can then be recovered from by sampling many gyro-paths (particle-in-cell methods, [<a href="#ref-pic">8</a>]). 
     <strong>Both frames are physically equivalent, but offer different insights and numerical advantages</strong>. <br><br>
-    This duality is related to the <strong>Fokker-Planck equation</strong> [<a href="#ref-fokker">9</a>], which describes the evolution of probability densities under drift and diffusion. Because the Fokker-Planck equation is derived from a given SDE (as the forward Kolmogorov), it links the distribution-based and SDE-based descriptions.
+    This duality is related to the <strong><a href="https://en.wikipedia.org/wiki/Fokker%E2%80%93Planck_equation">Fokker-Planck equation</a></strong> [<a href="#ref-fokker">9</a>], which describes the evolution of probability densities under drift and diffusion. The Fokker-Planck equation is derived from an SDE, such as the <a href="https://en.wikipedia.org/wiki/Ornstein%E2%80%93Uhlenbeck_process">Ornstein–Uhlenbeck process</a> (as the forward Kolmogorov), and so it links the distribution-based and SDE-based descriptions.
     <!-- It is also connected to how collisions are modeled in gyrokinetics, with the Vlasov-Fokker-Planck equation.<br><br> -->
 </div>
 
@@ -190,3 +190,6 @@ NeuGK outperforms reduced numerical approaches and machine learning baselines in
 
 <a name="ref-unet"></a>
 [15] O. Ronneberger, P. Fischer, and T. Brox, "U-Net: Convolutional Networks for Biomedical Image Segmentation," in *Medical Image Computing and Computer-Assisted Intervention (MICCAI)*, 2015, pp. 234–241.
+
+---
+2025, Gianluca Galletti
