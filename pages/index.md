@@ -28,7 +28,7 @@
 
 ## Introduction
 
-Nuclear Fusion is a promising contender for sustainable energy production. It is based on fusing two hydrogen atoms to form helium as a side product and release energy that can be used to power a turbine. Fusion naturally occurs in stars, where the strong gravitational force produces massive pressures which overcome the repelling force between two hydrogen atoms (_Coulomb barrier_). The figure below shows the fusion reaction for hydrogen isotopes Deutereum and Tritium.
+Nuclear Fusion is a promising contender for sustainable energy production. For humans, we can use the energy released by the reaction of fusing two hydrogen atoms (to form helium and a neutron, where most energy ends up) to power, for example, a turbine. In nature, fusion naturally occurs in stars, where the strong gravitational force produces massive pressures which overcome the repelling force between two hydrogen atoms (_Coulomb barrier_). The figure below shows the fusion reaction for hydrogen isotopes Deutereum and Tritium.
 
 <figure style="text-align: center;">
     <img src="imgs/dt_fusion.gif" alt="D-T nuclear fusion reaction" width="70%">
@@ -39,7 +39,7 @@ Nuclear Fusion is a promising contender for sustainable energy production. It is
 
 Since the gravitational force on planet Earth is insufficient to overcome this barrier, we require massive amounts of heat to increase the probability of atoms fusing. In reality, this means heating up a gas to hundreds of millions of degrees, which is also called a **Plasma**. At these conditions, hydrogen atoms split into ions and electrons. Due the amount of heat, the Plasma has to be confined within magnetic fields, as there is no material that could withstand such extreme temperatures.
 
-In order to turn nuclar fusion into a viable energy source, Plasma needs to be confined over long periods of time. This is difficult, as the Plasma is inherently unstable, and often tries to escape confinement. One contributor to this behavior is __turbulence__, which arises due to temperature gradients within the Plasma. Therefore it is essential to understand and model Plasma turbulence in modern reactors such as Tokamaks, in order to downstream design new reactors and confinement control systems.
+In order to turn nuclar fusion into a viable energy source, Plasma needs to be confined over long periods of time. This is difficult, as it's inherently unstable, and often tries to escape confinement. One contributor to this behavior is __turbulence__, which arises due to temperature gradients within the Plasma. Therefore it is essential to understand and model Plasma turbulence in modern reactors such as Tokamaks, in order to downstream design new reactors and confinement control systems.
 However, understanding and modelling Plasma turbulence is an incredibly hard problem, and practictioners must rely on expensive numerical simulations.
 
 > _"Nuclear fusion is not rocket science, because it's way harder."_  
