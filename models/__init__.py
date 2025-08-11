@@ -276,23 +276,39 @@ def get_model(cfg, dataset, train_method="default"):
             modulation=modulation,
         )
 
-    if cfg.model.name == "perc":
-        from models.perceiver import CompressionPerc
-
+    if "fno" in cfg.model.name:
+        from models.fno import Df5DTFNO, DfVSpace3DTFNO, DfLocal5DTFNO
+        
         base_resolution = dataset.resolution
+        num_layers = cfg.model.num_layers
+        
+        if cfg.model.name == "fno":
+            model = Df5DTFNO(
+                latent_dim,
+                base_resolution=base_resolution,
+                in_channels=problem_dim,
+                out_channels=problem_dim,
+                num_layers=num_layers
+            )
+        if cfg.model.name == "fno3d":
+            model = DfVSpace3DTFNO(
+                latent_dim,
+                base_resolution=base_resolution,
+                in_channels=problem_dim,
+                out_channels=problem_dim,
+                num_layers=num_layers
+            )
+        if cfg.model.name == "local_fno":
+            patch_size = cfg.model.swin.patch_size
 
-        model = CompressionPerc(
-            space=5,
-            in_channels=2,
-            out_channels=2,
-            dim=latent_dim,
-            patch_size=cfg.model.swin.patch_size,
-            base_resolution=base_resolution,
-            num_latent_tokens=420,
-            encoder_depth=2,
-            approximator_depth=8,
-        )
-
+            model = DfLocal5DTFNO(
+                latent_dim,
+                base_resolution=base_resolution,
+                patch_size=patch_size,
+                in_channels=problem_dim,
+                out_channels=problem_dim,
+                num_layers=num_layers
+            )
     try:
         model
     except NameError:

@@ -15,7 +15,7 @@ ddp:
   n_nodes: 1
 amp: 
   enable: true  # set to false when using rope or integrals in training (complex / fft)
-  bfloat: true
+  bfloat: false  # set to false for fno
 mode: "train"
 eval: true
 device: "cuda"
