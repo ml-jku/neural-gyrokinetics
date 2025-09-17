@@ -281,6 +281,34 @@ def plot_potentials(x1, x2):
     return plt_to_wandb_image(fig)
 
 
+def plot_2d_fluxfield(x1, x2):
+    from matplotlib import colormaps
+
+    c_map = colormaps["RdBu"]
+
+    fig, ax = plt.subplots(2, 1, figsize=(10, 5))
+    fig.subplots_adjust(wspace=0.05)
+
+    # select only real part if we predicted both real/imag parts of phi
+    # fluxfield is already 2D
+    x1 = x1[0] if x1.ndim > 2 else x1
+    x2 = x2[0] if x2.ndim > 2 else x2
+    ax[0].matshow(x1.squeeze().T, cmap=c_map)
+    ax[0].set_title(r"$Q_{pred}$", fontsize=24)
+    ax[0].set_ylabel(r"$y$", fontsize=20)
+    ax[0].set_xticks([])
+    ax[0].set_yticks([])
+
+    ax[1].matshow(x2.squeeze().T, cmap=c_map)
+    ax[1].set_title(r"$Q_{GT}$", fontsize=24)
+    ax[1].set_xlabel(r"$x$", fontsize=20)
+    ax[1].set_ylabel(r"$y$", fontsize=20)
+    ax[1].set_xticks([])
+    ax[1].set_yticks([])
+
+    return plt_to_wandb_image(fig)
+
+
 def generate_val_plots(rollout, gt, ts, phase):
     plots = {}
     val_plots_dict = {
@@ -295,6 +323,9 @@ def generate_val_plots(rollout, gt, ts, phase):
         "phi_int": {
             f"Integrated potentials (T={ts[0].item():.2f}, {phase})": plot_potentials,
         },
+        "fluxfield": {
+            f"Fluxfield (T={ts[0].item():.2f}, {phase})": plot_2d_fluxfield,
+        }
     }
     for key in rollout.keys():
         if key not in val_plots_dict:

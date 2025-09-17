@@ -24,12 +24,10 @@ def main(config: DictConfig):
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     set_seed(config.seed)
 
-    print("#" * 88, "\nStarting Cyclone with configs:")
-    print(OmegaConf.to_yaml(config))
-    print("#" * 88, "\n")
-
     dict_config = OmegaConf.to_container(config)
     date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
+    choices = HydraConfig.get().runtime.choices
+    dict_config["choices"] = choices
     if not config.load_ckpt:
         if config.output_path is None:
             dict_config["output_path"] = osp.join("outputs", date_and_time)
@@ -49,11 +47,16 @@ def main(config: DictConfig):
     else:
         # check that output path exists
         assert os.path.exists(config.output_path), "Output path does not exist, cannot load ckpt"
-        assert os.path.exists(f"{config.output_path}/best.pth"), "Output path does not contain checkpoint best.pt"
+        assert os.path.exists(f"{config.output_path}/ckp.pth"), "Output path does not contain checkpoint best.pt"
         config = OmegaConf.create(yaml.safe_load(open(f"{config.output_path}/config.yaml", "r")))
         overrides_dotlist = [str(o) for o in HydraConfig.get().overrides.task]
         cli_conf = OmegaConf.from_dotlist(overrides_dotlist)
         config = OmegaConf.merge(config, cli_conf)
+        config.logging.run_id = f"{config.model.name}_{date_and_time}"
+
+    print("#" * 88, "\nStarting Cyclone with configs:")
+    print(OmegaConf.to_yaml(config))
+    print("#" * 88, "\n")
 
     if torch.cuda.is_available():
         n_gpus = torch.cuda.device_count()

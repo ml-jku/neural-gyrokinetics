@@ -130,3 +130,4 @@ class DfLocal5DTFNO(nn.Module):
         df = unpad(df, pad_axes, self.base_resolution)
         df = rearrange(df, "b ... c -> b c ...")
         return {"df": df}
+    

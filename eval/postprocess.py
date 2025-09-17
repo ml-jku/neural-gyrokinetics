@@ -7,6 +7,7 @@ import pickle
 import torch
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import struct
 
 from utils import pev_flux_df_phi, phi_integral, load_geometry
 
@@ -72,7 +73,7 @@ DUMP_DIR = args.pred_path
 if "iteration" in DUMP_DIR:
     if DUMP_DIR.endswith('/'):
         DUMP_DIR = DUMP_DIR[:-1]
-    if "best" in DUMP_DIR:
+    if "best" in DUMP_DIR or "ckp" in DUMP_DIR:
         sim = DUMP_DIR.split('/')[-2]
     else:
         sim = DUMP_DIR.split('/')[-1]
@@ -113,15 +114,35 @@ for sim in sims_to_eval:
         pred_fluxes = correct_time(GT_DIR, pred_fluxes_dict)
     else:
         pred_fluxes = {}
-        k_dir = K_files('_'.join(GT_DIR.split('_')[:2]))
+        k_dir = K_files('_'.join(GT_DIR.split('_')[:2]))[80:]
         if os.path.isfile(os.path.join(DUMP_DIR, k_dir[0], "flux")):
             # For XNet simply load fluxes from each K-file
             print("Loading flux predictions...")
             for k_file in k_dir[:-2]:
                 if not os.path.isfile(os.path.join(DUMP_DIR, k_file, "flux")):
-                    flux = np.loadtxt(os.path.join(DUMP_DIR, f"K{k_file}", "flux"))
+                    try:
+                        flux = np.loadtxt(os.path.join(DUMP_DIR, f"K{k_file}", "flux"))
+                    except:
+                        try:
+                            with open(os.path.join(DUMP_DIR, f"K{k_file}", "flux"), "rb") as fid:
+                                ff = np.fromfile(fid, dtype=np.float64)
+                            knth = np.reshape(ff, (2, 85, 32), order="F").astype("float32").copy()
+                            flux = knth.sum()
+                        except:
+                            flux = open(os.path.join(DUMP_DIR, f"K{k_file}", "flux"), "rb").read()
+                            flux = struct.unpack("d", flux)[0]
                 else:
-                    flux = np.loadtxt(os.path.join(DUMP_DIR, k_file, "flux"))
+                    try:
+                        flux = np.loadtxt(os.path.join(DUMP_DIR, k_file, "flux"))
+                    except:
+                        try:
+                            with open(os.path.join(DUMP_DIR, k_file, "flux"), "rb") as fid:
+                                ff = np.fromfile(fid, dtype=np.float64)
+                            knth = np.reshape(ff, (2, 85, 32), order="F").astype("float32").copy()
+                            flux = knth[1].sum()
+                        except:
+                            flux = open(os.path.join(DUMP_DIR, k_file, "flux"), "rb").read()
+                            flux = struct.unpack("d", flux)[0]
 
                 # correct for time shift
                 if k_file.startswith("K"):
@@ -136,7 +157,9 @@ for sim in sims_to_eval:
                         line_split = line.split("=")
                         if line_split[0].strip() == "TIME":
                             time = float(line_split[1].strip().strip(",").strip())
-                pred_fluxes[time] = flux.item()
+                if isinstance(flux, np.ndarray):
+                    flux = flux.item()
+                pred_fluxes[time] = flux
         else:
             # compute flux integral
             print("Computing flux integral for dumps...")
@@ -169,11 +192,12 @@ for sim in sims_to_eval:
                 pred_fluxes[k_file] = flux.item()
             pred_fluxes = correct_time(GT_DIR, pred_fluxes)
 
-    model_corr = pickle.load(open(f"{DUMP_DIR}/model_corr.pkl", "rb"))
-    gt_corr = pickle.load(open(f"{DUMP_DIR}/gt_corr.pkl", "rb"))
     os.makedirs(os.path.join(DUMP_DIR, "plots"), exist_ok=True)
+    if os.path.exists(f"{DUMP_DIR}/model_corr.pkl"):
+        model_corr = pickle.load(open(f"{DUMP_DIR}/model_corr.pkl", "rb"))
+        gt_corr = pickle.load(open(f"{DUMP_DIR}/gt_corr.pkl", "rb"))
+        correlation_plot(model_corr, gt_corr, DUMP_DIR)
     plot_flux_comp(gt_fluxes, pred_fluxes, DUMP_DIR)
-    correlation_plot(model_corr, gt_corr, DUMP_DIR)
     with open(f"{DUMP_DIR}/pred_fluxes.pkl", "wb") as fid:
         pickle.dump(pred_fluxes, fid)
 

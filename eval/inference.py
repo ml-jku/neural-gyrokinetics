@@ -13,7 +13,7 @@ import time
 import re
 import h5py
 
-from utils import load_model_and_config
+from utils import load_model_and_config, expand_as
 from models import get_model
 from dataset.cyclone import CycloneDataset
 
@@ -43,6 +43,12 @@ def invert_ifft(x):
     knth = np.stack([knth.real, knth.imag]).squeeze().astype("float32")
     return knth
 
+def invert_fluxfield(fluxfield, norm: str = "forward"):
+    fluxfield = np.moveaxis(fluxfield.squeeze().cpu().numpy(), 0, -1).copy()
+    fluxfield = fluxfield.view(dtype=np.complex64).squeeze()
+    fluxfield = np.fft.fftn(fluxfield, axes=(-1,-2), norm=norm)
+    fluxfield = np.fft.fftshift(fluxfield, axes=(-2,))
+    return np.stack([fluxfield.real, fluxfield.imag]).astype("float32")
 
 def modify_fds_dat(path):
     with open(path, "r") as infile:
@@ -147,9 +153,9 @@ CKP = parser.ckpt
 device = "cuda"
 
 cfg = OmegaConf.create(yaml.safe_load(open(f"{CKP}/config.yaml", "r")))
-
 train_losses = [k for k, v in cfg.model.loss_weights.items() if v > 0.0]
-input_fields = np.unique(cfg.dataset.input_fields + train_losses)
+input_fields = set(cfg.dataset.input_fields + [k for k in cfg.model.loss_weights.keys()
+                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]])
 traindata = CycloneDataset(
     path=parser.data_path,
     active_keys=cfg.dataset.active_keys,
@@ -211,16 +217,8 @@ if "ood" in parser.eval_sim:
     raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/ood/{parser.eval_sim.replace('.h5', '').replace("ood_", "").replace("_ifft", "")}"
 else:
     raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{parser.eval_sim.replace('.h5', '')}"
-print(f"Val: {len(data)}")
 
 assert traindata.norm_stats == data.norm_stats, "Normalization stats mismatch"
-if cfg.dataset.offset > 0:
-    # dump normalization stats so we only need to compute them once
-    with open(f"{parser.ckpt}/normalization_stats.pkl", "wb") as out:
-        pickle.dump(traindata.norm_stats, out)
-
-if "detach_flux_latents" not in cfg.model.swin:
-    cfg.model.swin.detach_flux_latents=False
 model = get_model(cfg, dataset=data)
 path = f"{CKP}/best.pth" if not last else f"{CKP}/ckp.pth"
 model, *_ = load_model_and_config(path, model, device)
@@ -232,7 +230,7 @@ model_inputs = ["df"]
 if "ood" in parser.eval_sim:
     IDX_END = 263
     params = {}
-    with h5py.File(f"/restricteddata/ukaea/gyrokinetics/preprocessed/{parser.eval_sim}") as infile:
+    with h5py.File(f"/restricteddata/ukaea/gyrokinetics/preprocessed/{parser.eval_sim.replace('.h5', '_ifft_realpotens')}.h5") as infile:
         k_name = "timestep_" + str(0).zfill(5)
         k = infile[f"data/{k_name}"][:]
         if cfg.dataset.separate_zf:
@@ -291,7 +289,9 @@ shift_scale_dict = defaultdict(dict)
 invert_fns = {
     "df": partial(invert_df, cfg=cfg, parser=parser),
     "phi": invert_phi if not cfg.dataset.real_potens else None,
-    "flux": None
+    "fluxfield": invert_fluxfield,
+    "flux": None,
+    "fluxavg": None
 }
 
 for key in input_fields:
@@ -299,8 +299,8 @@ for key in input_fields:
         shift = torch.tensor(traindata.norm_stats[key]["full"]["mean"]).unsqueeze(0).to(device)
         scale = torch.tensor(traindata.norm_stats[key]["full"]["std"]).unsqueeze(0).to(device)
     elif cfg.dataset.normalization == "minmax":
-        x_min = torch.tensor(traindata.norm_stats[key]["full"]["min"]).unsqueeze(0).to(device)
-        x_max = torch.tensor(traindata.norm_stats[key]["full"]["max"]).unsqueeze(0).to(device)
+        x_min = torch.tensor(traindata.norm_stats[key]["full"]["min"]).to(device)
+        x_max = torch.tensor(traindata.norm_stats[key]["full"]["max"]).to(device)
         scale = (x_max - x_min) / cfg.dataset.beta1
         shift = x_min + scale * cfg.dataset.beta2
     shift_scale_dict[key]["shift"] = shift
@@ -365,7 +365,9 @@ with torch.no_grad():
         for key in outputs.keys():
             scale = shift_scale_dict[key]["scale"]
             shift = shift_scale_dict[key]["shift"]
-            # denormalize
+            if scale.ndim != outputs[key].ndim:
+                scale = expand_as(scale, outputs[key].squeeze()).unsqueeze(0)
+                shift = expand_as(shift, outputs[key].squeeze()).unsqueeze(0)
             b_xt = outputs[key] * scale + shift
 
             invert_fn = invert_fns[key]
@@ -395,10 +397,10 @@ with torch.no_grad():
                     f"cp {raw_path}/FDS.dat {dirtarget}")
                 modify_fds_dat(f"{dirtarget}/FDS.dat")
                 modify_input_dat(f"{dirtarget}/input.dat")
-                write_mode = "wb" if key in ["df", "phi"] else "w"
+                write_mode = "wb" if key in ["df", "phi", "fluxfield"] else "w"
                 with open(ftarget, write_mode) as f:
                     print(f"Writing file {ftarget}")
-                    if key == "flux":
+                    if key in ["flux", "fluxavg"]:
                         f.write(str(b_xt.item()))
                     else:
                         f.write(b_xt)

@@ -148,15 +148,8 @@ def load_model_and_config(
             "module."+k: v
             for k, v in loaded_ckpt["model_state_dict"].items()
         }
-    new_state_dict = {}
-    for key in loaded_ckpt["model_state_dict"].keys():
-        if "flux_head" in key and not key in loaded_ckpt["model_state_dict"]:
-            # compatibility to earlier code version
-            new_key = re.sub(r"^(flux_head\.blocks\.\d+)\.", r"\1.blocks.0.", key)
-        else:
-            new_key = key
-        new_state_dict[new_key] = loaded_ckpt["model_state_dict"][key]
-    model.load_state_dict(new_state_dict)
+    new_state_dict = loaded_ckpt["model_state_dict"]
+    model.load_state_dict(new_state_dict, strict=False)
     resume_epoch = loaded_ckpt["epoch"]
     resume_loss = loaded_ckpt["loss"]
     print(
@@ -203,7 +196,12 @@ def find_free_port():
 def expand_as(src: np.ndarray, tgt: np.ndarray):
     src = src.squeeze()
     while src.ndim < tgt.ndim:
-        src = np.expand_dims(src, axis=-1)
+        if isinstance(src, np.ndarray):
+            src = np.expand_dims(src, axis=-1)
+        elif isinstance(src, torch.Tensor):
+            src = src.unsqueeze(-1)
+        else:
+            raise NotImplementedError("Unsupported datatype")
     return src
 
 
@@ -542,7 +540,8 @@ def phi_integral(df: torch.Tensor, geometry: Dict):
 
     poisson_diag = torch.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
     poisson_diag[..., 0, 0] = 0.0
-    poisson_diag = poisson_diag + signz * torch.exp(-cfen) * de / tmp
+    poisson_diag = poisson_diag - signz * torch.exp(-cfen) * de / tmp
+    poisson_diag = -1 / poisson_diag
 
     # first usmv
     phi = (1 + 0j) * poisson_int * df
@@ -733,16 +732,22 @@ def poten_files(directory):
 
 def exclude_from_weight_decay(model, param_names, weight_decay):
     decay, no_decay = [], []
+    no_decay_names, decay_names = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
+        add_to_no_decay = False
         for param_name in param_names:
             if param_name in name.lower():
-                no_decay.append(param)
-            #elif len(param.shape) == 1 or name.endswith('.bias'):
-            #    no_decay.append(param)
-            else:
-                decay.append(param)
+                add_to_no_decay = True
+        
+        if add_to_no_decay:
+            no_decay.append(param)
+            no_decay_names.append(name)
+        else:
+            decay.append(param)
+            decay_names.append(name)
+
     return [
         {'params': decay, 'weight_decay': weight_decay},
         {'params': no_decay, 'weight_decay': 0.0}

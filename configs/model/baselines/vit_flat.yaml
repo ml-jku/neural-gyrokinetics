@@ -1,0 +1,31 @@
+name: vit_flat
+bundle_seq_length: 1
+latent_dim: 256
+num_layers: 1
+conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
+losses: ["df"]
+loss_weights:
+  df: 1.0
+  phi: 0.0
+  flux: 0.0
+extra_loss_weights:
+  phi_int: 0.0
+  flux_int: 0.0
+  phi_cross: 0.0
+  flux_cross: 0.0
+
+vit:
+  patch_size: [ 4, 2, 4, 5, 4 ]
+  window_size: [ 4, 2, 2, 9, 4 ]
+  num_heads: [8]
+  depth: [16]
+  gradient_checkpoint: false
+  merging_hidden_ratio: 4.0
+  unmerging_hidden_ratio: 8.0
+  c_multiplier: 2
+  norm_output: false
+  use_abs_pe: true
+  act_fn: GELU
+  patch_skip: true
+  modulation: dit
+  drop_path: 0.1

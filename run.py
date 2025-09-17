@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import warnings
 
 import gc
 import torch
@@ -71,6 +72,16 @@ def runner(rank, cfg, train_method, world_size):
     model = model.to(device)
     if use_ddp:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+
+    if cfg.load_ckpt:
+        # choosing best.pt since ckpt.pt does not contain scheduler sd
+        ckpt_path = os.path.join(cfg.output_path, "ckp.pth")
+        model, ckpt_dict = load_model_and_config(ckpt_path, model, device, for_ddp=use_ddp)
+        if cfg.training.params_to_include:
+            for n, p in model.named_parameters():
+                for key in cfg.training.params_to_include:
+                    if not key in n:
+                        p.requires_grad = False
 
     bundle_seq_length = cfg.model.bundle_seq_length
     if cfg.mode == "train":
@@ -151,29 +162,33 @@ def runner(rank, cfg, train_method, world_size):
                 model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
         input_fields = set(cfg.dataset.input_fields)
+        if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+            input_fields.add("position")
         output_fields = list(
             (set(cfg.model.loss_weights.keys())).union(
                 [k.split("_")[0] for k in cfg.model.extra_loss_weights.keys()]
             )
         )
+        compute_integrals = True if set(output_fields) != set(["flux", "phi", "df"]) else False
         conditioning = cfg.model.conditioning
         idx_keys = ["file_index", "timestep_index"]
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
 
         if cfg.load_ckpt:
-            # choosing best.pt since ckpt.pt does not contain scheduler sd
-            ckpt_path = os.path.join(cfg.output_path, "best.pth")
-            model, ckpt_dict = load_model_and_config(ckpt_path, model, device, for_ddp=use_ddp)
-            opt.load_state_dict(ckpt_dict["optimizer_state_dict"])
+            try:
+                opt.load_state_dict(ckpt_dict["optimizer_state_dict"])
+            except:
+                trained_params = sum([len(params[i]['params']) for i in range(len(params))])
+                included = cfg.training.params_to_include
+                print(f"Failed to load optimizer state, training {trained_params} params with key {included}")
             scheduler.load_state_dict(ckpt_dict["scheduler_state_dict"])
             start_epoch = ckpt_dict["epoch"]
-            loss_val_min = ckpt_dict["loss"]
             cur_update_step = start_epoch * len(trainloader)
         else:
-            loss_val_min = torch.inf
             cur_update_step = 0.
             start_epoch = 0
 
+        loss_val_min = torch.inf
         for epoch in range(start_epoch + 1, n_epochs + 1):
             loss_logs = {k: 0 for k in loss_wrap.active_losses}
             loss_logs["relative_norm"] = 0.0
@@ -247,7 +262,8 @@ def runner(rank, cfg, train_method, world_size):
                     progress_remaining = remainig_progress(cur_update_step, total_steps)
                     loss, losses = loss_wrap(preds, gts, idx_data, geometry=geometry,
                                              progress_remaining=progress_remaining,
-                                             separate_zf=cfg.dataset.separate_zf if cfg.model.extra_zf_loss else False)
+                                             separate_zf=cfg.dataset.separate_zf if cfg.model.extra_zf_loss else False,
+                                             compute_integrals=compute_integrals)
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
@@ -292,6 +308,7 @@ def runner(rank, cfg, train_method, world_size):
                     if cfg.training.scheduler
                     else cfg.training.learning_rate
                 ),
+                "train/epoch": epoch 
             }
             for key in loss_scheduler_dict.keys():
                 train_losses_dict[f"train/{key}_schedule"] = loss_scheduler_dict[key](progress_remaining)

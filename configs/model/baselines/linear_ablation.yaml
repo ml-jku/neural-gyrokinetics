@@ -6,29 +6,17 @@ decouple_mu: true
 conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
 extra_zf_loss: false
 loss_scheduler:
-  fluxfield: 
-    type: "linear"
-    start: 0
-    end: 1
-    start_fraction: 0.7
-    end_fraction: 0.9
   df: null
-  phi:
-    type: "linear"
-    start: 0
-    end: 1
-    start_fraction: 0.5
-    end_fraction: 0.7
+  phi: null
   flux: null
   phi_int: null
   flux_int: null
   phi_cross: null
   flux_cross: null
 loss_weights:
-  df: 1.0
-  phi: 0.1
-  flux: 0.0
-  fluxfield: 1.0
+  df: 0.0
+  phi: 0.0
+  flux: 1.0
 extra_loss_weights:
   phi_int: 0.0
   flux_int: 0.0
@@ -60,7 +48,6 @@ swin:
   flux_reduce: "max"
   flux_num_heads: 8
   flux_depth: 1
-  flux_conditioning: true
   init_weights: "kaiming_uniform"
   patching_init_weights: "kaiming_uniform"
   cond_init_weights: "normal_smallvar"

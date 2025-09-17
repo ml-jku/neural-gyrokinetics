@@ -1,8 +1,7 @@
-name: fno3d
+name: transolver
 bundle_seq_length: 1
 latent_dim: 256
-num_layers: 4
-decouple_mu: true
+num_layers: 1
 conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
 extra_zf_loss: false
 loss_scheduler:
