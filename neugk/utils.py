@@ -151,20 +151,8 @@ def load_model_and_config(
         loaded_ckpt["model_state_dict"] = {
             "module." + k: v for k, v in loaded_ckpt["model_state_dict"].items()
         }
-<<<<<<< HEAD:neugk/utils.py
-    new_state_dict = {}
-    for key in loaded_ckpt["model_state_dict"].keys():
-        if "flux_head" in key and key not in loaded_ckpt["model_state_dict"]:
-            # compatibility to earlier code version
-            new_key = re.sub(r"^(flux_head\.blocks\.\d+)\.", r"\1.blocks.0.", key)
-        else:
-            new_key = key
-        new_state_dict[new_key] = loaded_ckpt["model_state_dict"][key]
-    model.load_state_dict(new_state_dict)
-=======
     new_state_dict = loaded_ckpt["model_state_dict"]
     model.load_state_dict(new_state_dict, strict=False)
->>>>>>> final_runs:utils.py
     resume_epoch = loaded_ckpt["epoch"]
     resume_loss = loaded_ckpt["loss"]
     print(
@@ -662,16 +650,6 @@ def exclude_from_weight_decay(model, param_names, weight_decay):
         add_to_no_decay = False
         for param_name in param_names:
             if param_name in name.lower():
-<<<<<<< HEAD:neugk/utils.py
-                no_decay.append(param)
-            # elif len(param.shape) == 1 or name.endswith('.bias'):
-            #    no_decay.append(param)
-            else:
-                decay.append(param)
-    return [
-        {"params": decay, "weight_decay": weight_decay},
-        {"params": no_decay, "weight_decay": 0.0},
-=======
                 add_to_no_decay = True
         
         if add_to_no_decay:
@@ -684,5 +662,4 @@ def exclude_from_weight_decay(model, param_names, weight_decay):
     return [
         {'params': decay, 'weight_decay': weight_decay},
         {'params': no_decay, 'weight_decay': 0.0}
->>>>>>> final_runs:utils.py
     ]

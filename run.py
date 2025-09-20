@@ -17,16 +17,11 @@ import torch.distributed as dist
 from torch.utils._pytree import tree_map
 import os
 
-from dataset import get_data, CycloneSample
-from models import get_model
-from train import (
-    get_pushforward_fn,
-    LossWrapper,
-    GradientBalancer,
-    pretrain_autoencoder,
-)
-from eval.evaluate import evaluate
-from utils import (
+from neugk.dataset import get_data, CycloneSample
+from neugk.models import get_model
+from neugk.train import get_pushforward_fn, LossWrapper, GradientBalancer
+from neugk.eval.evaluate import evaluate
+from neugk.utils import (
     load_model_and_config,
     setup_logging,
     edit_tag,
@@ -157,13 +152,6 @@ def runner(rank, cfg, train_method, world_size):
                 use_bf16=use_bf16,
                 device=device,
             )
-
-        if cfg.training.pretraining:
-            model = pretrain_autoencoder(
-                model, cfg, trainloader, valloaders, writer, device
-            )  # only valuate on the holdout trajectories, not the holdout samples
-            if not hasattr(model, "module") and use_ddp:
-                model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
         input_fields = set(cfg.dataset.input_fields)
         if cfg.model.name in ["pointnet", "transolver", "transformer"]:

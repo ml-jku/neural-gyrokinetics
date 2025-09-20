@@ -1,26 +1,28 @@
-from typing import Sequence, Union, Optional, Type, Dict, List
+from typing import Sequence, Union, Optional, Type, Dict
 
 from einops import rearrange
 import torch
 from torch import nn
 from functools import partial
 
-from neugk.models.nd_vit.vit_layers import (
-    ViTLayer, 
-    DiTLayer, 
-    FilmViTLayer,
-)
+from neugk.models.nd_vit.swin_layers import SwinLayer, DiTSwinLayer, FilmSwinLayer
 from neugk.models.nd_vit.positional import PositionalEmbedding
-from neugk.models.nd_vit.patching import PatchEmbed, PatchUnmerging, pad_to_blocks, unpad
+from neugk.models.nd_vit.patching import (
+    PatchEmbed,
+    PatchUnmerging,
+    pad_to_blocks,
+    unpad,
+)
 
 
-class ViTFlat(nn.Module):
+class SwinFlat(nn.Module):
     def __init__(
         self,
         space: int,
         dim: int,
         base_resolution: Sequence[int],
         patch_size: Union[Sequence[int], int] = 4,
+        window_size: Union[Sequence[int], int] = 5,
         depth: int = 2,
         num_heads: int = 4,
         in_channels: int = 2,
@@ -31,29 +33,27 @@ class ViTFlat(nn.Module):
         hidden_mlp_ratio: float = 2.0,
         use_checkpoint: bool = False,
         unmerging_hidden_ratio: float = 8.0,
-        cond_embed: Optional[nn.Module] = None,
-        modulation: str = "film",
+        conditioning: Optional[nn.Module] = None,
+        modulation: str = "dit",
         act_fn: nn.Module = nn.GELU,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         expand_act_fn: nn.Module = nn.LeakyReLU,
         init_weights: str = "xavier_uniform",
         patching_init_weights: str = "xavier_uniform",
         patch_skip: bool = False,
-        conditioning: Optional[List[str]]= None,
     ):
         super().__init__()
         self.patch_size = patch_size
         self.base_resolution = base_resolution
         self.patch_skip = patch_skip
         # set layer type and conditioning
-        Layer = ViTLayer
-        self.cond_embed = cond_embed
+        Layer = SwinLayer
+        self.cond_embed = conditioning
         if self.cond_embed is not None:
-            self.condition_keys = sorted(conditioning)
             if modulation == "dit":
-                ModulatedSwinLayer = DiTLayer
+                ModulatedSwinLayer = DiTSwinLayer
             if modulation == "film":
-                ModulatedSwinLayer = FilmViTLayer
+                ModulatedSwinLayer = FilmSwinLayer
             Layer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
 
         padded_base_resolution, _ = pad_to_blocks(base_resolution, patch_size)
@@ -75,6 +75,7 @@ class ViTFlat(nn.Module):
             space,
             dim,
             grid_size=self.patch_embed.grid_size,
+            window_size=window_size,
             depth=depth,
             num_heads=num_heads,
             drop_path=drop_path,
@@ -85,8 +86,7 @@ class ViTFlat(nn.Module):
         )
 
         if abs_pe:
-            self.ape = PositionalEmbedding(dim, self.patch_embed.grid_size,
-                                           learnable=True)
+            self.ape = PositionalEmbedding(dim, self.patch_embed.grid_size)
 
         # unpatch
         self.unpatch = PatchUnmerging(
@@ -117,25 +117,24 @@ class ViTFlat(nn.Module):
             self.cond_embed.reset_parameters(self.init_weights)
         self.swin.reset_parameters(self.init_weights)
 
-    def forward(self, df: torch.Tensor, **kwargs) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
         # compress to patch space
-        df, pad_axes = self.patch_encode(df)
+        x, pad_axes = self.patch_encode(x)
         if self.patch_skip:
-            first_res = df.clone()
+            first_res = x.clone()
 
         # backbone
         cond = self.condition(kwargs)
-        if hasattr(self, "ape"):
-            df = self.ape(df)
-        df = self.swin(df, **cond)
+
+        x = self.swin(x, **cond)
 
         # expand to original
         if self.patch_skip:
-            df = torch.cat([df, first_res], -1)
+            x = torch.cat([x, first_res], -1)
 
-        df = self.patch_decode(df, cond["condition"], pad_axes)
+        x = self.patch_decode(x, cond["condition"], pad_axes)
 
-        return {"df": df}
+        return x
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         # pad to patch blocks
@@ -157,19 +156,17 @@ class ViTFlat(nn.Module):
         return x
 
     def condition(self, kwconds) -> Dict:
-        # drop input fields
-        kwconds = {k: v for k, v in kwconds.items() if k in self.condition_keys}
         if len(kwconds) == 0:
             return {}
-
-        assert self.condition_keys == sorted(list(kwconds.keys())), (
-            "Mismatch in conditioning keys "
-            f"{self.condition_keys} != {sorted(list(kwconds.keys()))}"
-        )
-        cond = torch.cat(
-            [kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1
-        )
-        if self.cond_embed is not None:
+        cond = kwconds.get("timestep")
+        cond = cond.unsqueeze(-1)
+        refine_step = kwconds.get("refinement_step", None)
+        if refine_step is not None:
+            cond = torch.cat([cond, refine_step.unsqueeze(-1)], dim=-1)
+        itg = kwconds.get("itg", None)
+        if itg is not None:
+            cond = torch.cat([cond, itg.unsqueeze(-1)], dim=-1)
+        if cond is not None and self.cond_embed is not None:
             # embed conditioning is e.g. sincos
             return {"condition": self.cond_embed(cond)}
         else:

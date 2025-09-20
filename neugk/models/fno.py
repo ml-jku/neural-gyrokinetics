@@ -6,7 +6,7 @@ from einops import rearrange
 
 from neuralop.models import FNO, FNO3d
 
-from models.nd_vit.patching import PatchEmbed, PatchUnmerging, pad_to_blocks, unpad
+from neugk.models.nd_vit.patching import PatchEmbed, PatchUnmerging, pad_to_blocks, unpad
 
 
 class Df5DTFNO(FNO):

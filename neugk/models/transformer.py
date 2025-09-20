@@ -1,12 +1,11 @@
 from functools import partial
-from typing import Optional, List, Dict
+from typing import List, Dict
 
 import torch
 import torch.nn as nn
-from einops import einsum, rearrange
-from torch.nn import functional as F
+from einops import rearrange
 
-from models.utils import ContinuousEmbed, MLP, AttentionDecoder, DiT
+from neugk.models.layers import ContinuousEmbed, MLP, AttentionDecoder, DiT
 
 
 class TransformerBlock(nn.Module):

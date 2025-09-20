@@ -6,7 +6,8 @@ import torch.nn as nn
 from einops import einsum, rearrange
 from torch.nn import functional as F
 
-from models.utils import ContinuousEmbed, MLP, DiT
+from neugk.models.layers import ContinuousEmbed, MLP, DiT
+
 
 class TransolverAttention(nn.Module):
     """

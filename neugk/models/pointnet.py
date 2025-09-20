@@ -3,7 +3,8 @@ from torch import nn
 import torch
 from einops import rearrange
 
-from models.utils import MLP, ContinuousEmbed
+from neugk.models.layers import MLP, ContinuousEmbed
+
 
 class PointNet(nn.Module):
     def __init__(self, dim, n_dims, n_channels, condition_keys):
