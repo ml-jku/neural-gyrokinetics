@@ -12,6 +12,7 @@ scheduler: "cosine"
 clip_grad: true
 clip_to: 1.0
 gradnorm_balancer: "none"  # "none", "full", "pseudo"
+params_to_include: null
 pushforward:
   epochs: [100, 130, 160]
   unrolls: [0, 0, 0]

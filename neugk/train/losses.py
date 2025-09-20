@@ -52,7 +52,7 @@ class LossWrapper(nn.Module):
     ):
         super().__init__()
         self.weights = weights
-        self._data_losses = ["df", "phi", "flux"]
+        self._data_losses = ["df", "phi", "flux", "fluxfield"]
         self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
         self.integrator = FluxIntegral(real_potens=real_potens)
         self.denormalize_fn = denormalize_fn
@@ -144,6 +144,8 @@ class LossWrapper(nn.Module):
         do_ints = not self.training and compute_integrals
         if sum([self.weights.get(k, 0.0) for k in self._int_losses]) > 0 or do_ints:
             int_losses, integrated = self.integral_loss(geometry, preds, tgts, idx_data)
+        else:
+            integrated = None
         loss_keys = (
             [k for k, w in self.weights.items() if w > 0.0]
             if self.training
@@ -156,7 +158,12 @@ class LossWrapper(nn.Module):
             # warnings.warn("Prediction - DATA loss weight key mismatch.")
             missing_keys = [k for k in data_keys if k not in preds]
             for k in missing_keys:
-                preds[k] = torch.zeros_like(tgts[k]).to(tgts[k].device)
+                if k in tgts:
+                    preds[k] = torch.zeros_like(tgts[k]).to(tgts[k].device)
+                else:
+                    tmp_key = list(preds.keys())[0]
+                    preds[k] = torch.zeros(size=(1,1)).to(preds[tmp_key].device)
+                    tgts[k] = torch.zeros_like(preds[k]).to(preds[k].device)
         if not all([k.replace("_cross", "") in preds for k in cross_keys]):
             raise ValueError("Prediction - CROSS loss weight key mismatch.")
         # compute losses
@@ -171,9 +178,23 @@ class LossWrapper(nn.Module):
                         preds[k] = preds[k].unsqueeze(0)
                     losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
-                losses[k] = F.mse_loss(preds[k], tgts[k])
+                # TODO: Remove again after this experiment
+                # preds[k] = torch.stack([self.denormalize_fn(idx_data["file_index"][b], fluxfield=preds[k][b]) for b in range(preds[k].shape[0])])
+                # tgts[k] = torch.stack([self.denormalize_fn(idx_data["file_index"][b], fluxfield=tgts[k][b]) for b in range(tgts[k].shape[0])])
+                # losses[k] = F.l1_loss(preds[k], tgts[k]) if self.training else F.mse_loss(preds[k], tgts[k])
+                if self.training:
+                    losses[k] = F.l1_loss(preds[k], tgts[k])
+                    # shape_loss = relative_norm_mse(preds[k], tgts[k])
+                    # sum_axes = tuple(range(1, preds[k].ndim))
+                    # S_true = tgts[k].sum(dim=sum_axes).clamp_min(1e-12)
+                    # S_hat  = preds[k].sum(dim=sum_axes).clamp_min(1e-12)
+                    # scale_loss = (S_hat.log1p() - S_true.log1p()).abs().mean()
+                    # losses[k] = shape_loss + scale_loss
+                else:
+                    losses[k] = F.mse_loss(preds[k], tgts[k])
         for k in int_keys + cross_keys:
-            losses[k] = int_losses[k]
+            if k in int_losses:
+                losses[k] = int_losses[k]
         if self.training:
             # reweight and accumulate
             loss = sum([self.weights[k] * losses[k] for k in loss_keys])
@@ -182,7 +203,7 @@ class LossWrapper(nn.Module):
             return loss, losses
         else:
             # no reweight in validation
-            loss = sum([losses[k] for k in loss_keys])
+            loss = sum([losses[k] for k in loss_keys if k in losses])
             return loss, losses, integrated
 
     @property

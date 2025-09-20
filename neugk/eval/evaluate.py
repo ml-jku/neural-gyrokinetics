@@ -58,7 +58,12 @@ def evaluate(
     use_amp = cfg.amp.enable
     use_bf16 = use_amp and cfg.amp.bfloat and torch.cuda.is_bf16_supported()
     input_fields = cfg.dataset.input_fields
-    output_fields = list(cfg.model.loss_weights.keys())
+    output_fields = [k for k in cfg.model.loss_weights.keys() 
+                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]]
+    if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+        input_fields.append("position")
+    if set(output_fields) != set(["df", "phi", "flux"]):
+        eval_integrals = False
     if eval_integrals:
         output_fields = ["df", "phi", "flux"]  # all fields for integral evaluation
     conditioning = cfg.model.conditioning
@@ -133,9 +138,8 @@ def evaluate(
                     eval_integrals=eval_integrals,
                 )
                 # add integrated potentials to rollout for comparison
-                rollout["phi_int"] = torch.stack(
-                    [integrated_i[t]["phi"] for t in range(len(integrated_i))]
-                )
+                if integrated_i[0] is not None:
+                    rollout["phi_int"] = torch.stack([integrated_i[t]["phi"] for t in range(len(integrated_i))])
 
                 for key in metrics_i.keys():
                     if metrics_i[key].shape[-1] < tot_eval_steps:
@@ -157,29 +161,31 @@ def evaluate(
                         metrics[key] += metrics_i[key]
                         validated_steps = torch.ones([tot_eval_steps])
                 n_timesteps_acc += validated_steps
-                if val_idx == 0:
-                    # holdout trajectories valset
-                    t_idx = idx_data["timestep_index"].tolist()
-                    batch_idx = torch.randint(0, len(t_idx), (1,)).item()
-                    rollout = {k: rollout[k][:, batch_idx].cpu() for k in rollout}
-                    gts = {k: gts[k][batch_idx].cpu() for k in gts}
-                    plots = generate_val_plots(
-                        rollout=rollout,
-                        gt=gts,
-                        ts=conds["timestep"],
-                        phase="Random draw",
-                    )
-                    val_plots.update(plots)
-                else:
-                    # holdout samples valset
-                    if idx == 0:
+                if not "position" in inputs:
+                    # no plots for field-like baselines
+                    if val_idx == 0:
+                        # holdout trajectories valset
+                        t_idx = idx_data["timestep_index"].tolist()
+                        batch_idx = torch.randint(0, len(t_idx), (1,)).item()
+                        rollout = {k: rollout[k][:, batch_idx].cpu() for k in rollout}
+                        gts = {k: gts[k][batch_idx].cpu() for k in gts}
                         plots = generate_val_plots(
                             rollout=rollout,
                             gt=gts,
                             ts=conds["timestep"],
-                            phase="Holdout samples",
+                            phase=f"Random draw",
                         )
                         val_plots.update(plots)
+                    else:
+                        # holdout samples valset
+                        if idx == 0:
+                            plots = generate_val_plots(
+                                rollout=rollout,
+                                gt=gts,
+                                ts=conds["timestep"],
+                                phase="Holdout samples",
+                            )
+                            val_plots.update(plots)
 
             if dist.is_initialized():
                 # for phase in metrics.keys():
@@ -215,14 +221,13 @@ def evaluate(
 
         if not rank:
             # Save model if validation loss on trajectories improves
-            val_loss = metrics["df"].mean()
+            val_loss = metrics[cfg.validation.model_selection_metric].mean()
             loss_val_min = save_model_and_config(
                 model,
                 optimizer=opt,
                 scheduler=scheduler,
                 cfg=cfg,
                 epoch=epoch,
-                # one + two step mse as target metric
                 val_loss=val_loss,
                 loss_val_min=loss_val_min,
             )

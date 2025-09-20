@@ -1,7 +1,8 @@
 from torch.utils.data.dataloader import DataLoader
 
+from dataset.augment import noise_transform
+from dataset.cyclone import CycloneDataset, CycloneSample, CoordinateCycloneDataset, LinearCycloneDataset
 import torch.distributed as dist
-from torch.utils.data.distributed import DistributedSampler
 
 from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import CycloneDataset, CycloneSample
@@ -41,9 +42,23 @@ def get_data(cfg):
                 last_n = entry.last_n
                 partial_holdouts[file] = last_n
 
-        trainset = CycloneDataset(
+        input_fields = set(cfg.dataset.input_fields + [k for k in cfg.model.loss_weights.keys()
+                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]])
+        if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+            input_fields.add("position")
+        assert not ("flux" in input_fields and "fluxavg" in input_fields), "Cannot predict both fluxavg and flux..."
+
+        if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+            # these models use coordinates as input
+            dataset_class = CoordinateCycloneDataset
+        elif cfg.choices.model == "baselines/linear_ablation":
+            dataset_class = LinearCycloneDataset
+        else:
+            dataset_class = CycloneDataset
+
+        trainset = dataset_class(
             active_keys=cfg.dataset.active_keys,
-            input_fields=["df", "phi", "flux"],
+            input_fields=input_fields, 
             path=cfg.dataset.path,
             split="train",
             random_seed=cfg.seed,
@@ -65,9 +80,9 @@ def get_data(cfg):
             real_potens=cfg.dataset.real_potens,
         )
 
-        holdout_traj_valset = CycloneDataset(
+        holdout_trajectories_valset = dataset_class(
             active_keys=cfg.dataset.active_keys,
-            input_fields=["df", "phi", "flux"],
+            input_fields=input_fields,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
@@ -114,9 +129,9 @@ def get_data(cfg):
         )
 
         if partial_holdouts:
-            holdout_samples_valset = CycloneDataset(
+            holdout_samples_valset = dataset_class(
                 active_keys=cfg.dataset.active_keys,
-                input_fields=["df", "phi", "flux"],
+                input_fields=input_fields,
                 path=cfg.dataset.path,
                 split="val",
                 random_seed=cfg.seed,
