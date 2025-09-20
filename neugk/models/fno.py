@@ -6,7 +6,12 @@ from einops import rearrange
 
 from neuralop.models import FNO, FNO3d
 
-from neugk.models.nd_vit.patching import PatchEmbed, PatchUnmerging, pad_to_blocks, unpad
+from neugk.models.nd_vit.patching import (
+    PatchEmbed,
+    PatchUnmerging,
+    pad_to_blocks,
+    unpad,
+)
 
 
 class Df5DTFNO(FNO):
@@ -17,7 +22,7 @@ class Df5DTFNO(FNO):
         in_channels: int = 2,
         out_channels: int = 2,
         num_layers: int = 4,
-        mode_scale: int = 4
+        mode_scale: int = 4,
     ):
         super().__init__(
             n_modes=[r // mode_scale for r in base_resolution],
@@ -27,16 +32,16 @@ class Df5DTFNO(FNO):
             n_layers=num_layers,
             factorization="tucker",
             implementation="factorized",
-            rank=0.05
+            rank=0.05,
         )
         self.base_resolution = tuple(base_resolution)
-    
+
     def forward(self, df: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
         _ = kwargs
         df = super().forward(df, output_shape=self.base_resolution)
         return {"df": df}
-    
-    
+
+
 class DfVSpace3DTFNO(FNO3d):
     def __init__(
         self,
@@ -45,7 +50,7 @@ class DfVSpace3DTFNO(FNO3d):
         in_channels: int = 2,
         out_channels: int = 2,
         num_layers: int = 4,
-        mode_scale: int = 2
+        mode_scale: int = 2,
     ):
         super().__init__(
             n_modes_height=base_resolution[2] // mode_scale,
@@ -58,10 +63,10 @@ class DfVSpace3DTFNO(FNO3d):
             n_layers=num_layers,
             factorization="tucker",
             implementation="factorized",
-            rank=0.05
+            rank=0.05,
         )
         self.base_resolution = tuple(base_resolution)
-    
+
     def forward(self, df: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
         _ = kwargs
         vp, vm = df.shape[2], df.shape[3]
@@ -69,10 +74,11 @@ class DfVSpace3DTFNO(FNO3d):
         df = super().forward(df, output_shape=self.base_resolution[2:])
         df = rearrange(df, "b (c vp vm) s x y -> b c vp vm s x y", vp=vp, vm=vm)
         return {"df": df}
-    
+
 
 class DfLocal5DTFNO(nn.Module):
     """Local-FNO https://arxiv.org/pdf/2411.11348"""
+
     def __init__(
         self,
         dim: int,
@@ -83,12 +89,11 @@ class DfLocal5DTFNO(nn.Module):
         num_layers: int = 4,
     ):
         super().__init__()
-        
+
         padded_base_resolution, _ = pad_to_blocks(base_resolution, patch_size)
         self.base_resolution = tuple(base_resolution)
         self.patch_size = patch_size
-        
-        
+
         self.patch = PatchEmbed(
             space=5,
             base_resolution=padded_base_resolution,
@@ -96,7 +101,7 @@ class DfLocal5DTFNO(nn.Module):
             in_channels=in_channels,
             embed_dim=dim,
             flatten=False,
-            mlp_depth=1
+            mlp_depth=1,
         )
         self.fno = Df5DTFNO(
             dim,
@@ -104,7 +109,7 @@ class DfLocal5DTFNO(nn.Module):
             in_channels=dim,
             out_channels=dim,
             num_layers=num_layers,
-            mode_scale=1  # use every mode in patched space
+            mode_scale=1,  # use every mode in patched space
         )
         self.unpatch = PatchUnmerging(
             space=5,
@@ -114,10 +119,9 @@ class DfLocal5DTFNO(nn.Module):
             out_channels=out_channels,
             flatten=False,
             norm_layer=None,
-            mlp_depth=1
+            mlp_depth=1,
         )
-        
-        
+
     def forward(self, df: torch.Tensor, **kwargs) -> Dict[str, torch.Tensor]:
         _ = kwargs
         df = rearrange(df, "b c ... -> b ... c")
@@ -130,4 +134,3 @@ class DfLocal5DTFNO(nn.Module):
         df = unpad(df, pad_axes, self.base_resolution)
         df = rearrange(df, "b ... c -> b c ...")
         return {"df": df}
-    

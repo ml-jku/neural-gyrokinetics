@@ -73,7 +73,7 @@ def get_rollout_fn(
                         if pred[key].ndim in [4, 5, 7]
                         else pred[key].cpu()
                     )
-        
+
         for key in preds.keys():
             # only return desired size
             if "position" in inputs_t:

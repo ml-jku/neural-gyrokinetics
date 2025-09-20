@@ -256,6 +256,7 @@ class ContinuousConditionEmbed(nn.Module):
         emb = self.mlp(emb)
         return emb
 
+
 class ContinuousEmbed(ContinuousConditionEmbed):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -267,6 +268,7 @@ class ContinuousEmbed(ContinuousConditionEmbed):
         )
 
         self.reset_parameters("xavier_uniform")
+
 
 class Film(nn.Module):
     def __init__(self, cond_dim: int, dim: int):

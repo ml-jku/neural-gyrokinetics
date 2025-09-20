@@ -25,7 +25,6 @@ class TransolverAttention(nn.Module):
     :type slice_base: int
     """
 
-
     def __init__(
         self,
         dim: int = 128,
@@ -170,7 +169,7 @@ class Transolver(nn.Module):
 
         self.space = space
         self.output_channels = output_channels
-        
+
         transolver_base = dim
         assert (transolver_base % num_heads) == 0
         n_conds = len(condition_keys)
@@ -261,7 +260,7 @@ class Transolver(nn.Module):
         cond = {"cond": latent_vector}
 
         # embed coordinates of last timestep df
-        df = self.last_input_embed(df.transpose(1,2))
+        df = self.last_input_embed(df.transpose(1, 2))
 
         # encoder
         x = self.coord_embed(position)

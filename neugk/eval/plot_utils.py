@@ -328,7 +328,7 @@ def generate_val_plots(rollout, gt, ts, phase):
         },
         "fluxfield": {
             f"Fluxfield (T={ts[0].item():.2f}, {phase})": plot_2d_fluxfield,
-        }
+        },
     }
     for key in rollout.keys():
         if key not in val_plots_dict:

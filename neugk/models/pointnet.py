@@ -10,14 +10,14 @@ class PointNet(nn.Module):
     def __init__(self, dim, n_dims, n_channels, condition_keys):
         super().__init__()
         self.condition_keys = condition_keys
-        self.pos_embed = ContinuousEmbed(dim=dim,
-                                         n_cond=n_dims,
-                                         init_weights="xavier_uniform")
-        
-        self.cond_embed = ContinuousEmbed(dim=dim*2,
-                                          n_cond=len(self.condition_keys),
-                                          init_weights="xavier_uniform")
-        
+        self.pos_embed = ContinuousEmbed(
+            dim=dim, n_cond=n_dims, init_weights="xavier_uniform"
+        )
+
+        self.cond_embed = ContinuousEmbed(
+            dim=dim * 2, n_cond=len(self.condition_keys), init_weights="xavier_uniform"
+        )
+
         # embed re/img part of last timestep as additional context to predict change for next timestep
         self.last_input_embed = MLP([n_channels, self.pos_embed.cond_dim])
         self.in_block = MLP([dim * 2, dim * 2, dim * 2])
@@ -51,7 +51,7 @@ class PointNet(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
         x = self.pos_embed(position)
-        df = self.last_input_embed(df.transpose(1,2))
+        df = self.last_input_embed(df.transpose(1, 2))
         x = torch.cat([x, df], dim=-1)
         x = x + self.condition(kwargs)["condition"]
 

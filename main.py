@@ -49,9 +49,15 @@ def main(config: DictConfig):
         config = OmegaConf.create(dict_config)
     else:
         # check that output path exists
-        assert os.path.exists(config.output_path), "Output path does not exist, cannot load ckpt"
-        assert os.path.exists(f"{config.output_path}/ckp.pth"), "Output path does not contain checkpoint best.pt"
-        config = OmegaConf.create(yaml.safe_load(open(f"{config.output_path}/config.yaml", "r")))
+        assert os.path.exists(
+            config.output_path
+        ), "Output path does not exist, cannot load ckpt"
+        assert os.path.exists(
+            f"{config.output_path}/ckp.pth"
+        ), "Output path does not contain checkpoint best.pt"
+        config = OmegaConf.create(
+            yaml.safe_load(open(f"{config.output_path}/config.yaml", "r"))
+        )
         overrides_dotlist = [str(o) for o in HydraConfig.get().overrides.task]
         cli_conf = OmegaConf.from_dotlist(overrides_dotlist)
         config = OmegaConf.merge(config, cli_conf)

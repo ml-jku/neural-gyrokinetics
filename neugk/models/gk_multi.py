@@ -8,7 +8,12 @@ from einops import rearrange
 from functools import partial
 
 from neugk.models.gk_unet import SwinNDUnet, Swin5DUnet, SwinBlockUp
-from neugk.models.nd_vit.x_layers import MixingBlock, FluxDecoder, VSpaceReduce, BidirectionalMixingBlock
+from neugk.models.nd_vit.x_layers import (
+    MixingBlock,
+    FluxDecoder,
+    VSpaceReduce,
+    BidirectionalMixingBlock,
+)
 from neugk.models.nd_vit.swin_layers import FilmSwinLayer, DiTSwinLayer, SwinLayer
 from neugk.models.nd_vit.vit_layers import LayerModes
 from neugk.models.nd_vit.patching import PatchUnmerging, unpad
@@ -16,6 +21,7 @@ from neugk.models.nd_vit.patching import PatchUnmerging, unpad
 
 class NeuGK(nn.Module):
     """Neural Gyrokinetics model for predicting the 5d density and the 3d potential."""
+
     def __init__(
         self,
         dim: int,
@@ -107,7 +113,7 @@ class NeuGK(nn.Module):
             swin_bottleneck=swin_bottleneck,
             init_weights=init_weights,
             cond_init_weights=cond_init_weights,
-            patching_init_weights=patching_init_weights
+            patching_init_weights=patching_init_weights,
         )
 
         self.phi_unet = SwinNDUnet(
@@ -139,7 +145,7 @@ class NeuGK(nn.Module):
             use_rope=use_rope,
             init_weights=init_weights,
             cond_init_weights=cond_init_weights,
-            patching_init_weights=patching_init_weights
+            patching_init_weights=patching_init_weights,
         )
         self.phi_up_blocks = self.phi_unet.up_blocks
         self.phi_down_blocks = self.phi_unet.down_blocks
@@ -147,7 +153,9 @@ class NeuGK(nn.Module):
         self.df_up_blocks = self.df_unet.up_blocks
         self.df_down_blocks = self.df_unet.down_blocks
 
-        use_flux_head = "flux" in outputs or "fluxavg" in outputs or "fluxfield" in outputs
+        use_flux_head = (
+            "flux" in outputs or "fluxavg" in outputs or "fluxfield" in outputs
+        )
         self.flux_head = True if use_flux_head else None
         self.decode_fluxfield = False
         if self.flux_head:
@@ -168,7 +176,7 @@ class NeuGK(nn.Module):
             else:
                 self.decode_fluxfield = True
                 self.flux_cond_embed = flux_cond_embed
-                self.condition_keys = ['dg', 'itg', 'q', 's_hat', 'timestep']
+                self.condition_keys = ["dg", "itg", "q", "s_hat", "timestep"]
                 flux_space = 2
                 self.flux_mix = BidirectionalMixingBlock(
                     self.phi_unet.down_dims[-1],
@@ -176,7 +184,7 @@ class NeuGK(nn.Module):
                     self.phi_unet.down_dims[-1],
                     num_heads=8,
                     attn_drop=0.1,
-                    init_weights=init_weights
+                    init_weights=init_weights,
                 )
                 # TODO: change based on flux_space
                 space_diff = self.df_space - flux_space
@@ -184,8 +192,8 @@ class NeuGK(nn.Module):
                 up_grid_sizes = self.df_unet.grid_sizes[::-1][1:]
                 middle_grid_size = self.df_unet.grid_sizes[-1]
                 if decouple_mu:
-                    middle_grid_size = middle_grid_size[space_diff-1:]
-                    up_grid_sizes = [gs[space_diff-1:] for gs in up_grid_sizes]
+                    middle_grid_size = middle_grid_size[space_diff - 1 :]
+                    up_grid_sizes = [gs[space_diff - 1 :] for gs in up_grid_sizes]
                 else:
                     middle_grid_size = middle_grid_size[space_diff:]
                     up_grid_sizes = [gs[space_diff:] for gs in up_grid_sizes]
@@ -203,7 +211,9 @@ class NeuGK(nn.Module):
                         ModulatedSwinLayer = DiTSwinLayer
                     if modulation == "film":
                         ModulatedSwinLayer = FilmSwinLayer
-                    ModulatedSwinLayer = partial(ModulatedSwinLayer, cond_dim=cond_embed.cond_dim)
+                    ModulatedSwinLayer = partial(
+                        ModulatedSwinLayer, cond_dim=cond_embed.cond_dim
+                    )
                     LocalLayer = ModulatedSwinLayer
                 else:
                     LocalLayer = SwinLayer
@@ -212,7 +222,7 @@ class NeuGK(nn.Module):
                     use_rpb=use_rpb,
                     use_rope=use_rope,
                 )
-                
+
                 # self.flux_middle_first = LocalLayer(
                 #     flux_space,
                 #     self.df_unet.down_dims[-1],
@@ -326,14 +336,34 @@ class NeuGK(nn.Module):
             phi_down_dims = self.phi_unet.down_dims
             df_down_dims = self.df_unet.down_dims
             for df_dim, phi_dim in zip(df_down_dims, phi_down_dims):
-                df_mix.append(MixingBlock(df_dim, phi_dim, num_heads=8, attn_drop=0.1,
-                                          init_weights=init_weights))
-                phi_mix.append(MixingBlock(phi_dim, df_dim, num_heads=8, attn_drop=0.1,
-                                           init_weights=init_weights))
+                df_mix.append(
+                    MixingBlock(
+                        df_dim,
+                        phi_dim,
+                        num_heads=8,
+                        attn_drop=0.1,
+                        init_weights=init_weights,
+                    )
+                )
+                phi_mix.append(
+                    MixingBlock(
+                        phi_dim,
+                        df_dim,
+                        num_heads=8,
+                        attn_drop=0.1,
+                        init_weights=init_weights,
+                    )
+                )
                 if self.decode_fluxfield:
-                    flux_down_mix.append(MixingBlock(df_dim, phi_dim,
-                                         num_heads=8, attn_drop=0.1, 
-                                         init_weights=init_weights))
+                    flux_down_mix.append(
+                        MixingBlock(
+                            df_dim,
+                            phi_dim,
+                            num_heads=8,
+                            attn_drop=0.1,
+                            init_weights=init_weights,
+                        )
+                    )
             self.df_mix = nn.ModuleList(df_mix)
             self.phi_mix = nn.ModuleList(phi_mix)
             self.flux_down_mix = nn.ModuleList(flux_down_mix)
@@ -342,7 +372,9 @@ class NeuGK(nn.Module):
             df_mix_up = []
             phi_mix_up = []
             flux_mix_up = []
-            for i, (df_blk, phi_blk) in enumerate(zip(self.df_up_blocks, self.phi_up_blocks)):
+            for i, (df_blk, phi_blk) in enumerate(
+                zip(self.df_up_blocks, self.phi_up_blocks)
+            ):
                 df_mix_up.append(
                     MixingBlock(
                         left_dim=df_blk.dim,
@@ -380,21 +412,27 @@ class NeuGK(nn.Module):
             phi_patch_dim = self.phi_unet.unpatch.dim * (2 if patch_skip else 1)
             flux_patch_dim = self.flux_unpatch.dim * (2 if patch_skip else 1)
             self.df_mix_unpatch = MixingBlock(
-                left_dim=df_patch_dim, right_dim=phi_patch_dim, num_heads=8, attn_drop=0.1,
-                init_weights=init_weights
+                left_dim=df_patch_dim,
+                right_dim=phi_patch_dim,
+                num_heads=8,
+                attn_drop=0.1,
+                init_weights=init_weights,
             )
             self.phi_mix_unpatch = MixingBlock(
-                left_dim=phi_patch_dim, right_dim=df_patch_dim, num_heads=8, attn_drop=0.1,
-                init_weights=init_weights
+                left_dim=phi_patch_dim,
+                right_dim=df_patch_dim,
+                num_heads=8,
+                attn_drop=0.1,
+                init_weights=init_weights,
             )
             if self.decode_fluxfield:
                 self.flux_mix_unpatch = BidirectionalMixingBlock(
                     left_dim=flux_patch_dim,
                     middle_dim=df_patch_dim,
-                    right_dim=phi_patch_dim, 
-                    num_heads=8, 
+                    right_dim=phi_patch_dim,
+                    num_heads=8,
                     attn_drop=0.1,
-                    init_weights=init_weights
+                    init_weights=init_weights,
                 )
 
     def forward(
@@ -455,7 +493,9 @@ class NeuGK(nn.Module):
                 df, phi = self.df_mix_up[i](df, phi), self.phi_mix_up[i](phi, df)
             # up blocks
             df, df_ = df_blk(df, s=df_features[i], return_skip=True, **df_cond)
-            phi, phi_ = self.phi_up_blocks[i](phi, s=phi_features[i], return_skip=True, **phi_cond)
+            phi, phi_ = self.phi_up_blocks[i](
+                phi, s=phi_features[i], return_skip=True, **phi_cond
+            )
             # multiscale flux latents
             if self.flux_head is not None:
                 flux_lats.append(self.flux_head.mix(i + 1, phi_, df_, kwargs))
@@ -525,7 +565,7 @@ class NeuGK(nn.Module):
         if use_phi:
             phi = self.phi_unet.patch_decode(zphi, phi_pad_axes, cond=phi_cond)
         else:
-            phi=None
+            phi = None
         if self.decode_fluxfield:
             flux = self.flux_unpatch(zflux, cond=flux_cond)
             flux = unpad(flux, df_pad_axes, self.df_unet.base_resolution)
@@ -557,6 +597,7 @@ class NeuGK(nn.Module):
         else:
             return {}
 
+
 class NeuGKMultitask(NeuGK):
     """Neural Gyrokinetics model for multitask predictions from the 5d density."""
 
@@ -567,7 +608,7 @@ class NeuGKMultitask(NeuGK):
         df_patch_size: Union[Sequence[int], int] = 4,
         df_window_size: Union[Sequence[int], int] = 5,
         detach_flux_latents: bool = False,
-        **kwargs
+        **kwargs,
     ):
         # TODO check if deleting all the unused members
         # NOTE: must use df grids (s, x, y), otherwise shape mismatch
@@ -586,11 +627,11 @@ class NeuGKMultitask(NeuGK):
             phi_patch_size=phi_patch_size,
             phi_window_size=phi_window_size,
             detach_flux_latents=detach_flux_latents,
-            **kwargs
+            **kwargs,
         )
 
         # remove down path for phi unet
-        self.use_phi = "phi" in self.outputs # check if we use phi
+        self.use_phi = "phi" in self.outputs  # check if we use phi
         # remove down-mixing
         self.df_mix_middle = self.df_mix[-1]
         self.phi_mix_middle = self.phi_mix[-1]
@@ -612,7 +653,9 @@ class NeuGKMultitask(NeuGK):
             # phi integrator weights
             vspace_attn_down = []
             flux_attn_down = []
-            for i, (df_blk, phi_blk) in enumerate(zip(self.df_down_blocks, self.phi_up_blocks[::-1])):
+            for i, (df_blk, phi_blk) in enumerate(
+                zip(self.df_down_blocks, self.phi_up_blocks[::-1])
+            ):
                 vspace_attn_down.append(
                     VSpaceReduce(
                         dim=df_blk.dim,
@@ -626,7 +669,7 @@ class NeuGKMultitask(NeuGK):
 
                 if self.decode_fluxfield:
                     flux_attn_down.append(
-                            VSpaceReduce(
+                        VSpaceReduce(
                             dim=df_blk.dim,
                             out_dim=self.flux_up_blocks[::-1][i].dim,
                             num_heads=8,
@@ -715,7 +758,11 @@ class NeuGKMultitask(NeuGK):
                 phi_features.append(phi)
             else:
                 phi_features.append(None)
-            if self.decode_fluxfield and phi is not None and hasattr(self, "flux_down_mix"):
+            if (
+                self.decode_fluxfield
+                and phi is not None
+                and hasattr(self, "flux_down_mix")
+            ):
                 # mix df + phi
                 flux = self.flux_attn_down[i](df_pre, integrate_s=True)
                 flux_features.append(self.flux_down_mix[i](flux, phi))
@@ -735,7 +782,7 @@ class NeuGKMultitask(NeuGK):
         if self.decode_fluxfield:
             # TODO: add VSPaceReduce for fluxfield with integrate_s=True
             flux = self.flux_vspace_attn_middle(df, integrate_s=True)
-            #flux = self.flux_middle_first(df.sum((1,2)), **flux_cond)
+            # flux = self.flux_middle_first(df.sum((1,2)), **flux_cond)
 
         df, phi = self.df_mix_middle(df, phi), self.phi_mix_middle(phi, df)
         if self.decode_fluxfield:
@@ -757,9 +804,7 @@ class NeuGKMultitask(NeuGK):
 
         # up path
         df_features = df_features[::-1]
-        for i, (df_blk, df_mix) in enumerate(
-            zip(self.df_up_blocks, self.df_mix_up)
-        ):
+        for i, (df_blk, df_mix) in enumerate(zip(self.df_up_blocks, self.df_mix_up)):
             # mix latents
             df = df_mix(df, phi)
             phi = self.phi_mix_up[i](phi, df)
@@ -768,15 +813,19 @@ class NeuGKMultitask(NeuGK):
             # up blocks
             df, df_ = df_blk(df, s=df_features[i], return_skip=True, **df_cond)
             if self.use_phi:
-                phi, phi_ = self.phi_up_blocks[i](phi, s=phi_features[i], return_skip=True, **phi_cond)
+                phi, phi_ = self.phi_up_blocks[i](
+                    phi, s=phi_features[i], return_skip=True, **phi_cond
+                )
             else:
                 phi_ = phi
             # multiscale flux latents
             if self.flux_head is not None and not self.decode_fluxfield:
                 flux_lats.append(self.flux_head.mix(i + 1, phi_, df_, kwargs))
             if self.decode_fluxfield:
-                flux = self.flux_up_blocks[i](flux, s=flux_features[i], return_skip=False, **flux_cond)
-        
+                flux = self.flux_up_blocks[i](
+                    flux, s=flux_features[i], return_skip=False, **flux_cond
+                )
+
         # expand to original
         if self.patch_skip:
             df = torch.cat([df, df0], -1)
@@ -793,7 +842,7 @@ class NeuGKMultitask(NeuGK):
             use_phi=self.use_phi,
             df_cond=df_cond.get("condition"),
             phi_cond=phi_cond.get("condition"),
-            flux_cond=flux_cond.get("condition")
+            flux_cond=flux_cond.get("condition"),
         )
 
         out = [df]
@@ -806,6 +855,6 @@ class NeuGKMultitask(NeuGK):
         out += [flux]
 
         outputs = {}
-        for key, pred in zip(self.outputs, out):            
+        for key, pred in zip(self.outputs, out):
             outputs[key] = pred
         return outputs

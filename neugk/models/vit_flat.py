@@ -6,12 +6,17 @@ from torch import nn
 from functools import partial
 
 from neugk.models.nd_vit.vit_layers import (
-    ViTLayer, 
-    DiTLayer, 
+    ViTLayer,
+    DiTLayer,
     FilmViTLayer,
 )
 from neugk.models.nd_vit.positional import PositionalEmbedding
-from neugk.models.nd_vit.patching import PatchEmbed, PatchUnmerging, pad_to_blocks, unpad
+from neugk.models.nd_vit.patching import (
+    PatchEmbed,
+    PatchUnmerging,
+    pad_to_blocks,
+    unpad,
+)
 
 
 class ViTFlat(nn.Module):
@@ -39,7 +44,7 @@ class ViTFlat(nn.Module):
         init_weights: str = "xavier_uniform",
         patching_init_weights: str = "xavier_uniform",
         patch_skip: bool = False,
-        conditioning: Optional[List[str]]= None,
+        conditioning: Optional[List[str]] = None,
     ):
         super().__init__()
         self.patch_size = patch_size
@@ -85,8 +90,9 @@ class ViTFlat(nn.Module):
         )
 
         if abs_pe:
-            self.ape = PositionalEmbedding(dim, self.patch_embed.grid_size,
-                                           learnable=True)
+            self.ape = PositionalEmbedding(
+                dim, self.patch_embed.grid_size, learnable=True
+            )
 
         # unpatch
         self.unpatch = PatchUnmerging(

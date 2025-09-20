@@ -651,7 +651,7 @@ def exclude_from_weight_decay(model, param_names, weight_decay):
         for param_name in param_names:
             if param_name in name.lower():
                 add_to_no_decay = True
-        
+
         if add_to_no_decay:
             no_decay.append(param)
             no_decay_names.append(name)
@@ -660,6 +660,6 @@ def exclude_from_weight_decay(model, param_names, weight_decay):
             decay_names.append(name)
 
     return [
-        {'params': decay, 'weight_decay': weight_decay},
-        {'params': no_decay, 'weight_decay': 0.0}
+        {"params": decay, "weight_decay": weight_decay},
+        {"params": no_decay, "weight_decay": 0.0},
     ]

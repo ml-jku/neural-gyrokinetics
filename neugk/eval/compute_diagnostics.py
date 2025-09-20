@@ -19,6 +19,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 
+
 def parse_args():
     parser = ArgumentParser()
     parser.add_argument("--path", required=True, type=str)
@@ -85,8 +86,10 @@ def dump_df_diagnostics(
         filename += "_reduced"
     np.savetxt(os.path.join(dir, filename), [flux_spectra.sum()])
 
-def dump_df_phi_diagnostics(df, phi_fft, geometry, ds, nx, ny, ns, nkx, nky, dir, args,
-                        reduced=False):
+
+def dump_df_phi_diagnostics(
+    df, phi_fft, geometry, ds, nx, ny, ns, nkx, nky, dir, args, reduced=False
+):
 
     # compute flux spectrum
     df = np.moveaxis(df, 0, -1).copy()
@@ -98,7 +101,7 @@ def dump_df_phi_diagnostics(df, phi_fft, geometry, ds, nx, ny, ns, nkx, nky, dir
     phi_fft = torch.tensor(phi_fft)
 
     _, eflux, _ = pev_flux_df_phi(df, phi_fft, geometry, aggregate=False)
-    flux_spectra = eflux.sum((0,1,2,3)).numpy()
+    flux_spectra = eflux.sum((0, 1, 2, 3)).numpy()
     filename = "eflux_spectra"
     if reduced:
         filename += "_reduced"
@@ -108,14 +111,14 @@ def dump_df_phi_diagnostics(df, phi_fft, geometry, ds, nx, ny, ns, nkx, nky, dir
         filename += "_reduced"
     np.savetxt(os.path.join(dir, filename), [flux_spectra.sum()])
 
-def dump_phi_diagnostics(phi, nx, ns, ny, nkx, nky, dir, args,
-                         reduced=False, pad=True):
+
+def dump_phi_diagnostics(phi, nx, ns, ny, nkx, nky, dir, args, reduced=False, pad=True):
 
     if len(phi.shape) == 4:
         # we predicted real/imag of phi
         phi = np.moveaxis(phi, 0, -1).copy()
         phi = phi.view(dtype=np.complex64).squeeze()
-    
+
     phi_fft = np.fft.fftn(phi, axes=(0, 2), norm="forward")
     # compute zf profile from 3D
     fourier_zf = phi_fft.copy()
@@ -136,8 +139,10 @@ def dump_phi_diagnostics(phi, nx, ns, ny, nkx, nky, dir, args,
     with open(os.path.join(dir, filename), "wb") as f:
         f.write(phi_zf)
 
-def compute_diagnostics(dir, path, geometry, k_poten_dict, resolution, ds, 
-                        ns, nx, ny, compute_for_raw=False):
+
+def compute_diagnostics(
+    dir, path, geometry, k_poten_dict, resolution, ds, ns, nx, ny, compute_for_raw=False
+):
     nvpar, nmu, ns, nkx, nky = resolution
     if compute_for_raw:
         pred_file = os.path.join(path, dir)
@@ -160,10 +165,10 @@ def compute_diagnostics(dir, path, geometry, k_poten_dict, resolution, ds,
 
     # compute zf profile from 3D potens
     if compute_for_raw:
-        pred_file = os.path.join(path, k_poten_dict[dir.split('/')[-1]])
+        pred_file = os.path.join(path, k_poten_dict[dir.split("/")[-1]])
     else:
         pred_file = os.path.join(path, dir, "Poten")
-        
+
     # Load dumped phi
     if not compute_for_raw:
         with open(pred_file, "rb") as fid:
@@ -172,15 +177,20 @@ def compute_diagnostics(dir, path, geometry, k_poten_dict, resolution, ds,
         try:
             real_phi = np.reshape(ff, resolution, order="F").astype("float32").copy()
         except:
-            real_phi = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+            real_phi = (
+                np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+            )
     else:
         ff = np.loadtxt(pred_file, dtype=np.float64)
         resolution = (nx, ns, ny)
         real_phi = np.reshape(ff, resolution, order="F").astype("float32").copy()
-    
-    dump_phi_diagnostics(real_phi, nx, ns, ny, nkx, nky, dir, args, pad=not compute_for_raw)
+
+    dump_phi_diagnostics(
+        real_phi, nx, ns, ny, nkx, nky, dir, args, pad=not compute_for_raw
+    )
 
     return knth, real_phi
+
 
 def main(args):
     path = args.path[:-1] if args.path.endswith("/") else args.path
@@ -221,7 +231,8 @@ def main(args):
     nky = config["gridsize"]["nmod"]
     resolution = (nvpar, nmu, ns, nkx, nky)
 
-    extractor_fn = partial(compute_diagnostics, 
+    extractor_fn = partial(
+        compute_diagnostics,
         compute_for_raw=compute_for_raw,
         path=path,
         geometry=geometry,
@@ -230,7 +241,8 @@ def main(args):
         ds=ds,
         ns=ns,
         nx=nx,
-        ny=ny)
+        ny=ny,
+    )
 
     with ThreadPoolExecutor(args.num_workers) as executor:
         # indices in parallel, collect results in list
@@ -251,8 +263,21 @@ def main(args):
         dir = "/" + os.path.join(*k_dirs[0].split("/")[:-1])
 
     # again compute diagnostics
-    dump_df_diagnostics(pred_df, geometry, ds, nx, ny, ns, nkx, nky, dir, args, reduced=True)
-    dump_phi_diagnostics(pred_poten, nx, ns, ny, nkx, nky, dir, args, reduced=True, pad=not compute_for_raw)
+    dump_df_diagnostics(
+        pred_df, geometry, ds, nx, ny, ns, nkx, nky, dir, args, reduced=True
+    )
+    dump_phi_diagnostics(
+        pred_poten,
+        nx,
+        ns,
+        ny,
+        nkx,
+        nky,
+        dir,
+        args,
+        reduced=True,
+        pad=not compute_for_raw,
+    )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 import warnings
 import sys
+
 sys.path.append("..")
 import os
 from tqdm import tqdm
@@ -173,17 +174,20 @@ def phi_fft_to_real(fft, out_shape, norm: str = "forward"):
     phi_ifft = np.fft.irfftn(phi, axes=(0, 2), norm=norm, s=[nkx, nky])
     return phi_ifft
 
+
 def fluxfield_fft_to_real(fluxfield, norm: str = "forward"):
     fluxfield = np.fft.ifftshift(fluxfield, axes=(3,))
-    fluxfield = np.fft.ifftn(fluxfield, axes=(3,4), norm=norm)
+    fluxfield = np.fft.ifftn(fluxfield, axes=(3, 4), norm=norm)
     return np.stack([fluxfield.real, fluxfield.imag]).astype("float32")
+
 
 def fluxfield_real_to_fft(fluxfield, norm: str = "forward"):
     fluxfield = np.moveaxis(fluxfield, 0, -1).copy()
     fluxfield = fluxfield.view(dtype=np.complex64).squeeze()
-    fluxfield = np.fft.fftn(fluxfield, axes=(3,4), norm=norm)
+    fluxfield = np.fft.fftn(fluxfield, axes=(3, 4), norm=norm)
     fluxfield = np.fft.fftshift(fluxfield, axes=(3,))
     return np.stack([fluxfield.real, fluxfield.imag]).astype("float32")
+
 
 def preprocess(
     filename,
@@ -228,7 +232,7 @@ def preprocess(
                     time = float(line_split[1].strip().strip(",").strip())
                     ts.append(time)
     timesteps = np.array(ts)
-    
+
     # read helper vars
     sgrid = np.loadtxt(f"{dir_in}/sgrid")
     xphi = np.loadtxt(f"{dir_in}/xphi")
@@ -293,14 +297,22 @@ def preprocess(
             metadata_group = file.create_group("metadata")
             metadata_group.create_dataset("timesteps", data=timesteps)
             metadata_group.create_dataset("resolution", data=resolution)
-            metadata_group.create_dataset("ion_temp_grad", data=ion_temp_grad, shape=(1,))
+            metadata_group.create_dataset(
+                "ion_temp_grad", data=ion_temp_grad, shape=(1,)
+            )
             metadata_group.create_dataset("density_grad", data=density_grad, shape=(1,))
             metadata_group.create_dataset("fluxes", data=fluxes)
             metadata_group.create_dataset("s_hat", data=s_hat, shape=(1,))
             metadata_group.create_dataset("q", data=q, shape=(1,))
             geometry_group = file.create_group("geometry")
-            np_geom = {k: geometry[k] if type(geometry[k]) != torch.Tensor else np.array(geometry[k])
-                    for k in geometry.keys()}
+            np_geom = {
+                k: (
+                    geometry[k]
+                    if type(geometry[k]) != torch.Tensor
+                    else np.array(geometry[k])
+                )
+                for k in geometry.keys()
+            }
             for key in np_geom.keys():
                 geometry_group.create_dataset(key, data=np_geom[key])
             # metadata_group.create_dataset("geometry", data=geometry)
@@ -376,19 +388,25 @@ def preprocess(
             df = np.moveaxis(orig_knth, 0, -1).copy()
             df = df.view(dtype=np.complex64).squeeze()
             df = torch.tensor(df)
-            
+
             if not "Lin" in h5_filename:
                 # do not compute integral for linear sims => it will fail!
                 phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
-                _, eflux, _ = pev_flux_df_phi(df, phi_fft_unpadded, geometry, aggregate=False)
+                _, eflux, _ = pev_flux_df_phi(
+                    df, phi_fft_unpadded, geometry, aggregate=False
+                )
                 fluxfield = fluxfield_fft_to_real(eflux.numpy())
 
                 try:
-                    assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-4), "Flux integral failed..."
+                    assert np.isclose(
+                        eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1e-4
+                    ), "Flux integral failed..."
                 except:
                     warnings.warn("Flux integral failed...")
 
-                assert np.isclose(fluxfield_real_to_fft(fluxfield).sum(), orig_fluxes[idx]), "Fluxfield sum does not match scalar flux"
+                assert np.isclose(
+                    fluxfield_real_to_fft(fluxfield).sum(), orig_fluxes[idx]
+                ), "Fluxfield sum does not match scalar flux"
 
             # update running averages
             df_stats.update(
@@ -440,7 +458,9 @@ def preprocess(
             metadata_group.create_dataset("flux_max", data=flux_stats.max)
         if "metadata/fluxfield_mean" not in file and not "Lin" in h5_filename:
             metadata_group.create_dataset("fluxfield_mean", data=fluxfield_stats.mean)
-            metadata_group.create_dataset("fluxfield_std", data=np.sqrt(fluxfield_stats.var))
+            metadata_group.create_dataset(
+                "fluxfield_std", data=np.sqrt(fluxfield_stats.var)
+            )
             metadata_group.create_dataset("fluxfield_min", data=fluxfield_stats.min)
             metadata_group.create_dataset("fluxfield_max", data=fluxfield_stats.max)
 
@@ -458,17 +478,30 @@ split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
 # datasets = [f"iteration_{i}" for i in range(100,300)]
 # df = pd.read_csv("/system/user/publicwork/fpaische/plasmamodelling/misc/original_unstable.csv")
 # originals = df["name"].values
-originals = ["iteration_262", "iteration_115", "iteration_148", "iteration_235", "iteration_131", "iteration_8",
-             "ood/iteration_0", "ood/iteration_1", "ood/iteration_2", "ood/iteration_3", "ood/iteration_4"]
+originals = [
+    "iteration_262",
+    "iteration_115",
+    "iteration_148",
+    "iteration_235",
+    "iteration_131",
+    "iteration_8",
+    "ood/iteration_0",
+    "ood/iteration_1",
+    "ood/iteration_2",
+    "ood/iteration_3",
+    "ood/iteration_4",
+]
 datasets = [f"{name}_Lin" for name in originals]
 
 if not args.debug:
     # if we don't debug, we launch multiprocessing
-    preprocess_fns = partial(preprocess, 
+    preprocess_fns = partial(
+        preprocess,
         spatial_ifft=IFFT,
         separate_zf=separate_zf,
         split_into_bands=split_into_bands,
-        norm_axes=norm_axes)
+        norm_axes=norm_axes,
+    )
 
     with ThreadPoolExecutor(args.num_workers) as executor:
         # indices in parallel, collect results in list
@@ -490,7 +523,7 @@ else:
             split_into_bands=split_into_bands,
             norm_axes=norm_axes,
         )
-        
+
         # set rwx permissions
         try:
             os.chmod(h5_filename, 0o777)

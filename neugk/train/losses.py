@@ -162,7 +162,7 @@ class LossWrapper(nn.Module):
                     preds[k] = torch.zeros_like(tgts[k]).to(tgts[k].device)
                 else:
                     tmp_key = list(preds.keys())[0]
-                    preds[k] = torch.zeros(size=(1,1)).to(preds[tmp_key].device)
+                    preds[k] = torch.zeros(size=(1, 1)).to(preds[tmp_key].device)
                     tgts[k] = torch.zeros_like(preds[k]).to(preds[k].device)
         if not all([k.replace("_cross", "") in preds for k in cross_keys]):
             raise ValueError("Prediction - CROSS loss weight key mismatch.")

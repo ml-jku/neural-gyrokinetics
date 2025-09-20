@@ -98,7 +98,7 @@ if "iteration" in DUMP_DIR:
     if DUMP_DIR.endswith("/"):
         DUMP_DIR = DUMP_DIR[:-1]
     if "best" in DUMP_DIR or "ckp" in DUMP_DIR:
-        sim = DUMP_DIR.split('/')[-2]
+        sim = DUMP_DIR.split("/")[-2]
     else:
         sim = DUMP_DIR.split("/")[-1]
     GT_DIR = os.path.join("/restricteddata/ukaea/gyrokinetics/raw/", sim)
@@ -146,7 +146,7 @@ for sim in sims_to_eval:
         pred_fluxes = correct_time(GT_DIR, pred_fluxes_dict)
     else:
         pred_fluxes = {}
-        k_dir = K_files('_'.join(GT_DIR.split('_')[:2]))[80:]
+        k_dir = K_files("_".join(GT_DIR.split("_")[:2]))[80:]
         if os.path.isfile(os.path.join(DUMP_DIR, k_dir[0], "flux")):
             # For XNet simply load fluxes from each K-file
             print("Loading flux predictions...")
@@ -156,24 +156,40 @@ for sim in sims_to_eval:
                         flux = np.loadtxt(os.path.join(DUMP_DIR, f"K{k_file}", "flux"))
                     except:
                         try:
-                            with open(os.path.join(DUMP_DIR, f"K{k_file}", "flux"), "rb") as fid:
+                            with open(
+                                os.path.join(DUMP_DIR, f"K{k_file}", "flux"), "rb"
+                            ) as fid:
                                 ff = np.fromfile(fid, dtype=np.float64)
-                            knth = np.reshape(ff, (2, 85, 32), order="F").astype("float32").copy()
+                            knth = (
+                                np.reshape(ff, (2, 85, 32), order="F")
+                                .astype("float32")
+                                .copy()
+                            )
                             flux = knth.sum()
                         except:
-                            flux = open(os.path.join(DUMP_DIR, f"K{k_file}", "flux"), "rb").read()
+                            flux = open(
+                                os.path.join(DUMP_DIR, f"K{k_file}", "flux"), "rb"
+                            ).read()
                             flux = struct.unpack("d", flux)[0]
                 else:
                     try:
                         flux = np.loadtxt(os.path.join(DUMP_DIR, k_file, "flux"))
                     except:
                         try:
-                            with open(os.path.join(DUMP_DIR, k_file, "flux"), "rb") as fid:
+                            with open(
+                                os.path.join(DUMP_DIR, k_file, "flux"), "rb"
+                            ) as fid:
                                 ff = np.fromfile(fid, dtype=np.float64)
-                            knth = np.reshape(ff, (2, 85, 32), order="F").astype("float32").copy()
+                            knth = (
+                                np.reshape(ff, (2, 85, 32), order="F")
+                                .astype("float32")
+                                .copy()
+                            )
                             flux = knth[1].sum()
                         except:
-                            flux = open(os.path.join(DUMP_DIR, k_file, "flux"), "rb").read()
+                            flux = open(
+                                os.path.join(DUMP_DIR, k_file, "flux"), "rb"
+                            ).read()
                             flux = struct.unpack("d", flux)[0]
 
                 # correct for time shift

@@ -33,10 +33,11 @@ GEOM_KEYS = [
 
 class FluxIntegral(nn.Module):
     """Torch wrapper for the flux and electrostatic potential integrals.
-    
+
     The implementation is based on GKW, a FORTRAN codebase for gyrokinetics.
     Source and docs for GKW: https://bitbucket.org/gkw/workspace/projects/GKW
     """
+
     def __init__(self, real_potens: bool = False):
         super().__init__()
 

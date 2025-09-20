@@ -44,12 +44,14 @@ def invert_ifft(x):
     knth = np.stack([knth.real, knth.imag]).squeeze().astype("float32")
     return knth
 
+
 def invert_fluxfield(fluxfield, norm: str = "forward"):
     fluxfield = np.moveaxis(fluxfield.squeeze().cpu().numpy(), 0, -1).copy()
     fluxfield = fluxfield.view(dtype=np.complex64).squeeze()
-    fluxfield = np.fft.fftn(fluxfield, axes=(-1,-2), norm=norm)
+    fluxfield = np.fft.fftn(fluxfield, axes=(-1, -2), norm=norm)
     fluxfield = np.fft.fftshift(fluxfield, axes=(-2,))
     return np.stack([fluxfield.real, fluxfield.imag]).astype("float32")
+
 
 def modify_fds_dat(path):
     with open(path, "r") as infile:
@@ -161,8 +163,14 @@ device = "cuda"
 
 cfg = OmegaConf.create(yaml.safe_load(open(f"{CKP}/config.yaml", "r")))
 train_losses = [k for k, v in cfg.model.loss_weights.items() if v > 0.0]
-input_fields = set(cfg.dataset.input_fields + [k for k in cfg.model.loss_weights.keys()
-                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]])
+input_fields = set(
+    cfg.dataset.input_fields
+    + [
+        k
+        for k in cfg.model.loss_weights.keys()
+        if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
+    ]
+)
 traindata = CycloneDataset(
     path=parser.data_path,
     active_keys=cfg.dataset.active_keys,
@@ -223,7 +231,9 @@ os.makedirs(OUT_DIR, exist_ok=True)
 if "ood" in parser.eval_sim:
     raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/ood/{parser.eval_sim.replace('.h5', '').replace("ood_", "").replace("_ifft", "")}"
 else:
-    raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{parser.eval_sim.replace('.h5', '')}"
+    raw_path = (
+        f"/restricteddata/ukaea/gyrokinetics/raw/{parser.eval_sim.replace('.h5', '')}"
+    )
 
 assert traindata.norm_stats == data.norm_stats, "Normalization stats mismatch"
 model = get_model(cfg, dataset=data)
@@ -236,7 +246,9 @@ model_inputs = ["df"]
 if "ood" in parser.eval_sim:
     IDX_END = 263
     params = {}
-    with h5py.File(f"/restricteddata/ukaea/gyrokinetics/preprocessed/{parser.eval_sim.replace('.h5', '_ifft_realpotens')}.h5") as infile:
+    with h5py.File(
+        f"/restricteddata/ukaea/gyrokinetics/preprocessed/{parser.eval_sim.replace('.h5', '_ifft_realpotens')}.h5"
+    ) as infile:
         k_name = "timestep_" + str(0).zfill(5)
         k = infile[f"data/{k_name}"][:]
         if cfg.dataset.separate_zf:
@@ -315,7 +327,7 @@ invert_fns = {
     "phi": invert_phi if not cfg.dataset.real_potens else None,
     "fluxfield": invert_fluxfield,
     "flux": None,
-    "fluxavg": None
+    "fluxavg": None,
 }
 
 for key in input_fields:

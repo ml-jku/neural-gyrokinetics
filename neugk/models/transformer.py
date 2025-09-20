@@ -121,7 +121,6 @@ class Transformer(nn.Module):
             blocks.append(block)
         self.blocks = nn.ModuleList(blocks)
 
-
         # decode latent to fields (+ positions)
         self.decoder = MLP(
             [dim, output_channels],
@@ -175,7 +174,7 @@ class Transformer(nn.Module):
         cond = {"cond": latent_vector}
 
         # embed coordinates of last timestep df
-        df = self.last_input_embed(df.transpose(1,2))
+        df = self.last_input_embed(df.transpose(1, 2))
 
         # encoder
         x = self.coord_embed(position)

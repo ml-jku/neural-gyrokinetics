@@ -192,7 +192,13 @@ class CycloneDataset(Dataset):
                 linear_tag = "_Lin" if linear_sims else ""
                 real_potens_tag = "_realpotens" if real_potens else ""
                 self.files = [
-                    f if f"{linear_tag}_ifft{real_potens_tag}.h5" in f else re.sub(r"\.h5$", f"{linear_tag}_ifft{real_potens_tag}.h5", f)
+                    (
+                        f
+                        if f"{linear_tag}_ifft{real_potens_tag}.h5" in f
+                        else re.sub(
+                            r"\.h5$", f"{linear_tag}_ifft{real_potens_tag}.h5", f
+                        )
+                    )
                     for f in self.files
                 ]
 
@@ -204,13 +210,15 @@ class CycloneDataset(Dataset):
                 existing_files.append(f)
         diff = len(self.files) - len(existing_files)
         if diff:
-            warnings.warn(f"{diff} files not found, training on existing ones...") 
+            warnings.warn(f"{diff} files not found, training on existing ones...")
         self.files = existing_files
 
         # we use offsets for flux filtering
         if self.cond_filters:
             threshold = offset if offset > 0 else 80
-            self.files = [f for f in self.files if self._conditioning_filter(f, threshold)]
+            self.files = [
+                f for f in self.files if self._conditioning_filter(f, threshold)
+            ]
             print(f"Using {len(self.files)} sims for {split}...")
 
         if len(self.files) == 0:
@@ -236,7 +244,9 @@ class CycloneDataset(Dataset):
                 else:
                     real_potens_tag = "_realpotens" if real_potens else ""
                     linear_tag = "_Lin" if linear_sims else ""
-                    filename = filename.replace(f"{linear_tag}_ifft{real_potens_tag}", "")
+                    filename = filename.replace(
+                        f"{linear_tag}_ifft{real_potens_tag}", ""
+                    )
             n_tail_holdout = self.partial_holdouts.get(filename)
             with h5py.File(f_path, "r") as f:
                 # read the timesteps
@@ -267,19 +277,34 @@ class CycloneDataset(Dataset):
                     for k in self.input_fields:
                         if k == "fluxavg":
                             # comput stats avg flux
-                            self.norm_stats[k][f_id]["mean"] = np.mean(f[f"metadata/fluxes"][-80:], keepdims=True)
-                            self.norm_stats[k][f_id]["std"] = np.std(f[f"metadata/fluxes"][-80:], keepdims=True)
-                            self.norm_stats[k][f_id]["min"] = np.min(f[f"metadata/fluxes"][-80:], keepdims=True)
-                            self.norm_stats[k][f_id]["max"] = np.max(f[f"metadata/fluxes"][-80:], keepdims=True)
+                            self.norm_stats[k][f_id]["mean"] = np.mean(
+                                f[f"metadata/fluxes"][-80:], keepdims=True
+                            )
+                            self.norm_stats[k][f_id]["std"] = np.std(
+                                f[f"metadata/fluxes"][-80:], keepdims=True
+                            )
+                            self.norm_stats[k][f_id]["min"] = np.min(
+                                f[f"metadata/fluxes"][-80:], keepdims=True
+                            )
+                            self.norm_stats[k][f_id]["max"] = np.max(
+                                f[f"metadata/fluxes"][-80:], keepdims=True
+                            )
                             count = 1
                         elif k == "position":
                             pass
                         else:
-                            self.norm_stats[k][f_id][f"mean"] = f[f"metadata/{k}_mean"][:]
+                            self.norm_stats[k][f_id][f"mean"] = f[f"metadata/{k}_mean"][
+                                :
+                            ]
                             self.norm_stats[k][f_id][f"std"] = f[f"metadata/{k}_std"][:]
                             self.norm_stats[k][f_id][f"min"] = f[f"metadata/{k}_min"][:]
                             self.norm_stats[k][f_id][f"max"] = f[f"metadata/{k}_max"][:]
-                            count = len(timesteps) if not load_coordinates else len(timesteps) * np.prod(f["metadata/resolution"][:])
+                            count = (
+                                len(timesteps)
+                                if not load_coordinates
+                                else len(timesteps)
+                                * np.prod(f["metadata/resolution"][:])
+                            )
 
                         if k not in stats and k != "position":
                             stats[k] = RunningMeanStd(
@@ -310,7 +335,9 @@ class CycloneDataset(Dataset):
                 else:
                     real_potens_tag = "_realpotens" if real_potens else ""
                     linear_tag = "_Lin" if linear_sims else ""
-                    filename = filename.replace(f"{linear_tag}_ifft{real_potens_tag}", "")
+                    filename = filename.replace(
+                        f"{linear_tag}_ifft{real_potens_tag}", ""
+                    )
                 n_tail_holdout = self.partial_holdouts.get(filename)
                 if n_tail_holdout:
                     self.offsets[file_idx] = (
@@ -329,21 +356,32 @@ class CycloneDataset(Dataset):
                 self.file_and_tstep_to_flat_index[(file_idx, t_index)] = flat_idx
 
         norm_dataset = normalization is not None and normalization_scope == "dataset"
-        if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf) and not linear_sims:
+        if (
+            norm_dataset
+            and normalization_stats is None
+            and (offset > 0 or separate_zf)
+            and not linear_sims
+        ):
             # overwrite dataset-wide stats with new stats for data after offset only
             if separate_zf and not offset:
                 stats["df"] = self._recompute_stats(key="df")
             else:
                 for key in self.input_fields:
-                    if  key not in  ["fluxavg", "position"]:
+                    if key not in ["fluxavg", "position"]:
                         # TODO: assumes offsets are equal across all sims
-                        stats[key] = self._recompute_stats(key=key, offset=self.offsets[0])
+                        stats[key] = self._recompute_stats(
+                            key=key, offset=self.offsets[0]
+                        )
 
         if normalization_scope == "dataset" and normalization_stats is None:
             for k in input_fields:
                 if k != "position":
-                    self.norm_stats[k]["full"]["mean"] = stats[k].mean.astype(np.float32)
-                    self.norm_stats[k]["full"]["std"] = (stats[k].var ** (1/2)).astype(np.float32)
+                    self.norm_stats[k]["full"]["mean"] = stats[k].mean.astype(
+                        np.float32
+                    )
+                    self.norm_stats[k]["full"]["std"] = (
+                        stats[k].var ** (1 / 2)
+                    ).astype(np.float32)
                     self.norm_stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
                     self.norm_stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
 
@@ -378,17 +416,20 @@ class CycloneDataset(Dataset):
             if key == "df":
                 x = sample["x"]
                 y = sample["gt"]
-                norm_axes = (1,2,3,4,5)
+                norm_axes = (1, 2, 3, 4, 5)
             elif key == "phi":
                 x, y = sample["phi"], sample["y_phi"]
                 if len(x.shape) == 3:
                     x = np.expand_dims(x, 0)
                     y = np.expand_dims(y, 0)
-                norm_axes = (1,2,3)
+                norm_axes = (1, 2, 3)
             elif key == "fluxfield":
                 x = sample["fluxfield"]
                 y = None
-                norm_axes = (1,2,)
+                norm_axes = (
+                    1,
+                    2,
+                )
             else:
                 x = np.array([sample["gt_flux"]], dtype=np.float32)
                 y = None
@@ -414,8 +455,20 @@ class CycloneDataset(Dataset):
 
             return (x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max)
 
-        if os.path.exists(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl")):
-            stats = pickle.load(open(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl"), "rb"))
+        if os.path.exists(
+            os.path.join(
+                self.dir, f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl"
+            )
+        ):
+            stats = pickle.load(
+                open(
+                    os.path.join(
+                        self.dir,
+                        f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl",
+                    ),
+                    "rb",
+                )
+            )
         else:
             process_inds = partial(process_t_idx, key=key)
             stats = None
@@ -435,7 +488,16 @@ class CycloneDataset(Dataset):
                     if y_mean is not None:
                         stats.update(y_mean, y_var, y_min, y_max)
 
-                pickle.dump(stats, open(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl"), "wb"))
+                pickle.dump(
+                    stats,
+                    open(
+                        os.path.join(
+                            self.dir,
+                            f"{key}_offset{offset}_{len(self.files)}sims_stats.pkl",
+                        ),
+                        "wb",
+                    ),
+                )
 
         return stats
 
@@ -508,9 +570,15 @@ class CycloneDataset(Dataset):
             dg=torch.tensor(dg, dtype=self.dtype),
             s_hat=torch.tensor(s_hat, dtype=self.dtype),
             q=torch.tensor(q, dtype=self.dtype),
-            y_fluxavg=torch.tensor(fluxavg, dtype=self.dtype) if fluxavg is not None else None,
-            y_fluxfield=torch.tensor(fluxfield, dtype=self.dtype) if fluxfield is not None else None,
-            position=None
+            y_fluxavg=(
+                torch.tensor(fluxavg, dtype=self.dtype) if fluxavg is not None else None
+            ),
+            y_fluxfield=(
+                torch.tensor(fluxfield, dtype=self.dtype)
+                if fluxfield is not None
+                else None
+            ),
+            position=None,
         )
 
     def _load_data(
@@ -542,7 +610,7 @@ class CycloneDataset(Dataset):
                 k = data[f"data/{k_name}"][:]
                 k_gt = data[f"data/{k_name_gt}"][:]
                 # select only active re/im parts
-                if all(self.active_keys == np.array([0,1])):
+                if all(self.active_keys == np.array([0, 1])):
                     x.append(k)
                     gt.append(k_gt)
                 else:
@@ -553,13 +621,13 @@ class CycloneDataset(Dataset):
                 fluxfield = data[f"data/{fluxfield_name}"][:]
                 # TODO: possibly remove again
                 # reduce fluxfield to 2D
-                fluxfield = fluxfield.sum((1,2,3))
+                fluxfield = fluxfield.sum((1, 2, 3))
                 # select only active re/im parts
-                if all(self.active_keys == np.array([0,1])):
+                if all(self.active_keys == np.array([0, 1])):
                     y_fluxfield.append(fluxfield)
                 else:
                     y_fluxfield.append(fluxfield[self.active_keys])
-            
+
             if "phi" in self.input_fields:
                 phi = data[f"data/{phi_name}"][:]
                 phi_gt = data[f"data/{phi_name_gt}"][:]
@@ -629,7 +697,11 @@ class CycloneDataset(Dataset):
         sample["q"] = data["metadata/q"][:].squeeze()
         # load geometry
         sample["geometry"] = {k: np.array(v[()]) for k, v in data["geometry"].items()}
-        sample["fluxavg"] = self.get_avg_flux(file_index).squeeze() if "fluxavg" in self.input_fields else None
+        sample["fluxavg"] = (
+            self.get_avg_flux(file_index).squeeze()
+            if "fluxavg" in self.input_fields
+            else None
+        )
         return sample
 
     def normalize(
@@ -661,7 +733,6 @@ class CycloneDataset(Dataset):
 
         scale, shift = self._get_scale_shift(file_index, field, x)
         return (x - shift) / scale, shift, scale
-        
 
     def denormalize(
         self,
@@ -696,8 +767,8 @@ class CycloneDataset(Dataset):
     def _conditioning_filter(self, fname: str, offset: int) -> bool:
         with h5py.File(fname, "r") as f:
             for cond_name, cond_range in self.cond_filters.items():
-                if len(cond_name.split('_')) > 1:
-                    where, cond_name = cond_name.split('_')
+                if len(cond_name.split("_")) > 1:
+                    where, cond_name = cond_name.split("_")
                 if f"metadata/{cond_name}" in f:
                     cond = f[f"metadata/{cond_name}"][:]
                     if not isinstance(cond_range[0], Sequence):
@@ -756,8 +827,10 @@ class CycloneDataset(Dataset):
         return sample
 
     def get_timesteps(
-        self, file_idx: torch.Tensor, timestep_idx: Optional[torch.Tensor] = None,
-        offset: int = 0
+        self,
+        file_idx: torch.Tensor,
+        timestep_idx: Optional[torch.Tensor] = None,
+        offset: int = 0,
     ):
         # file_idx: (B,)
         if isinstance(file_idx, int):
@@ -882,9 +955,11 @@ class CycloneDataset(Dataset):
                 if batch[0].y_fluxfield is not None
                 else None
             ),
-            y_flux=torch.stack([sample.y_flux for sample in batch])
+            y_flux=(
+                torch.stack([sample.y_flux for sample in batch])
                 if batch[0].y_flux is not None
-                else None,
+                else None
+            ),
             timestep=torch.stack([sample.timestep for sample in batch]),
             file_index=torch.stack([sample.file_index for sample in batch]),
             timestep_index=torch.stack([sample.timestep_index for sample in batch]),
@@ -900,17 +975,18 @@ class CycloneDataset(Dataset):
             ),
         )
 
+
 class LinearCycloneDataset(CycloneDataset):
-    def __init__(
-        self,
-        *args,
-        **kwargs
-    ):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, linear_sims=True, **kwargs)
         temp_stats = self._recompute_stats_linear()
-        import pdb; pdb.set_trace()
+        import pdb
+
+        pdb.set_trace()
         self.norm_stats["df"]["full"]["mean"] = temp_stats.mean.astype(np.float32)
-        self.norm_stats["df"]["full"]["std"] = (temp_stats.var ** (1/2)).astype(np.float32)
+        self.norm_stats["df"]["full"]["std"] = (temp_stats.var ** (1 / 2)).astype(
+            np.float32
+        )
         self.norm_stats["df"]["full"]["min"] = temp_stats.min.astype(np.float32)
         self.norm_stats["df"]["full"]["max"] = temp_stats.max.astype(np.float32)
 
@@ -934,8 +1010,8 @@ class LinearCycloneDataset(CycloneDataset):
         file_index = index
 
         with h5py.File(self.files[file_index], "r") as f:
-            df_files = [key for key in  f["data"].keys() if key.startswith("timestep")]
-            t_index = len(df_files)-1
+            df_files = [key for key in f["data"].keys() if key.startswith("timestep")]
+            t_index = len(df_files) - 1
             sample = self._load_data(f, file_index, t_index)
         # k-fields
         x = sample["x"]
@@ -962,7 +1038,7 @@ class LinearCycloneDataset(CycloneDataset):
 
             if flux is not None:
                 flux, shift, scale = self.normalize(file_index, flux=flux)
-                
+
             if fluxavg is not None:
                 fluxavg, *_ = self.normalize(file_index, fluxavg=fluxavg)
 
@@ -974,10 +1050,14 @@ class LinearCycloneDataset(CycloneDataset):
             y_df=torch.tensor(gt, dtype=self.dtype) if gt is not None else None,
             phi=(torch.tensor(phi, dtype=self.dtype) if phi is not None else None),
             y_phi=(
-               	torch.tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
+                torch.tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
             ),
             y_flux=torch.tensor(flux, dtype=self.dtype),
-            y_fluxfield=torch.tensor(fluxfield, dtype=self.dtype) if fluxfield is not None else None,
+            y_fluxfield=(
+                torch.tensor(fluxfield, dtype=self.dtype)
+                if fluxfield is not None
+                else None
+            ),
             # index info
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
@@ -990,9 +1070,11 @@ class LinearCycloneDataset(CycloneDataset):
             # geometric tensors
             geometry=tree_map(lambda x: torch.from_numpy(x), geometry),
             # accessory
-            y_fluxavg=torch.tensor(fluxavg, dtype=self.dtype) if fluxavg is not None else None,
+            y_fluxavg=(
+                torch.tensor(fluxavg, dtype=self.dtype) if fluxavg is not None else None
+            ),
             position=None,
-	)
+        )
 
     def _load_data(
         self, data, file_index, t_index
@@ -1010,7 +1092,7 @@ class LinearCycloneDataset(CycloneDataset):
             if "df" in self.input_fields:
                 k = data[f"data/{k_name}"][:]
                 # select only active re/im parts
-                if all(self.active_keys == np.array([0,1])):
+                if all(self.active_keys == np.array([0, 1])):
                     x.append(k)
                 else:
                     x.append(k[self.active_keys])
@@ -1066,14 +1148,20 @@ class LinearCycloneDataset(CycloneDataset):
         sample["q"] = data["metadata/q"][:].squeeze()
         # load geometry
         sample["geometry"] = {k: np.array(v[()]) for k, v in data["geometry"].items()}
-        sample["fluxavg"] = self.get_avg_flux(file_index).squeeze() if "fluxavg" in self.input_fields else None
+        sample["fluxavg"] = (
+            self.get_avg_flux(file_index).squeeze()
+            if "fluxavg" in self.input_fields
+            else None
+        )
         sample["position"] = None
         sample["fluxfield"] = None
         return sample
-    
+
     def get_timesteps(
-        self, file_idx: torch.Tensor, timestep_idx: Optional[torch.Tensor] = None,
-        offset: int = 0
+        self,
+        file_idx: torch.Tensor,
+        timestep_idx: Optional[torch.Tensor] = None,
+        offset: int = 0,
     ):
         # file_idx: (B,)
         if isinstance(file_idx, int):
@@ -1084,29 +1172,44 @@ class LinearCycloneDataset(CycloneDataset):
         timesteps_tensor = torch.zeros_like(file_idx)
         for i, file_index in enumerate(file_idx):
             with h5py.File(self.files[file_index], "r") as f:
-                df_files = [key for key in  f["data"].keys() if key.startswith("timestep")]
-                t_index = len(df_files)-1
+                df_files = [
+                    key for key in f["data"].keys() if key.startswith("timestep")
+                ]
+                t_index = len(df_files) - 1
                 timesteps_tensor[i] = t_index
 
         return timesteps_tensor
 
     def _recompute_stats_linear(self):
         t_indices = list(range(0, len(self.files)))
-        
-        if os.path.exists(os.path.join(self.dir, f"df_linear_{len(self.files)}sims_stats.pkl")):
-            stats = pickle.load(open(os.path.join(self.dir, f"df_linear_{len(self.files)}sims_stats.pkl"), "rb"))
+
+        if os.path.exists(
+            os.path.join(self.dir, f"df_linear_{len(self.files)}sims_stats.pkl")
+        ):
+            stats = pickle.load(
+                open(
+                    os.path.join(
+                        self.dir, f"df_linear_{len(self.files)}sims_stats.pkl"
+                    ),
+                    "rb",
+                )
+            )
         else:
             stats = None
-            for index in tqdm.tqdm(t_indices, desc=f"Re-computing normalization stats for df"):
+            for index in tqdm.tqdm(
+                t_indices, desc=f"Re-computing normalization stats for df"
+            ):
                 file_index = index
 
                 with h5py.File(self.files[file_index], "r") as f:
-                    df_files = [key for key in  f["data"].keys() if key.startswith("timestep")]
-                    t_index = len(df_files)-1
+                    df_files = [
+                        key for key in f["data"].keys() if key.startswith("timestep")
+                    ]
+                    t_index = len(df_files) - 1
                     sample = self._load_data(f, file_index, t_index)
 
                 x = sample["x"]
-                norm_axes = (1,2,3,4,5)
+                norm_axes = (1, 2, 3, 4, 5)
                 if self.separate_zf:
                     x = self._separate_zf(x)
 
@@ -1119,8 +1222,16 @@ class LinearCycloneDataset(CycloneDataset):
                 if stats is None:
                     stats = RunningMeanStd(shape=x_mean.shape)
                 stats.update(x_mean, x_var, x_min, x_max)
-            
-            pickle.dump(stats, open(os.path.join(self.dir, f"df_linear_{len(self.files)}sims_stats.pkl"), "wb"))
+
+            pickle.dump(
+                stats,
+                open(
+                    os.path.join(
+                        self.dir, f"df_linear_{len(self.files)}sims_stats.pkl"
+                    ),
+                    "wb",
+                ),
+            )
 
         return stats
 
@@ -1140,26 +1251,29 @@ class LinearCycloneDataset(CycloneDataset):
         # length for samples is number of files
         return len(self.files)
 
+
 class CoordinateCycloneDataset(CycloneDataset):
-    def __init__(
-        self,
-        *args,
-        **kwargs
-    ):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert len(self.input_fields) == 2 and "position" in self.input_fields, "Cannot load multiple fields for coordinates"
+        assert (
+            len(self.input_fields) == 2 and "position" in self.input_fields
+        ), "Cannot load multiple fields for coordinates"
         assert not "flux" in self.input_fields, "Loading flux coordinates not supported"
 
     def _load_data(
-        self, data, file_index, t_index, n_subsamples=65536,
+        self,
+        data,
+        file_index,
+        t_index,
+        n_subsamples=65536,
     ) -> Tuple[np.ndarray, float, float, np.ndarray]:
         original_t_index = t_index + self.offsets[file_index]
-        assert self.bundle_seq_length == 1, "Bundling of >1 steps not supported for coordinates"
+        assert (
+            self.bundle_seq_length == 1
+        ), "Bundling of >1 steps not supported for coordinates"
         # read the input
         k_name = "timestep_" + str(original_t_index).zfill(5)
-        k_name_gt = "timestep_" + str(
-                original_t_index + 1
-            ).zfill(5)
+        k_name_gt = "timestep_" + str(original_t_index + 1).zfill(5)
         phi_name = "poten_" + str(original_t_index + 1).zfill(5)
 
         if "df" in self.input_fields:
@@ -1187,7 +1301,7 @@ class CoordinateCycloneDataset(CycloneDataset):
         sample["gt"] = y[:, rand_inds] if y is not None else None
         sample["phi"] = poten[:, rand_inds] if phi is not None else None
         sample["y_phi"] = None
-        sample["gt_flux"] = None # TODO: support flux coordinates
+        sample["gt_flux"] = None  # TODO: support flux coordinates
         sample["position"] = position
         sample["fluxfield"] = None
         # load conditioning
@@ -1198,9 +1312,13 @@ class CoordinateCycloneDataset(CycloneDataset):
         sample["q"] = data["metadata/q"][:].squeeze()
         # load geometry
         sample["geometry"] = {k: np.array(v[()]) for k, v in data["geometry"].items()}
-        sample["fluxavg"] = self.get_avg_flux(file_index).squeeze() if "fluxavg" in self.input_fields else None
+        sample["fluxavg"] = (
+            self.get_avg_flux(file_index).squeeze()
+            if "fluxavg" in self.input_fields
+            else None
+        )
         return sample
-    
+
     def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneSample:
         """
         Args:
@@ -1263,9 +1381,15 @@ class CoordinateCycloneDataset(CycloneDataset):
                 torch.tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
             ),
             y_flux=torch.tensor(flux, dtype=self.dtype) if flux is not None else None,
-            y_fluxavg=torch.tensor(fluxavg, dtype=self.dtype) if fluxavg is not None else None,
+            y_fluxavg=(
+                torch.tensor(fluxavg, dtype=self.dtype) if fluxavg is not None else None
+            ),
             position=torch.tensor(position, dtype=self.dtype),
-            y_fluxfield=torch.tensor(fluxfield, dtype=self.dtype) if fluxfield is not None else None,
+            y_fluxfield=(
+                torch.tensor(fluxfield, dtype=self.dtype)
+                if fluxfield is not None
+                else None
+            ),
             timestep=torch.tensor(timestep, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),

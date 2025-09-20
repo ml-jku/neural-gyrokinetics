@@ -58,8 +58,11 @@ def evaluate(
     use_amp = cfg.amp.enable
     use_bf16 = use_amp and cfg.amp.bfloat and torch.cuda.is_bf16_supported()
     input_fields = cfg.dataset.input_fields
-    output_fields = [k for k in cfg.model.loss_weights.keys() 
-                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]]
+    output_fields = [
+        k
+        for k in cfg.model.loss_weights.keys()
+        if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
+    ]
     if cfg.model.name in ["pointnet", "transolver", "transformer"]:
         input_fields.append("position")
     if set(output_fields) != set(["df", "phi", "flux"]):
@@ -139,7 +142,9 @@ def evaluate(
                 )
                 # add integrated potentials to rollout for comparison
                 if integrated_i[0] is not None:
-                    rollout["phi_int"] = torch.stack([integrated_i[t]["phi"] for t in range(len(integrated_i))])
+                    rollout["phi_int"] = torch.stack(
+                        [integrated_i[t]["phi"] for t in range(len(integrated_i))]
+                    )
 
                 for key in metrics_i.keys():
                     if metrics_i[key].shape[-1] < tot_eval_steps:

@@ -103,9 +103,14 @@ def get_model(cfg, dataset):
         modulation = cfg.model.swin.modulation
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         decouple_mu = cfg.model.decouple_mu
-        outputs = [k for k in cfg.model.loss_weights.keys() 
-                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]]
-        assert len([k for k in outputs if k.startswith("flux")]) == 1, "Cannot have multiple flux targets!"
+        outputs = [
+            k
+            for k in cfg.model.loss_weights.keys()
+            if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
+        ]
+        assert (
+            len([k for k in outputs if k.startswith("flux")]) == 1
+        ), "Cannot have multiple flux targets!"
         swin_bottleneck = cfg.model.swin.swin_bottleneck
         use_rpb = cfg.model.swin.use_rpb
         use_rope = cfg.model.swin.use_rope
@@ -264,23 +269,22 @@ def get_model(cfg, dataset):
             modulation=modulation,
             act_fn=act_fn,
             patch_skip=patch_skip,
-            abs_pe=use_abs_pe
+            abs_pe=use_abs_pe,
         )
 
-        
     if "fno" in cfg.model.name:
         from neugk.models.fno import Df5DTFNO, DfVSpace3DTFNO, DfLocal5DTFNO
-        
+
         base_resolution = dataset.resolution
         num_layers = cfg.model.num_layers
-        
+
         if cfg.model.name == "fno":
             model = Df5DTFNO(
                 latent_dim,
                 base_resolution=base_resolution,
                 in_channels=problem_dim,
                 out_channels=problem_dim,
-                num_layers=num_layers
+                num_layers=num_layers,
             )
         if cfg.model.name == "fno3d":
             model = DfVSpace3DTFNO(
@@ -288,7 +292,7 @@ def get_model(cfg, dataset):
                 base_resolution=base_resolution,
                 in_channels=problem_dim,
                 out_channels=problem_dim,
-                num_layers=num_layers
+                num_layers=num_layers,
             )
         if cfg.model.name == "local_fno":
             patch_size = cfg.model.swin.patch_size
@@ -298,20 +302,22 @@ def get_model(cfg, dataset):
                 patch_size=patch_size,
                 in_channels=problem_dim,
                 out_channels=problem_dim,
-                num_layers=num_layers
+                num_layers=num_layers,
             )
 
     if cfg.model.name == "pointnet":
         from neugk.models.pointnet import PointNet
-        
-        model = PointNet(dim=cfg.model.latent_dim,
-                         n_dims=5,
-                         n_channels=2 if not cfg.dataset.separate_zf else 4,
-                         condition_keys=cfg.model.conditioning)
+
+        model = PointNet(
+            dim=cfg.model.latent_dim,
+            n_dims=5,
+            n_channels=2 if not cfg.dataset.separate_zf else 4,
+            condition_keys=cfg.model.conditioning,
+        )
 
     if cfg.model.name == "transformer":
         from neugk.models.transformer import Transformer
-        
+
         model = Transformer(
             condition_keys=cfg.model.conditioning,
             output_channels=2,
@@ -321,7 +327,7 @@ def get_model(cfg, dataset):
 
     if cfg.model.name == "transolver":
         from neugk.models.transolver import Transolver
-        
+
         model = Transolver(
             condition_keys=cfg.model.conditioning,
             output_channels=2,
