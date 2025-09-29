@@ -1,7 +1,7 @@
 
 
 <div style="text-align: center;">
-  <a href="https://github.com/ml-jku/neugk" target="_blank">
+  <a href="https://github.com/ml-jku/gyrokinetics" target="_blank">
     <img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=GitHub&logoColor=FFFFFF" alt="code">
   </a>
   &nbsp;&nbsp;
@@ -10,20 +10,18 @@
   </a>
 </div>
 
-<!-- # <img src="imgs/neugk_icon.png" alt="neugk Icon" height="24px"> Efficiently Modeling 5D Plasma Turbulence Simulations -->
-
 ---
 
 <figure style="text-align: center;">
     <img src="imgs/velocity_surfaces.gif" alt="5d distribution function" width="70%">
     <figcaption style="color: white; font-size: 14px; margin-top: 8px;">
-    Figure 1: Visualizing the 5D distribution funciton, as 3D toruses within the 2D velocity space. 5D plotting has never been easier ;)
+    Figure 1: Visualizing the 5D distribution funciton, as 3D toruses within the 2D velocity space.
     </figcaption>
 </figure>
 
 ## TL;DR
-<div style="border-left: 4px solid #633d11; background-color: #c27721; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
-<strong>Nuclear fusion is hard</strong>, as it requires understanding physical phenomena like plasma turbulence. One way to do this is with very expensive <strong>numerical simulations, called gyrokinetics</strong>. We propose <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> <strong>NeuGK</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models Plasma turbulence in a <strong>5D phase space</strong>, unlike existing methods which take reduced approaches, and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
+<div style="border-left: 4px solid #492701; background-color: #4d4d4d; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
+<strong>Nuclear fusion is hard</strong>, as it requires understanding physical phenomena like plasma turbulence. One way to do this is with very expensive <strong>numerical simulations, called gyrokinetics</strong>. We propose <img src="imgs/gyroswin_icon.png" alt="gyroswin Icon" height="12px"> <strong>GyroSwin</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models Plasma turbulence in a <strong>5D phase space</strong>, unlike existing methods which take reduced approaches, and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
 </div>
 
 ## Introduction
@@ -72,7 +70,7 @@ Where:
 
 The **nonlinear term** $\mathbf{v}_\chi \cdot \nabla f$ describes turbulent advection, and the resulting nonlinear coupling constitutes the computationally most expensive term. For more details on gyrokinetics and the derivation of the equation, check _"The non-linear gyro-kinetic flux tube code GKW_" from _Arthur Peeters et al._ [[5](#ref-gyrokinetics)] and _"Gyrokinetics_" by _Xavier Gerbet and Maxime Lesur_ [[6](#ref-gyrokinetics3)].
 
-<div style="border-left: 4px solid #633d11; background-color: #c27721; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
+<div style="border-left: 4px solid #492701; background-color:rgb(146, 86, 18); padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
     The phase-space distribution function (<strong>Eulerian</strong>) is not the only way gyrokinetics can be parametrized. Instead, we can describe it with an ensemble of trajectories governed by an SDE, where gyrocenters are tracked directly as particles (<strong>Lagrangian</strong>). With the Lagrangian approach, the distribution function can then be recovered from by sampling many gyro-paths (particle-in-cell methods, [<a href="#ref-pic">8</a>]). 
     <strong>Both frames are physically equivalent, but offer different insights and numerical advantages</strong>. <br><br>
     This duality is related to the <strong><a href="https://en.wikipedia.org/wiki/Fokker%E2%80%93Planck_equation">Fokker-Planck equation</a></strong> [<a href="#ref-fokker">9</a>], which describes the evolution of probability densities under drift and diffusion. The Fokker-Planck equation is derived from an SDE, such as the <a href="https://en.wikipedia.org/wiki/Ornstein%E2%80%93Uhlenbeck_process">Ornstein–Uhlenbeck process</a> (as the forward Kolmogorov), and so it links the distribution-based and SDE-based descriptions.
@@ -101,29 +99,35 @@ We generalize the local window attention mechanism used in Swin Transformers, to
     </figcaption>
 </figure>
 
-We propose Neural Gyrokinetics, <img src="imgs/neugk_icon.png" alt="neugk Icon" height="12px"> **NeuGK**, the first ever neural surrogate for nonlinear Gyrokinetic simulations. We start from the popular UNet architecture [[15](#ref-unet)] and model the temporal evolution of the distribution function in an autoregressive manner. Furthermore, NeuGK is a multitask model and not only predicts the evolution of the 5D distribution function, but also 3D potential fields and heat flux, which are usually obtained by performing complex integrals on the 5D fields. NeuGK achieves this through three output branches at different dimensions that share latents with cross attention.
+We propose Gyrokinetic Swin, <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> **GyroSwin**, the first ever neural surrogate for nonlinear Gyrokinetic simulations. We start from the popular UNet architecture [[15](#ref-unet)] and model the temporal evolution of the distribution function in an autoregressive manner. Furthermore, GyroSwin is a multitask model and not only predicts the evolution of the 5D distribution function, but also 3D potential fields and heat flux, which are usually obtained by performing complex integrals on the 5D fields. GyroSwin achieves this through three output branches at different dimensions that share latents with cross attention.
 
 
 <figure style="text-align: center;">
-    <img src="imgs/figure1.png" alt="NeuGK architecture compared to quasilinear" width="80%">
+    <img src="imgs/figure1.png" alt="GyroSwin architecture compared to quasilinear" width="80%">
     <figcaption style="color: white; font-size: 14px; margin-top: 8px;">
-    Figure 4: NeuGK multitask trainin pipeline. We directly model the 5D distribution function of nonlinear gyrokinetics and incorporates 3D electrostatic potential fields and turbulent transport quantities, such as heat flux.
+    Figure 4: GyroSwin multitask trainin pipeline. We directly model the 5D distribution function of nonlinear gyrokinetics and incorporates 3D electrostatic potential fields and turbulent transport quantities, such as heat flux.
     </figcaption>
 </figure>
 
 ## Results
 
-### Does NeuGK accurately predict heat flux?
+### Does GyroSwin accurately predict $\delta f$ and heat flux?
 
-> [TODO: Visualization of heat flux trajectory]
+| Method | Input | δf ID (↓) | δf OOD (↓) | 𝑄̄ᵢ ID (↓) | 𝑄̄ᵢ OOD (↓) |
+|--------|-------|-----------|------------|------------|-------------|
+| QL (Bourdelle et al., 2007) | 3D | n/a | n/a | 40.74 ± 7.47 | 53.3 ± 14.77 |
+| PointNet | 5D | n/a | n/a | 40.74 ± 7.47 | 53.3 ± 14.77 |
+| Transolver | 5D | n/a | n/a | 40.74 ± 7.47 | 53.3 ± 14.77 |
+| GyroSwin (ours) | 5D | – | – | **24.38 ± 6.79** | **18.49 ± 6.15** |
 
-### Does NeuGK capture underlying physics?
+
+### Does GyroSwin capture underlying physics?
 
 > [TODO: Diagnostics plots — zonal flow and spectra]
 
 # Wrapping up
 
-NeuGK outperforms reduced numerical approaches and machine learning baselines in modelling plasma turbulence. It accurately captures nonlinear phenomena and spectral quantities self-consistently, while offering a three order of magnitude speedup compared to the numerical solver GKW [[7](#ref-gyrokinetics3)]. As a result, NeuGK offers a fruitful alternative to efficient approximation of turbulent transport and opens up a variety of research directions leveraging the potential of neural surrogates for Plasma turbulence modelling. Finally, Plasma turbulence modelling is an incredibly hard problem, but we believe that Machine Learning will disrupt the landscape of Plasma turbulence modelling in the future. 
+GyroSwin outperforms reduced numerical approaches and machine learning baselines in modelling plasma turbulence. It accurately captures nonlinear phenomena and spectral quantities self-consistently, while offering a three order of magnitude speedup compared to the numerical solver GKW [[7](#ref-gyrokinetics3)]. As a result, GyroSwin offers a fruitful alternative to efficient approximation of turbulent transport and opens up a variety of research directions leveraging the potential of neural surrogates for Plasma turbulence modelling. Finally, Plasma turbulence modelling is an incredibly hard problem, but we believe that Machine Learning will disrupt the landscape of Plasma turbulence modelling in the future. 
 
 <figure style="text-align: center;">
     <img src="imgs/here_to_help.jpg" alt="xkcd 1831: here to help (edited)" width="100%">
@@ -135,8 +139,8 @@ NeuGK outperforms reduced numerical approaches and machine learning baselines in
 ## Cite
 ```
 @misc{galletti20255dneuralsurrogatesnonlinear,
-      title={5D Neural Surrogates for Nonlinear Gyrokinetic Simulations of Plasma Turbulence}, 
-      author={Gianluca Galletti and Fabian Paischer and Paul Setinek and William Hornsby and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter},
+      title={GyroSwin: 5D Surrogates for Gyrokinetics Plasma Turbulence Simulations}, 
+      author={Gianluca Galletti and Fabian Paischer and William Hornsby and Paul Setinek and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter},
       year={2025},
       eprint={2502.07469},
       archivePrefix={arXiv},
