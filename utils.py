@@ -92,15 +92,16 @@ def setup_logging(config):
 def save_model_and_config(
     model: nn.Module,
     optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler,
     cfg: DictConfig,
     epoch: int,
     val_loss: float,
     loss_val_min: float,
 ) -> float:
     # create directory if it s not there
-    os.makedirs(cfg.ckpt_path, exist_ok=True)
+    os.makedirs(cfg.output_path, exist_ok=True)
 
-    with open(os.path.join(cfg.ckpt_path, "config.yaml"), "w") as f:
+    with open(os.path.join(cfg.output_path, "config.yaml"), "w") as f:
         OmegaConf.save(config=cfg, f=f.name)
 
     state_dict = model.state_dict()
@@ -114,9 +115,10 @@ def save_model_and_config(
             "epoch": epoch,
             "model_state_dict": state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
             "loss": val_loss,
         },
-        f"{cfg.ckpt_path}/ckp.pth",
+        f"{cfg.output_path}/ckp.pth",
     )
 
     if val_loss < loss_val_min:
@@ -126,36 +128,35 @@ def save_model_and_config(
                 "epoch": epoch,
                 "model_state_dict": state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
                 "loss": val_loss,
             },
-            f"{cfg.ckpt_path}/best.pth",
+            f"{cfg.output_path}/best.pth",
         )
 
     return loss_val_min
 
 
 def load_model_and_config(
-    ckp_path: str, model: nn.Module, device: torch.DeviceObjType
+    ckp_path: str, model: nn.Module, device: torch.DeviceObjType, for_ddp=False,
 ) -> Tuple[nn.Module, Dict, int]:
     # TODO latest or best?
 
-    loaded_ckp = torch.load(ckp_path, map_location=device, weights_only=True)
-    optimizer_state_dict = loaded_ckp["optimizer_state_dict"]
-    temp_key = list(loaded_ckp["model_state_dict"].keys())[0]
-    if temp_key.startswith("module."):
-        loaded_ckp["model_state_dict"] = {
-            k.replace("module.", ""): v
-            for k, v in loaded_ckp["model_state_dict"].items()
+    loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
+    if for_ddp:
+        loaded_ckpt["model_state_dict"] = {
+            "module."+k: v
+            for k, v in loaded_ckpt["model_state_dict"].items()
         }
-    model.load_state_dict(loaded_ckp["model_state_dict"])
-    resume_epoch = loaded_ckp["epoch"]
-    resume_loss = loaded_ckp["loss"]
+    new_state_dict = loaded_ckpt["model_state_dict"]
+    model.load_state_dict(new_state_dict, strict=False)
+    resume_epoch = loaded_ckpt["epoch"]
+    resume_loss = loaded_ckpt["loss"]
     print(
         f"Loading model {ckp_path} (stopped at epoch {resume_epoch}) "
         f"with loss {resume_loss:5f}"
     )
-
-    return model, optimizer_state_dict, resume_epoch
+    return model, loaded_ckpt
 
 
 def compress_src(path):
@@ -195,7 +196,12 @@ def find_free_port():
 def expand_as(src: np.ndarray, tgt: np.ndarray):
     src = src.squeeze()
     while src.ndim < tgt.ndim:
-        src = np.expand_dims(src, axis=-1)
+        if isinstance(src, np.ndarray):
+            src = np.expand_dims(src, axis=-1)
+        elif isinstance(src, torch.Tensor):
+            src = src.unsqueeze(-1)
+        else:
+            raise NotImplementedError("Unsupported datatype")
     return src
 
 
@@ -475,13 +481,12 @@ def pev_flux_df_phi(
         vflux_det = vflux_det.sum()
     return pflux_det, eflux_det, vflux_det
 
-def phi_integral(df: torch.Tensor, geometry: Dict, padded_shape: Tuple = (392, 16, 96)):
+def phi_integral(df: torch.Tensor, geometry: Dict):
     ns, nx, ny = df.shape[3:]
-    # df to fourier, phi to fourier and unpad
+    # df to fourier
     df = df.movedim(0, -1).contiguous()
     df = torch.view_as_complex(df)
     # phi tensor
-    phi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
     bufphi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
     # expand geometry constants for broadcasting
     # grids
@@ -535,7 +540,8 @@ def phi_integral(df: torch.Tensor, geometry: Dict, padded_shape: Tuple = (392, 1
 
     poisson_diag = torch.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
     poisson_diag[..., 0, 0] = 0.0
-    poisson_diag = poisson_diag + signz * torch.exp(-cfen) * de / tmp
+    poisson_diag = poisson_diag - signz * torch.exp(-cfen) * de / tmp
+    poisson_diag = -1 / poisson_diag
 
     # first usmv
     phi = (1 + 0j) * poisson_int * df
@@ -563,10 +569,6 @@ def phi_integral(df: torch.Tensor, geometry: Dict, padded_shape: Tuple = (392, 1
     # normalize
     phi = phi * poisson_diag
     phi = rearrange(phi.squeeze(), "s x y -> x s y")
-    # pad phi in fourier to padded_shape
-    if padded_shape is not None:
-        xpad = (padded_shape[0] - phi.shape[0]) // 2 + 1
-        # TODO
     return phi
 
 def is_number(string):
@@ -668,3 +670,85 @@ def load_geometry(directory):
     geometry["bt_frac"] = torch.tensor(geom["Bt_frac"])
     geometry["rfun"] = torch.tensor(geom["R"])
     return geometry
+
+def get_linear_burn_in_fn(start: float, end: float, end_fraction: float, start_fraction: float):
+
+    def func(progress_remaining: float) -> float:
+        if (1 - progress_remaining) > end_fraction:
+            return end
+        elif (1 - progress_remaining) < start_fraction:
+            return start
+        else:
+            return start + (1 - progress_remaining - start_fraction) * (end - start) / (end_fraction - start_fraction)
+
+    return func
+
+def remainig_progress(cur_step, total_steps):
+    return 1. - (cur_step / total_steps)
+
+def parse_input_dat(file_path):
+    parsed_data = {}
+    with open(file_path, "r") as file:
+        content = file.read()
+    # split the content by section headers (e.g., &SPECIES, &SPCGENERAL, etc.)
+    sections = re.split(r"&\w+", content)
+    # get all the headers by finding the section names
+    section_headers = re.findall(r"&(\w+)", content)
+    # remove comments
+    sections = [
+        section.strip() for section in sections if len(section) and section[0] != "!" and section.strip()
+    ]
+    for header, section in zip(section_headers, sections):
+        section_dict = {}
+        params = re.findall(r"(\w+)\s*=\s*([-\d\.e\w]+)", section)
+        for param, value in params:
+            try:
+                section_dict[param] = (
+                    float(value) if "e" in value or "." in value else int(value)
+                )
+            except ValueError:
+                section_dict[param] = value.strip()
+        while header in parsed_data:
+            header = f"{header}0"
+        parsed_data[header] = section_dict
+
+    return parsed_data
+
+def K_files(directory):
+    files = os.listdir(directory)
+    digit_files = sorted(
+        [file for file in files if file.isdigit()], key=lambda x: int(x)
+    )
+    k_files = sorted(
+        [file for file in files if file.startswith("K") and not file.endswith(".dat")]
+    )
+    return k_files + digit_files
+
+def poten_files(directory):
+    files = os.listdir(directory)
+    poten_files = sorted([file for file in files if file.startswith("Poten")])
+    timestep_slices = [int(f.replace("Poten", "")) for f in poten_files]
+    return poten_files, np.array(timestep_slices) - 1
+
+def exclude_from_weight_decay(model, param_names, weight_decay):
+    decay, no_decay = [], []
+    no_decay_names, decay_names = [], []
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        add_to_no_decay = False
+        for param_name in param_names:
+            if param_name in name.lower():
+                add_to_no_decay = True
+        
+        if add_to_no_decay:
+            no_decay.append(param)
+            no_decay_names.append(name)
+        else:
+            decay.append(param)
+            decay_names.append(name)
+
+    return [
+        {'params': decay, 'weight_decay': weight_decay},
+        {'params': no_decay, 'weight_decay': 0.0}
+    ]

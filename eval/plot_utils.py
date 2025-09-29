@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import wandb
 import warnings
-from pysteps.utils.spectral import rapsd
 
 import torch
 
@@ -201,6 +200,7 @@ def plot_5D_raspec(x, x2):
 
 
 def plot_4x4_2D_raspec(x1, x2=None, **kwargs):
+    from pysteps.utils.spectral import rapsd
     _ = kwargs
     labels = [r"v_{par}", r"v_{\mu}", r"s", r"k_x", r"k_y"]
 
@@ -262,16 +262,47 @@ def plot_potentials(x1, x2):
     fig, ax = plt.subplots(2, 1, figsize=(10, 5))
     fig.subplots_adjust(wspace=0.05)
 
-    ax[0].matshow(x1[0].squeeze()[:, 8, :].T, cmap=c_map)
+    # select only real part if we predicted both real/imag parts of phi
+    x1 = x1[0] if x1.ndim > 3 else x1
+    x2 = x2[0] if x2.ndim > 3 else x2
+    ax[0].matshow(x1.squeeze()[:, 8, :].T, cmap=c_map)
     ax[0].set_title(r"$\phi_{pred}$", fontsize=24)
     ax[0].set_ylabel(r"$y_{\phi}$", fontsize=20)
     ax[0].set_xticks([])
     ax[0].set_yticks([])
 
-    ax[1].matshow(x2[0].squeeze()[:, 8, :].T, cmap=c_map)
+    ax[1].matshow(x2.squeeze()[:, 8, :].T, cmap=c_map)
     ax[1].set_title(r"$\phi_{GT}$", fontsize=24)
     ax[1].set_xlabel(r"$x_{\phi}$", fontsize=20)
     ax[1].set_ylabel(r"$y_{\phi}$", fontsize=20)
+    ax[1].set_xticks([])
+    ax[1].set_yticks([])
+
+    return plt_to_wandb_image(fig)
+
+
+def plot_2d_fluxfield(x1, x2):
+    from matplotlib import colormaps
+
+    c_map = colormaps["RdBu"]
+
+    fig, ax = plt.subplots(2, 1, figsize=(10, 5))
+    fig.subplots_adjust(wspace=0.05)
+
+    # select only real part if we predicted both real/imag parts of phi
+    # fluxfield is already 2D
+    x1 = x1[0] if x1.ndim > 2 else x1
+    x2 = x2[0] if x2.ndim > 2 else x2
+    ax[0].matshow(x1.squeeze().T, cmap=c_map)
+    ax[0].set_title(r"$Q_{pred}$", fontsize=24)
+    ax[0].set_ylabel(r"$y$", fontsize=20)
+    ax[0].set_xticks([])
+    ax[0].set_yticks([])
+
+    ax[1].matshow(x2.squeeze().T, cmap=c_map)
+    ax[1].set_title(r"$Q_{GT}$", fontsize=24)
+    ax[1].set_xlabel(r"$x$", fontsize=20)
+    ax[1].set_ylabel(r"$y$", fontsize=20)
     ax[1].set_xticks([])
     ax[1].set_yticks([])
 
@@ -283,8 +314,8 @@ def generate_val_plots(rollout, gt, ts, phase):
     val_plots_dict = {
         "df": {
             f"pred (T={ts[0].item():.2f}, {phase})": plot4x4_sided,
-            f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
-            f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
+            # f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
+            # f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
         },
         "phi": {
             f"Potentials (T={ts[0].item():.2f}, {phase})": plot_potentials,
@@ -292,10 +323,13 @@ def generate_val_plots(rollout, gt, ts, phase):
         "phi_int": {
             f"Integrated potentials (T={ts[0].item():.2f}, {phase})": plot_potentials,
         },
+        "fluxfield": {
+            f"Fluxfield (T={ts[0].item():.2f}, {phase})": plot_2d_fluxfield,
+        }
     }
     for key in rollout.keys():
         if key not in val_plots_dict:
-            # TODO: add visualization for flux rollout
+            # skip flux
             continue
         
         gt_key = key
@@ -305,23 +339,15 @@ def generate_val_plots(rollout, gt, ts, phase):
         x = rollout[key].clone()
         y = gt[gt_key].clone()
 
-        # first timestep and batch
-        if y.shape[1] != 2:
+        if y.shape[0] != 2 and key == "df":
             y = torch.cat(
                 [
-                    y[:, 0::2].sum(axis=1, keepdims=True), y[:, 1::2].sum(axis=1, keepdims=True),
+                    y[0::2].sum(axis=0, keepdims=True), y[1::2].sum(axis=0, keepdims=True),
                 ],
-                dim=1,
-            ).cpu()
+                dim=0,
+            )
 
-        if y.ndim <= 7 and gt_key:
-            y = y[0].to("cpu")
-        elif y.ndim > 7:
-            y[0, 0].to("cpu")
-        else:
-            raise NotImplementedError("Unknown shapes for plotting...")
-
-        if x.shape[1] != 2:  # separate zonal flow, sum and recompose
+        if x.shape[1] != 2 and key == "df":  # separate zonal flow, sum and recompose
             x = torch.cat(
                 [
                     x[:, 0::2].sum(axis=1, keepdims=True),

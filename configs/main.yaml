@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - dataset: cyclone
-  - model: swin5d
+  - model: xnet_multi
   - logging: wandb
   - training: default
   - validation: default
@@ -10,11 +10,13 @@ defaults:
 experiment_id: test
 seed: 0
 output_path: null
-use_ddp: false
+ddp:
+  enable: false
+  n_nodes: 1
 amp: 
   enable: true  # set to false when using rope or integrals in training (complex / fft)
-  bfloat: true
+  bfloat: false  # set to false for fno
 mode: "train"
 eval: true
 device: "cuda"
-load_ckp: false
+load_ckpt: false

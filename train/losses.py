@@ -11,10 +11,6 @@ from torch.distributed import get_rank, is_initialized
 
 from concurrent.futures import ThreadPoolExecutor
 
-from conflictfree.grad_operator import ConFIGOperator
-from conflictfree.momentum_operator import PseudoMomentumOperator
-from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
-
 from utils import save_model_and_config
 from dataset.cyclone import CycloneDataset, CycloneSample
 from train.integrals import FluxIntegral
@@ -22,41 +18,45 @@ from train.integrals import FluxIntegral
 
 def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
     assert x.shape == y.shape, "Mismatch in dimensions for computing loss"
-    if dim_to_keep is None:
-        x = x.flatten(1)
-        y = y.flatten(1)
-    else:
-        # inference mode
-        x = x.flatten(2)
-        y = y.flatten(2)
+    if x.ndim > 1:
+        if dim_to_keep is None:
+            x = x.flatten(1)
+            y = y.flatten(1)
+        else:
+            # inference mode
+            x = x.flatten(2)
+            y = y.flatten(2)
     diff = x - y
     diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
     y_norms = torch.linalg.norm(y, ord=2, dim=-1)
+    eps = 1e-8
     if squared:
         diff_norms, y_norms = diff_norms ** 2, y_norms ** 2
     if dim_to_keep is None:
         # sum over timesteps and mean over examples in batch
-        return torch.mean(diff_norms / y_norms)
+        return torch.mean(diff_norms / (y_norms + eps))
     else:
         dims = [i for i in range(len(y_norms.shape))][dim_to_keep + 1 :]
-        return torch.mean(diff_norms / y_norms, dim=dims)
+        return torch.mean(diff_norms / (y_norms + eps), dim=dims)
 
 
 class LossWrapper(nn.Module):
     def __init__(
         self,
         weights: Dict,
+        schedulers: Dict,
         denormalize_fn: Optional[Callable] = None,
         separate_zf: bool = False,
+        real_potens: bool = False,
     ):
         super().__init__()
-
         self.weights = weights
-        self._data_losses = ["df", "phi", "flux"]
+        self._data_losses = ["df", "phi", "flux", "fluxfield"]
         self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
-        self.integrator = FluxIntegral()
+        self.integrator = FluxIntegral(real_potens=real_potens)
         self.denormalize_fn = denormalize_fn
         self.separate_zf = separate_zf
+        self.schedulers = schedulers
 
     def integral_loss(
         self,
@@ -76,7 +76,11 @@ class LossWrapper(nn.Module):
                 assert "df" in preds, "Integral losses requires df (5D)."
                 pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
                 if "phi" in preds:
+                    if preds["phi"].ndim == 3:
+                        preds["phi"] = preds["phi"].unsqueeze(0)
                     pred_phi.append(self.denormalize_fn(f, phi=preds["phi"][b]))
+                if tgts["phi"].ndim == 3:
+                    tgts["phi"] = tgts["phi"].unsqueeze(0)
                 tgt_phi.append(self.denormalize_fn(f, phi=tgts["phi"][b]))
                 tgt_eflux.append(self.denormalize_fn(f, flux=tgts["flux"][b]))
             pred_df = torch.stack(pred_df)
@@ -108,9 +112,13 @@ class LossWrapper(nn.Module):
         # mimicry / cross terms in the loss (between prediction heads and integrals)
         if "phi" in preds:
             int_losses["phi_cross"] = F.mse_loss(pred_phi, pphi_int)
+        else:
+            int_losses["phi_cross"] = 0.
         if "flux" in preds:
             pred_eflux = preds["flux"] if "flux" in preds else None
             int_losses["flux_cross"] = F.mse_loss(pred_eflux, eflux)
+        else:
+            int_losses["flux_cross"] = 0.
 
         return int_losses, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
 
@@ -121,14 +129,22 @@ class LossWrapper(nn.Module):
         idx_data: Optional[Dict[str, torch.Tensor]] = None,
         geometry: Optional[Dict[str, torch.Tensor]] = None,
         compute_integrals: bool = True,
+        progress_remaining: float = 1.,
+        separate_zf: bool = False,
     ):
         losses = {}
         int_losses = {}
-        # NOTE: newtwork predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
+        # reset weight if scheduler is defined
+        for key in self.schedulers.keys():
+            if key in self.weights:
+                self.weights[key] = self.schedulers[key](progress_remaining)
+        # NOTE: network predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
         # only compute integrals if requested by weights or in eval
         do_ints = not self.training and compute_integrals
         if sum([self.weights.get(k, 0.0) for k in self._int_losses]) > 0 or do_ints:
             int_losses, integrated = self.integral_loss(geometry, preds, tgts, idx_data)
+        else:
+            integrated = None
         loss_keys = (
             [k for k, w in self.weights.items() if w > 0.0]
             if self.training
@@ -138,17 +154,46 @@ class LossWrapper(nn.Module):
         cross_keys = [k for k in loss_keys if "cross" in k]
         data_keys = list(set(loss_keys) - set(int_keys) - set(cross_keys))
         if not all([k in preds for k in data_keys]):
-            raise ValueError("Prediction - DATA loss weight key mismatch.")
+            # warnings.warn("Prediction - DATA loss weight key mismatch.")
+            missing_keys = [k for k in data_keys if k not in preds]
+            for k in missing_keys:
+                if k in tgts:
+                    preds[k] = torch.zeros_like(tgts[k]).to(tgts[k].device)
+                else:
+                    tmp_key = list(preds.keys())[0]
+                    preds[k] = torch.zeros(size=(1,1)).to(preds[tmp_key].device)
+                    tgts[k] = torch.zeros_like(preds[k]).to(preds[k].device)
         if not all([k.replace("_cross", "") in preds for k in cross_keys]):
             raise ValueError("Prediction - CROSS loss weight key mismatch.")
         # compute losses
         for k in data_keys:
-            if k == "df":
-                losses[k] = relative_norm_mse(preds[k], tgts[k])
+            if k in ["df", "phi"]:
+                if k == "df" and separate_zf:
+                    zf_loss = F.mse_loss(preds[k][:, :2], tgts[k][:, :2])
+                    other_loss = relative_norm_mse(preds[k][:, 2:], tgts[k][:, 2:])
+                    losses[k] = zf_loss + other_loss
+                else:
+                    if preds[k].shape != tgts[k].shape and k == "phi":
+                        preds[k] = preds[k].unsqueeze(0)
+                    losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
-                losses[k] = F.mse_loss(preds[k], tgts[k])
+                # TODO: Remove again after this experiment
+                # preds[k] = torch.stack([self.denormalize_fn(idx_data["file_index"][b], fluxfield=preds[k][b]) for b in range(preds[k].shape[0])])
+                # tgts[k] = torch.stack([self.denormalize_fn(idx_data["file_index"][b], fluxfield=tgts[k][b]) for b in range(tgts[k].shape[0])])
+                # losses[k] = F.l1_loss(preds[k], tgts[k]) if self.training else F.mse_loss(preds[k], tgts[k])
+                if self.training:
+                    losses[k] = F.l1_loss(preds[k], tgts[k])
+                    # shape_loss = relative_norm_mse(preds[k], tgts[k])
+                    # sum_axes = tuple(range(1, preds[k].ndim))
+                    # S_true = tgts[k].sum(dim=sum_axes).clamp_min(1e-12)
+                    # S_hat  = preds[k].sum(dim=sum_axes).clamp_min(1e-12)
+                    # scale_loss = (S_hat.log1p() - S_true.log1p()).abs().mean()
+                    # losses[k] = shape_loss + scale_loss
+                else:
+                    losses[k] = F.mse_loss(preds[k], tgts[k])
         for k in int_keys + cross_keys:
-            losses[k] = int_losses[k]
+            if k in int_losses:
+                losses[k] = int_losses[k]
         if self.training:
             # reweight and accumulate
             loss = sum([self.weights[k] * losses[k] for k in loss_keys])
@@ -157,7 +202,7 @@ class LossWrapper(nn.Module):
             return loss, losses
         else:
             # no reweight in validation
-            loss = sum([losses[k] for k in loss_keys])
+            loss = sum([losses[k] for k in loss_keys if k in losses])
             return loss, losses, integrated
 
     @property
@@ -192,6 +237,11 @@ class GradientBalancer(nn.Module):
         if mode in [None, "none"]:
             pass
         # conflict free gradnorm
+        if mode in ["pseudo", "full"]:
+            from conflictfree.grad_operator import ConFIGOperator
+            from conflictfree.momentum_operator import PseudoMomentumOperator
+            from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
+
         if mode == "pseudo":
             self.operator = PseudoMomentumOperator(n_tasks)
             self.loss_selector = OrderedSliceSelector()
@@ -439,7 +489,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                 if is_main_proc and writer:
                     writer.log({f"pretrain/val_{valname}_relative_norm_mse": val_mse})
 
-            if cfg.ckpt_path is not None and is_main_proc:
+            if is_main_proc:
                 # Save model if validation loss improves
                 loss_val_min = save_model_and_config(
                     model,
@@ -451,7 +501,7 @@ def pretrain_autoencoder(model, cfg, trainloader, valloaders, writer, device):
                     loss_val_min=loss_val_min,
                 )
             else:
-                warnings.warn("`cfg.ckpt_path` not set: checkpoints will not be stored")
+                warnings.warn(f"checkpoints will not be stored for rank {rank}")
 
         epoch_str = str(epoch).zfill(
             len(str(int(cfg.training.pretraining_kwargs.n_epochs)))

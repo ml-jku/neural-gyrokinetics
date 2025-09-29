@@ -6,8 +6,10 @@ import sys
 import traceback
 import torch.multiprocessing as mp
 import torch
+import yaml
 
 import hydra
+from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
 from utils import set_seed, compress_src, find_free_port
@@ -22,46 +24,49 @@ def main(config: DictConfig):
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     set_seed(config.seed)
 
+    dict_config = OmegaConf.to_container(config)
+    date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
+    choices = HydraConfig.get().runtime.choices
+    dict_config["choices"] = choices
+    if not config.load_ckpt:
+        if config.output_path is None:
+            dict_config["output_path"] = osp.join("outputs", date_and_time)
+        else:
+            dict_config["output_path"] = osp.join(dict_config["output_path"], date_and_time)
+
+        if not os.path.exists(dict_config["output_path"]):
+            os.makedirs(dict_config["output_path"], exist_ok=True)
+        
+        compress_src(dict_config["output_path"])
+
+        if dict_config["logging"]["run_id"] is None:
+            dict_config["logging"][
+                "run_id"
+            ] = f"{dict_config['model']['name']}_{date_and_time}"
+        config = OmegaConf.create(dict_config)
+    else:
+        # check that output path exists
+        assert os.path.exists(config.output_path), "Output path does not exist, cannot load ckpt"
+        assert os.path.exists(f"{config.output_path}/ckp.pth"), "Output path does not contain checkpoint best.pt"
+        config = OmegaConf.create(yaml.safe_load(open(f"{config.output_path}/config.yaml", "r")))
+        overrides_dotlist = [str(o) for o in HydraConfig.get().overrides.task]
+        cli_conf = OmegaConf.from_dotlist(overrides_dotlist)
+        config = OmegaConf.merge(config, cli_conf)
+        config.logging.run_id = f"{config.model.name}_{date_and_time}"
+
     print("#" * 88, "\nStarting Cyclone with configs:")
     print(OmegaConf.to_yaml(config))
     print("#" * 88, "\n")
 
-    dict_config = OmegaConf.to_container(config)
-    date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
-    if config.output_path is None:
-        dict_config["output_path"] = osp.join("outputs", date_and_time)
-    else:
-        dict_config["output_path"] = osp.join(dict_config["output_path"], date_and_time)
-
-    dict_config["ckpt_path"] = dict_config["output_path"]
-    config = OmegaConf.create(dict_config)
-
-    if not os.path.exists(config.output_path):
-        os.makedirs(dict_config["output_path"], exist_ok=True)
-
-    compress_src(dict_config["output_path"])
-
     if torch.cuda.is_available():
-        world_size = torch.cuda.device_count()
+        n_gpus = torch.cuda.device_count()
+        world_size = n_gpus * config.ddp.n_nodes
     else:
         world_size = 1
 
     train_method = "default"  # TODO
-
-    if dict_config["model"]["loss_weights"] is None:
-        dict_config["model"]["loss_weights"] = {}
-    if dict_config["model"]["extra_loss_weights"] is None:
-        dict_config["model"]["extra_loss_weights"] = {}
-
     try:
-        if dict_config["logging"]["run_id"] is None:
-            print(dict_config["model"]["name"])
-            dict_config["logging"][
-                "run_id"
-            ] = f"{dict_config['model']['name']}_{date_and_time}"
-            config = OmegaConf.create(dict_config)
-
-        if config.use_ddp and world_size > 1:
+        if config.ddp.enable and world_size > 1 and config.ddp.n_nodes == 1:
             if "SLURM_NODELIST" not in os.environ:
                 os.environ["MASTER_ADDR"] = "localhost"
             else:
@@ -73,6 +78,10 @@ def main(config: DictConfig):
                 # unset nccl comm interface
                 del os.environ["NCCL_SOCKET_IFNAME"]
             mp.spawn(runner, args=(config, train_method, world_size), nprocs=world_size)
+        elif config.ddp.enable and world_size > 1 and config.ddp.n_nodes > 1:
+            # script should be launched via torchrun such that env variables have been set
+            rank = int(os.environ["RANK"])
+            runner(rank, config, train_method, world_size=world_size)
         else:
             rank = 0
             runner(rank, config, train_method, world_size=1)

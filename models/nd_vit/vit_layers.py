@@ -1,4 +1,5 @@
 from typing import Optional, Type, Sequence, Union
+from functools import partial
 
 from enum import Enum
 import torch
@@ -51,6 +52,9 @@ class PatchAttention(nn.Module):
             return
         elif init_weights == "xavier_uniform":
             init_weights_fn = nn.init.xavier_uniform_
+        elif init_weights == "kaiming_uniform":
+            init_weights_fn = partial(nn.init.kaiming_uniform_, nonlinearity="relu",
+                                      mode="fan_in", a=0)
         elif init_weights in ["truncnormal", "truncnormal002"]:
             init_weights_fn = nn.init.trunc_normal_
         else:
@@ -169,6 +173,9 @@ class VisionTransformerBlock(nn.Module):
             pass
         elif init_weights == "xavier_uniform":
             self.mlp.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights == "kaiming_uniform":
+            self.mlp.apply(seq_weight_init(partial(nn.init.kaiming_uniform_, 
+                                                   nonlinearity="relu", mode="fan_in", a=0)))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.mlp.apply(seq_weight_init(nn.init.trunc_normal_))
         else:

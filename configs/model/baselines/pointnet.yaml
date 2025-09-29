@@ -1,0 +1,23 @@
+name: pointnet
+bundle_seq_length: 1
+latent_dim: 256
+num_layers: 1
+conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
+extra_zf_loss: false
+loss_scheduler:
+  df: null
+  phi: null
+  flux: null
+  phi_int: null
+  flux_int: null
+  phi_cross: null
+  flux_cross: null
+loss_weights:
+  df: 1.0
+  phi: 0.0
+  flux: 0.0
+extra_loss_weights:
+  phi_int: 0.0
+  flux_int: 0.0
+  phi_cross: 0.0
+  flux_cross: 0.0

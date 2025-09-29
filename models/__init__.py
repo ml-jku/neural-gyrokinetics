@@ -109,11 +109,16 @@ def get_model(cfg, dataset, train_method="default"):
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
         decouple_mu = cfg.model.decouple_mu
         refiner = train_method == "refiner"
-        outputs = list(cfg.model.loss_weights.keys())
+        outputs = [k for k in cfg.model.loss_weights.keys() 
+                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]]
+        assert len([k for k in outputs if k.startswith("flux")]) == 1, "Cannot have multiple flux targets!"
         swin_bottleneck = cfg.model.swin.swin_bottleneck
         use_rpb = cfg.model.swin.use_rpb
         use_rope = cfg.model.swin.use_rope
         latent_cross_attn = cfg.model.swin.latent_cross_attn
+        flux_reduce = cfg.model.swin.flux_reduce
+        flux_num_heads = cfg.model.swin.flux_num_heads
+        flux_depth = cfg.model.swin.flux_depth
 
         cond_fn = None
         conditioning = cfg.model.conditioning
@@ -122,6 +127,10 @@ def get_model(cfg, dataset, train_method="default"):
         n_cond = len(conditioning)
         if n_cond > 0:
             cond_fn = ContinuousConditionEmbed(128, n_cond)
+            if cfg.model.swin.flux_conditioning:
+                flux_cond_fn = ContinuousConditionEmbed(128, n_cond)
+            else:
+                flux_cond_fn = None
 
         if cfg.model.bundle_seq_length > 1:
             raise NotImplementedError
@@ -156,6 +165,13 @@ def get_model(cfg, dataset, train_method="default"):
             use_rpb=use_rpb,
             use_rope=use_rope,
             latent_cross_attn=latent_cross_attn,
+            separate_zf=separate_zf,
+            detach_flux_latents=cfg.model.swin.detach_flux_latents,
+            real_potens=cfg.dataset.real_potens,
+            flux_reduce=flux_reduce,
+            flux_num_heads=flux_num_heads,
+            flux_depth=flux_depth,
+            flux_cond_embed=flux_cond_fn,
         )
 
     if cfg.model.name == "swin_flat":
@@ -209,6 +225,59 @@ def get_model(cfg, dataset, train_method="default"):
             act_fn=act_fn,
             patch_skip=patch_skip,
         )
+
+    if cfg.model.name == "vit_flat":
+        from models.vit_flat import ViTFlat
+        from models.utils import ContinuousConditionEmbed
+
+        space = 5
+        patch_size = cfg.model.vit.patch_size
+        window_size = cfg.model.vit.window_size
+        base_resolution = dataset.resolution
+        num_heads = cfg.model.vit.num_heads
+        depth = cfg.model.vit.depth
+        gradient_checkpoint = cfg.model.vit.gradient_checkpoint
+        use_abs_pe = cfg.model.vit.use_abs_pe
+        act_fn = getattr(torch.nn, cfg.model.vit.act_fn)
+        patch_skip = cfg.model.vit.patch_skip
+        modulation = cfg.model.vit.modulation
+        refiner = train_method == "refiner"
+
+        cond_fn = None
+        conditioning = cfg.model.conditioning
+        n_cond = len(conditioning)
+        if n_cond > 0:
+            cond_fn = ContinuousConditionEmbed(128, n_cond)
+
+        bundle_steps = cfg.model.bundle_seq_length
+        if bundle_steps > 1:  # TODO investigate time dimension!
+            space = space + 1
+            # extend patching for time dimension
+            patch_size = [1] + patch_size
+            window_size = [bundle_steps] + window_size
+            base_resolution = (bundle_steps,) + tuple(base_resolution)
+
+        model = ViTFlat(
+            space=space,
+            dim=latent_dim,
+            base_resolution=base_resolution,
+            patch_size=patch_size,
+            depth=depth[0],
+            num_heads=num_heads[0],
+            in_channels=problem_dim * (2 if refiner else 1),
+            out_channels=problem_dim,
+            use_checkpoint=gradient_checkpoint,
+            drop_path=cfg.model.vit.drop_path,
+            conv_patch=False,
+            hidden_mlp_ratio=2.0,
+            conditioning=cfg.model.conditioning,
+            cond_embed=cond_fn,
+            modulation=modulation,
+            act_fn=act_fn,
+            patch_skip=patch_skip,
+            abs_pe=use_abs_pe
+        )
+
 
     if cfg.model.name == "ae":
         from models.swin_ae import SwinAE
@@ -265,23 +334,65 @@ def get_model(cfg, dataset, train_method="default"):
             act_fn=act_fn,
             modulation=modulation,
         )
-
-    if cfg.model.name == "perc":
-        from models.perceiver import CompressionPerc
-
+        
+    if "fno" in cfg.model.name:
+        from models.fno import Df5DTFNO, DfVSpace3DTFNO, DfLocal5DTFNO
+        
         base_resolution = dataset.resolution
+        num_layers = cfg.model.num_layers
+        
+        if cfg.model.name == "fno":
+            model = Df5DTFNO(
+                latent_dim,
+                base_resolution=base_resolution,
+                in_channels=problem_dim,
+                out_channels=problem_dim,
+                num_layers=num_layers
+            )
+        if cfg.model.name == "fno3d":
+            model = DfVSpace3DTFNO(
+                latent_dim,
+                base_resolution=base_resolution,
+                in_channels=problem_dim,
+                out_channels=problem_dim,
+                num_layers=num_layers
+            )
+        if cfg.model.name == "local_fno":
+            patch_size = cfg.model.swin.patch_size
+            model = DfLocal5DTFNO(
+                latent_dim,
+                base_resolution=base_resolution,
+                patch_size=patch_size,
+                in_channels=problem_dim,
+                out_channels=problem_dim,
+                num_layers=num_layers
+            )
 
-        model = CompressionPerc(
+    if cfg.model.name == "pointnet":
+        from models.pointnet import PointNet
+        model = PointNet(dim=cfg.model.latent_dim,
+                         n_dims=5,
+                         n_channels=2 if not cfg.dataset.separate_zf else 4,
+                         condition_keys=cfg.model.conditioning)
+
+    if cfg.model.name == "transformer":
+        from models.transformer import Transformer
+        model = Transformer(
+            condition_keys=cfg.model.conditioning,
+            output_channels=2,
             space=5,
-            in_channels=2,
-            out_channels=2,
-            dim=latent_dim,
-            patch_size=cfg.model.swin.patch_size,
-            base_resolution=base_resolution,
-            num_latent_tokens=420,
-            encoder_depth=2,
-            approximator_depth=8,
+            dim=cfg.model.latent_dim,
         )
+
+    if cfg.model.name == "transolver":
+        from models.transolver import Transolver
+        model = Transolver(
+            condition_keys=cfg.model.conditioning,
+            output_channels=2,
+            space=5,
+            dim=cfg.model.latent_dim,
+        )
+
 
     try:
         model

@@ -2,9 +2,9 @@ import numpy as np
 from torch.utils.data.dataloader import DataLoader
 
 from dataset.augment import noise_transform
-from dataset.cyclone import CycloneDataset, CycloneSample
+from dataset.cyclone import CycloneDataset, CycloneSample, CoordinateCycloneDataset, LinearCycloneDataset
 from torch.utils.data.distributed import DistributedSampler
-
+import torch.distributed as dist
 
 def check_partial_holdouts(dataset_cfg):
     # check that each trajectory in partial holdouts also appears in training
@@ -29,6 +29,7 @@ def get_data(cfg):
             )
         )
 
+    use_ddp = dist.is_initialized()
     if cfg.dataset.name == "cyclone":
         partial_holdouts = {}
         if cfg.dataset.partial_holdouts:
@@ -39,9 +40,23 @@ def get_data(cfg):
                 last_n = entry.last_n
                 partial_holdouts[file] = last_n
 
-        trainset = CycloneDataset(
+        input_fields = set(cfg.dataset.input_fields + [k for k in cfg.model.loss_weights.keys()
+                   if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]])
+        if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+            input_fields.add("position")
+        assert not ("flux" in input_fields and "fluxavg" in input_fields), "Cannot predict both fluxavg and flux..."
+
+        if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+            # these models use coordinates as input
+            dataset_class = CoordinateCycloneDataset
+        elif cfg.choices.model == "baselines/linear_ablation":
+            dataset_class = LinearCycloneDataset
+        else:
+            dataset_class = CycloneDataset
+
+        trainset = dataset_class(
             active_keys=cfg.dataset.active_keys,
-            input_fields=["df", "phi", "flux"],  # TODO figure out how to deal with eval
+            input_fields=input_fields, 
             path=cfg.dataset.path,
             split="train",
             random_seed=cfg.seed,
@@ -60,11 +75,12 @@ def get_data(cfg):
             offset=cfg.dataset.offset,
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
+            real_potens=cfg.dataset.real_potens,
         )
 
-        holdout_trajectories_valset = CycloneDataset(
+        holdout_trajectories_valset = dataset_class(
             active_keys=cfg.dataset.active_keys,
-            input_fields=["df", "phi", "flux"],
+            input_fields=input_fields,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
@@ -83,16 +99,19 @@ def get_data(cfg):
             offset=cfg.dataset.offset,
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
+            real_potens=cfg.dataset.real_potens,
         )
 
         trainloader = DataLoader(
             trainset,
             cfg.training.batch_size,
             num_workers=cfg.training.num_workers,
-            shuffle=True if not cfg.use_ddp else False,
+            shuffle=True if not use_ddp else False,
             collate_fn=trainset.collate,
             pin_memory=cfg.training.pin_memory,
-            sampler=DistributedSampler(trainset) if cfg.use_ddp else None,
+            sampler=DistributedSampler(trainset) if use_ddp else None,
+            persistent_workers=True,
+            prefetch_factor=cfg.training.num_workers // 2,
         )
 
         holdout_trajectories_valloader = DataLoader(
@@ -103,14 +122,16 @@ def get_data(cfg):
             collate_fn=holdout_trajectories_valset.collate,
             pin_memory=cfg.training.pin_memory,
             sampler=(
-                DistributedSampler(holdout_trajectories_valset) if cfg.use_ddp else None
+                DistributedSampler(holdout_trajectories_valset) if use_ddp else None
             ),
+            persistent_workers=True,
+            prefetch_factor=cfg.training.num_workers // 2,
         )
 
         if partial_holdouts:
-            holdout_samples_valset = CycloneDataset(
+            holdout_samples_valset = dataset_class(
                 active_keys=cfg.dataset.active_keys,
-                input_fields=["df", "phi", "flux"],
+                input_fields=input_fields,
                 path=cfg.dataset.path,
                 split="val",
                 random_seed=cfg.seed,
@@ -129,6 +150,7 @@ def get_data(cfg):
                 offset=cfg.dataset.offset,
                 separate_zf=cfg.dataset.separate_zf,
                 num_workers=cfg.dataset.num_workers,
+                real_potens=cfg.dataset.real_potens,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,
@@ -138,7 +160,7 @@ def get_data(cfg):
                 collate_fn=holdout_samples_valset.collate,
                 pin_memory=cfg.training.pin_memory,
                 sampler=(
-                    DistributedSampler(holdout_samples_valset) if cfg.use_ddp else None
+                    DistributedSampler(holdout_samples_valset) if use_ddp else None
                 ),
             )
 

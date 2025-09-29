@@ -184,7 +184,7 @@ class SwinBlockUp(nn.Module):
 
         if use_abs_pe:
             self.pos_embed = PositionalEmbedding(
-                dim, grid_size, learnable=learnable_pos_embed
+                dim, grid_size, learnable=learnable_pos_embed, init_weights="sincos"
             )
 
         # NOTE: project down concat dimension first to save params
@@ -227,6 +227,9 @@ class SwinBlockUp(nn.Module):
                 pass
             elif init_weights == "xavier_uniform":
                 self.proj_concat.apply(seq_weight_init(nn.init.xavier_uniform_))
+            elif init_weights == "kaiming_uniform":
+                self.proj_concat.apply(seq_weight_init(partial(nn.init.kaiming_uniform_, nonlinearity="relu",
+                                                                                        mode="fan_in", a=0)))
             elif init_weights in ["truncnormal", "truncnormal002"]:
                 self.proj_concat.apply(seq_weight_init(nn.init.trunc_normal_))
             else:
@@ -344,6 +347,7 @@ class SwinNDUnet(nn.Module):
         expand_act_fn: nn.Module = nn.LeakyReLU,
         init_weights: str = "xavier_uniform",
         patching_init_weights: str = "xavier_uniform",
+        cond_init_weights: str = "normal_smallvar",
         norm_output: bool = False,
         patch_skip: bool = False,
         swin_bottleneck: bool = False,
@@ -361,6 +365,7 @@ class SwinNDUnet(nn.Module):
         self.window_size = window_size
         self.init_weights = init_weights
         self.patching_init_weights = patching_init_weights
+        self.cond_init_weights = cond_init_weights
         self.base_resolution = base_resolution
         self.norm_output = norm_output
         self.patch_skip = patch_skip
@@ -377,8 +382,6 @@ class SwinNDUnet(nn.Module):
         self.depth = depth
 
         # set layer type and conditioning
-        LocalLayer = SwinLayer
-        GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
         self.cond_embed = cond_embed
         self.condition_keys = sorted(conditioning)
         if self.cond_embed is not None:
@@ -388,25 +391,25 @@ class SwinNDUnet(nn.Module):
             if modulation == "film":
                 ModulatedSwinLayer = FilmSwinLayer
                 ModulatedViTLayer = FilmViTLayer
-            LocalLayer = partial(
-                ModulatedSwinLayer,
-                cond_dim=self.cond_embed.cond_dim,
-                use_rpb=use_rpb,
-                use_rope=use_rope,
-            )
-            if swin_bottleneck:
-                GlobalLayer = partial(
-                    ModulatedSwinLayer,
-                    cond_dim=self.cond_embed.cond_dim,
-                    window_size=window_size,
-                    use_rpb=use_rpb,
-                    use_rope=use_rope,
-                )
-            else:
-                GlobalLayer = partial(
-                    ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim
-                )
-
+            ModulatedSwinLayer = partial(ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim)
+            ModulatedViTLayer = partial(ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim)
+            LocalLayer = ModulatedSwinLayer
+            GlobalLayer = ModulatedSwinLayer if swin_bottleneck else ModulatedViTLayer
+        else:
+            LocalLayer = SwinLayer
+            GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
+        LocalLayer = partial(
+            LocalLayer,
+            use_rpb=use_rpb,
+            use_rope=use_rope,
+        )
+        kwargs = {
+            "use_rpb": use_rpb,
+            "use_rope": use_rope,
+        }
+        if swin_bottleneck:
+            kwargs["window_size"] = window_size
+        GlobalLayer = partial(GlobalLayer, **kwargs)
         self.patch_embed = PatchEmbed(
             space=space,
             base_resolution=padded_base_resolution,
@@ -464,7 +467,8 @@ class SwinNDUnet(nn.Module):
         )
 
         if use_abs_pe:
-            self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
+            self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1], 
+                                                 init_weights="sincos")
 
         self.middle_upscale = PatchUnmerging(
             space=space,
@@ -549,7 +553,7 @@ class SwinNDUnet(nn.Module):
         self.unpatch.reset_parameters(self.patching_init_weights)
         # conditioning
         if hasattr(self, "cond_embed") and self.cond_embed is not None:
-            self.cond_embed.reset_parameters(self.init_weights)
+            self.cond_embed.reset_parameters(self.cond_init_weights)
         # backbone
         for up_blk, down_blk in zip(self.up_blocks, self.down_blocks):
             up_blk.reset_parameters(self.init_weights)
@@ -587,7 +591,7 @@ class SwinNDUnet(nn.Module):
         if self.patch_skip:
             df = torch.cat([df, first_res], -1)
 
-        df = self.patch_decode(df, cond["condition"], pad_axes)
+        df = self.patch_decode(df, pad_axes, cond=cond["condition"])
 
         if self.norm_output:
             df = df / df.std((2, 3, 4, 5, 6), keepdims=True)
@@ -604,7 +608,7 @@ class SwinNDUnet(nn.Module):
         return x, pad_axes
 
     def patch_decode(
-        self, z: torch.Tensor, cond: torch.Tensor, pad_axes: torch.Tensor
+        self, z: torch.Tensor, pad_axes: torch.Tensor, cond: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         # expand patches to original size
         x = self.unpatch(z, cond)
@@ -635,7 +639,7 @@ class SwinNDUnet(nn.Module):
 
 
 class Swin5DUnet(SwinNDUnet):
-    def __init__(self, separate_zf: bool = False, decouple_mu: bool = False, **kwargs):
+    def __init__(self, decouple_mu: bool = False, **kwargs):
         full_in_channels = kwargs["in_channels"]
         kwargs["space"] = 5
         if decouple_mu:
@@ -654,13 +658,12 @@ class Swin5DUnet(SwinNDUnet):
             vel_pe_resolution = [1, decoupled_dim, 1, 1, 1]
 
         super().__init__(**kwargs)
-
-        self.separate_zf = separate_zf
         self.decouple_mu = decouple_mu
         if decouple_mu:
             self.decoupled_dim = decoupled_dim
             # positional information for velocity mixing
-            self.vel_pe = PositionalEmbedding(full_in_channels, vel_pe_resolution, True)
+            self.vel_pe = PositionalEmbedding(full_in_channels, vel_pe_resolution, True,
+                                              init_weights="sincos")
 
     def patch_encode(self, df: torch.Tensor):
         # decouple mu and add positional information
@@ -676,7 +679,7 @@ class Swin5DUnet(SwinNDUnet):
         return df, pad_axes
 
     def patch_decode(
-        self, z: torch.Tensor, cond: torch.Tensor, pad_axes: torch.Tensor
+        self, z: torch.Tensor, pad_axes: torch.Tensor, cond: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         # expand patches to original size
         df = self.unpatch(z, cond)
@@ -687,12 +690,5 @@ class Swin5DUnet(SwinNDUnet):
         if self.decouple_mu:
             df = rearrange(
                 df, "b (c mu) vp ... -> b c vp mu ...", mu=self.decoupled_dim
-            )
-        if self.separate_zf:
-            # replace zf channels with their average
-            df[:, 0:2] = (
-                df[:, 0:2]
-                .mean(axis=-1, keepdims=True)
-                .repeat([1] * (df.ndim - 1) + [df.shape[-1]])
             )
         return df

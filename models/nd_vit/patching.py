@@ -1,6 +1,7 @@
 from typing import Type, Optional, Sequence, Union, Tuple
 
 from itertools import product
+from functools import partial
 from math import ceil
 import numpy as np
 from einops import rearrange
@@ -140,6 +141,9 @@ class PatchEmbed(nn.Module):
             pass
         elif init_weights == "xavier_uniform":
             self.patch.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights == "kaiming_uniform":
+            self.patch.apply(seq_weight_init(partial(nn.init.kaiming_uniform_, nonlinearity="relu",
+                                                                              mode="fan_in", a=0)))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.patch.apply(seq_weight_init(nn.init.trunc_normal_))
         else:
@@ -237,6 +241,9 @@ class PatchMerging(nn.Module):
             pass
         elif init_weights == "xavier_uniform":
             self.reduction.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights == "kaiming_uniform":
+            self.reduction.apply(seq_weight_init(partial(nn.init.kaiming_uniform_, nonlinearity="relu",
+                                                                                  mode="fan_in", a=0)))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.reduction.apply(seq_weight_init(nn.init.trunc_normal_))
         else:
@@ -365,6 +372,9 @@ class PatchUnmerging(nn.Module):
             pass
         elif init_weights == "xavier_uniform":
             self.expansion.apply(seq_weight_init(nn.init.xavier_uniform_))
+        elif init_weights == "kaiming_uniform":
+            self.expansion.apply(seq_weight_init(partial(nn.init.kaiming_uniform_, nonlinearity="relu",
+                                                                              mode="fan_in", a=0)))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.expansion.apply(seq_weight_init(nn.init.trunc_normal_))
         else:

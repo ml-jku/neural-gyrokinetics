@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import warnings
 
 import gc
 import torch
@@ -10,6 +11,7 @@ from transformers.optimization import get_scheduler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.utils._pytree import tree_map
+import os
 
 from dataset import get_data, CycloneSample
 from models import get_model
@@ -20,7 +22,14 @@ from train import (
     pretrain_autoencoder,
 )
 from eval.evaluate import evaluate
-from utils import load_model_and_config, setup_logging, edit_tag
+from utils import (
+    load_model_and_config,
+    setup_logging,
+    edit_tag,
+    get_linear_burn_in_fn,
+    remainig_progress,
+    exclude_from_weight_decay
+)
 
 
 def ddp_setup(rank, world_size):
@@ -30,16 +39,18 @@ def ddp_setup(rank, world_size):
 
 
 def runner(rank, cfg, train_method, world_size):
-    device = torch.device(f"cuda:{rank}") if torch.cuda.is_available() else "cpu"
-    if cfg.use_ddp and world_size > 1:
+    if cfg.ddp.enable and cfg.ddp.n_nodes > 1 and world_size > 1:
+        local_rank = int(os.environ["LOCAL_RANK"])
+    else:
+        local_rank = rank
+    device = torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else "cpu"
+    if cfg.ddp.enable and world_size > 1:
         ddp_setup(rank, world_size)
         use_ddp = True
     else:
         use_ddp = False
 
     if not rank:
-        data_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
-        cfg.logging.run_name = f"{cfg.model.name}_{data_and_time}"
         writer = setup_logging(cfg)
     else:
         writer = None
@@ -60,26 +71,35 @@ def runner(rank, cfg, train_method, world_size):
     model = get_model(cfg, dataset=trainset, train_method=train_method)
     model = model.to(device)
     if use_ddp:
-        model = DDP(model, device_ids=[rank])
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+
+    if cfg.load_ckpt:
+        # choosing best.pt since ckpt.pt does not contain scheduler sd
+        ckpt_path = os.path.join(cfg.output_path, "ckp.pth")
+        model, ckpt_dict = load_model_and_config(ckpt_path, model, device, for_ddp=use_ddp)
+        if cfg.training.params_to_include:
+            for n, p in model.named_parameters():
+                for key in cfg.training.params_to_include:
+                    if not key in n:
+                        p.requires_grad = False
 
     bundle_seq_length = cfg.model.bundle_seq_length
-
-    opt_state_dict = None
-    if cfg.load_ckp is True and cfg.ckpt_path is not None:
-        # TODO move config loading to here (now in main.py)
-        model, opt_state_dict, _ = load_model_and_config(
-            cfg.ckpt_path, model=model, device=device
-        )
-
     if cfg.mode == "train":
         n_epochs = cfg.training.n_epochs
         total_steps = n_epochs * len(trainloader)
 
+        if cfg.training.exclude_from_wd is not None:
+            params = exclude_from_weight_decay(model, cfg.training.exclude_from_wd, 
+                                               weight_decay=cfg.training.weight_decay)
+        else:
+            params = model.parameters()
+        
         # optimizer config
         opt = torch.optim.Adam(
-            model.parameters(),
+            params,
             lr=cfg.training.learning_rate,
             weight_decay=cfg.training.weight_decay,
+            betas=(0.9, 0.95)
         )
 
         use_amp = cfg.amp.enable
@@ -94,17 +114,22 @@ def runner(rank, cfg, train_method, world_size):
                 num_training_steps=total_steps,
             )
 
-        if opt_state_dict is not None:
-            opt.load_state_dict(opt_state_dict)
-
+        loss_scheduler_dict = {}
+        weights = dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights)
+        for key in weights.keys():
+            if cfg.model.loss_scheduler[key]:
+                scheduler_params = getattr(cfg.model.loss_scheduler, key)
+                loss_scheduler_dict[key] = get_linear_burn_in_fn(scheduler_params.start, end=scheduler_params.end, 
+                                                                 start_fraction=scheduler_params.start_fraction, 
+                                                                 end_fraction=scheduler_params.end_fraction)
         # configure loss
         predict_delta = cfg.training.predict_delta
-
-        weights = dict(cfg.model.loss_weights) | dict(cfg.model.extra_loss_weights)
         loss_wrap = LossWrapper(
             weights=weights,
+            schedulers=loss_scheduler_dict,
             denormalize_fn=trainset.denormalize,
             separate_zf=cfg.dataset.separate_zf,
+            real_potens=cfg.dataset.real_potens
         )
         grad_balancer = GradientBalancer(
             opt,
@@ -134,19 +159,37 @@ def runner(rank, cfg, train_method, world_size):
                 model, cfg, trainloader, valloaders, writer, device
             )  # only valuate on the holdout trajectories, not the holdout samples
             if not hasattr(model, "module") and use_ddp:
-                model = DDP(model, device_ids=[rank])
+                model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
         input_fields = set(cfg.dataset.input_fields)
+        if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+            input_fields.add("position")
         output_fields = list(
             (set(cfg.model.loss_weights.keys())).union(
                 [k.split("_")[0] for k in cfg.model.extra_loss_weights.keys()]
             )
         )
+        compute_integrals = True if set(output_fields) != set(["flux", "phi", "df"]) else False
         conditioning = cfg.model.conditioning
         idx_keys = ["file_index", "timestep_index"]
         use_tqdm = cfg.logging.tqdm if not use_ddp else False
+
+        if cfg.load_ckpt:
+            try:
+                opt.load_state_dict(ckpt_dict["optimizer_state_dict"])
+            except:
+                trained_params = sum([len(params[i]['params']) for i in range(len(params))])
+                included = cfg.training.params_to_include
+                print(f"Failed to load optimizer state, training {trained_params} params with key {included}")
+            scheduler.load_state_dict(ckpt_dict["scheduler_state_dict"])
+            start_epoch = ckpt_dict["epoch"]
+            cur_update_step = start_epoch * len(trainloader)
+        else:
+            cur_update_step = 0.
+            start_epoch = 0
+
         loss_val_min = torch.inf
-        for epoch in range(1, n_epochs + 1):
+        for epoch in range(start_epoch + 1, n_epochs + 1):
             loss_logs = {k: 0 for k in loss_wrap.active_losses}
             loss_logs["relative_norm"] = 0.0
             model.train()
@@ -159,7 +202,7 @@ def runner(rank, cfg, train_method, world_size):
 
             ############################# train loop start #############################
 
-            for i, sample in enumerate(trainloader):
+            for _, sample in enumerate(trainloader):
                 try:
                     reset_peak_memory_stats(device)
                 except:
@@ -216,7 +259,11 @@ def runner(rank, cfg, train_method, world_size):
                             preds[key] = preds[key] + inputs[key]
 
                     # compute losses
-                    loss, losses = loss_wrap(preds, gts, idx_data, geometry=geometry)
+                    progress_remaining = remainig_progress(cur_update_step, total_steps)
+                    loss, losses = loss_wrap(preds, gts, idx_data, geometry=geometry,
+                                             progress_remaining=progress_remaining,
+                                             separate_zf=cfg.dataset.separate_zf if cfg.model.extra_zf_loss else False,
+                                             compute_integrals=compute_integrals)
 
                 # forward timing
                 info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
@@ -228,8 +275,13 @@ def runner(rank, cfg, train_method, world_size):
                 if cfg.training.scheduler is not None:
                     scheduler.step()
 
+                cur_update_step += 1.
                 for k in loss_wrap.active_losses:
-                    loss_logs[k] += losses[k].item()
+                    if k not in loss_logs:
+                        # if schedulers start from zero
+                        loss_logs[k] = losses[k]    
+                    else:
+                        loss_logs[k] += losses[k].item()
                 loss_logs["relative_norm"] += loss.item()
 
                 del inputs
@@ -256,7 +308,10 @@ def runner(rank, cfg, train_method, world_size):
                     if cfg.training.scheduler
                     else cfg.training.learning_rate
                 ),
+                "train/epoch": epoch 
             }
+            for key in loss_scheduler_dict.keys():
+                train_losses_dict[f"train/{key}_schedule"] = loss_scheduler_dict[key](progress_remaining)
             train_losses_dict = train_losses_dict | loss_logs
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
@@ -270,6 +325,7 @@ def runner(rank, cfg, train_method, world_size):
                 valsets,
                 valloaders,
                 opt,
+                scheduler,
                 epoch,
                 cfg,
                 device,
@@ -305,6 +361,9 @@ def runner(rank, cfg, train_method, world_size):
                 )
         if writer:
             writer.finish()
+
+    if use_ddp:
+        dist.destroy_process_group()
 
     if cfg.mode == "rollout":
         raise NotImplementedError("TODO")

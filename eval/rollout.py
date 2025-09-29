@@ -62,19 +62,25 @@ def get_rollout_fn(
                             pred[key] = pred[key] + inputs_t[key]
 
                     for key in inputs_t.keys():
-                        inputs_t[key] = pred[key].clone().float()
+                        if key in pred:
+                            # Position is not in pred, and is constant
+                            inputs_t[key] = pred[key].clone().float()
 
                 for key in pred:
                     # add time dim if not there
                     preds[key].append(
                         pred[key].cpu().unsqueeze(2)
-                        if pred[key].ndim in [5, 7]
+                        if pred[key].ndim in [4, 5, 7]
                         else pred[key].cpu()
                     )
-
+        
         for key in preds.keys():
             # only return desired size
-            preds[key] = rearrange(torch.cat(preds[key], 2), "b c t ... -> t b c ...")
+            if "position" in inputs_t:
+                preds[key] = torch.cat([p.unsqueeze(2) for p in preds[key]], 2)
+            else:
+                preds[key] = torch.cat(preds[key], 2)
+            preds[key] = rearrange(preds[key], "b c t ... -> t b c ...")
             preds[key] = preds[key][: rollout_steps * bundle_steps, :, ...]
         if len(fluxes) > 0:
             preds["flux"] = rearrange(torch.stack(fluxes, dim=-1), "b t -> t b")
