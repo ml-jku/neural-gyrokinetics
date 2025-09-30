@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from neugk.models.layers import ContinuousEmbed, MLP, AttentionDecoder, DiT
+from gyroswin.models.layers import ContinuousEmbed, MLP, AttentionDecoder, DiT
 
 
 class TransformerBlock(nn.Module):

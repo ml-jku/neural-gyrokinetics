@@ -3,7 +3,7 @@ from torch import nn
 import torch
 from einops import rearrange
 
-from neugk.models.layers import MLP, ContinuousEmbed
+from gyroswin.models.layers import MLP, ContinuousEmbed
 
 
 class PointNet(nn.Module):

@@ -5,7 +5,7 @@ import glob
 import numpy as np
 import torch
 
-from neugk.utils import (
+from gyroswin.utils import (
     phi_integral,
     load_geometry,
     pev_flux_df_phi,

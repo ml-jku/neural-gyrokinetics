@@ -13,7 +13,7 @@ from functools import partial
 import pandas as pd
 from argparse import ArgumentParser
 
-from neugk.utils import (
+from gyroswin.utils import (
     RunningMeanStd,
     pev_flux_df_phi,
     load_geometry,

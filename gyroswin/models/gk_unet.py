@@ -7,11 +7,16 @@ import torch
 from torch import nn
 from functools import partial
 
-from neugk.models.layers import seq_weight_init
-from neugk.models.nd_vit.vit_layers import ViTLayer, DiTLayer, FilmViTLayer, LayerModes
-from neugk.models.nd_vit.swin_layers import SwinLayer, DiTSwinLayer, FilmSwinLayer
-from neugk.models.nd_vit.positional import PositionalEmbedding
-from neugk.models.nd_vit.patching import (
+from gyroswin.models.layers import seq_weight_init
+from gyroswin.models.nd_vit.vit_layers import (
+    ViTLayer,
+    DiTLayer,
+    FilmViTLayer,
+    LayerModes,
+)
+from gyroswin.models.nd_vit.swin_layers import SwinLayer, DiTSwinLayer, FilmSwinLayer
+from gyroswin.models.nd_vit.positional import PositionalEmbedding
+from gyroswin.models.nd_vit.patching import (
     PatchEmbed,
     PatchMerging,
     PatchUnmerging,

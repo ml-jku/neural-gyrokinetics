@@ -1,7 +1,7 @@
 
 
 <div style="text-align: center;">
-  <a href="https://github.com/ml-jku/gyrokinetics" target="_blank">
+  <a href="https://github.com/ml-jku/neural-gyrokinetics" target="_blank">
     <img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=GitHub&logoColor=FFFFFF" alt="code">
   </a>
   &nbsp;&nbsp;
@@ -21,7 +21,7 @@
 
 ## TL;DR
 <div style="border-left: 4px solid #492701; background-color: #4d4d4d; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
-<strong>Nuclear fusion is hard</strong>, as it requires understanding physical phenomena like plasma turbulence. One way to do this is with very expensive <strong>numerical simulations, called gyrokinetics</strong>. We propose <img src="imgs/gyroswin_icon.png" alt="gyroswin Icon" height="12px"> <strong>GyroSwin</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models Plasma turbulence in a <strong>5D phase space</strong>, unlike existing methods which take reduced approaches, and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
+<strong>Nuclear fusion is hard</strong>, as it requires understanding physical phenomena like plasma turbulence. One way to do this is with very expensive <strong>numerical simulations, called gyrokinetics</strong>. We propose <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>GyroSwin</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models Plasma turbulence in a <strong>5D phase space</strong>, unlike existing methods which take reduced approaches, and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
 </div>
 
 ## Introduction

@@ -13,8 +13,8 @@ from conflictfree.grad_operator import ConFIGOperator
 from conflictfree.momentum_operator import PseudoMomentumOperator
 from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
 
-from neugk.dataset.cyclone import CycloneDataset, CycloneSample
-from neugk.train.integrals import FluxIntegral
+from gyroswin.dataset.cyclone import CycloneDataset, CycloneSample
+from gyroswin.train.integrals import FluxIntegral
 
 
 def relative_norm_mse(x, y, dim_to_keep=None, squared=True):

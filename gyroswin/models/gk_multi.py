@@ -7,19 +7,19 @@ from torch import nn
 from einops import rearrange
 from functools import partial
 
-from neugk.models.gk_unet import SwinNDUnet, Swin5DUnet, SwinBlockUp
-from neugk.models.nd_vit.x_layers import (
+from gyroswin.models.gk_unet import SwinNDUnet, Swin5DUnet, SwinBlockUp
+from gyroswin.models.nd_vit.x_layers import (
     MixingBlock,
     FluxDecoder,
     VSpaceReduce,
-    BidirectionalMixingBlock,
+    # BidirectionalMixingBlock,
 )
-from neugk.models.nd_vit.swin_layers import FilmSwinLayer, DiTSwinLayer, SwinLayer
-from neugk.models.nd_vit.vit_layers import LayerModes
-from neugk.models.nd_vit.patching import PatchUnmerging, unpad
+from gyroswin.models.nd_vit.swin_layers import FilmSwinLayer, DiTSwinLayer, SwinLayer
+from gyroswin.models.nd_vit.vit_layers import LayerModes
+from gyroswin.models.nd_vit.patching import PatchUnmerging, unpad
 
 
-class NeuGK(nn.Module):
+class GyroSwin(nn.Module):
     """Neural Gyrokinetics model for predicting the 5d density and the 3d potential."""
 
     def __init__(
@@ -410,7 +410,6 @@ class NeuGK(nn.Module):
 
             df_patch_dim = self.df_unet.unpatch.dim * (2 if patch_skip else 1)
             phi_patch_dim = self.phi_unet.unpatch.dim * (2 if patch_skip else 1)
-            flux_patch_dim = self.flux_unpatch.dim * (2 if patch_skip else 1)
             self.df_mix_unpatch = MixingBlock(
                 left_dim=df_patch_dim,
                 right_dim=phi_patch_dim,
@@ -426,6 +425,7 @@ class NeuGK(nn.Module):
                 init_weights=init_weights,
             )
             if self.decode_fluxfield:
+                flux_patch_dim = self.flux_unpatch.dim * (2 if patch_skip else 1)
                 self.flux_mix_unpatch = BidirectionalMixingBlock(
                     left_dim=flux_patch_dim,
                     middle_dim=df_patch_dim,
@@ -598,7 +598,7 @@ class NeuGK(nn.Module):
             return {}
 
 
-class NeuGKMultitask(NeuGK):
+class GyroSwinMultitask(GyroSwin):
     """Neural Gyrokinetics model for multitask predictions from the 5d density."""
 
     def __init__(
@@ -795,7 +795,7 @@ class NeuGKMultitask(NeuGK):
             flux = self.flux_middle_two(flux, **flux_cond)
 
         if self.flux_head is not None and not self.decode_fluxfield:
-            flux_lats.append(self.flux_head.mix(0, phi, df, kwargs))
+            flux_lats.append(self.flux_head.mix(0, phi, df, **kwargs))
 
         df = self.df_unet.middle_upscale(df)
         phi = self.phi_middle_upscale(phi)
@@ -820,7 +820,7 @@ class NeuGKMultitask(NeuGK):
                 phi_ = phi
             # multiscale flux latents
             if self.flux_head is not None and not self.decode_fluxfield:
-                flux_lats.append(self.flux_head.mix(i + 1, phi_, df_, kwargs))
+                flux_lats.append(self.flux_head.mix(i + 1, phi_, df_, **kwargs))
             if self.decode_fluxfield:
                 flux = self.flux_up_blocks[i](
                     flux, s=flux_features[i], return_skip=False, **flux_cond

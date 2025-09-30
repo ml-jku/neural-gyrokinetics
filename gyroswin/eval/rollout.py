@@ -6,7 +6,7 @@ from torch import nn
 from torch.utils.data import Dataset
 from collections import defaultdict
 
-from neugk.dataset.cyclone import CycloneSample
+from gyroswin.dataset.cyclone import CycloneSample
 
 
 def get_rollout_fn(

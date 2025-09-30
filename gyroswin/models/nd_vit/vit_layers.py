@@ -10,8 +10,8 @@ from einops import rearrange
 from torch.nn.attention import SDPBackend, sdpa_kernel
 import torch.distributed as dist
 
-from neugk.models.nd_vit.drop import DropPath
-from neugk.models.layers import Film, MLP, DiT, seq_weight_init
+from gyroswin.models.nd_vit.drop import DropPath
+from gyroswin.models.layers import Film, MLP, DiT, seq_weight_init
 
 
 class LayerModes(Enum):

@@ -14,8 +14,8 @@ import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
 
-from neugk.utils import set_seed, compress_src, find_free_port
-from run import runner
+from gyroswin.utils import set_seed, compress_src, find_free_port
+from gyroswin.run import runner
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="main")

@@ -2,7 +2,7 @@ defaults:
   - _self_
   - dataset: cyclone
   - model: multi
-  - logging: wandb
+  - logging: no_logging
   - training: default
   - validation: default
   # - override hydra/launcher: litai

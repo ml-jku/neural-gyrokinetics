@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 import struct
 
-from neugk.utils import pev_flux_df_phi, phi_integral, load_geometry
+from gyroswin.utils import pev_flux_df_phi, phi_integral, load_geometry
 
 
 def parse_args():

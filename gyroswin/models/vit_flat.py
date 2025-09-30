@@ -5,13 +5,13 @@ import torch
 from torch import nn
 from functools import partial
 
-from neugk.models.nd_vit.vit_layers import (
+from gyroswin.models.nd_vit.vit_layers import (
     ViTLayer,
     DiTLayer,
     FilmViTLayer,
 )
-from neugk.models.nd_vit.positional import PositionalEmbedding
-from neugk.models.nd_vit.patching import (
+from gyroswin.models.nd_vit.positional import PositionalEmbedding
+from gyroswin.models.nd_vit.patching import (
     PatchEmbed,
     PatchUnmerging,
     pad_to_blocks,

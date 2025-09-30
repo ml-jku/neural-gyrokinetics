@@ -12,8 +12,8 @@ def get_model(cfg, dataset):
         assert cfg.dataset.input_fields == [
             "df"
         ], "No more inputs than df supported for simple 5D-Swin"
-        from neugk.models.gk_unet import Swin5DUnet
-        from neugk.models.layers import ContinuousConditionEmbed
+        from gyroswin.models.gk_unet import Swin5DUnet
+        from gyroswin.models.layers import ContinuousConditionEmbed
 
         patch_size = cfg.model.swin.patch_size
         window_size = cfg.model.swin.window_size
@@ -78,12 +78,12 @@ def get_model(cfg, dataset):
             use_rope=use_rope,
         )
 
-    if "neugk" in cfg.model.name:
+    if "gyroswin" in cfg.model.name:
         if "multi" in cfg.model.name:
-            from neugk.models.gk_multi import NeuGKMultitask as NeuGK
+            from gyroswin.models.gk_multi import GyroSwinMultitask as GyroSwin
         else:
-            from neugk.models.gk_multi import NeuGK
-        from neugk.models.layers import ContinuousConditionEmbed
+            from gyroswin.models.gk_multi import GyroSwin
+        from gyroswin.models.layers import ContinuousConditionEmbed
 
         df_patch_size = cfg.model.swin.patch_size
         phi_patch_size = cfg.model.swin.phi_patch_size
@@ -132,7 +132,7 @@ def get_model(cfg, dataset):
         if cfg.model.bundle_seq_length > 1:
             raise NotImplementedError
 
-        model = NeuGK(
+        model = GyroSwin(
             dim=latent_dim,
             outputs=outputs,
             df_base_resolution=df_base_resolution,
@@ -172,8 +172,8 @@ def get_model(cfg, dataset):
         )
 
     if cfg.model.name == "swin_flat":
-        from neugk.models.swin_flat import SwinFlat
-        from neugk.models.layers import ContinuousConditionEmbed
+        from gyroswin.models.swin_flat import SwinFlat
+        from gyroswin.models.layers import ContinuousConditionEmbed
 
         space = 5
         patch_size = cfg.model.swin.patch_size
@@ -222,8 +222,8 @@ def get_model(cfg, dataset):
         )
 
     if cfg.model.name == "vit_flat":
-        from neugk.models.vit_flat import ViTFlat
-        from neugk.models.layers import ContinuousConditionEmbed
+        from gyroswin.models.vit_flat import ViTFlat
+        from gyroswin.models.layers import ContinuousConditionEmbed
 
         space = 5
         patch_size = cfg.model.vit.patch_size
@@ -273,7 +273,7 @@ def get_model(cfg, dataset):
         )
 
     if "fno" in cfg.model.name:
-        from neugk.models.fno import Df5DTFNO, DfVSpace3DTFNO, DfLocal5DTFNO
+        from gyroswin.models.fno import Df5DTFNO, DfVSpace3DTFNO, DfLocal5DTFNO
 
         base_resolution = dataset.resolution
         num_layers = cfg.model.num_layers
@@ -306,7 +306,7 @@ def get_model(cfg, dataset):
             )
 
     if cfg.model.name == "pointnet":
-        from neugk.models.pointnet import PointNet
+        from gyroswin.models.pointnet import PointNet
 
         model = PointNet(
             dim=cfg.model.latent_dim,
@@ -316,7 +316,7 @@ def get_model(cfg, dataset):
         )
 
     if cfg.model.name == "transformer":
-        from neugk.models.transformer import Transformer
+        from gyroswin.models.transformer import Transformer
 
         model = Transformer(
             condition_keys=cfg.model.conditioning,
@@ -326,7 +326,7 @@ def get_model(cfg, dataset):
         )
 
     if cfg.model.name == "transolver":
-        from neugk.models.transolver import Transolver
+        from gyroswin.models.transolver import Transolver
 
         model = Transolver(
             condition_keys=cfg.model.conditioning,

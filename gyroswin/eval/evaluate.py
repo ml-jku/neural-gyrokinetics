@@ -6,9 +6,9 @@ from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
 from tqdm import tqdm
 
-from neugk.utils import save_model_and_config
-from neugk.dataset import CycloneSample
-from neugk.eval import validation_metrics, generate_val_plots, get_rollout_fn
+from gyroswin.utils import save_model_and_config
+from gyroswin.dataset import CycloneSample
+from gyroswin.eval import validation_metrics, generate_val_plots, get_rollout_fn
 
 
 def denormalize_rollout(rollout, gts, idx_data, denormalize_fn):

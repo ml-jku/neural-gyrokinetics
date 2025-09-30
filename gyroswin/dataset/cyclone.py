@@ -15,7 +15,7 @@ import random
 import pickle
 from functools import partial
 
-from utils import expand_as, RunningMeanStd
+from gyroswin.utils import expand_as, RunningMeanStd
 
 
 @dataclass

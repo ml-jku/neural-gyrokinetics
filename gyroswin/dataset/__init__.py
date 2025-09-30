@@ -1,16 +1,15 @@
 from torch.utils.data.dataloader import DataLoader
 
-from dataset.augment import noise_transform
-from dataset.cyclone import (
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+
+from gyroswin.dataset.augment import noise_transform
+from gyroswin.dataset.cyclone import (
     CycloneDataset,
     CycloneSample,
     CoordinateCycloneDataset,
     LinearCycloneDataset,
 )
-import torch.distributed as dist
-
-from neugk.dataset.augment import noise_transform
-from neugk.dataset.cyclone import CycloneDataset, CycloneSample
 
 
 def check_partial_holdouts(dataset_cfg):
@@ -19,7 +18,7 @@ def check_partial_holdouts(dataset_cfg):
         file = entry.trajectory
         if file not in dataset_cfg.training_trajectories:
             raise ValueError(
-                f"Trajectory '{file}' in partial_holdouts not in training_trajectories."
+                f"Trajectory '{file}' in partial_holdouts is not in training_trajectories."
             )
     return
 
@@ -101,7 +100,7 @@ def get_data(cfg):
             random_seed=cfg.seed,
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
-            normalization_stats=trainset.stats,
+            normalization_stats=trainset.norm_stats,
             spatial_ifft=cfg.dataset.spatial_ifft,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,
@@ -126,19 +125,21 @@ def get_data(cfg):
             pin_memory=cfg.training.pin_memory,
             sampler=DistributedSampler(trainset) if use_ddp else None,
             persistent_workers=True,
-            prefetch_factor=cfg.training.prefetch_factor,
+            prefetch_factor=cfg.training.num_workers // 2,
         )
 
         holdout_trajectories_valloader = DataLoader(
-            holdout_traj_valset,
+            holdout_trajectories_valset,
             cfg.validation.batch_size,
             num_workers=cfg.training.num_workers,
             shuffle=False,
-            collate_fn=holdout_traj_valset.collate,
+            collate_fn=holdout_trajectories_valset.collate,
             pin_memory=cfg.training.pin_memory,
-            sampler=DistributedSampler(holdout_traj_valset) if use_ddp else None,
+            sampler=(
+                DistributedSampler(holdout_trajectories_valset) if use_ddp else None
+            ),
             persistent_workers=True,
-            prefetch_factor=cfg.training.prefetch_factor,
+            prefetch_factor=cfg.training.num_workers // 2,
         )
 
         if partial_holdouts:
@@ -150,7 +151,7 @@ def get_data(cfg):
                 random_seed=cfg.seed,
                 normalization=cfg.dataset.normalization,
                 normalization_scope=cfg.dataset.normalization_scope,
-                normalization_stats=trainset.stats,
+                normalization_stats=trainset.norm_stats,
                 spatial_ifft=cfg.dataset.spatial_ifft,
                 bundle_seq_length=cfg.model.bundle_seq_length,
                 trajectories=cfg.dataset.training_trajectories,
@@ -172,20 +173,21 @@ def get_data(cfg):
                 shuffle=False,
                 collate_fn=holdout_samples_valset.collate,
                 pin_memory=cfg.training.pin_memory,
-                sampler=DistributedSampler(holdout_samples_valset) if use_ddp else None,
-                persistent_workers=True,
-                prefetch_factor=cfg.training.prefetch_factor,
+                sampler=(
+                    DistributedSampler(holdout_samples_valset) if use_ddp else None
+                ),
             )
 
         print(f"Train: {len(trainset)} samples")
-        print(f"Holdout trajectories Val: {len(holdout_traj_valset)} samples")
+        print(f"Holdout trajectories Val: {len(holdout_trajectories_valset)} samples")
 
         if partial_holdouts:
-            total_val = len(holdout_samples_valset) + len(holdout_traj_valset)
             print(f"Holdout samples Val: {len(holdout_samples_valset)} samples")
-            print(f"Validation ratio: {total_val / len(trainset):.2f}")
+            print(
+                f"Validation ratio: {(len(holdout_samples_valset) + len(holdout_trajectories_valset)) / len(trainset):.2f}"
+            )
             return (
-                (trainset, holdout_traj_valset, holdout_samples_valset),
+                (trainset, holdout_trajectories_valset, holdout_samples_valset),
                 (
                     trainloader,
                     holdout_trajectories_valloader,
@@ -194,9 +196,9 @@ def get_data(cfg):
                 augmentations,
             )
 
-    print(f"Validation ratio: {len(holdout_traj_valset) / len(trainset):.2f}")
+    print(f"Validation ratio: {len(holdout_trajectories_valset) / len(trainset):.2f}")
     return (
-        (trainset, holdout_traj_valset),
+        (trainset, holdout_trajectories_valset),
         (trainloader, holdout_trajectories_valloader),
         augmentations,
     )

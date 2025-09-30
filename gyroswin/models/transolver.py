@@ -6,7 +6,7 @@ import torch.nn as nn
 from einops import einsum, rearrange
 from torch.nn import functional as F
 
-from neugk.models.layers import ContinuousEmbed, MLP, DiT
+from gyroswin.models.layers import ContinuousEmbed, MLP, DiT
 
 
 class TransolverAttention(nn.Module):

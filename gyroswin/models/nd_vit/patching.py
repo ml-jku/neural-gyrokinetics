@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from neugk.models.layers import seq_weight_init, MLP, Film
+from gyroswin.models.layers import seq_weight_init, MLP, Film
 
 
 def pad_to_blocks(

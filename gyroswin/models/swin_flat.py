@@ -5,9 +5,9 @@ import torch
 from torch import nn
 from functools import partial
 
-from neugk.models.nd_vit.swin_layers import SwinLayer, DiTSwinLayer, FilmSwinLayer
-from neugk.models.nd_vit.positional import PositionalEmbedding
-from neugk.models.nd_vit.patching import (
+from gyroswin.models.nd_vit.swin_layers import SwinLayer, DiTSwinLayer, FilmSwinLayer
+from gyroswin.models.nd_vit.positional import PositionalEmbedding
+from gyroswin.models.nd_vit.patching import (
     PatchEmbed,
     PatchUnmerging,
     pad_to_blocks,

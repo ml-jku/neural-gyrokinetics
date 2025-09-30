@@ -10,8 +10,8 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn import functional as F
 import torch.distributed as dist
 
-from neugk.models.nd_vit.drop import DropPath
-from neugk.models.layers import MLP, seq_weight_init, AttentionDecoder
+from gyroswin.models.nd_vit.drop import DropPath
+from gyroswin.models.layers import MLP, seq_weight_init, AttentionDecoder
 
 
 class MixingBlock(nn.Module):
@@ -165,6 +165,7 @@ class FluxDecoder(nn.Module):
         init_weights: Optional[str] = None,
         detach_latents: bool = False,
         reduction: str = "max",
+        cond_embed=None,
     ):
         super().__init__()
         self.detach_latents = detach_latents
@@ -209,7 +210,9 @@ class FluxDecoder(nn.Module):
             dropout_prob=drop,
         )
 
-    def mix(self, i: int, left: torch.Tensor, right: Optional[torch.Tensor] = None):
+    def mix(
+        self, i: int, left: torch.Tensor, right: Optional[torch.Tensor] = None, **kwargs
+    ):
         if self.detach_latents:
             left = left.detach()
             right = right.detach()
