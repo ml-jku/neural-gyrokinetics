@@ -175,20 +175,6 @@ def phi_fft_to_real(fft, out_shape, norm: str = "forward"):
     return phi_ifft
 
 
-def fluxfield_fft_to_real(fluxfield, norm: str = "forward"):
-    fluxfield = np.fft.ifftshift(fluxfield, axes=(3,))
-    fluxfield = np.fft.ifftn(fluxfield, axes=(3, 4), norm=norm)
-    return np.stack([fluxfield.real, fluxfield.imag]).astype("float32")
-
-
-def fluxfield_real_to_fft(fluxfield, norm: str = "forward"):
-    fluxfield = np.moveaxis(fluxfield, 0, -1).copy()
-    fluxfield = fluxfield.view(dtype=np.complex64).squeeze()
-    fluxfield = np.fft.fftn(fluxfield, axes=(3, 4), norm=norm)
-    fluxfield = np.fft.fftshift(fluxfield, axes=(3,))
-    return np.stack([fluxfield.real, fluxfield.imag]).astype("float32")
-
-
 def preprocess(
     filename,
     spatial_ifft=False,
@@ -280,7 +266,6 @@ def preprocess(
         df_stats = RunningMeanStd(shape=(2,) + shape)
         phi_stats = RunningMeanStd((1, 1, 1))
         flux_stats = RunningMeanStd((1,))
-        fluxfield_stats = RunningMeanStd(shape=(2,) + shape)
 
     ks = K_files(dir_in.replace("_Lin", ""))
     potens, _ = poten_files(dir_in.replace("_Lin", ""))
@@ -395,7 +380,6 @@ def preprocess(
                 _, eflux, _ = pev_flux_df_phi(
                     df, phi_fft_unpadded, geometry, aggregate=False
                 )
-                fluxfield = fluxfield_fft_to_real(eflux.numpy())
 
                 try:
                     assert np.isclose(
@@ -403,10 +387,6 @@ def preprocess(
                     ), "Flux integral failed..."
                 except:
                     warnings.warn("Flux integral failed...")
-
-                assert np.isclose(
-                    fluxfield_real_to_fft(fluxfield).sum(), orig_fluxes[idx]
-                ), "Fluxfield sum does not match scalar flux"
 
             # update running averages
             df_stats.update(
@@ -422,13 +402,6 @@ def preprocess(
                 np.min(phi, axis=(0, 1, 2), keepdims=True),
                 np.max(phi, axis=(0, 1, 2), keepdims=True),
             )
-            if not "Lin" in h5_filename:
-                fluxfield_stats.update(
-                    np.mean(fluxfield, axis=norm_axes, keepdims=True),
-                    np.var(fluxfield, axis=norm_axes, keepdims=True),
-                    np.min(fluxfield, axis=norm_axes, keepdims=True),
-                    np.max(fluxfield, axis=norm_axes, keepdims=True),
-                )
 
             # Add the reshaped data as a dataset to the "data" group
             k_name = "timestep_" + str(idx).zfill(5)
@@ -437,9 +410,6 @@ def preprocess(
             poten_name = "poten_" + str(idx).zfill(5)
             if poten_name not in file["data"].keys():
                 data_group.create_dataset(poten_name, data=phi)
-            fluxfield_name = "fluxfield_" + str(idx).zfill(5)
-            if fluxfield_name not in file["data"].keys() and not "Lin" in h5_filename:
-                data_group.create_dataset(fluxfield_name, data=fluxfield)
 
         if "metadata/df_mean" not in file:
             metadata_group.create_dataset("df_mean", data=df_stats.mean)
@@ -456,13 +426,6 @@ def preprocess(
             metadata_group.create_dataset("flux_std", data=np.sqrt(flux_stats.var))
             metadata_group.create_dataset("flux_min", data=flux_stats.min)
             metadata_group.create_dataset("flux_max", data=flux_stats.max)
-        if "metadata/fluxfield_mean" not in file and not "Lin" in h5_filename:
-            metadata_group.create_dataset("fluxfield_mean", data=fluxfield_stats.mean)
-            metadata_group.create_dataset(
-                "fluxfield_std", data=np.sqrt(fluxfield_stats.var)
-            )
-            metadata_group.create_dataset("fluxfield_min", data=fluxfield_stats.min)
-            metadata_group.create_dataset("fluxfield_max", data=fluxfield_stats.max)
 
         return h5_filename, False
 

@@ -25,7 +25,6 @@ class CycloneSample:
     phi: torch.Tensor
     y_phi: torch.Tensor
     y_flux: torch.Tensor
-    y_fluxfield: torch.Tensor
     timestep: torch.Tensor
     file_index: torch.Tensor
     timestep_index: torch.Tensor
@@ -423,13 +422,6 @@ class CycloneDataset(Dataset):
                     x = np.expand_dims(x, 0)
                     y = np.expand_dims(y, 0)
                 norm_axes = (1, 2, 3)
-            elif key == "fluxfield":
-                x = sample["fluxfield"]
-                y = None
-                norm_axes = (
-                    1,
-                    2,
-                )
             else:
                 x = np.array([sample["gt_flux"]], dtype=np.float32)
                 y = None
@@ -531,7 +523,6 @@ class CycloneDataset(Dataset):
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         # conditioning fields
         timestep = sample["timestep"]
-        fluxfield = sample["fluxfield"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
         geometry = sample["geometry"]
         fluxavg = sample["fluxavg"]
@@ -549,9 +540,6 @@ class CycloneDataset(Dataset):
 
             if fluxavg is not None:
                 fluxavg, *_ = self.normalize(file_index, fluxavg=fluxavg)
-
-            if fluxfield is not None:
-                fluxfield, *_ = self.normalize(file_index, fluxfield=fluxfield)
 
         return CycloneSample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
@@ -573,11 +561,6 @@ class CycloneDataset(Dataset):
             y_fluxavg=(
                 torch.tensor(fluxavg, dtype=self.dtype) if fluxavg is not None else None
             ),
-            y_fluxfield=(
-                torch.tensor(fluxfield, dtype=self.dtype)
-                if fluxfield is not None
-                else None
-            ),
             position=None,
         )
 
@@ -590,7 +573,6 @@ class CycloneDataset(Dataset):
         poten = []
         y_poten = []
         gt_flux = []
-        y_fluxfield = []
         for i in range(self.bundle_seq_length):
             # read the input
             k_name = "timestep_" + str(original_t_index + i).zfill(5)
@@ -600,9 +582,6 @@ class CycloneDataset(Dataset):
                 original_t_index + self.bundle_seq_length + i
             ).zfill(5)
             phi_name_gt = "poten_" + str(
-                original_t_index + self.bundle_seq_length + i
-            ).zfill(5)
-            fluxfield_name = "fluxfield_" + str(
                 original_t_index + self.bundle_seq_length + i
             ).zfill(5)
 
@@ -616,17 +595,6 @@ class CycloneDataset(Dataset):
                 else:
                     x.append(k[self.active_keys])
                     gt.append(k_gt[self.active_keys])
-
-            if "fluxfield" in self.input_fields:
-                fluxfield = data[f"data/{fluxfield_name}"][:]
-                # TODO: possibly remove again
-                # reduce fluxfield to 2D
-                fluxfield = fluxfield.sum((1, 2, 3))
-                # select only active re/im parts
-                if all(self.active_keys == np.array([0, 1])):
-                    y_fluxfield.append(fluxfield)
-                else:
-                    y_fluxfield.append(fluxfield[self.active_keys])
 
             if "phi" in self.input_fields:
                 phi = data[f"data/{phi_name}"][:]
@@ -653,16 +621,6 @@ class CycloneDataset(Dataset):
         else:
             x, gt = None, None
 
-        if "fluxfield" in self.input_fields:
-            # stack to shape (c, t, v1, v2, s, x, y)
-            if self.bundle_seq_length == 1:
-                # sqeeze out time if we only have 1 timestep
-                fluxfield = y_fluxfield[0]
-            else:
-                fluxfield = np.stack(y_fluxfield, axis=1)
-        else:
-            fluxfield = None
-
         if "phi" in self.input_fields:
             # stack to shape (c, t, x, s, y)
             if self.bundle_seq_length == 1:
@@ -688,7 +646,6 @@ class CycloneDataset(Dataset):
         sample["phi"] = poten
         sample["y_phi"] = y_poten
         sample["gt_flux"] = np.array(gt_flux).squeeze() if gt_flux is not None else None
-        sample["fluxfield"] = fluxfield
         # load conditioning
         sample["timestep"] = data["metadata/timesteps"][original_t_index]
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
@@ -711,7 +668,6 @@ class CycloneDataset(Dataset):
         phi: Optional[torch.Tensor] = None,
         flux: Optional[torch.Tensor] = None,
         fluxavg: Optional[torch.Tensor] = None,
-        fluxfield: Optional[torch.Tensor] = None,
     ):
         if df is not None:
             field = "df"
@@ -725,9 +681,6 @@ class CycloneDataset(Dataset):
         elif fluxavg is not None:
             field = "fluxavg"
             x = fluxavg
-        elif fluxfield is not None:
-            field = "fluxfield"
-            x = fluxfield
         else:
             raise ValueError
 
@@ -741,7 +694,6 @@ class CycloneDataset(Dataset):
         phi: Optional[torch.Tensor] = None,
         flux: Optional[torch.Tensor] = None,
         fluxavg: Optional[torch.Tensor] = None,
-        fluxfield: Optional[torch.Tensor] = None,
     ):
         if df is not None:
             field = "df"
@@ -755,9 +707,6 @@ class CycloneDataset(Dataset):
         elif fluxavg is not None:
             field = "fluxavg"
             x = fluxavg
-        elif fluxfield is not None:
-            field = "fluxfield"
-            x = fluxfield
         else:
             raise ValueError
 
@@ -950,11 +899,6 @@ class CycloneDataset(Dataset):
                 if batch[0].y_phi is not None
                 else None
             ),
-            y_fluxfield=(
-                torch.stack([sample.y_fluxfield for sample in batch])
-                if batch[0].y_fluxfield is not None
-                else None
-            ),
             y_flux=(
                 torch.stack([sample.y_flux for sample in batch])
                 if batch[0].y_flux is not None
@@ -1020,7 +964,6 @@ class LinearCycloneDataset(CycloneDataset):
         gt = None
         # potential field and flux
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
-        fluxfield = sample["fluxfield"]
         # conditioning fields
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
@@ -1042,9 +985,6 @@ class LinearCycloneDataset(CycloneDataset):
             if fluxavg is not None:
                 fluxavg, *_ = self.normalize(file_index, fluxavg=fluxavg)
 
-            if fluxfield is not None:
-                fluxfield, *_ = self.normalize(file_index, fluxfield=fluxfield)
-
         return CycloneSample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
             y_df=torch.tensor(gt, dtype=self.dtype) if gt is not None else None,
@@ -1053,11 +993,6 @@ class LinearCycloneDataset(CycloneDataset):
                 torch.tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
             ),
             y_flux=torch.tensor(flux, dtype=self.dtype),
-            y_fluxfield=(
-                torch.tensor(fluxfield, dtype=self.dtype)
-                if fluxfield is not None
-                else None
-            ),
             # index info
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
@@ -1154,7 +1089,6 @@ class LinearCycloneDataset(CycloneDataset):
             else None
         )
         sample["position"] = None
-        sample["fluxfield"] = None
         return sample
 
     def get_timesteps(
@@ -1303,7 +1237,6 @@ class CoordinateCycloneDataset(CycloneDataset):
         sample["y_phi"] = None
         sample["gt_flux"] = None  # TODO: support flux coordinates
         sample["position"] = position
-        sample["fluxfield"] = None
         # load conditioning
         sample["timestep"] = data["metadata/timesteps"][original_t_index]
         sample["itg"] = data["metadata/ion_temp_grad"][:].squeeze()
@@ -1352,7 +1285,6 @@ class CoordinateCycloneDataset(CycloneDataset):
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
         geometry = sample["geometry"]
         fluxavg = sample["fluxavg"]
-        fluxfield = sample["fluxfield"]
         position = sample["position"]
 
         if self.normalization is not None and get_normalized:
@@ -1370,9 +1302,6 @@ class CoordinateCycloneDataset(CycloneDataset):
             if fluxavg is not None:
                 fluxavg, *_ = self.normalize(file_index, fluxavg=fluxavg)
 
-            if fluxfield is not None:
-                fluxfield, *_ = self.normalize(file_index, fluxfield=fluxfield)
-
         return CycloneSample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
             y_df=torch.tensor(gt, dtype=self.dtype) if gt is not None else None,
@@ -1385,11 +1314,6 @@ class CoordinateCycloneDataset(CycloneDataset):
                 torch.tensor(fluxavg, dtype=self.dtype) if fluxavg is not None else None
             ),
             position=torch.tensor(position, dtype=self.dtype),
-            y_fluxfield=(
-                torch.tensor(fluxfield, dtype=self.dtype)
-                if fluxfield is not None
-                else None
-            ),
             timestep=torch.tensor(timestep, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),

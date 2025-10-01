@@ -45,14 +45,6 @@ def invert_ifft(x):
     return knth
 
 
-def invert_fluxfield(fluxfield, norm: str = "forward"):
-    fluxfield = np.moveaxis(fluxfield.squeeze().cpu().numpy(), 0, -1).copy()
-    fluxfield = fluxfield.view(dtype=np.complex64).squeeze()
-    fluxfield = np.fft.fftn(fluxfield, axes=(-1, -2), norm=norm)
-    fluxfield = np.fft.fftshift(fluxfield, axes=(-2,))
-    return np.stack([fluxfield.real, fluxfield.imag]).astype("float32")
-
-
 def modify_fds_dat(path):
     with open(path, "r") as infile:
         content = infile.read()
@@ -325,7 +317,6 @@ shift_scale_dict = defaultdict(dict)
 invert_fns = {
     "df": partial(invert_df, cfg=cfg, parser=parser),
     "phi": invert_phi if not cfg.dataset.real_potens else None,
-    "fluxfield": invert_fluxfield,
     "flux": None,
     "fluxavg": None,
 }
@@ -445,8 +436,7 @@ with torch.no_grad():
                 os.system(f"cp {raw_path}/FDS.dat {dirtarget}")
                 modify_fds_dat(f"{dirtarget}/FDS.dat")
                 modify_input_dat(f"{dirtarget}/input.dat")
-                write_mode = "wb" if key in ["df", "phi", "fluxfield"] else "w"
-                with open(ftarget, write_mode) as f:
+                with open(ftarget, "wb") as f:
                     print(f"Writing file {ftarget}")
                     if key in ["flux", "fluxavg"]:
                         f.write(str(b_xt.item()))

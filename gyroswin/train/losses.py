@@ -52,7 +52,7 @@ class LossWrapper(nn.Module):
     ):
         super().__init__()
         self.weights = weights
-        self._data_losses = ["df", "phi", "flux", "fluxfield"]
+        self._data_losses = ["df", "phi", "flux"]
         self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
         self.integrator = FluxIntegral(real_potens=real_potens)
         self.denormalize_fn = denormalize_fn
@@ -178,10 +178,6 @@ class LossWrapper(nn.Module):
                         preds[k] = preds[k].unsqueeze(0)
                     losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
-                # TODO: Remove again after this experiment
-                # preds[k] = torch.stack([self.denormalize_fn(idx_data["file_index"][b], fluxfield=preds[k][b]) for b in range(preds[k].shape[0])])
-                # tgts[k] = torch.stack([self.denormalize_fn(idx_data["file_index"][b], fluxfield=tgts[k][b]) for b in range(tgts[k].shape[0])])
-                # losses[k] = F.l1_loss(preds[k], tgts[k]) if self.training else F.mse_loss(preds[k], tgts[k])
                 if self.training:
                     losses[k] = F.l1_loss(preds[k], tgts[k])
                     # shape_loss = relative_norm_mse(preds[k], tgts[k])
