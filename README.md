@@ -35,7 +35,7 @@ After generating and preprocessing the dataset, GyroSwin and baselines training 
 GyroSwin is a 5D vision transformers trained to capture the full nonlinear dynamics of gyrokinetic plasma turbulence. It uses shifted window linear attention, as global attention is too expensive for 5-dimensional grids.
 GyroSwin provides accurate predictions of turbulent transport at a fraction of the computational cost, while preserving key physical phenomena missed by tabular regression or quasilinear models. 
 
-Check out our [blogpost](https://ml-jku.github.io/gyroswin/)!
+Check out our [blogpost](https://ml-jku.github.io/blog/2025/gyroswin/)!
 
 ## Project structure
 ```
