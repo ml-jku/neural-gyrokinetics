@@ -51,8 +51,8 @@ Understanding **plasma turbulence** is crucial for modelling plasma scenarios fo
 
 Let $f = f(x, y, s, v_{\parallel}, \mu)$ where:
 
-- $x$, $y$ are spatial coordinates along a toroidal C-section of a torus in real space.
-- $s$ is the toroidal coordinate along the field line, going around the torus.
+- $x$ (radial) and $y$ (binormal) are spatial coordinates along a toroidal C-section of a torus in real space.
+- $s$ (parallel) is the toroidal coordinate along the field line, going around the torus.
 - $v_{\parallel}$ the parallel velocity component along the field lines.
 - $\mu$ is the magnetic angular moment, related to the gyral motion of particles.
 
@@ -111,23 +111,53 @@ We propose Gyrokinetic Swin, <img src="imgs/gyroswin_icon.png" alt="GyroSwin Ico
 
 ## Results
 
-### Does GyroSwin accurately predict $\delta f$ and heat flux?
+### Does GyroSwin accurately predict quantities of interest?
 
-| Method | Input | δf ID (↓) | δf OOD (↓) | 𝑄̄ᵢ ID (↓) | 𝑄̄ᵢ OOD (↓) |
-|--------|-------|-----------|------------|------------|-------------|
-| QL (Bourdelle et al., 2007) | 3D | n/a | n/a | 40.74 ± 7.47 | 53.3 ± 14.77 |
-| PointNet | 5D | n/a | n/a | 40.74 ± 7.47 | 53.3 ± 14.77 |
-| Transolver | 5D | n/a | n/a | 40.74 ± 7.47 | 53.3 ± 14.77 |
-| GyroSwin (ours) | 5D | – | – | **24.38 ± 6.79** | **18.49 ± 6.15** |
+| **Method** | **Input** | **f (ID ↑)** | **f (OOD ↑)** | **Q̄ (ID ↓)** | **Q̄ (OOD ↓)** |
+|-------------|------------|--------------|---------------|---------------|----------------|
+| QL (Bourdelle et al., 2007) | 3D | n/a | n/a | 89.53 ± 11.76 | 95.22 ± 21.57 |
+| GPR (Hornsby, 2024) | 0D | n/a | n/a | 43.82 ± 10.84 | 59.28 ± 17.55 |
+| FNO (Li et al., 2021) | 3D | 9.33 ± 0.56 | 9.20 ± 0.58 | 119.88 ± 13.15 | 124.96 ± 23.27 |
+| Transolver (Wu et al., 2024) | 5D | 9.83 ± 1.40 | 10.80 ± 1.46 | 119.93 ± 13.15 | 125.05 ± 23.28 |
+| ViT (Dosovitskiy et al., 2021) | 5D | 16.83 ± 1.49 | 19.20 ± 1.36 | 119.63 ± 13.13 | 125.13 ± 23.29 |
+| <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> **GyroSwin** (Small) | 5D | 26.50 ± 3.55 | **28.60 ± 8.82 | 67.68 ± 10.28 | 70.48 ± 17.21 |
+| <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> **GyroSwin** (Large) | 5D | **110.33** ± 19.74 | **111.80** ± 23.83 | **18.32** ± 1.56 | **26.43** ± 9.49|
 
 
-### Does GyroSwin capture underlying physics?
 
-> [TODO: Diagnostics plots — zonal flow and spectra]
+### Does GyroSwin capture underlying physics, and how well does it scale?
+
+<figure style="text-align: center;">
+    <img src="imgs/df_render.png" alt="render of the density function" width="90%">
+    <figcaption style="color: white; font-size: 14px; margin-top: 8px;">
+    Planar projection visualization of the 5D distribution function, with a few axes selected.
+    </figcaption>
+</figure>
+
+
+| **Method**                                 | **Fwd [ms]** | **Mem [GB]** | **Params [M]** | **Q(k_y) ID (↑)** | **Q(k_y) OOD (↑)** |
+| ------------------------------------------ | ------------ | ------------ | -------------- | ----------------- | ------------------ |
+| QL (Bourdelle et al., 2007)                | n/a          | n/a          | n/a            | 0.51 ± 0.40       | 0.58 ± 0.33        |
+| F-CNN                                      | 569.6        | 11.1         | 2.0            | n/a               | n/a                |
+| F-FNO                                      | 963.3        | 36.9         | 1.3            | n/a               | n/a                |
+| PointNet (Qi et al., 2016)                 | 27K          | 5.8          | 60.6           | 0.61 ± 0.04       | 0.66 ± 0.09        |
+| Transolver (Wu et al., 2024)               | 18K          | 2.85         | 27.3           | 0.62 ± 0.05       | 0.65 ± 0.08        |
+| ViT (Dosovitskiy et al., 2021)             | 6.3          | 2.4          | 46.1           | 0.56 ± 0.05       | 0.68 ± 0.10        |
+| Our Method (Small)                         | 11.8         | 2.8          | 90.2           | 0.84 ± 0.09       | 0.84 ± 0.08        |
+| Our Method (Medium)                        | 12.1         | 5.3          | 250.9          | 0.74 ± 0.06       | 0.78 ± 0.11        |
+| **Our Method (Large)**                     | 15.4         | 9.6          | 998.3          | **0.87 ± 0.10**   | **0.92 ± 0.07**    |
+
+
+<figure style="text-align: center;">
+    <img src="imgs/kyspec_zf.png" alt="render of the density function" width="90%">
+    <figcaption style="color: white; font-size: 14px; margin-top: 8px;">
+    Time-averaged binormal turbulent spectra and zonal flow profile (middle parallel slice).
+    </figcaption>
+</figure>
 
 # Wrapping up
 
-GyroSwin outperforms reduced numerical approaches and machine learning baselines in modelling plasma turbulence. It accurately captures nonlinear phenomena and spectral quantities self-consistently, while offering a three order of magnitude speedup compared to the numerical solver GKW [[7](#ref-gyrokinetics3)]. As a result, GyroSwin offers a fruitful alternative to efficient approximation of turbulent transport and opens up a variety of research directions leveraging the potential of neural surrogates for Plasma turbulence modelling. Finally, Plasma turbulence modelling is an incredibly hard problem, but we believe that Machine Learning will disrupt the landscape of Plasma turbulence modelling in the future. 
+GyroSwin outperforms reduced numerical approaches and machine learning baselines in modelling plasma turbulence. It accurately captures nonlinear phenomena and spectral quantities self-consistently, while offering a three order of magnitude speedup compared to the numerical solver GKW [[7](#ref-gyrokinetics3)]. We demonstrate the extremely favorable scaling of our model, compared to other full 5D approaches. As a result, GyroSwin offers a fruitful alternative to efficient approximation of turbulent transport and opens up a variety of research directions leveraging the potential of neural surrogates for Plasma turbulence modelling. Finally, Plasma turbulence modelling is an incredibly hard problem, but we believe that Machine Learning will disrupt the landscape of Plasma turbulence modelling in the future. 
 
 <figure style="text-align: center;">
     <img src="imgs/here_to_help.jpg" alt="xkcd 1831: here to help (edited)" width="100%">
