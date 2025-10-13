@@ -5,7 +5,7 @@
     <img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=GitHub&logoColor=FFFFFF" alt="code">
   </a>
   &nbsp;&nbsp;
-  <a href="https://arxiv.org/abs/2502.07469" target="_blank">
+  <a href="https://arxiv.org/abs/2510.07314" target="_blank">
     <img src="https://img.shields.io/badge/arXiv-B31B1B?style=for-the-badge&logo=arXiv&logoColor=FFFFFF" alt="paper">
   </a>
 </div>
@@ -168,14 +168,14 @@ GyroSwin outperforms reduced numerical approaches and machine learning baselines
 
 ## Cite
 ```
-@misc{galletti20255dneuralsurrogatesnonlinear,
-      title={GyroSwin: 5D Surrogates for Gyrokinetics Plasma Turbulence Simulations}, 
-      author={Gianluca Galletti and Fabian Paischer and William Hornsby and Paul Setinek and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter},
-      year={2025},
-      eprint={2502.07469},
-      archivePrefix={arXiv},
-      primaryClass={physics.plasm-ph},
-      url={https://arxiv.org/abs/2502.07469}, 
+@inproceedings{paischer2025gyroswin,
+    author       = {Fabian Paischer and Gianluca Galletti
+                    and William Hornsby and Paul Setinek
+                    and Lorenzo Zanisi and Naomi Carey
+                    and Stanislas Pamela and Johannes Brandstetter
+    },
+    booktitle    = {Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 02 - 07, 2025},
+    year         = {2025}
 }
 ```
 
