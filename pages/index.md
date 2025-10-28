@@ -207,7 +207,7 @@ We can investigate whether GyroSwin is capable of capturing such zonal flows as 
     </figcaption>
 </figure>
 
-# Wrapping up
+## Wrapping up
 
 GyroSwin outperforms reduced numerical approaches and other neural surrogates in modelling plasma turbulence. It accurately captures nonlinear phenomena and spectral quantities self-consistently, while offering a speedup of three orders of magnitude compared to the numerical solver GKW [[7](#ref-gyrokinetics3)]. Furthermore, GyroSwin scales favorably to larger amounts of data and model sizes compared to competitors, which is imperative to truly advance surrogate modelling to higher fidelity plasma turbulence simulations. As a result, GyroSwin offers a fruitful alternative to reduced numerical models for efficient approximation of turbulent transport. Finally, plasma turbulence modelling is an incredibly hard problem, but we believe that Machine Learning will disrupt the landscape of plasma turbulence modelling in the future. 
 
@@ -228,17 +228,12 @@ GyroSwin outperforms reduced numerical approaches and other neural surrogates in
 If you found our work useful, please consider citing it.
 
 ``` 
-  @inproceedings{paischer2025gyroswin,
-    author       = {Fabian Paischer and Gianluca Galletti
-                    and William Hornsby and Paul Setinek
-                    and Lorenzo Zanisi and Naomi Carey
-                    and Stanislas Pamela and Johannes Brandstetter
-                },
-    booktitle    = {Advances in Neural Information Processing Systems 38: Annual Conference
-                  on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego,
-                  CA, USA, December 02 - 07, 2025},
-    year         = {2025}
-  }
+@inproceedings{paischer2025gyroswin,
+    title={GyroSwin: 5D Surrogates for Gyrokinetic Plasma Turbulence Simulations}, 
+    author={Fabian Paischer and Gianluca Galletti and William Hornsby and Paul Setinek and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter},
+    booktitle={Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 02 - 07, 2025},
+    year={2025}
+}
 ```
 
 ## References

@@ -84,14 +84,9 @@ Check out our [blogpost](https://ml-jku.github.io/blog/2025/gyroswin/)!
 
 ```
 @inproceedings{paischer2025gyroswin,
-    author       = {Fabian Paischer and Gianluca Galletti
-                    and William Hornsby and Paul Setinek
-                    and Lorenzo Zanisi and Naomi Carey
-                    and Stanislas Pamela and Johannes Brandstetter
-                },
-    booktitle    = {Advances in Neural Information Processing Systems 38: Annual Conference
-                  on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego,
-                  CA, USA, December 02 - 07, 2025},
-    year         = {2025}
-    }
+    title={GyroSwin: 5D Surrogates for Gyrokinetic Plasma Turbulence Simulations}, 
+    author={Fabian Paischer and Gianluca Galletti and William Hornsby and Paul Setinek and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter},
+    booktitle={Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 02 - 07, 2025},
+    year={2025}
+}
 ```
