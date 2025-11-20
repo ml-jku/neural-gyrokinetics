@@ -213,8 +213,25 @@ class CycloneDataset(Dataset):
             self.files = [f for f in self.files if self._conditioning_filter(f, threshold)]
             print(f"Using {len(self.files)} sims for {split}...")
 
-        if len(self.files) == 0:
-            raise RuntimeError(f"No trajectories found! Active filters: {cond_filters}")
+        # remove duplicates
+        self.files = list(set(self.files))
+        existing_files = []
+        for f in self.files:
+            if os.path.isfile(f):
+                existing_files.append(f)
+        diff = len(self.files) - len(existing_files)
+        if diff:
+            warnings.warn(f"{diff} files not found, training on existing ones...") 
+        self.files = existing_files
+        
+        # TODO assume same resolution across all files
+        with h5py.File(self.files[0], "r") as f:
+            self.resolution = f["metadata/resolution"][:]
+            self.phi_resolution = (
+                self.resolution[3],
+                self.resolution[2],
+                self.resolution[4],
+            )
 
         # get metadata (samples per file and normalization stats)
         self.file_num_samples = []
@@ -346,15 +363,6 @@ class CycloneDataset(Dataset):
                     self.norm_stats[k]["full"]["std"] = (stats[k].var ** (1/2)).astype(np.float32)
                     self.norm_stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
                     self.norm_stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
-
-        # TODO assume same resolution across all files
-        with h5py.File(self.files[0], "r") as f:
-            self.resolution = f["metadata/resolution"][:]
-            self.phi_resolution = (
-                self.resolution[3],
-                self.resolution[2],
-                self.resolution[4],
-            )
 
     def _separate_zf(self, x):
         if not isinstance(x, np.ndarray):
@@ -1276,3 +1284,80 @@ class CoordinateCycloneDataset(CycloneDataset):
             s_hat=torch.tensor(s_hat, dtype=self.dtype),
             q=torch.tensor(q, dtype=self.dtype),
         )
+    
+    def _recompute_stats(self, key: str, offset: int = 0):
+        if key in ["df", "phi"]:
+            t_indices = list(range(0, self.length, 2))
+        else:
+            t_indices = list(range(0, self.length))
+
+        def process_t_idx(t_idx, key):
+            file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
+            with h5py.File(self.files[file_index], "r") as f:
+                sample = self._load_data(f, file_index, t_index, n_subsamples=np.prod(self.resolution))
+
+            if key == "df":
+                x = sample["x"]
+                y = sample["gt"]
+                norm_axes = (1,)
+            elif key == "phi":
+                x, y = sample["phi"], sample["y_phi"]
+                if len(x.shape) == 3:
+                    x = np.expand_dims(x, 0)
+                    y = np.expand_dims(y, 0)
+                norm_axes = (1,2,3)
+            elif key == "fluxfield":
+                x = sample["fluxfield"]
+                y = None
+                norm_axes = (1,2,)
+            else:
+                x = np.array([sample["gt_flux"]], dtype=np.float32)
+                y = None
+                norm_axes = (0,)
+
+            if self.separate_zf and key == "df":
+                x = self._separate_zf(x)
+                y = self._separate_zf(y)
+
+            # Compute metrics for x and y
+            x_mean = np.mean(x, norm_axes, keepdims=True)
+            x_var = np.var(x, norm_axes, keepdims=True)
+            x_min = np.min(x, norm_axes, keepdims=True)
+            x_max = np.max(x, norm_axes, keepdims=True)
+
+            if y is not None:
+                y_mean = np.mean(y, norm_axes, keepdims=True)
+                y_var = np.var(y, norm_axes, keepdims=True)
+                y_min = np.min(y, norm_axes, keepdims=True)
+                y_max = np.max(y, norm_axes, keepdims=True)
+            else:
+                y_mean = y_var = y_min = y_max = None
+
+            return (x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max)
+
+        zf_flag = "_nozf" if not self.separate_zf else ""
+        if os.path.exists(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_{zf_flag}stats.pkl")):
+            stats = pickle.load(open(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_{zf_flag}stats.pkl"), "rb"))
+        else:
+            process_inds = partial(process_t_idx, key=key)
+            stats = None
+            with ThreadPoolExecutor(self.num_workers) as executor:
+                # indices in parallel, collect results in list
+                metrics_gen = tqdm.tqdm(
+                    executor.map(process_inds, t_indices),
+                    total=len(t_indices),
+                    desc=f"Re-computing normalization stats for {key}",
+                )
+
+                for metrics in metrics_gen:
+                    x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max = metrics
+                    if stats is None:
+                        stats = RunningMeanStd(shape=x_mean.shape)
+                    stats.update(x_mean, x_var, x_min, x_max)
+                    if y_mean is not None:
+                        stats.update(y_mean, y_var, y_min, y_max)
+
+                print(f"Saving stats to {os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_{zf_flag}stats.pkl")}")
+                pickle.dump(stats, open(os.path.join(self.dir, f"{key}_offset{offset}_{len(self.files)}sims_{zf_flag}stats.pkl"), "wb"))
+
+        return stats
