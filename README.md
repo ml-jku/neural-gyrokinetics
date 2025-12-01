@@ -8,7 +8,19 @@ For researchers at the intersection between scientific machine learning and plas
 
 ## Pretrained GyroSwin Models
 
-We are working on a public release of the GyroSwin series (Small, Medium, Large) on Huggingface. As soon as they are online, we will link them here.
+Our trained Gyroswin models are available on the huggingface hub. We provide all three model sizes of GyroSwin as reported in the paper:
+
+- [Small](https://huggingface.co/models/ml-jku/gyroswim_small)
+- [Medium](https://huggingface.co/models/ml-jku/gyroswim_small)
+- [Large](https://huggingface.co/models/ml-jku/gyroswim_small)
+
+In addition we uploaded the different in-distribution and out-of-distribution cases we used for evaluation in the paper on the huggingface hub at [this link](https://huggingface.co/datasets/ml-jku/gyroswin_cbc_id_ood).
+The uploaded data contains the snapshot which we start from for the different simulations along with all necessary conditioning parameters. 
+To perform inference with a GyroSwin model, simply execute
+
+    python -m gyroswin.eval.inference_from_hf
+  
+This script will automatically fetch all necessary data from the hub along with the model weights and perform inference in an autoregressive manner. Each prediction (df, phi, flux) will be stored in a newly generated directory called `predictions`. You can select which model checkpoint to load via the `--ckpt` option.
 
 ## Data Generation
 The dataset used to train GyroSwin is too large to be easily distributed,

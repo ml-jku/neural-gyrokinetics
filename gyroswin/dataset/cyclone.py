@@ -316,7 +316,7 @@ class CycloneDataset(Dataset):
                                 self.norm_stats[k][f_id][f"std"] ** 2,
                                 self.norm_stats[k][f_id][f"min"],
                                 self.norm_stats[k][f_id][f"max"],
-                                count=len(timesteps),
+                                count=count,
                             )
 
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
