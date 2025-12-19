@@ -11,28 +11,38 @@ from collections import defaultdict
 from omegaconf import OmegaConf
 from functools import partial
 import time
-import re
 import h5py
 
 from huggingface_hub import login, hf_hub_download
-auth_token = open(os.path.expanduser('~/.cache/huggingface/token'), 'r').read()
+
+auth_token = open(os.path.expanduser("~/.cache/huggingface/token"), "r").read()
 login(auth_token)
 
-from gyroswin.models import get_model
-from gyroswin.utils import expand_as
+from neugk.gyroswin.models import get_model
+from neugk.utils import expand_as
 
 
 def create_parser():
     parser = ArgumentParser()
     parser.add_argument("--ckpt", default="ml-jku/gyroswin_small")
+    parser.add_argument("--data_path", default="cache")
     parser.add_argument(
-        "--data_path", default="cache"
+        "--eval_sim",
+        default="iteration_262.h5",
+        choices=[
+            "iteration_262.h5",
+            "iteration_135.h5",
+            "iteration_8.h5",
+            "iteration_232.h5",
+            "iteration_148.h5",
+            "iteration_115.h5",
+            "ood_iteration_0.h5",
+            "ood_iteration_1.h5",
+            "ood_iteration_2.h5",
+            "ood_iteration_3.h5",
+            "ood_iteration_4.h5",
+        ],
     )
-    parser.add_argument("--eval_sim", default="iteration_262.h5",
-                        choices=["iteration_262.h5", "iteration_135.h5", "iteration_8.h5", 
-                                 "iteration_232.h5", "iteration_148.h5", "iteration_115.h5", 
-                                 "ood_iteration_0.h5", "ood_iteration_1.h5", "ood_iteration_2.h5", 
-                                 "ood_iteration_3.h5", "ood_iteration_4.h5"])
     return parser.parse_args()
 
 
@@ -45,6 +55,7 @@ def invert_ifft(x):
     knth = np.fft.ifftshift(knth, axes=(3,))
     knth = np.stack([knth.real, knth.imag]).squeeze().astype("float32")
     return knth
+
 
 def invert_df(b_xt, cfg, parser):
     if cfg.dataset.separate_zf:
@@ -59,6 +70,7 @@ def invert_df(b_xt, cfg, parser):
 
     return b_xt
 
+
 parser = create_parser()
 device = "cuda"
 model_name = parser.ckpt.split("/")[-1]
@@ -67,9 +79,9 @@ model_name = parser.ckpt.split("/")[-1]
 snapshot_dir = hf_hub_download(
     repo_id="ml-jku/gyroswin_cbc_id_ood",
     filename=os.path.join("preprocessed", parser.eval_sim),
-    repo_type="dataset",   # or "model" if that’s where you uploaded it
+    repo_type="dataset",  # or "model" if that’s where you uploaded it
     token=True,
-    cache_dir=parser.data_path
+    cache_dir=parser.data_path,
 )
 
 # load normalization stats
@@ -78,7 +90,7 @@ norm_stats_dir = hf_hub_download(
     filename="normalization_stats.pkl",
     repo_type="dataset",
     token=True,
-    cache_dir=parser.data_path
+    cache_dir=parser.data_path,
 )
 
 norm_stats = pickle.load(open(norm_stats_dir, "rb"))
@@ -90,14 +102,14 @@ OUT_DIR = f"predictions/{model_name}/{cyclone_name}"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 sd_path = hf_hub_download(
-    repo_id=parser.ckpt,
-    filename="pytorch_model.bin",
-    cache_dir=parser.data_path
+    repo_id=parser.ckpt, filename="pytorch_model.bin", cache_dir=parser.data_path
 )
 state_dict = torch.load(sd_path)
 
 # instantiate dummy dataset required for model instantiation
-cfg = OmegaConf.create(yaml.safe_load(open(f"checkpoints/{model_name}/config.yaml", "r")))
+cfg = OmegaConf.create(
+    yaml.safe_load(open(f"checkpoints/{model_name}/config.yaml", "r"))
+)
 input_fields = set(
     cfg.dataset.input_fields
     + [
@@ -127,7 +139,11 @@ with h5py.File(snapshot_dir) as infile:
     end_tstep = start_tstep + steps * delta
     timesteps = torch.arange(start_tstep, end_tstep, delta).unsqueeze(0).to(device)
     resolution = infile["metadata/resolution"][:]
-    phi_resolution = (resolution[3], resolution[2], resolution[4],)
+    phi_resolution = (
+        resolution[3],
+        resolution[2],
+        resolution[4],
+    )
 
 params["timestep"] = timesteps[:, 0].cpu().numpy()
 inputs = {"df": torch.tensor(k).unsqueeze(0).to(device, non_blocking=True)}
@@ -139,7 +155,7 @@ conds = {
 cfg.dataset.resolution = tuple(i.item() for i in resolution)
 cfg.dataset.phi_resolution = tuple(i.item() for i in phi_resolution)
 model = get_model(cfg, dataset=cfg.dataset)
-model.load_state_dict(state_dict,  strict=True)
+model.load_state_dict(state_dict, strict=True)
 model = model.to(device)
 model = model.eval()
 
@@ -158,12 +174,8 @@ invert_fns = {
 
 for key in input_fields:
     if cfg.dataset.normalization == "zscore":
-        shift = (
-            torch.tensor(norm_stats[key]["full"]["mean"]).unsqueeze(0).to(device)
-        )
-        scale = (
-            torch.tensor(norm_stats[key]["full"]["std"]).unsqueeze(0).to(device)
-        )
+        shift = torch.tensor(norm_stats[key]["full"]["mean"]).unsqueeze(0).to(device)
+        scale = torch.tensor(norm_stats[key]["full"]["std"]).unsqueeze(0).to(device)
     elif cfg.dataset.normalization == "minmax":
         x_min = torch.tensor(norm_stats[key]["full"]["min"]).to(device)
         x_max = torch.tensor(norm_stats[key]["full"]["max"]).to(device)
@@ -186,7 +198,7 @@ with torch.no_grad():
 
         fwd_start = time.time()
         outputs = model(**inputs, **conds)
-        
+
         # replace inputs with outputs for next timestep
         for key in model_inputs:
             inputs[key] = outputs[key].clone()

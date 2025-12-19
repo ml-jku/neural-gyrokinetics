@@ -1,0 +1,32 @@
+mode: default
+grid_save: true
+epochs: 20
+lr: 5e-3
+pinc_epochs: 0
+batch_size: 2048
+trajectory: [
+  iteration_13.h5,
+  iteration_115.h5,
+  iteration_131.h5,
+  iteration_134.h5,
+  iteration_146.h5,
+  iteration_148.h5,
+  iteration_160.h5,
+  iteration_200.h5,
+  iteration_210.h5,
+  iteration_212.h5,
+]
+ckp_path: nf_ckps_scale/
+throttling: 1
+timesteps: [100, 140, 200]
+gpus: [3, 4, 5, 6, 7]
+normalization: zscore
+ky_filter: base
+
+# model
+name: mlp
+dim: 256
+n_layers: 6
+skips: True
+embed_type: discrete
+act_fn: silu

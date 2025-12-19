@@ -9,7 +9,7 @@ defaults:
 
 experiment_id: test
 seed: 0
-output_path: null
+output_path: /local00/bioinf/galletti/gyroswin_xxl_0.5std
 ddp:
   enable: false
   n_nodes: 1
@@ -19,4 +19,4 @@ amp:
 mode: "train"
 eval: true
 device: "cuda"
-load_ckpt: false
+load_ckpt: true

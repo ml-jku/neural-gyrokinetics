@@ -7,7 +7,7 @@ We provide all configuration files used to generate our dataset in the `gkw_conf
 It contains separate directories, one per trajectory, with a single `input.dat` file in each.
 
 After generating the trajectories with GKW, 
-they can be preprocessed to the `hdf5` format with [`gyroswin.dataset.preprocess`](../gyroswin/dataset/preprocess.py).
+they can be preprocessed to the `hdf5` format with [`neugk.gyroswin.dataset.preprocess`](../gyroswin/dataset/preprocess.py).
 
 ## Parameter Ranges
 We specify the ranges for sampling the main parameters:
