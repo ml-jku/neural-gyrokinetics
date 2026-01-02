@@ -78,7 +78,7 @@ def get_model(cfg, dataset):
             use_rope=use_rope,
         )
 
-    if "gyroswin" in cfg.model.name:
+    if any([a in cfg.model.name for a in ["xnet", "gyroswin"]]):
         if "multi" in cfg.model.name:
             from neugk.gyroswin.models.gyroswin import GyroSwinMultitask as GyroSwin
         else:

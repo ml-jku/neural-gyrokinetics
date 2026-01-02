@@ -47,27 +47,34 @@ def get_data(cfg):
                 last_n = entry.last_n
                 partial_holdouts[file] = last_n
 
-        input_fields = set(
-            cfg.dataset.input_fields
-            + [
-                k
-                for k in cfg.model.loss_weights.keys()
-                if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
-            ]
-        )
-        if cfg.model.name in ["pointnet", "transolver", "transformer"]:
-            input_fields.add("position")
-        assert not (
-            "flux" in input_fields and "fluxavg" in input_fields
-        ), "Cannot predict both fluxavg and flux..."
-
-        if cfg.model.name in ["pointnet", "transolver", "transformer"]:
-            # these models use coordinates as input
-            dataset_class = CoordinateCycloneDataset
-        # elif cfg.choices.model == "baselines/linear_ablation":
-        #     dataset_class = LinearCycloneDataset
+        if cfg.workflow == "gyroswin":
+            input_fields = set(
+                cfg.dataset.input_fields
+                + [
+                    k
+                    for k in cfg.model.loss_weights.keys()
+                    if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
+                ]
+            )
+            if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+                input_fields.add("position")
+            assert not (
+                "flux" in input_fields and "fluxavg" in input_fields
+            ), "Cannot predict both fluxavg and flux..."
+            kwargs = {}
+            if cfg.model.name in ["pointnet", "transolver", "transformer"]:
+                # these models use coordinates as input
+                dataset_class = CoordinateCycloneDataset
+            # elif cfg.choices.model == "baselines/linear_ablation":
+            #     dataset_class = LinearCycloneDataset
+            else:
+                dataset_class = CycloneDataset
+        elif cfg.workflow == "pinc":
+            input_fields = ["df", "phi", "flux"]  # TODO how to deal with eval
+            kwargs = {"conditions": list(cfg.model.conditioning)}
+            dataset_class = CycloneAEDataset
         else:
-            dataset_class = CycloneDataset
+            raise NotImplementedError
 
         trainset = dataset_class(
             active_keys=cfg.dataset.active_keys,
@@ -91,6 +98,7 @@ def get_data(cfg):
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
             real_potens=cfg.dataset.real_potens,
+            **kwargs,
         )
 
         holdout_trajectories_valset = dataset_class(
@@ -101,7 +109,7 @@ def get_data(cfg):
             random_seed=cfg.seed,
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
-            normalization_stats=trainset.norm_stats,
+            normalization_stats=getattr(trainset, "norm_stats", None),
             spatial_ifft=cfg.dataset.spatial_ifft,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,
@@ -115,6 +123,7 @@ def get_data(cfg):
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
             real_potens=cfg.dataset.real_potens,
+            **kwargs,
         )
 
         trainloader = DataLoader(
@@ -152,7 +161,7 @@ def get_data(cfg):
                 random_seed=cfg.seed,
                 normalization=cfg.dataset.normalization,
                 normalization_scope=cfg.dataset.normalization_scope,
-                normalization_stats=trainset.norm_stats,
+                normalization_stats=getattr(trainset, "norm_stats", None),
                 spatial_ifft=cfg.dataset.spatial_ifft,
                 bundle_seq_length=cfg.model.bundle_seq_length,
                 trajectories=cfg.dataset.training_trajectories,

@@ -28,7 +28,7 @@ Running is managed with Hydra configs, structured as follows.
 └── 📁 validation                  # Validation configs
 ```
 
-After generating and preprocessing the dataset, GyroSwin and baselines training can be started with `main_gyroswin.py`.
+After generating and preprocessing the dataset, GyroSwin and baselines training can be started with `main.py`.
 
 ## <img src="docs/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="18px"> GyroSwin
 <p align="center">
@@ -106,8 +106,7 @@ PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2025/pi
 │   │   └── 📄 train.py            # Neural field training and evaluation utilities
 │   └── 📁 experiments             # Experiment notebooks and integration with GKW
 
-📄 main_gyroswin.py                # GyroSwin entry point for training/experiments
-📄 main_pinc.py                    # PINC autoencoder training
+📄 main.py                         # Entry point for training/experiments
 ```
 
 ## Citing

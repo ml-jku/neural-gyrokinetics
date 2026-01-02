@@ -1,13 +1,22 @@
 from typing import Dict, Optional, Tuple, List
 
 import os
+import os.path as osp
+import sys
+import hydra
+import warnings
+from omegaconf import OmegaConf
+
+import h5py
 import numpy as np
 import torch
 from torch import nn
 import torch.distributed as dist
 from omegaconf import DictConfig
 
+from neugk.utils import RunningMeanStd, filter_config_subset, filter_cli_priority
 from neugk.pinc.peft_utils import create_lora_model_wrapper
+from neugk.models.layers import ContinuousConditionEmbed
 
 
 def train_step_autoencoder(
@@ -20,6 +29,13 @@ def train_step_autoencoder(
     loss_wrap: nn.Module,
     progress_remaining: float,
 ):
+    model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
+    separate_zf = (
+        cfg.dataset.separate_zf
+        if hasattr(getattr(cfg, model_key), "extra_zf_loss")
+        and getattr(cfg, model_key).extra_zf_loss
+        else False
+    )
     model.train()
     # model prediction
     # for ae we only use df
@@ -29,15 +45,14 @@ def train_step_autoencoder(
     # TODO(diff) get rid of loss_wrap?
     # loss = F.mse_loss(x_preds["df"], xs["df"])
     # losses = {"df": loss}
+
     loss, losses = loss_wrap(
         x_preds,
         xs,  # autoencoder
         idx_data,
         geometry=geometry,
         progress_remaining=progress_remaining,
-        separate_zf=(
-            cfg.dataset.separate_zf if cfg.autoencoder.extra_zf_loss else False
-        ),  # TODO(diff) which options?
+        separate_zf=separate_zf,
         integral_loss_type=getattr(cfg.training, "integral_loss_type", "mse"),
     )
     return loss, losses
@@ -53,6 +68,13 @@ def train_step_peft(
     loss_wrap: nn.Module,
     progress_remaining: float,
 ):
+    model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
+    separate_zf = (
+        cfg.dataset.separate_zf
+        if hasattr(getattr(cfg, model_key), "extra_zf_loss")
+        and getattr(cfg, model_key).extra_zf_loss
+        else False
+    )
     model.train()
     x_preds = model(xs["df"], condition=condition)
 
@@ -62,12 +84,7 @@ def train_step_peft(
         idx_data,
         geometry=geometry,
         progress_remaining=progress_remaining,
-        separate_zf=(
-            cfg.dataset.separate_zf
-            if hasattr(cfg.autoencoder, "extra_zf_loss")
-            and cfg.autoencoder.extra_zf_loss
-            else False
-        ),
+        separate_zf=separate_zf,
         integral_loss_type=getattr(cfg.training, "integral_loss_type", "mse"),
     )
 
@@ -112,7 +129,10 @@ def load_autoencoder(
         if separate_zf:
             problem_dim = problem_dim + 2
 
-        ae_cfg = config.autoencoder
+        ae_cfg = getattr(config, "autoencoder", getattr(config, "model", None))
+
+        if ae_cfg is None:
+            raise ValueError("Autoencoder config not found.")
 
         model_type = getattr(ae_cfg, "model_type", "ae")
         # Import appropriate model class
@@ -124,8 +144,6 @@ def load_autoencoder(
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVQVAE as AE
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
-
-        from neugk.models.layers import ContinuousConditionEmbed
 
         bottleneck_dim = ae_cfg.bottleneck.dim
         bottleneck_num_heads = getattr(ae_cfg.bottleneck, "num_heads", None)
@@ -253,10 +271,10 @@ def load_autoencoder(
 
                 full_config = OmegaConf.load(config_path)
 
-                if hasattr(full_config, "autoencoder") and hasattr(
-                    full_config.autoencoder, "peft"
-                ):
-                    peft_config = full_config.autoencoder.peft
+                model_key = "autoencoder" if hasattr(config, "autoencoder") else "model"
+
+                if hasattr(getattr(full_config, model_key), "peft"):
+                    peft_config = getattr(full_config, model_key).peft
 
                     # reconstruct PEFT model
                     if peft_config.method.lower() == "eva":
@@ -306,13 +324,61 @@ def load_autoencoder(
         return model, loaded_ckpt, config
 
 
+def restart_config_autoencoder():
+    config = hydra.compose("main", overrides=sys.argv[1:])
+
+    if config.get("ae_checkpoint") is not None:
+        checkpoint_path = osp.abspath(config.ae_checkpoint)
+        config_path = osp.join(checkpoint_path, "config.yaml")
+
+        # Determine correct weights file
+        if getattr(config.training, "use_latest_checkpoint", False):
+            checkpoint_path = osp.join(checkpoint_path, "ckp.pth")
+        else:
+            checkpoint_path = osp.join(checkpoint_path, "best.pth")
+
+        if os.path.isfile(checkpoint_path) and os.path.isfile(config_path):
+            if config.stage == "peft":
+                print(f"PEFT stage: Will load model weights from {checkpoint_path}")
+            else:
+                checkpoint_config = OmegaConf.load(config_path)
+
+                # Remove CLI args related to autoencoder to avoid conflicts
+                try:
+                    aecli_idx = ["autoencoder" in c for c in sys.argv].index(True)
+                    aecli = sys.argv.pop(aecli_idx)
+                    warnings.warn(
+                        f"CLI arg '{aecli}' ignored in favor of checkpoint config."
+                    )
+                except ValueError:
+                    pass
+
+                # Copy dataset settings
+                config.dataset.spatial_ifft = checkpoint_config.dataset.spatial_ifft
+                config.dataset.separate_zf = checkpoint_config.dataset.separate_zf
+                config.dataset.real_potens = checkpoint_config.dataset.real_potens
+
+                # Clean config to allow merge
+                if "autoencoder" in checkpoint_config:
+                    for key in ["loss_scheduler", "loss_weights", "extra_loss_weights"]:
+                        if key in checkpoint_config.model:
+                            del checkpoint_config.model[key]
+
+                filter_cli_priority(sys.argv[1:], checkpoint_config)
+                filter_config_subset(config, checkpoint_config)
+                config = OmegaConf.merge(config, checkpoint_config)
+                config.ae_checkpoint = checkpoint_path
+                print(f"Loaded config from checkpoint '{config_path}'")
+        else:
+            raise ValueError(f"{checkpoint_path} does not exist!")
+    return config
+
+
 def aggregate_dataset_stats(file_paths: List[str]) -> Dict[str, float]:
     """
     Aggregate statistics across multiple dataset files to get true dataset-wide statistics.
     This is the correct way to handle statistics for multi-file datasets.
     """
-    import h5py
-    from utils import RunningMeanStd
 
     # Initialize running statistics
     phi_stats = RunningMeanStd((1,))

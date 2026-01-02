@@ -367,9 +367,9 @@ class GyroSwin(nn.Module):
         if hasattr(self, "flux_mix_unpatch"):
             zflux = self.flux_mix_unpatch(zflux, zdf, zphi)
         # expand to original
-        df = self.df_unet.patch_decode(zdf, df_pad_axes, cond=df_cond)
+        df = self.df_unet.patch_decode(zdf, df_pad_axes, condition=df_cond)
         if use_phi:
-            phi = self.phi_unet.patch_decode(zphi, phi_pad_axes, cond=phi_cond)
+            phi = self.phi_unet.patch_decode(zphi, phi_pad_axes, condition=phi_cond)
         else:
             phi = None
         return df, phi

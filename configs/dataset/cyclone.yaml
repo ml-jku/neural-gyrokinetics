@@ -1,6 +1,6 @@
 name: cyclone
 path: /local00/bioinf/gyrokinetics/preprocessed
-normalization: zscore
+normalization: none
 normalization_scope: dataset
 minmax_beta1: 8
 minmax_beta2: 4

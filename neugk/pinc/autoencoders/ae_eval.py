@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 from functools import partial
 import warnings
@@ -9,7 +9,7 @@ import torch.distributed as dist
 from tqdm import tqdm
 from omegaconf import DictConfig
 
-from utils import save_model_and_config
+from neugk.utils import save_model_and_config
 from neugk.dataset import CycloneAESample
 from neugk.gyroswin.eval import validation_metrics, generate_val_plots
 
@@ -241,7 +241,6 @@ def evaluate(
                 # TODO decide target metric
                 val_loss=val_loss,
                 loss_val_min=loss_val_min,
-                stage=stage,
             )
         else:
             warnings.warn(f"checkpoints will not be stored for rank {rank}")

@@ -4,7 +4,8 @@ import torch
 
 
 def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
-    ae_cfg = cfg.autoencoder
+    model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
+    ae_cfg = getattr(cfg, model_key)
 
     latent_dim = ae_cfg.latent_dim
     problem_dim = len(dataset.active_keys)

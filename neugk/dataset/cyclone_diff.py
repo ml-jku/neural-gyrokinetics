@@ -39,10 +39,9 @@ class CycloneAESample:
 
 
 class CycloneAEDataset(CycloneDataset):
-    def __init__(self, *args, stage: str, conditions: Sequence[str], **kwargs):
+    def __init__(self, *args, conditions: Sequence[str], **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.stage = stage
         self.conditions = conditions
 
     def _recompute_stats(self, key: str, offset: int = 0):

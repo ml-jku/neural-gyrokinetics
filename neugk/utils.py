@@ -1,15 +1,18 @@
 """General utils."""
 
 from typing import Dict, Tuple, Optional, Sequence
+from datetime import timedelta
 import glob
 import zipfile
 import os
+import gc
 import random
 import importlib
 import socket
 import re
 
 import torch
+import torch.distributed as dist
 from torch import nn
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
@@ -68,6 +71,12 @@ class WandbManager:
     def finish(self):
         # End the W&B run
         wandb.finish()
+
+
+def ddp_setup(rank, world_size):
+    dist.init_process_group(
+        backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20)
+    )
 
 
 def edit_tag(dict, prefix, postfix):

@@ -1,6 +1,6 @@
 import sys
 
-sys.path.append("../..")
+sys.path.append("../../..")
 import os
 import yaml
 from argparse import ArgumentParser
@@ -108,7 +108,7 @@ state_dict = torch.load(sd_path)
 
 # instantiate dummy dataset required for model instantiation
 cfg = OmegaConf.create(
-    yaml.safe_load(open(f"checkpoints/{model_name}/config.yaml", "r"))
+    yaml.safe_load(open(f"configs/checkpoints/{model_name}/config.yaml", "r"))
 )
 input_fields = set(
     cfg.dataset.input_fields
