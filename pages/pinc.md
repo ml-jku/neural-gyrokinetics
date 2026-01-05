@@ -42,14 +42,14 @@ Our attempt to ease both concerns is <img src="imgs/pinc_icon.png" alt="GyroSwin
 
 
 ### Evaluating Plasma Turbulence
-As described in the previous blogpost, the full representation of gyrokinetics is the 5D phase space distribution function $\bm{f}$.
+As described in the previous blogpost, the full representation of gyrokinetics is the 5D phase space distribution function $\boldsymbol{f}$.
 To check whether compression keeps the physics intact, we look at both _spatial_ and _temporal_ measures of turbulence.
-Two core quantities come from integrating $\bm{f}$ to obtain the **electrostatic potential** $\bm{\phi}$ and **heat flux** $Q$:
+Two core quantities come from integrating $\boldsymbol{f}$ to obtain the **electrostatic potential** $\boldsymbol{\phi}$ and **heat flux** $Q$:
 
 $$
-\bm{\phi} = \mathbf{A} \int \mathbf{J_{0}} \mathbf{f} , \mathrm{d}v_{\parallel}\mathrm{d}\mu,
+\boldsymbol{\phi} = \mathbf{A} \int \mathbf{J_{0}} \boldsymbol{f} , \mathrm{d}v_{\parallel}\mathrm{d}\mu,
 \quad
-Q = \int \mathbf{B} \int \mathbf{v}^2 \mathbf{\phi f} , \mathrm{d}v_{\parallel}\mathrm{d}\mu,\mathrm{d}x\mathrm{d}y\mathrm{d}s.
+Q = \int \mathbf{B} \int \mathbf{v}^2 \boldsymbol{\phi} \boldsymbol{f} , \mathrm{d}v_{\parallel}\mathrm{d}\mu,\mathrm{d}x\mathrm{d}y\mathrm{d}s.
 $$
 
 Additionally, turbulence is interpreted by looking at how energy distributes across spatial modes, using wave-space diagnostics like $k_y^{\text{spec}}$ and $Q^{\text{spec}}$.
@@ -59,22 +59,22 @@ We experiment with two dominant techniques:
 _ __Autoencoders (AEs / VQ-VAEs):__ explicit compression through a latent bottleneck, __parameters are shared across data__.
 _ __Neural Implicit Fields (NFs):__ store each snapshot as an tiny __independent__ coordinate-based network, with compression happening implicitly in weight space.
 
-Both optimize a complex MSE loss on the 5D distribution $\bm{f}$
+Both optimize a complex MSE loss on the 5D distribution $\boldsymbol{f}$
 
 $$
 \mathcal{L}_{\text{recon}} =
-\sum \left| \Re(\mathbf{f}_{\text{pred}} - \mathbf{f}_{\text{GT}})^2 +
-\Im(\mathbf{f}_{\text{pred}} - \mathbf{f}_{\text{GT}})^2 \right|.
+\sum \left| \Re(\boldsymbol{f}_{\text{pred}} - \boldsymbol{f}_{\text{GT}})^2 +
+\Im(\boldsymbol{f}_{\text{pred}} - \boldsymbol{f}_{\text{GT}})^2 \right|.
 $$
 
 
 ### Physics-Inspired Neural Compression
 Plain reconstruction loss isn’t enough, and high reconstruction quality does not always reflect in the physical fidelity.
-PINC adds penalties on the ground truth physical quantities $\bm{\phi}$ and $Q$, as well as the diagnostic spectras $k_y^{\text{spec}}$ and $Q^{\text{spec}}$.
+PINC adds penalties on the ground truth physical quantities $\boldsymbol{\phi}$ and $Q$, as well as the diagnostic spectras $k_y^{\text{spec}}$ and $Q^{\text{spec}}$.
 Moreover, monotonicity of the energy cascade is enforced as a knowledge-driven physical constraint.
 
 As a side note, while PINC-neural fields can be confortably trained with _off-the-shelf_ optimizers, the story is different for the more complex autoencoders. 
-Instead, naively training them on all PINC losses often leads to severe instabilities and catastrophic forgetting. We solve this complication by pretraining the larger autoencoders on the distribution $\bm{f}$, and subsequently using Explained Variance Adaptation [[5](#ref-eva)] to finetune the model on the PINC losses.
+Instead, naively training them on all PINC losses often leads to severe instabilities and catastrophic forgetting. We solve this complication by pretraining the larger autoencoders on the distribution $\boldsymbol{f}$, and subsequently using Explained Variance Adaptation [[5](#ref-eva)] to finetune the model on the PINC losses.
 
 
 ## Results
@@ -114,7 +114,7 @@ This table is obtained from the public 50GB dataset, and can be reproduced with 
   </p>
 </div>
 
-These 2D projections of the 5D (left) and 3D (right) fields demonstrate the advantage of PINC neural fields in direct density reconstruction, end even more clear for integral fidelity for the electrostatic potential. This is reflected in the higher $\bm{\phi}$ PSNR in Table 1.
+These 2D projections of the 5D (left) and 3D (right) fields demonstrate the advantage of PINC neural fields in direct density reconstruction, end even more clear for integral fidelity for the electrostatic potential. This is reflected in the higher $\boldsymbol{\phi}$ PSNR in Table 1.
 
 <figure style="text-align: center;">
     <img src="imgs/cascade.png" alt="Bi-directional energy cascade" width="100%">
