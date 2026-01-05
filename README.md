@@ -115,7 +115,8 @@ PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2025/pi
 ├── 📄 plot_utils.py              # Basic visualizations and disgnostics
 ├── 📄 runner.py                  # Base runner class
 └── 📄 utils.py                   # General helper stuff
-📄 main.py                            # Entry point for training/experiments
+
+📄 main.py                        # Entry point for training/experiments
 ```
 
 ## Citing
