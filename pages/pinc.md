@@ -6,6 +6,10 @@
   <a href="TODO" target="_blank">
     <img src="https://img.shields.io/badge/arXiv-B31B1B?style=for-the-badge&logo=arXiv&logoColor=FFFFFF" alt="paper">
   </a>
+  &nbsp;&nbsp;
+  <a href="https://huggingface.co/datasets/gerkone/pinc_gkw" target="_blank">
+    <img src="https://huggingface.co/datasets/huggingface/badges/resolve/main/dataset-on-hf-md.svg">
+  </a>
 </div>
 
 ---
@@ -14,16 +18,13 @@
 <div style="border-left: 4px solid #5e4931ff; background-color: #e8cfcfff; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
 
 <strong>Modern scientific simulations produce massive amounts of data</strong>.
-Storing and analyzing this data has become a bottleneck, forcing researchers to throw away valuable information and limiting machine learning training to reduced settings or limited amounts of data. Plasma turbulence modeled by the gyrokinetic equation is a clear instance of this pattern.
+Storing and analyzing this data has become a bottleneck, forcing researchers to throw away valuable information and limiting machine learning training. Plasma turbulence modeled by the gyrokinetic equation is a top example of this.
 We introduce <img src="imgs/pinc_icon.png" alt="GyroSwin Icon" height="14px"> <strong>Physics-Inspired Neural Compression (PINC)</strong> for plasma turbulence. We explore various learned compression techniques, like Neural Fields and VQ-VAEs, and train them with novel plasma-specific physics-informed losses, achieving <strong>70,000x</strong> size reduction while maintaining key physical characteristics.
-Our evaluation pipeline assesses spatial reconstruction quality, preservation <strong>noninear integrals</strong>, and the fidelity of <strong>transient dynamics</strong> essential for turbulence.
-
+<strong>We share a reduced 50GB validation set <a href="https://huggingface.co/datasets/gerkone/pinc_gkw" target="_blank"> on huggingface </a> for future compression benchmarking efforts.</strong>
 </div>
 
 ## Introduction
-In the [previous blogpost](https://ml-jku.github.io/blog/2025/gyroswin/) we introduced <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>GyroSwin</strong> [[1](#ref-gyroswin)], a scalable 5D vision transformer able to reliably capture the full nonlinear dynamics of gyrokinetic plasma turbulence.
-
-In this post, we present a direction orthogonal to GyroSwin, tackling one of the main challenges that transpired from large-scale training on high-dimensional data: __storage!__
+In the [previous blogpost](https://ml-jku.github.io/blog/2025/gyroswin/) we introduced <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>GyroSwin</strong> [[1](#ref-gyroswin)], a scalable 5D vision transformer able to reliably capture the full nonlinear dynamics of gyrokinetic plasma turbulence. In this post, we present a direction orthogonal to GyroSwin, tackling one of the main challenges that transpired from large-scale training on high-dimensional data: __storage!__
 
 Indeed, to achieve its impressive results GyroSwin was trained on a "simple" dataset that consisted already of __terabytes of plasma data__. "Production" gyrokinetic simulations are orders of magnitude more expensive, both in terms of compute and storage required. From a machine learning perspective this would make it unfeasible to package a complete and diverse gyrokinetic dataset.
 On the _plasma scientist_ side of the coin, entire simulations can never be stored at full resolution, and practictioners base their analysis on simpler integrated quantities, time traces and spectras.
@@ -78,7 +79,21 @@ Instead, naively training them on all PINC losses often leads to severe instabil
 
 ## Results
 ### Quantitative
-TODO final table
+Learned compression shows strong performance on all metrics in our dataset. Neural fields and autoencoders with PINC losses considerably improve the conservation of physical quantities, compared to the unregularized counterparts. For neural fields, training on physics-informed losses degrades reconstruction quality slightly and introduces some temporal inconsistencies, and we speculate this is caused by [conflict gradients](https://arxiv.org/abs/2001.06782).
+
+| Method        | CR         | PSNR ↑           | EPE ↓            | L1(Q) ↓           | PSNR($\phi$) ↑   | WD($k_y^{\text{spec}}$) ↓ | WD($Q^{\text{spec}}$) ↓ |
+|---------------|------------|------------------|------------------|-------------------|------------------|------------------|------------------|
+| ZFP           | 901×       | 28.97 ± 1.09     | 0.169 ± 0.10     | 107.48 ± 49.35    | −16.20 ± 7.09    | 0.020 ± 0.01     | 0.116 ± 0.20     |
+| Wavelet       | 936×       | 33.07 ± 1.18     | 0.063 ± 0.04     | 107.74 ± 49.51    | −13.24 ± 9.20    | 0.020 ± 0.01     | **0.010 ± 0.00** |
+| PCA           | 1020×      | 32.09 ± 0.98     | 0.091 ± 0.06     | 67.60 ± 36.08     | −10.22 ± 6.89    | 0.020 ± 0.01     | 0.011 ± 0.00     |
+| JPEG2000      | 1000×      | 34.33 ± 0.95     | 0.062 ± 0.05     | 103.91 ± 44.12    | −20.85 ± 6.50    | 0.020 ± 0.01     | 0.035 ± 0.03     |
+| NF            | 1167×      | **36.91 ± 0.93** | **0.039 ± 0.03** | 61.50 ± 16.91     | 1.24 ± 5.99      | 0.017 ± 0.01     | 0.017 ± 0.00     |
+| PINC-NF       | 1167×      | _35.76 ± 1.38_   | _0.046 ± 0.03_   | **2.18 ± 8.33**   | **13.50 ± 4.44** | **0.006 ± 0.00** | 0.015 ± 0.00     |
+| AE + EVA      | 716×       | 35.64 ± 2.03     | 0.093 ± 0.09     | _15.01 ± 16.42_   | 6.72 ± 4.98      | 0.016 ± 0.01     | 0.012 ± 0.01     |
+| VQ-VAE + EVA  | **77368×** | 32.61 ± 1.58     | 0.101 ± 0.08     | 44.26 ± 40.97     | _7.66 ± 3.75_    | _0.015 ± 0.01_   | 0.013 ± 0.01     |
+
+This table is obtained from the public 50GB dataset, and can be reproduced with the evaluation notebook [`01_pinc_evaluation_hf.ipynb`](https://github.com/ml-jku/neural-gyrokinetics/blob/git-release/notebooks/01_pinc_evaluation_hf.ipynb).
+
 ### Qualitative
 <div style="display:flex; justify-content:center; gap:12px; align-items:flex-start; flex-wrap:wrap;">
   <figure style="margin:0; text-align:center; width:45%;">
@@ -122,24 +137,22 @@ While traditional compresson techniques sometimes manage to visually capture $k_
     </figcaption>
 </figure>
 
-The left figure highlights an advantageous exponential scaling for the neural fields, agains a super-exponential decay for traditional compression techniques. A _"goldilocks compression rate"_ from 200x to 10,000x can be also recovered, where neural fields outperform traditional compression on direct reconstruction.
+The left figure highlights an advantageous power-law scaling for the neural fields, agains a super-exponential decay for traditional compression techniques. We also notice a _"goldilocks compression rate"_ , between 200x and 10,000x where for neural fields outperform traditional compression on direct reconstruction.
 
 The left plot shows the improvement of PINC training in terms of the integral loss gap, reported for a single VQ-VAE (blue cross $\to$ green dot, $\Delta \mathcal{L}$ gap displayed with an arrow).
 
 ## Conclusions and Future Work
-PINC opens new possibilities for sharing, storing, and analyzing scientific datasets that was previously too large to handle.
-
-<strong> <span>&#8618;</span> </strong> So, what's next?
+PINC opens new possibilities for sharing, storing, and analyzing scientific datasets that was previously too large to handle. What's next?
 
 1. __Big small datasets.__ The initial concern that motivated this work is scaling GyroSwin to even larger data volumes, and especially higher fidelity data. With PINC, compressed representations can either be inflated _in-transit_, or directly serve as a dataset for _"compressed"_ surrogate modeling. For instance, the VQ-VAE can be leveraged for latent diffusion, where turbulent solutions are generated starting from operational parameters. 
 2. **Integration into numerical codes and workflows.** Integrating PINC in the plasma scientist workflow of GKW would enable cheap, staggered **on-the-fly (in-situ)** compression during the simulation, making it feasible to capture transient dynamics without writing massive data dumps to disk.
 
-
 ## Resources
 
  - <a href="TODO">Paper</a>
- - <a href="https://ml-jku.github.io/blog/2025/gyroswin/">GyroSwin Blogpost</a>
  - <a href="https://github.com/ml-jku/neural-gyrokinetics">Code</a>
+ - <a href="https://huggingface.co/datasets/gerkone/pinc_gkw">HuggingFace dataset and results</a>
+ - <a href="https://ml-jku.github.io/blog/2025/gyroswin/">GyroSwin blogpost</a>
 
 ## Citation
 
