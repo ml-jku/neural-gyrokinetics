@@ -7,8 +7,6 @@ import torch
 
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
-import numpy as np
-import torch
 
 from neugk.utils import (
     phi_integral,

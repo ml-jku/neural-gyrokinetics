@@ -505,7 +505,6 @@ class PINCLossWrapper(LossWrapper):
         compute_integrals: bool = True,
         progress_remaining: float = 1.0,
         separate_zf: bool = False,
-        integral_loss_type: str = "mse",
     ):
         losses = {}
         int_losses, int_monitor = {}, {}
@@ -689,7 +688,6 @@ class PINCGradientBalancer(GradientBalancer):
             self.operator = ConFIGOperator()
 
         elif mode == "pseudo":
-            from conflictfree.momentum_operator import PseudoMomentumOperator
 
             self._debug_step = 0
             # Operator already init by super()

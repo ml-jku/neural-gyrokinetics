@@ -115,7 +115,7 @@ def main(config: DictConfig):
                     if current_sched:
                         dict_config["model"]["loss_scheduler"] = current_sched
 
-                    print(f"Merged config from checkpoint with PEFT settings")
+                    print("Merged config from checkpoint with PEFT settings")
                     config = OmegaConf.create(dict_config)
                 else:
                     raise FileNotFoundError(f"Config not found: {ae_config_path}")

@@ -1,17 +1,22 @@
-from typing import List, Dict
-import warnings
+from typing import List, Dict, Callable
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
+from einops import rearrange
+
 from tqdm import tqdm
+from collections import defaultdict
+import warnings
 
 from neugk.utils import save_model_and_config
-from neugk.dataset import CycloneSample
-from neugk.gyroswin.eval import validation_metrics, generate_val_plots, get_rollout_fn
+from neugk.dataset import CycloneSample, CycloneDataset
+from neugk.eval import validation_metrics
+from neugk.plot_utils import generate_val_plots
 
 
-def denormalize_rollout(rollout, gts, idx_data, denormalize_fn):
+def denormalize_rollout(rollout, idx_data, denormalize_fn):
     for k in rollout:
         rollout[k] = torch.stack(
             [
@@ -24,13 +29,121 @@ def denormalize_rollout(rollout, gts, idx_data, denormalize_fn):
                 for t in range(rollout[k].shape[0])
             ]
         )
-        gts[k] = torch.stack(
-            [
-                denormalize_fn(f, **{k: gts[k][b]})
-                for b, f in enumerate(idx_data["file_index"].tolist())
-            ]
+    return rollout
+
+
+def get_target_rollout(
+    output_fields,
+    dataset: CycloneDataset,
+    idx_data: Dict,
+    n_eval_steps,
+    bundle_seq_length,
+):
+    tgts = defaultdict(list)
+    for t in range(0, n_eval_steps, bundle_seq_length):
+        sample: CycloneSample = dataset.get_at_time(
+            idx_data["file_index"].long(),
+            (idx_data["timestep_index"] + t).long(),
+            get_normalized=False,
+            num_workers=4,
         )
-    return rollout, gts
+        for key in output_fields:
+            tgts[key].append(getattr(sample, f"y_{key}"))
+    for key in tgts.keys():
+        if bundle_seq_length == 1:
+            tgts[key] = torch.stack(tgts[key], 0)
+        else:
+            if key == "flux":
+                tgts[key] = rearrange(torch.stack(tgts[key], 1), "b t -> t b")
+            elif key == "phi":
+                tgts[key] = rearrange(torch.stack(tgts[key], 1), "b t ... -> t b ...")
+            else:
+                tgts[key] = rearrange(
+                    torch.stack(tgts[key], 2), "b c t ... -> t b c ..."
+                )
+    return tgts
+
+
+def get_rollout_fn(
+    n_steps: int,
+    bundle_steps: int,
+    dataset: Dataset,
+    predict_delta: bool = False,
+    use_amp: bool = False,
+    use_bf16: bool = False,
+    device: str = "cuda",
+) -> Callable:
+    # correct step size by adding last bundle
+    # n_steps_ = n_steps + bundle_steps - 1
+
+    def _rollout(
+        model: nn.Module,
+        inputs: Dict,
+        idx_data: Dict,
+        conds: Dict,
+    ) -> torch.Tensor:
+        # cap the steps depending on the current max timestep
+        rollout_steps = []
+        for i, f_idx in enumerate(idx_data["file_index"].tolist()):
+            ts_left = dataset.num_ts(int(f_idx)) - int(idx_data["timestep_index"][i])
+            ts_left = ts_left // bundle_steps - 1
+            rollout_steps.append(min(ts_left, n_steps))
+        rollout_steps = min(rollout_steps)
+
+        tot_ts = rollout_steps * bundle_steps
+        inputs_t = inputs.copy()
+        preds = defaultdict(list)
+        # get corresponding timesteps
+        ts_step = bundle_steps
+        ts_idxs = [
+            list(range(int(ts), int(ts) + tot_ts, ts_step))
+            for ts in idx_data["timestep_index"].tolist()
+        ]
+        fluxes = []
+        tsteps = dataset.get_timesteps(idx_data["file_index"], torch.tensor(ts_idxs))
+        amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+        with torch.no_grad():
+            # move bundles forward, rollout in blocks
+            for i in range(0, rollout_steps):
+                with torch.autocast(device, dtype=amp_dtype, enabled=use_amp):
+                    conds["timestep"] = tsteps[:, i].to(device)
+                    pred = model(**inputs_t, **conds)
+                    if "flux" in pred:
+                        fluxes.append(pred["flux"].cpu())
+                        del pred["flux"]
+
+                    if predict_delta:
+                        for key in pred.keys():
+                            pred[key] = pred[key] + inputs_t[key]
+
+                    for key in inputs_t.keys():
+                        if key in pred:
+                            # Position is not in pred, and is constant
+                            inputs_t[key] = pred[key].clone().float()
+
+                for key in pred:
+                    # add time dim if not there
+                    preds[key].append(
+                        pred[key].cpu().unsqueeze(2)
+                        if pred[key].ndim in [4, 5, 7]
+                        else pred[key].cpu()
+                    )
+
+        for key in preds.keys():
+            # only return desired size
+            if "position" in inputs_t:
+                preds[key] = torch.cat([p.unsqueeze(2) for p in preds[key]], 2)
+            else:
+                preds[key] = torch.cat(preds[key], 2)
+            preds[key] = rearrange(preds[key], "b c t ... -> t b c ...")
+            preds[key] = preds[key][: rollout_steps * bundle_steps, :, ...]
+        if len(fluxes) > 0:
+            preds["flux"] = rearrange(torch.stack(fluxes, dim=-1), "b t -> t b")
+        # to float32 for integrals etc
+        preds = {k: p.to(dtype=torch.float32) for k, p in preds.items()}
+        return preds
+
+    return _rollout
 
 
 @torch.no_grad
@@ -83,7 +196,7 @@ def evaluate(
 
             rollout_fn = get_rollout_fn(
                 n_steps=n_eval_steps,
-                bundle_steps=cfg.model.bundle_seq_length,
+                bundle_steps=bundle_seq_length,
                 dataset=valset,
                 predict_delta=predict_delta,
                 device=str(device),
@@ -112,41 +225,58 @@ def evaluate(
                     k: getattr(sample, k).to(device, non_blocking=True)
                     for k in input_fields
                 }
-                gts = {
-                    k: getattr(sample, f"y_{k}").to(device, non_blocking=True)
-                    for k in output_fields
-                }
                 conds = {
                     k: getattr(sample, k).to(device, non_blocking=True)
                     for k in conditioning
                 }
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
+                # get target rollout
+                # TODO can speed up by returning targets only once / doing batched
+                tgts = get_target_rollout(
+                    output_fields, valset, idx_data, n_eval_steps, bundle_seq_length
+                )
+
                 # get the rolled out validation trajectories
                 rollout = rollout_fn(model, inputs, idx_data, conds)
 
                 # denormalize rollout and target for evaluation / plots
                 # NOTE denormalize always true for integrals if denormalize:
-                rollout, gts = denormalize_rollout(
-                    rollout, gts, idx_data, valset.denormalize
-                )
+                rollout = denormalize_rollout(rollout, idx_data, valset.denormalize)
+
+                tgts = {k: v.cpu() for k, v in tgts.items()}
+                rollout = {k: v.cpu() for k, v in rollout.items()}
+
+                if cfg.dataset.separate_zf:
+
+                    def _recombine_zf(x):
+                        x = torch.cat(
+                            [x[:, :, 0::2].sum(2, True), x[:, :, 1::2].sum(2, True)],
+                            dim=2,
+                        )
+                        return x
+
+                    # apply recombine_zf to preds and tgts
+                    if rollout["df"].shape[2] % 2 == 0:
+                        rollout["df"] = _recombine_zf(rollout["df"])
+                    if tgts["df"].shape[2] % 2 == 0:
+                        tgts["df"] = _recombine_zf(tgts["df"])
 
                 metrics_i, integrated_i = validation_metrics(
-                    rollout,
-                    idx_data,
-                    bundle_seq_length,
-                    dataset=valset,
-                    output_fields=output_fields,
+                    tgts=tgts,
+                    preds=rollout,
+                    geometry=sample.geometry,
                     loss_wrap=loss_wrap,
                     eval_integrals=eval_integrals,
                 )
+
                 # add integrated potentials to rollout for comparison
                 if integrated_i[0] is not None:
                     rollout["phi_int"] = torch.stack(
                         [integrated_i[t]["phi"] for t in range(len(integrated_i))]
                     )
 
-                for key in metrics_i.keys():
+                for key in metrics.keys():
                     if metrics_i[key].shape[-1] < tot_eval_steps:
                         # end of dataset, need to pad the tensor
                         diff = tot_eval_steps - metrics_i[key].shape[-1]
@@ -166,19 +296,20 @@ def evaluate(
                         metrics[key] += metrics_i[key]
                         validated_steps = torch.ones([tot_eval_steps])
                 n_timesteps_acc += validated_steps
-                if not "position" in inputs:
+                if "position" not in inputs:
                     # no plots for field-like baselines
                     if val_idx == 0:
                         # holdout trajectories valset
                         t_idx = idx_data["timestep_index"].tolist()
                         batch_idx = torch.randint(0, len(t_idx), (1,)).item()
                         rollout = {k: rollout[k][:, batch_idx].cpu() for k in rollout}
-                        gts = {k: gts[k][batch_idx].cpu() for k in gts}
+                        plot_gt = {k: tgts[k][0][batch_idx].cpu() for k in tgts}
                         plots = generate_val_plots(
                             rollout=rollout,
-                            gt=gts,
+                            gt=plot_gt,
                             ts=conds["timestep"],
-                            phase=f"Random draw",
+                            phase="Random draw",
+                            workflow="gyroswin",
                         )
                         val_plots.update(plots)
                     else:
@@ -186,9 +317,10 @@ def evaluate(
                         if idx == 0:
                             plots = generate_val_plots(
                                 rollout=rollout,
-                                gt=gts,
+                                gt=tgts,  # TODO ?
                                 ts=conds["timestep"],
                                 phase="Holdout samples",
+                                workflow="gyroswin",
                             )
                             val_plots.update(plots)
 

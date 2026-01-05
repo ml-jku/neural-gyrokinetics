@@ -448,7 +448,7 @@ class GyroSwinMultitask(GyroSwin):
         if self.use_phi:
             # phi integrator weights
             vspace_attn_down = []
-            flux_attn_down = []
+            # flux_attn_down = []
             for i, (df_blk, phi_blk) in enumerate(
                 zip(self.df_down_blocks, self.phi_up_blocks[::-1])
             ):

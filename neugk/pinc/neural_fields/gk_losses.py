@@ -141,7 +141,7 @@ def spectra_losses(
     # kernel = torch.ones(1, 1, 5, device=pred_df.device) / 5
     for k in ["qspec", "kyspec"]:
         spec = torch.nan_to_num(torch.log1p(pred_diag[k]), 0.0)
-        spec_gt = torch.nan_to_num(torch.log1p(gt_diag[k]), 0.0)
+        # spec_gt = torch.nan_to_num(torch.log1p(gt_diag[k]), 0.0)
         peak_idx = torch.argmax(spec).item()
         tail = spec[peak_idx:]
         # isotonic loss

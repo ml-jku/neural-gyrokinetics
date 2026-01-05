@@ -304,7 +304,7 @@ def preprocess(
             metadata_group = file["metadata"]
 
         # group for our 6D field data
-        if not "data" in file.keys():
+        if "data" not in file.keys():
             data_group = file.create_group("data")
         else:
             data_group = file["data"]
@@ -373,7 +373,7 @@ def preprocess(
             df = df.view(dtype=np.complex64).squeeze()
             df = torch.tensor(df)
 
-            if not "Lin" in h5_filename:
+            if "Lin" not in h5_filename:
                 # do not compute integral for linear sims => it will fail!
                 phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
                 _, eflux, _ = pev_flux_df_phi(
@@ -470,7 +470,7 @@ if not args.debug:
         returns = tqdm(
             executor.map(preprocess_fns, datasets),
             total=len(datasets),
-            desc=f"Preprocessing data...",
+            desc="Preprocessing data...",
         )
 
     for filename, skipped in returns:

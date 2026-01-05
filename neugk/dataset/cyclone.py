@@ -2,7 +2,6 @@ from typing import Type, Optional, List, Tuple, Dict, Sequence, Union
 import re
 import os
 import h5py
-import warnings
 from dataclasses import dataclass
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -89,6 +88,7 @@ class CycloneDataset(Dataset):
         minmax_beta1: float = 8,
         minmax_beta2: float = 4,
         offset: int = 0,
+        tail_offset: int = 0,
         separate_zf: bool = False,
         num_workers: int = 4,
         real_potens: bool = False,
@@ -220,33 +220,36 @@ class CycloneDataset(Dataset):
             # check for holdout samples
             filename = os.path.split(f_path)[-1]
             if spatial_ifft:
-                if split_into_bands:
-                    n_bands_tag = (
-                        f"_{split_into_bands}bands" if split_into_bands else ""
-                    )
-                    filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
-                else:
-                    real_potens_tag = "_realpotens" if real_potens else ""
-                    filename = filename.replace(f"_ifft{real_potens_tag}", "")
-            n_tail_holdout = self.partial_holdouts.get(filename)
+                # optional preprocessing filename tags
+                n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+                filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
+                real_potens_tag = "_realpotens" if real_potens else ""
+                filename = filename.replace(f"_ifft{real_potens_tag}", "")
+            # number of offset samples on the tail (as holdout or for n_eval_steps)
+            self.n_tail_holdout = tail_offset
+            if self.partial_holdouts.get(filename, 0) > self.n_tail_holdout:
+                self.n_tail_holdout += self.partial_holdouts.get(filename, 0)
             with h5py.File(f_path, "r") as f:
                 # read the timesteps
-                if n_tail_holdout:
+                if self.n_tail_holdout:
                     if split == "train":
-                        timesteps = f["metadata/timesteps"][offset:-n_tail_holdout]
+                        timesteps = f["metadata/timesteps"][
+                            offset : -self.n_tail_holdout
+                        ]
                         orig_t_index = np.arange(len(timesteps))[offset::subsample]
-                        timesteps = timesteps[orig_t_index]
                     else:
-                        timesteps = f["metadata/timesteps"][offset:-n_tail_holdout:]
+                        timesteps = f["metadata/timesteps"][
+                            offset : -self.n_tail_holdout :
+                        ]
                         orig_t_index = np.arange(len(timesteps))[::subsample]
-                        timesteps = timesteps[orig_t_index]
                         self.steps_per_file[f_id] = len(
                             f["metadata/timesteps"][:][offset::subsample]
                         )
                 else:
                     timesteps = f["metadata/timesteps"][:][offset:]
                     orig_t_index = np.arange(len(timesteps))[::subsample]
-                    timesteps = timesteps[orig_t_index]
+                # crop timesteps
+                timesteps = timesteps[orig_t_index]
                 # This only works for 1 step training (with pf and rollout aswell)
                 n_samples = len(timesteps) - self.bundle_seq_length * 2 + 1
                 self.file_num_samples.append(n_samples)
@@ -280,21 +283,18 @@ class CycloneDataset(Dataset):
         self.length = self.cumulative_samples[-1]
         self.offsets = [offset for _ in range(len(self.files))]
         # calculate offsets if we are in a partial holdout validation dataset
+        # TODO is this part still in use?
         if split == "val" and self.partial_holdouts:
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
-                if split_into_bands:
-                    n_bands_tag = (
-                        f"_{split_into_bands}bands" if split_into_bands else ""
-                    )
-                    filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
-                else:
-                    real_potens_tag = "_realpotens" if real_potens else ""
-                    filename = filename.replace(f"_ifft{real_potens_tag}", "")
-                n_tail_holdout = self.partial_holdouts.get(filename)
-                if n_tail_holdout:
+                # optional preprocessing filename tags
+                n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
+                filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
+                real_potens_tag = "_realpotens" if real_potens else ""
+                filename = filename.replace(f"_ifft{real_potens_tag}", "")
+                if self.n_tail_holdout:
                     self.offsets[file_idx] = (
-                        self.steps_per_file[file_idx] - n_tail_holdout
+                        self.steps_per_file[file_idx] - self.n_tail_holdout
                     )
 
         # create mapping from from file and ts index to flat index and vice versa
@@ -422,7 +422,9 @@ class CycloneDataset(Dataset):
 
         return stats
 
-    def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneSample:
+    def __getitem__(
+        self, index: Union[int, Tuple[int, int]], get_normalized: bool = True
+    ) -> CycloneSample:
         """
         Args:
             index (int): Flat index with dataset ordering.
@@ -438,8 +440,14 @@ class CycloneDataset(Dataset):
                 - file_index (torch.Tensor): accessory file index, shape `()`
                 - timestep_index (torch.Tensor): accessory timestep index, shape `()`
         """
-        # lookup file index and time index from flat index
-        file_index, t_index = self.flat_index_to_file_and_tstep[index]
+        if isinstance(index, int):
+            # lookup file index and time index from flat index
+            file_index, t_index = self.flat_index_to_file_and_tstep[index]
+        elif isinstance(index, Tuple):
+            # direct access
+            file_index, t_index = index
+            assert file_index < len(self.files)
+            assert t_index < self.num_ts(file_index) + self.n_tail_holdout
 
         with h5py.File(self.files[file_index], "r") as f:
             sample = self._load_data(f, file_index, t_index)
@@ -662,15 +670,27 @@ class CycloneDataset(Dataset):
         file_idx: torch.Tensor,
         timestep_idx: torch.Tensor,
         get_normalized: bool = True,
+        num_workers: int = 1,
     ):
-        # Compute the flat indices from the file indices and time indices
-        updated_index = [
-            self.file_and_tstep_to_flat_index[i]
-            for i in zip(file_idx.tolist(), timestep_idx.tolist())
-        ]
-        sample = self.collate(
-            [self.__getitem__(idx, get_normalized) for idx in updated_index]
-        )
+        def _fetch(idx):
+            return self.__getitem__(idx, get_normalized)
+
+        if num_workers > 1:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                # direct indexing to access hidden tail for evaluation
+                samples = list(
+                    executor.map(
+                        _fetch, list(zip(file_idx.tolist(), timestep_idx.tolist()))
+                    )
+                )
+            sample = self.collate(samples)
+        else:
+            sample = self.collate(
+                [
+                    self.__getitem__((f_idx, t_idx), get_normalized)
+                    for f_idx, t_idx in zip(file_idx.tolist(), timestep_idx.tolist())
+                ]
+            )
         return sample
 
     def get_timesteps(
@@ -1023,7 +1043,7 @@ class LinearCycloneDataset(CycloneDataset):
         else:
             stats = None
             for index in tqdm.tqdm(
-                t_indices, desc=f"Re-computing normalization stats for df"
+                t_indices, desc="Re-computing normalization stats for df"
             ):
                 file_index = index
 
@@ -1084,7 +1104,7 @@ class CoordinateCycloneDataset(CycloneDataset):
         assert (
             len(self.input_fields) == 2 and "position" in self.input_fields
         ), "Cannot load multiple fields for coordinates"
-        assert not "flux" in self.input_fields, "Loading flux coordinates not supported"
+        assert "flux" not in self.input_fields, "Loading flux coordinates not supported"
 
     def _load_data(
         self,

@@ -2,7 +2,6 @@ from typing import Dict, Sequence, Optional
 
 import os
 import sys
-import warnings
 
 sys.path.extend([".", ".."])
 

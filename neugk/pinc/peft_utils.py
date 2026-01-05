@@ -8,9 +8,8 @@ import json
 from pathlib import Path
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
 from omegaconf import DictConfig
-from peft import LoraConfig, EvaConfig, get_peft_model, PeftModel, TaskType
+from peft import LoraConfig, get_peft_model, PeftModel
 
 
 def find_linear_layers(
@@ -207,55 +206,6 @@ def create_lora_model_wrapper(
             bias=peft_config.get("bias", "none"),
             eva_config=None,
         )
-
-
-def setup_peft_stage(
-    model: nn.Module,
-    peft_config: Dict,
-    freeze_base_model: bool = True,
-    dataloader: Optional[DataLoader] = None,
-) -> Tuple[nn.Module, nn.Module]:
-    """
-    Setup PEFT stage with LoRA or EVA adaptation.
-
-    Args:
-        model: Pre-trained base model (typically autoencoder)
-        peft_config: PEFT configuration dict
-        freeze_base_model: Whether to freeze base model parameters
-        dataloader: DataLoader for EVA statistics collection (required for EVA)
-
-    Returns:
-        Tuple of (peft_model, base_model) where:
-        - peft_model: Model with PEFT adapters attached
-        - base_model: Original model (for potential restoration)
-    """
-    method = peft_config.get("method", "lora").lower()
-
-    # setup model
-    if method in ["lora", "eva"]:
-        adapted_model = create_lora_model_wrapper(model, peft_config, method=method)
-    else:
-        raise ValueError(f"Unsupported PEFT method: {method}")
-
-    # freeze base model parameters
-    if freeze_base_model:
-        for name, param in adapted_model.named_parameters():
-            if "lora_" not in name:  # Don't freeze LoRA/EVA parameters
-                param.requires_grad = False
-
-    # for printing stats
-    total_params = sum(p.numel() for p in adapted_model.parameters())
-    trainable_params = sum(
-        p.numel() for p in adapted_model.parameters() if p.requires_grad
-    )
-
-    print(f"PEFT model setup complete:")
-    print(f"  Method: {method.upper()}")
-    print(f"  Total parameters: {total_params:,}")
-    print(f"  Trainable parameters: {trainable_params:,}")
-    print(f"  Trainable ratio: {100 * trainable_params / total_params:.2f}%")
-
-    return adapted_model, model
 
 
 def create_lora_model(
@@ -509,67 +459,6 @@ def save_lora_weights(
         save_peft_only=save_lora_only,
         save_full_model=save_full_model,
     )
-
-
-def load_lora_weights(
-    base_model: nn.Module,
-    lora_weights_path: Union[str, Path],
-    method: str = "lora_only",
-) -> nn.Module:
-    """
-    load LoRA weights
-
-    Args:
-        base_model: The base model to load LoRA weights into
-        lora_weights_path: Path to LoRA weights file or directory
-        method: "lora_only" or "full_state"
-
-    Returns:
-        Model with LoRA weights loaded
-    """
-    lora_weights_path = Path(lora_weights_path)
-
-    if method == "lora_only":
-        if lora_weights_path.is_dir():
-            lora_file = lora_weights_path / "lora_weights.pth"
-        else:
-            lora_file = lora_weights_path
-
-        if not lora_file.exists():
-            raise FileNotFoundError(f"LoRA weights file not found: {lora_file}")
-
-        checkpoint = torch.load(lora_file, map_location="cpu")
-        lora_state_dict = checkpoint.get("lora_state_dict", checkpoint)
-
-        # Load only LoRA parameters
-        model_state_dict = base_model.state_dict()
-        loaded_params = 0
-        for name, param in lora_state_dict.items():
-            if name in model_state_dict:
-                model_state_dict[name].copy_(param)
-                loaded_params += 1
-
-        print(f"Loaded {loaded_params} LoRA parameters from {lora_file}")
-
-    elif method == "full_state":
-        # Load full model state
-        if lora_weights_path.is_dir():
-            full_file = lora_weights_path / "full_model.pth"
-            if full_file.exists():
-                checkpoint = torch.load(full_file, map_location="cpu")
-                base_model.load_state_dict(checkpoint["model_state_dict"])
-                print(f"Loaded full model from {full_file}")
-            else:
-                raise FileNotFoundError(f"Full model file not found: {full_file}")
-        else:
-            checkpoint = torch.load(lora_weights_path, map_location="cpu")
-            if "model_state_dict" in checkpoint:
-                base_model.load_state_dict(checkpoint["model_state_dict"])
-            else:
-                base_model.load_state_dict(checkpoint)
-            print(f"Loaded model state from {lora_weights_path}")
-
-    return base_model
 
 
 def load_lora_weights(

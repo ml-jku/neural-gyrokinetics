@@ -11,13 +11,11 @@ from omegaconf import DictConfig
 
 from neugk.utils import save_model_and_config
 from neugk.dataset import CycloneAESample
-from neugk.gyroswin.eval import validation_metrics, generate_val_plots
+from neugk.eval import validation_metrics
+from neugk.plot_utils import generate_val_plots
 
 
-# TODO: repetition of neugk.gyroswin.eval stuff
-
-
-def denormalize_rollout(preds, xs, idx_data, denormalize_fn):
+def denormalize_single(preds, idx_data, denormalize_fn):
     # denormalize physics data keys
     physics_keys = {"df", "phi", "flux"}
     for k in preds:
@@ -28,16 +26,7 @@ def denormalize_rollout(preds, xs, idx_data, denormalize_fn):
                     for b, f in enumerate(idx_data["file_index"].tolist())
                 ]
             )
-
-    for k in xs:
-        if k in physics_keys:
-            xs[k] = torch.stack(
-                [
-                    denormalize_fn(f, **{k: xs[k][b]})
-                    for b, f in enumerate(idx_data["file_index"].tolist())
-                ]
-            )
-    return preds, xs
+    return preds
 
 
 def autoencoder_eval(
@@ -84,6 +73,7 @@ def evaluate(
             for key in loss_wrap.all_losses:
                 metrics[key] = torch.tensor(0.0)
             n_timesteps_acc = torch.tensor(0.0)
+            use_tqdm = False
             if use_tqdm or (dist.is_initialized() and not rank):
                 valloader = tqdm(
                     valloader,
@@ -114,9 +104,9 @@ def evaluate(
                 # get the rolled out validation trajectories
                 preds = eval_fn(xs, condition)
 
-                # denormalize rollout and target for evaluation / plots
                 # NOTE denormalize always true for integrals if denormalize:
-                preds, xs = denormalize_rollout(preds, xs, idx_data, valset.denormalize)
+                preds = denormalize_single(preds, idx_data, valset.denormalize)
+                tgts = denormalize_single(tgts, idx_data, valset.denormalize)
 
                 tgts = {k: v.cpu() for k, v in tgts.items()}
                 preds = {k: v.cpu() for k, v in preds.items()}
@@ -143,9 +133,6 @@ def evaluate(
                     geometry=geometry,
                     loss_wrap=loss_wrap,
                     eval_integrals=eval_integrals,
-                    integral_loss_type=getattr(
-                        cfg.training, "integral_loss_type", "mse"
-                    ),
                 )
 
                 # add integrated quantities to rollout for comparison
@@ -183,9 +170,9 @@ def evaluate(
                     plots = generate_val_plots(
                         rollout=preds_plots,
                         gt=tgts,
-                        timestep=sample.timestep,
+                        ts=sample.timestep,
                         phase="Random draw",
-                        stage="autoencoder",
+                        workflow="autoencoder",
                     )
                     val_plots.update(plots)
                 else:
@@ -196,7 +183,7 @@ def evaluate(
                             gt=tgts,
                             timestep=sample.timestep,
                             phase="Holdout samples",
-                            stage="autoencoder",
+                            workflow="autoencoder",
                         )
                         val_plots.update(plots)
 

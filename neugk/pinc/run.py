@@ -15,7 +15,7 @@ from neugk.runner import BaseRunner
 
 from neugk.pinc.autoencoders import get_autoencoder
 from neugk.pinc.losses import PINCLossWrapper, PINCGradientBalancer
-from neugk.pinc.autoencoders.ae_eval import evaluate as pinc_evaluate
+from neugk.pinc.autoencoders.evaluate import evaluate as pinc_evaluate
 from neugk.pinc.autoencoders.ae_utils import (
     aggregate_dataset_stats,
     MuonWithAuxAdam,

@@ -8,7 +8,6 @@ from neugk.dataset.cyclone import (
     CycloneDataset,
     CycloneSample,
     CoordinateCycloneDataset,
-    LinearCycloneDataset,
 )
 from neugk.dataset.cyclone_diff import CycloneAEDataset, CycloneAESample
 
@@ -56,12 +55,18 @@ def get_data(cfg):
                     if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
                 ]
             )
+            # exclude fields not in dataset
+            # input_fields = input_fields.intersection({"df", "phi", "flux"})
+            if input_fields.union({"df", "phi", "flux"}) != {"df", "phi", "flux"}:
+                raise ValueError(f"{input_fields} contains unknown values")
             if cfg.model.name in ["pointnet", "transolver", "transformer"]:
                 input_fields.add("position")
             assert not (
                 "flux" in input_fields and "fluxavg" in input_fields
             ), "Cannot predict both fluxavg and flux..."
-            kwargs = {}
+            # NOTE: for autoregressive evaluation, crop end of trajectory
+            train_kwargs = {}
+            val_kwargs = {"tail_offset": cfg.validation.n_eval_steps}
             if cfg.model.name in ["pointnet", "transolver", "transformer"]:
                 # these models use coordinates as input
                 dataset_class = CoordinateCycloneDataset
@@ -71,7 +76,8 @@ def get_data(cfg):
                 dataset_class = CycloneDataset
         elif cfg.workflow == "pinc":
             input_fields = ["df", "phi", "flux"]  # TODO how to deal with eval
-            kwargs = {"conditions": list(cfg.model.conditioning)}
+            train_kwargs = {"conditions": list(cfg.model.conditioning)}
+            val_kwargs = {"conditions": list(cfg.model.conditioning)}
             dataset_class = CycloneAEDataset
         else:
             raise NotImplementedError
@@ -98,7 +104,7 @@ def get_data(cfg):
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
             real_potens=cfg.dataset.real_potens,
-            **kwargs,
+            **train_kwargs,
         )
 
         holdout_trajectories_valset = dataset_class(
@@ -123,7 +129,7 @@ def get_data(cfg):
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
             real_potens=cfg.dataset.real_potens,
-            **kwargs,
+            **val_kwargs,
         )
 
         trainloader = DataLoader(

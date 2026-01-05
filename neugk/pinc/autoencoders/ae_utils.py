@@ -53,7 +53,6 @@ def train_step_autoencoder(
         geometry=geometry,
         progress_remaining=progress_remaining,
         separate_zf=separate_zf,
-        integral_loss_type=getattr(cfg.training, "integral_loss_type", "mse"),
     )
     return loss, losses
 
@@ -85,7 +84,6 @@ def train_step_peft(
         geometry=geometry,
         progress_remaining=progress_remaining,
         separate_zf=separate_zf,
-        integral_loss_type=getattr(cfg.training, "integral_loss_type", "mse"),
     )
 
     return loss, losses

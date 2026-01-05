@@ -1,3 +1,3 @@
-from neugk.pinc.ae_run import PINCRunner
+from neugk.pinc.run import PINCRunner
 
 __all__ = ["PINCRunner"]

@@ -237,7 +237,7 @@ def kmeans(
     sample_fn=batched_sample_vectors,
     all_reduce_fn=noop,
 ):
-    num_codebooks, dim, dtype, device = (
+    num_codebooks, dim, dtype, _ = (
         samples.shape[0],
         samples.shape[-1],
         samples.dtype,
@@ -540,7 +540,6 @@ class EuclideanCodebook(Module):
         if needs_codebook_dim:
             x = rearrange(x, "... -> 1 ...")
 
-        dtype = x.dtype
         flatten, ps = pack_one(x, "h * d")
 
         if exists(mask):
@@ -746,8 +745,6 @@ class CosineSimCodebook(Module):
 
         if needs_codebook_dim:
             x = rearrange(x, "... -> 1 ...")
-
-        dtype = x.dtype
 
         flatten, ps = pack_one(x, "h * d")
 
@@ -1038,12 +1035,11 @@ class VectorQuantize(Module):
             assert not exists(mask)
             x = rearrange(x, "b d -> b 1 d")
 
-        shape, device, heads, is_multiheaded, codebook_size, return_loss = (
+        shape, device, heads, is_multiheaded, _, return_loss = (
             x.shape,
             x.device,
             self.heads,
             self.heads > 1,
-            self.codebook_size,
             exists(indices),
         )
 
