@@ -1,5 +1,4 @@
 # Neural Gyrokinetics
-
 Machine learning tools to accelerate high-dimensional plasma turbulence simulations.
 Neural Gyrokinetics includes research code for
 - <img src="pages/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>[GyroSwin](https://arxiv.org/abs/2510.07314)</strong>, a 5D neural surrogate for nonlinear gyrokinetics.
@@ -10,11 +9,7 @@ For researchers at the intersection between scientific machine learning and plas
 
 ## Pretrained GyroSwin Models
 
-Our trained Gyroswin models are available on the huggingface hub. We provide all three model sizes of GyroSwin as reported in the paper:
-
-- [Small](https://huggingface.co/models/ml-jku/gyroswim_small)
-- [Medium](https://huggingface.co/models/ml-jku/gyroswim_small)
-- [Large](https://huggingface.co/models/ml-jku/gyroswim_small)
+Our trained Gyroswin models are available on the huggingface hub. We provide all three model sizes of GyroSwin as reported in the paper: [Small](https://huggingface.co/ml-jku/gyroswin_small) | [Medium](https://huggingface.co/ml-jku/gyroswin_medium) | [Large](https://huggingface.co/ml-jku/gyroswin_large).
 
 In addition we uploaded the different in-distribution and out-of-distribution cases we used for evaluation in the paper on the huggingface hub at [this link](https://huggingface.co/datasets/ml-jku/gyroswin_cbc_id_ood).
 The uploaded data contains the snapshot which we start from for the different simulations along with all necessary conditioning parameters. 
