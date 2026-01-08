@@ -1,4 +1,4 @@
-from typing import Optional, Sequence, List
+from typing import Optional, Sequence, List, Tuple, Callable
 
 import numpy as np
 import scipy.linalg
@@ -11,6 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from zipnn import ZipNN
 import zfpy
+from scipy.ndimage import convolve
 
 
 import matplotlib
@@ -429,8 +430,10 @@ def exact_dmd(x: np.ndarray, r: int = None, dt: float = 0.4):
     }
 
 
-def optical_flow(x: np.ndarray):
-    """Optical flow between frames using simplified Horn-Schunck finite differences."""
+def base_optical_flow(x: np.ndarray):
+    """Optical flow between frames using Horn-Schunck finite differences.
+    Introduces ghost flows because of reshaping to 2D.
+    """
     nvp, nmu, ns, nx, ny = x.shape[2:]
     x = rearrange(x, "c t vp mu s x y -> t c (vp mu) (s x y)")
     x_avg = x.mean(axis=1)
@@ -459,38 +462,63 @@ def optical_flow(x: np.ndarray):
     )
 
 
-def koopman_error(x1: np.ndarray, x2: np.ndarray, r: int = 3, dt: float = 0.4):
-    """MSE between DMD spectra of two sequences."""
-    r = x1.shape[0] if r is None else r
+def optical_flow_5d(
+    x: np.ndarray,
+    deltas: Optional[np.ndarray] = None,
+    alpha: float = 1.0,
+    n_iters: int = 50,
+    kernel_size: Optional[Tuple[int]] = None,
+):
+    """
+    Iterative Horn-Schunck 5D optical flow. Enforces smoothness via local averaging.
+    """
+    # channel mean to get intensity
+    x_intensity = x.mean(axis=0)
+    # temporal derivative and mid-point intensity
+    x1 = x_intensity[:-1]
+    x2 = x_intensity[1:]
+    # account for deltas
+    deltas = deltas if deltas is not None else np.ones(x1.shape[0])
+    deltas = deltas.reshape(-1, *[1] * 5)
+    xt = x2 - x1 / deltas
+    x_mid = 0.5 * (x1 + x2)
 
-    dmd1, dmd2 = exact_dmd(x1, r=r, dt=dt), exact_dmd(x2, r=r, dt=dt)
-    # sort by mode amplitude
-    order1 = np.argsort(np.abs(dmd1["amps"]))[::-1]
-    order2 = np.argsort(np.abs(dmd2["amps"]))[::-1]
-    for k in ["lam", "modes", "amps", "freqs"]:
-        dmd1[k] = dmd1[k][..., order1]
-        dmd2[k] = dmd2[k][..., order2]
-    losses = {}
-    for k in ["lam", "modes", "amps", "freqs"]:
-        losses[k] = np.mean((np.abs(dmd1["lam"]) - np.abs(dmd2["lam"])) ** 2)
-    # amplitude-weighted modes
-    losses["bmode"] = np.mean(
-        (np.abs(dmd1["amps"] * dmd1["modes"]) - np.abs(dmd2["amps"] * dmd2["modes"]))
-        ** 2
-    )
-    # reconstruction
-    t = np.arange(x1.shape[1]) * dt
-    x1_dmd = np.real(
-        dmd1["modes"] @ (dmd1["amps"][:, None] * np.exp(np.outer(dmd1["lam"], t)))
-    )
-    x2_dmd = np.real(
-        dmd2["modes"] @ (dmd2["amps"][:, None] * np.exp(np.outer(dmd2["lam"], t)))
-    )
-    losses["dmd"] = np.mean((np.abs(x1_dmd) - np.abs(x2_dmd)) ** 2)
+    # generalized 5d spatial gradients
+    grads = np.gradient(x_mid, axis=(1, 2, 3, 4, 5))
+    # denominator (alpha^2 + |grad|^2)
+    sum_squared_grads = sum(g**2 for g in grads)
+    denominator = alpha**2 + sum_squared_grads
+    velocity = np.zeros((5, *xt.shape))
+    if n_iters == 0:
+        # non iterative (normal flow, local only)
+        for i, g in enumerate(grads):
+            velocity[i] = -g * xt / denominator
+    else:
+        # iterative smoothing with averaging kernel (global approx)
+        kernel_size = kernel_size if kernel_size else (3, 3, 3, 3, 3)
+        kernel = np.zeros((1, *kernel_size))
+        neighbor_weight = 1.0 / (5 * 2)
+        # star stencil
+        for d in range(5):
+            idx_l = [k // 2 for k in kernel_size]
+            idx_r = [k // 2 for k in kernel_size]
+            idx_l[d] -= 1
+            idx_r[d] += 1
+            kernel[(0, *idx_l)] = neighbor_weight
+            kernel[(0, *idx_r)] = neighbor_weight
+        for _ in range(n_iters):
+            # compute local averages for each component
+            u_avg = np.stack([convolve(u, kernel, mode="constant") for u in velocity])
+            # compute brightness consistency update
+            grad_dot_u_avg = sum(grads[i] * u_avg[i] for i in range(5))
+            # horn schunck update
+            for i in range(5):
+                velocity[i] = u_avg[i] - grads[i] * (grad_dot_u_avg + xt) / denominator
+    return velocity
 
-    return {k: float(v) for k, v in losses.items()}
 
-
-def endpoint_error(x1: np.ndarray, x2: np.ndarray):
+def endpoint_error(
+    x1: np.ndarray, x2: np.ndarray, optical_flow_fn: Callable = base_optical_flow
+):
     """Endpoint error (EPE) between optical flow fields of two sequences."""
-    return float(np.mean((optical_flow(x1) - optical_flow(x2)) ** 2))
+    return float(np.mean((optical_flow_fn(x1) - optical_flow_fn(x2)) ** 2))

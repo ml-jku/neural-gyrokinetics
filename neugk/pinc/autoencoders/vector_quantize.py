@@ -1035,7 +1035,7 @@ class VectorQuantize(Module):
             assert not exists(mask)
             x = rearrange(x, "b d -> b 1 d")
 
-        shape, device, heads, is_multiheaded, _, return_loss = (
+        shape, device, heads, is_multiheaded, return_loss = (
             x.shape,
             x.device,
             self.heads,
