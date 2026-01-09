@@ -8,7 +8,6 @@ Neural Gyrokinetics includes research code for
 For researchers at the intersection between scientific machine learning and plasma physics, or in general working on (accelerating) high-dimensional simulations.
 
 ## Pretrained GyroSwin Models
-
 Our trained Gyroswin models are available on the huggingface hub. We provide all three model sizes of GyroSwin as reported in the paper: [Small](https://huggingface.co/ml-jku/gyroswin_small) | [Medium](https://huggingface.co/ml-jku/gyroswin_medium) | [Large](https://huggingface.co/ml-jku/gyroswin_large).
 
 In addition we uploaded the different in-distribution and out-of-distribution cases we used for evaluation in the paper on the huggingface hub at [this link](https://huggingface.co/datasets/ml-jku/gyroswin_cbc_id_ood).
