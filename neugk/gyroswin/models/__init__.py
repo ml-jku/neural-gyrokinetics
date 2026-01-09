@@ -172,12 +172,12 @@ def get_model(cfg, dataset):
         )
 
     if "fno" in cfg.model.name:
-        from neugk.gyroswin.models.fno import Df5DTFNO, DfVSpace3DTFNO, DfLocal5DTFNO
-
         base_resolution = dataset.resolution
         num_layers = cfg.model.num_layers
 
         if cfg.model.name == "fno":
+            from neugk.gyroswin.models.baselines import Df5DTFNO
+
             model = Df5DTFNO(
                 latent_dim,
                 base_resolution=base_resolution,
@@ -186,6 +186,8 @@ def get_model(cfg, dataset):
                 num_layers=num_layers,
             )
         if cfg.model.name == "fno3d":
+            from neugk.gyroswin.models.baselines import DfVSpace3DTFNO
+
             model = DfVSpace3DTFNO(
                 latent_dim,
                 base_resolution=base_resolution,
@@ -194,6 +196,8 @@ def get_model(cfg, dataset):
                 num_layers=num_layers,
             )
         if cfg.model.name == "local_fno":
+            from neugk.gyroswin.models.baselines import DfLocal5DTFNO
+
             patch_size = cfg.model.swin.patch_size
             model = DfLocal5DTFNO(
                 latent_dim,
@@ -205,7 +209,7 @@ def get_model(cfg, dataset):
             )
 
     if cfg.model.name == "pointnet":
-        from neugk.gyroswin.models.pointnet import PointNet
+        from neugk.gyroswin.models.baselines import PointNet
 
         model = PointNet(
             dim=cfg.model.latent_dim,
@@ -215,7 +219,7 @@ def get_model(cfg, dataset):
         )
 
     if cfg.model.name == "transformer":
-        from neugk.gyroswin.models.transformer import Transformer
+        from neugk.gyroswin.models.baselines import Transformer
 
         model = Transformer(
             condition_keys=cfg.model.conditioning,
@@ -225,7 +229,7 @@ def get_model(cfg, dataset):
         )
 
     if cfg.model.name == "transolver":
-        from neugk.gyroswin.models.transolver import Transolver
+        from neugk.gyroswin.models.baselines import Transolver
 
         model = Transolver(
             condition_keys=cfg.model.conditioning,

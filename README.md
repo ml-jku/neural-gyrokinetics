@@ -70,17 +70,10 @@ PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2025/pi
 ├── 📁 gyroswin                       # Code from the GyroSwin paper
 │   ├── 📁 eval                       # Evaluation and analysis
 │   │   ├── 📄 evaluate.py            # Rollout evaluation functions
-│   │   ├── 📄 inference_from_hf.py   # Inference utilities
-│   │   ├── 📄 inference.py           # Inference utilities
-│   │   ├── 📄 postprocess.py         # Postprocessing of outputs
-│   │   └── 📄 rollout.py             # Rollout evaluation script
-│   ├── 📁 models                     # Model architectures
-│   │   ├── 📄 fno.py                 # Fourier Neural Operator baseline
-│   │   ├── 📄 gyroswin.py            # Multi-head GyroSwin
-│   │   ├── 📄 pointnet.py            # PointNet baseline
-│   │   ├── 📄 transformer.py         # Transformer baseline
-│   │   ├── 📄 transolver.py          # Transolver baseline
-│   │   ├── 📄 vit_flat.py            # Vision Transformer baseline
+│   │   └── 📄 inference_from_hf.py   # Inference utilities
+│   ├── 📁 models                     # Model architectures (GyroSwin and baselines)
+|   │   ├── 📁 baselines              # FNO, PointNet, Transformer and Transolver
+│   │   ├── 📄 gyroswin.py            # Multi-head UNet with cross attention (GyroSwin)
 │   │   └── 📄 x_layers.py            # Cross attention mixing blocks
 │   └── 📄 run.py                     # Gyroswin runner (train, log and eval)
 │
@@ -94,12 +87,12 @@ PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2025/pi
 │   ├── 📁 neural_fields              # Neural fields models, training and evaluation
 │   │   ├── 📁 models                 # MLP, SIREN and WIRE
 │   │   ├── 📄 data.py                # Simple in-memory dataset and dataloader
-│   │   ├── 📄 gk_losses.py           # Gyrokinetic physics-informed losses
+│   │   ├── 📄 gk_losses.py           # Neural field physics-informed losses
 │   │   ├── 📄 nf_train.py            # Neural field training
 │   │   ├── 📄 nf_utils.py            # Neural field utilities, evaluation and plotting
 │   │   └── 📄 trad.py                # Traditional compression funcions
-│   ├── 📄 losses.py                  # Extended PINC-specific balancer
-│   ├── 📄 nf_main.py                 # Neural fields staggered runner and grid search
+│   ├── 📄 losses.py                  # Extended PINC-specific losses and balancer
+│   ├── 📄 nf_main.py                 # Neural fields parallel runner and grid search
 │   ├── 📄 peft_utils.py              # LoRA utilities for PINC training of large models
 │   └── 📄 run.py                     # PINC autoencoder runner
 |
@@ -119,14 +112,12 @@ PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2025/pi
 │   ├── 📄 gk_unet.py                 # UNet swin model
 │   └── 📄 layers.py                  # Common layers (MLP, attention, conditioning)
 |
-├── 📄 eval.py                    # General evaluation and base class
-├── 📄 integrals.py               # Gyrokinetics integrals (potential and flux)
-├── 📄 losses.py                  # Loss computation and gradient balancer
-├── 📄 plot_utils.py              # Basic visualizations and disgnostics
-├── 📄 runner.py                  # Base runner class
-└── 📄 utils.py                   # General helper stuff
+├── 📄 eval.py                        # General evaluation and base class
+├── 📄 integrals.py                   # Gyrokinetics integrals (potential and flux)
+├── 📄 losses.py                      # Loss computation and gradient balancer
+└── 📄 runner.py                      # Base runner class
 
-📄 main.py                        # Entry point for training/experiments
+📄 main.py                            # Entry point for training/experiments
 ```
 
 ## Citing

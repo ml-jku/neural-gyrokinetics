@@ -6,7 +6,7 @@ from einops import rearrange
 
 from neuralop.models import FNO, FNO3d
 
-from neugk.gyroswin.models.nd_vit.patching import (
+from neugk.models.nd_vit.patching import (
     PatchEmbed,
     PatchExpand,
     pad_to_blocks,
