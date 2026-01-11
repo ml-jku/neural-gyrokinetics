@@ -40,6 +40,7 @@ class PINCRunner(BaseRunner):
             else {}
         )
 
+        # pinc specific losses
         self.loss_wrap = PINCLossWrapper(
             weights=weights,
             schedulers=self.loss_scheduler_dict,
@@ -61,6 +62,22 @@ class PINCRunner(BaseRunner):
             eval_spectral_loss_type=getattr(
                 self.cfg.training, "eval_spectral_loss_type", "l1"
             ),
+        )
+
+        # gradient balancer
+        self.use_amp = self.cfg.amp.enable
+        self.use_bf16 = (
+            self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
+        )
+        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
+        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
+
+        self.grad_balancer = PINCGradientBalancer(
+            self.opt,
+            mode=self.cfg.training.gradnorm_balancer,
+            scaler=self.scaler,
+            clip_grad=self.cfg.training.clip_grad,
+            n_tasks=len(self.loss_wrap.active_losses),
         )
 
         self.model = get_autoencoder(
@@ -226,22 +243,6 @@ class PINCRunner(BaseRunner):
                     )
             except Exception as e:
                 print(f"Warning: Could not load optimizer/scheduler state: {e}")
-
-        # Continue with standard run setup
-        self.use_amp = self.cfg.amp.enable
-        self.use_bf16 = (
-            self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
-        )
-        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
-        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
-
-        self.grad_balancer = PINCGradientBalancer(
-            self.opt,
-            mode=self.cfg.training.gradnorm_balancer,
-            scaler=self.scaler,
-            clip_grad=self.cfg.training.clip_grad,
-            n_tasks=len(self.loss_wrap.active_losses),
-        )
 
         use_tqdm = self.cfg.logging.tqdm if not self.use_ddp else False
 

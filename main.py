@@ -22,13 +22,17 @@ from neugk.pinc.autoencoders.ae_utils import restart_config_autoencoder
 
 from neugk.gyroswin import GyroSwinRunner
 from neugk.pinc import PINCRunner
+from neugk.diffusion import DDPMRunner
 
 
 def dispatch_runner(rank, config, world_size):
-    if config.get("workflow", "gyroswin") == "gyroswin":
+    workflow = config.get("workflow", "gyroswin")
+    if workflow == "gyroswin":
         GyroSwinRunner(rank, config, world_size=world_size)()
-    elif config.get("workflow", "gyroswin") == "pinc":
+    elif workflow == "pinc":
         PINCRunner(rank, config, world_size=world_size)()
+    elif workflow == "diffusion":
+        DDPMRunner(rank, config, world_size=world_size)()
     else:
         raise NotImplementedError
 

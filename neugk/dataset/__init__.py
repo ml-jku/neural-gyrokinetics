@@ -79,6 +79,11 @@ def get_data(cfg):
             train_kwargs = {"conditions": list(cfg.model.conditioning)}
             val_kwargs = {"conditions": list(cfg.model.conditioning)}
             dataset_class = CycloneAEDataset
+        elif cfg.workflow == "diffusion":
+            input_fields = ["df", "phi", "flux"]  # TODO how to deal with eval
+            train_kwargs = {"conditions": list(cfg.model.conditioning)}
+            val_kwargs = {"conditions": list(cfg.model.conditioning)}
+            dataset_class = CycloneAEDataset
         else:
             raise NotImplementedError
 

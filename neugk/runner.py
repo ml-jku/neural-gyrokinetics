@@ -13,7 +13,6 @@ from neugk.utils import (
     remainig_progress,
 )
 from neugk.dataset import get_data
-from neugk.losses import GradientBalancer
 
 
 class BaseRunner:
@@ -152,16 +151,6 @@ class BaseRunner:
         self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
         self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
 
-        # grad balancer
-        n_tasks = len(self.loss_wrap.active_losses)
-        self.grad_balancer = GradientBalancer(
-            self.opt,
-            mode=self.cfg.training.gradnorm_balancer,
-            scaler=self.scaler,
-            clip_grad=self.cfg.training.clip_grad,
-            n_tasks=n_tasks,
-        )
-
         use_tqdm = self.cfg.logging.tqdm if not self.use_ddp else False
 
         # main loop
@@ -173,7 +162,8 @@ class BaseRunner:
 
             # training step
             self.model.train()
-            self.loss_wrap.train().to(self.device)
+            if self.loss_wrap is not None:
+                self.loss_wrap.train().to(self.device)
             loss_logs, info_dict = self.train_epoch(epoch)
 
             # logging

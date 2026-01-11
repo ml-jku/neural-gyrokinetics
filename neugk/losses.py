@@ -44,20 +44,20 @@ def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
 class LossWrapper(nn.Module):
     def __init__(
         self,
-        weights: Dict,
-        schedulers: Dict,
+        weights: Optional[Dict] = None,
+        schedulers: Optional[Dict] = None,
         denormalize_fn: Optional[Callable] = None,
         separate_zf: bool = False,
         real_potens: bool = False,
     ):
         super().__init__()
-        self.weights = weights
+        self.weights = weights if weights is not None else {}
+        self.schedulers = schedulers if weights is not None else {}
         self._data_losses = ["df", "phi", "flux"]
         self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
         self.integrator = FluxIntegral(real_potens=real_potens)
         self.denormalize_fn = denormalize_fn
         self.separate_zf = separate_zf
-        self.schedulers = schedulers
 
     def integral_loss(
         self,
@@ -136,9 +136,10 @@ class LossWrapper(nn.Module):
         losses = {}
         int_losses = {}
         # reset weight if scheduler is defined
-        for key in self.schedulers.keys():
-            if key in self.weights:
-                self.weights[key] = self.schedulers[key](progress_remaining)
+        if self.schedulers is not None:
+            for key in self.schedulers.keys():
+                if key in self.weights:
+                    self.weights[key] = self.schedulers[key](progress_remaining)
         # NOTE: network predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
         # only compute integrals if requested by weights or in eval
         do_ints = not self.training and compute_integrals
@@ -164,8 +165,9 @@ class LossWrapper(nn.Module):
                     tmp_key = list(preds.keys())[0]
                     preds[k] = torch.zeros(size=(1, 1)).to(preds[tmp_key].device)
                     tgts[k] = torch.zeros_like(preds[k]).to(preds[k].device)
-        if not all([k.replace("_cross", "") in preds for k in cross_keys]):
-            raise ValueError("Prediction - CROSS loss weight key mismatch.")
+        # TODO(diff) are these really needed?
+        # if not all([k.replace("_cross", "") in preds for k in cross_keys]):
+        #     raise ValueError("Prediction - CROSS loss weight key mismatch.")
         # compute losses
         for k in data_keys:
             if k in ["df", "phi"]:
