@@ -1,0 +1,29 @@
+peft:
+  # PEFT method selection
+  method: "lora" # "lora" or "eva"
+  
+  # LoRA (Low Rank Adaptation)
+  lora:
+    r: 64
+    lora_alpha: 1
+    lora_dropout: 0.0
+    bias: "none"
+    strategy: "attention_mlp" # "comprehensive", "attention_only", "bottleneck_only", "attention_mlp"
+  
+  # EVA (Explained Variance Adaptation)
+  eva:
+    r: 64
+    lora_alpha: 1
+    lora_dropout: 0.0
+    bias: "none"
+    strategy: "attention_mlp" # "comprehensive", "attention_only", "bottleneck_only", "attention_mlp"
+    # EVA parameters
+    rho: 2.0
+    tau: 0.99
+    use_label_mask: true
+    whiten: false
+    adjust_scaling_factors: true
+    
+  save:
+    save_lora_only: true
+    save_full_model: false

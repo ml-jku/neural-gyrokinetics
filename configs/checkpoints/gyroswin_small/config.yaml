@@ -1,0 +1,196 @@
+experiment_id: gyroswin_small
+seed: 0
+output_path: outputs/20250703_122955
+ddp:
+  enable: true
+  n_nodes: 1
+amp:
+  enable: true
+  bfloat: true
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+dataset:
+  name: cyclone
+  path: /local00/bioinf/gyrokinetics/preprocessed
+  normalization: zscore
+  normalization_scope: dataset
+  minmax_beta1: 8
+  minmax_beta2: 4
+  offset: 80
+  subsample: 1
+  spatial_ifft: true
+  separate_zf: true
+  real_potens: true
+  split_into_bands: null
+  log_transform: false
+  num_workers: 4
+  active_keys:
+  - re
+  - im
+  input_fields:
+  - df
+  training_trajectories: iteration_{0-7,9-12,14-99,101-114,116-130,132-147,149-199,201-234,236-261,263-299}.h5
+  validation_trajectories:
+  - iteration_13.h5
+  - iteration_100.h5
+  - iteration_200.h5
+  partial_holdouts: null
+  training_cond_filters:
+    last_fluxes:
+    - 1.0
+    - .inf
+    first_fluxes:
+    - 1.0
+    - .inf
+  eval_cond_filters:
+    last_fluxes:
+    - 1.0
+    - .inf
+    first_fluxes:
+    - 1.0
+    - .inf
+  augment:
+    noise: false
+    noise_std: 0.0001
+model:
+  name: gyroswin_multi
+  bundle_seq_length: 1
+  latent_dim: 256
+  num_layers: 1
+  decouple_mu: true
+  conditioning:
+  - timestep
+  - itg
+  - dg
+  - s_hat
+  - q
+  extra_zf_loss: false
+  loss_scheduler:
+    df: null
+    phi:
+      type: linear
+      start: 0
+      end: 1
+      start_fraction: 0.5
+      end_fraction: 0.7
+    flux:
+      type: linear
+      start: 0
+      end: 1
+      start_fraction: 0.7
+      end_fraction: 0.9
+    phi_int: null
+    flux_int: null
+    phi_cross: null
+    flux_cross: null
+  loss_weights:
+    df: 1.0
+    phi: 0.1
+    flux: 1.0e-05
+  extra_loss_weights:
+    phi_int: 0.0
+    flux_int: 0.0
+    phi_cross: 0.0
+    flux_cross: 0.0
+  swin:
+    patch_size:
+    - 4
+    - 2
+    - 4
+    - 5
+    - 4
+    phi_patch_size:
+    - 5
+    - 4
+    - 4
+    window_size:
+    - 4
+    - 2
+    - 2
+    - 9
+    - 4
+    phi_window_size:
+    - 9
+    - 2
+    - 4
+    num_heads:
+    - 8
+    depth:
+    - 2
+    gradient_checkpoint: false
+    merging_hidden_ratio: 4.0
+    unmerging_hidden_ratio: 8.0
+    c_multiplier: 2
+    norm_output: false
+    use_abs_pe: false
+    act_fn: GELU
+    patch_skip: true
+    modulation: film
+    drop_path: 0.1
+    swin_bottleneck: true
+    latent_cross_attn: true
+    use_rpb: true
+    use_rope: false
+    detach_flux_latents: false
+    flux_reduce: max
+    flux_num_heads: 8
+    flux_depth: 1
+    init_weights: kaiming_uniform
+    patching_init_weights: kaiming_uniform
+    cond_init_weights: normal_smallvar
+    flux_conditioning: false
+logging:
+  writer: wandb
+  mode: online
+  entity: jku-ukaea
+  project: debug
+  run_id: xnet_multi_20250703_122955
+  tqdm: true
+  model_summary: false
+training:
+  batch_size: 16
+  n_epochs: 500
+  num_workers: 4
+  pin_memory: false
+  learning_rate: 0.0003
+  final_learning_rate: 1.0e-06
+  weight_decay: 1.0e-05
+  exclude_from_wd:
+  - cond
+  predict_delta: false
+  scheduler: cosine
+  clip_grad: true
+  clip_to: 0.5
+  gradnorm_balancer: none
+  pushforward:
+    epochs:
+    - 100
+    - 130
+    - 160
+    unrolls:
+    - 0
+    - 0
+    - 0
+    probs:
+    - 10
+    - 10
+    - 5
+  pretraining: false
+  pretraining_kwargs:
+    freeze_after: false
+    clip_grad: false
+    scheduler: null
+    weight_decay: 1.0e-05
+    lr: 0.001
+    n_epochs: 35
+    target_modules:
+    - patch_embed
+    - unpatch
+    add_noise: false
+validation:
+  batch_size: 16
+  n_eval_steps: 2
+  validate_every_n_epochs: 20
+  eval_integrals: true

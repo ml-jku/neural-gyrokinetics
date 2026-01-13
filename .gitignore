@@ -8,3 +8,4 @@
 *.out
 tmp/
 upload_changed_py.sh
+cache/

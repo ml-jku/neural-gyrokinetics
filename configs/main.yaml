@@ -1,8 +1,8 @@
 defaults:
   - _self_
   - dataset: cyclone
-  - model: xnet_multi
-  - logging: wandb
+  - model: multi
+  - logging: no_logging
   - training: default
   - validation: default
   # - override hydra/launcher: litai
@@ -20,3 +20,5 @@ mode: "train"
 eval: true
 device: "cuda"
 load_ckpt: false
+workflow: "gyroswin" # "gyroswin", "pinc_autoencoder", "pinc_peft"
+ae_checkpoint: "/system/user/publicwork/galletti/huggingface/autoencoders/ae/best.pth"
