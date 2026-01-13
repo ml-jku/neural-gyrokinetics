@@ -75,12 +75,12 @@ def get_data(cfg):
             else:
                 dataset_class = CycloneDataset
         elif cfg.workflow == "pinc":
-            input_fields = ["df", "phi", "flux"]  # TODO how to deal with eval
+            input_fields = ["df", "phi", "flux"]
             train_kwargs = {"conditions": list(cfg.model.conditioning)}
             val_kwargs = {"conditions": list(cfg.model.conditioning)}
             dataset_class = CycloneAEDataset
         elif cfg.workflow == "diffusion":
-            input_fields = ["df", "phi", "flux"]  # TODO how to deal with eval
+            input_fields = ["df", "phi", "flux"]
             train_kwargs = {"conditions": list(cfg.model.conditioning)}
             val_kwargs = {"conditions": list(cfg.model.conditioning)}
             dataset_class = CycloneAEDataset
@@ -120,7 +120,7 @@ def get_data(cfg):
             random_seed=cfg.seed,
             normalization=cfg.dataset.normalization,
             normalization_scope=cfg.dataset.normalization_scope,
-            normalization_stats=getattr(trainset, "norm_stats", None),
+            normalization_stats=getattr(trainset, "stats", None),
             spatial_ifft=cfg.dataset.spatial_ifft,
             bundle_seq_length=cfg.model.bundle_seq_length,
             trajectories=cfg.dataset.validation_trajectories,

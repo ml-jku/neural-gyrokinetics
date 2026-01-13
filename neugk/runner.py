@@ -174,7 +174,6 @@ class BaseRunner:
                     if self.scheduler
                     else self.cfg.training.learning_rate
                 ),
-                "train/epoch": epoch,
             }
             for k, sched in self.loss_scheduler_dict.items():
                 train_losses_dict[f"train/{k}_schedule"] = sched(progress)

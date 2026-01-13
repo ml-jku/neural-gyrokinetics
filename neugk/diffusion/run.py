@@ -1,18 +1,18 @@
 from typing import Dict
 
 import os
-from tqdm import tqdm
 from collections import defaultdict
 from time import perf_counter_ns
 
 import torch
 import torch.nn.functional as F
+from torch.nn.utils import clip_grad_norm_
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
 from torch.utils._pytree import tree_map
 from diffusers import DDPMScheduler
 
-from neugk.diffusion.models import get_diffusion_model
+from neugk.diffusion.models import get_diffusion_model, DummyAE
 from neugk.diffusion.evaluate import evaluate as diff_evaluate
 from neugk.dataset import CycloneAESample
 from neugk.utils import exclude_from_weight_decay, memory_cleanup
@@ -26,15 +26,22 @@ class DDPMRunner(BaseRunner):
         if not ckpt_path or not os.path.exists(ckpt_path):
             raise ValueError(f"AE not found at {ckpt_path}.")
 
-        # TODO(diff) what does load_peft=True do
-        self.autoencoder, _, _ = load_autoencoder(
-            ckpt_path, device=self.device, load_peft=True
-        )
+        if "latent" in self.cfg.model.model_type:
+            # TODO(diff) what does load_peft=True do
+            self.autoencoder, _, _ = load_autoencoder(
+                ckpt_path, device=self.device, load_peft=True
+            )
+        else:
+            # TODO(diff) for now dummy autoencoder for pixel diffusion
+            self.autoencoder = DummyAE()
+
         self.autoencoder.to(self.device)
         self.autoencoder.eval()
         self.autoencoder.requires_grad_(False)
 
         self.model = get_diffusion_model(self.cfg, self.autoencoder).to(self.device)
+
+        self.latents_buffer = {}
 
         diff_cfg = self.cfg.model.scheduler
 
@@ -96,28 +103,24 @@ class DDPMRunner(BaseRunner):
 
         self.cur_update_step = self.start_epoch * len(self.trainloader)
 
-    def train_step_diffusion(self, sample: Dict[str, torch.Tensor], condition):
+    def forward_step_diffusion(self, sample: Dict[str, torch.Tensor], condition):
         df = sample["df"]
         with torch.no_grad():
             latents, _, _ = self.autoencoder.encode(df, condition=condition)
-
         bs = latents.shape[0]
         noise = torch.randn_like(latents, device=self.device)
-
-        timesteps = torch.randint(
-            0,
-            self.noise_scheduler.config.num_train_timesteps,
-            (bs,),
-            device=self.device,
-        ).long()
-
+        n_timesteps = self.noise_scheduler.config.num_train_timesteps
+        timesteps = torch.randint(0, n_timesteps, (bs,), device=self.device).long()
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
-
-        noise_pred = self.model(noisy_latents, timesteps, condition)
-
-        loss = F.mse_loss(noise_pred, noise)
-
-        return loss, {"loss": loss, "mse": loss}
+        model_output = self.model(noisy_latents, tstep=timesteps, condition=condition)
+        pred_type = self.noise_scheduler.config.prediction_type
+        if pred_type == "epsilon":
+            target = noise
+        elif pred_type == "sample":
+            target = latents  # TODO(diff) is this correct or consistency model?
+        elif pred_type == "v_prediction":
+            target = self.noise_scheduler.get_velocity(latents, noise, timesteps)
+        return F.mse_loss(model_output, target)
 
     def train_epoch(self, epoch):
         loss_logs = defaultdict(list)
@@ -148,17 +151,23 @@ class DDPMRunner(BaseRunner):
             t_start_fwd = perf_counter_ns()
 
             with torch.autocast(str(self.device), self.amp_dtype, enabled=self.use_amp):
-                loss, losses = self.train_step_diffusion(xs, condition)
+                loss = self.forward_step_diffusion(xs, condition)
 
             info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
             t_start_bkd = perf_counter_ns()
 
-            # backward and step
-            # TODO(diff) check grad_balancer
-            # self.model = self.grad_balancer(self.model, loss, [loss])
-            loss.backward()
             self.opt.zero_grad()
-            self.opt.step()
+
+            if self.use_amp:
+                self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.opt)
+                clip_grad_norm_(self.model.parameters(), self.cfg.training.clip_grad)
+                self.scaler.step(self.opt)
+                self.scaler.update()
+            else:
+                loss.backward()
+                clip_grad_norm_(self.model.parameters(), self.cfg.training.clip_grad)
+                self.opt.step()
 
             if self.scheduler:
                 self.scheduler.step()
@@ -168,7 +177,7 @@ class DDPMRunner(BaseRunner):
             loss_logs["loss"].append(loss.item())
 
             if (self.cur_update_step % 100) == 0:
-                del xs, condition, idx_data, geometry, loss, losses
+                del xs, condition, idx_data, geometry, loss
                 memory_cleanup(self.device, aggressive=True)
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
@@ -192,8 +201,8 @@ class DDPMRunner(BaseRunner):
 
         for t in self.noise_scheduler.timesteps:
             t_batch = torch.full((bs,), t, device=self.device, dtype=torch.long)
-            noise_pred = self.model(latents, t_batch, condition)
-            step_output = self.noise_scheduler.step(noise_pred, t, latents)
+            pred = self.model(latents, tstep=t_batch, condition=condition)
+            step_output = self.noise_scheduler.step(pred, t, latents)
             latents = step_output.prev_sample
 
         # TODO(diff) temporary

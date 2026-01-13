@@ -280,71 +280,94 @@ def filter_cli_priority(cli: Sequence, source: DictConfig, key: str = ""):
 
 
 class RunningMeanStd:
-    def __init__(self, shape: Sequence[int], epsilon: float = 1e-4):
+    def __init__(
+        self, shape: Sequence[int], epsilon: float = 1e-4, buffer_size: int = 10000
+    ):
         """
-        Calculates the running mean and std of a data stream
-        https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
-
-        :param epsilon: helps with arithmetic issues
-        :param shape: the shape of the data stream's output
+        Calculates running stats.
+        Buffer is now shape + (buffer_size,) to track quantiles per channel.
         """
+        self.shape = shape
         self.mean = np.zeros(shape, np.float32)
-        self.min = np.zeros(shape, np.float32)
-        self.max = np.zeros(shape, np.float32)
         self.var = np.ones(shape, np.float32)
+        self.min = np.full(shape, np.inf, np.float32)
+        self.max = np.full(shape, -np.inf, np.float32)
         self.count = epsilon
 
+        self.buffer_size = buffer_size
+        self.buffer = np.zeros((shape[0], buffer_size), dtype=np.float32)
+        self.buffer_count = 0
+        self.q02 = np.zeros(shape, np.float32)
+        self.q98 = np.ones(shape, np.float32)
+
     def copy(self) -> "RunningMeanStd":
-        """
-        :return: Return a copy of the current object.
-        """
-        new_object = RunningMeanStd(shape=self.mean.shape)
+        new_object = RunningMeanStd(shape=self.shape, buffer_size=self.buffer_size)
         new_object.mean = self.mean.copy()
         new_object.var = self.var.copy()
+        new_object.min = self.min.copy()
+        new_object.max = self.max.copy()
         new_object.count = float(self.count)
+        new_object.buffer = self.buffer.copy()
+        new_object.buffer_count = self.buffer_count
+        new_object.q02 = self.q02.copy()
+        new_object.q98 = self.q98.copy()
         return new_object
 
-    def combine(self, other: "RunningMeanStd") -> None:
+    def update(
+        self, mean, var, min, max, count=1.0, samples: Optional[np.ndarray] = None
+    ) -> None:
         """
-        Combine stats from another ``RunningMeanStd`` object.
-
-        :param other: The other object to combine with.
+        :param samples: Array of shape (*shape, N_samples) containing raw data points.
         """
-        self.update_from_moments(
-            other.mean, other.var, other.min, other.max, other.count
-        )
-
-    def update(self, mean, var, min, max, count=1.0) -> None:
         self.update_from_moments(mean, var, min, max, count)
+        if samples is not None:
+            self._update_buffer(samples)
+
+    def _update_buffer(self, batch: np.ndarray):
+        """
+        Vectorized Reservoir Sampling.
+        batch shape: (*shape, k)
+        """
+        batch_size = batch.shape[-1]
+
+        batch = batch.squeeze(tuple(range(1, batch.ndim - 2)))
+        space = self.buffer_size - self.buffer_count
+        if space > 0:
+            take = min(space, batch_size)
+            self.buffer[..., self.buffer_count : self.buffer_count + take] = batch[
+                ..., :take
+            ]
+            self.buffer_count += take
+            batch = batch[..., take:]
+            batch_size -= take
+
+        if batch_size > 0:
+            indices = np.random.randint(0, self.buffer_count, size=batch_size)
+            self.buffer[..., indices] = batch
+
+    def compute_quantiles(self) -> None:
+        if self.buffer_count > 0:
+            valid_data = self.buffer[..., : self.buffer_count]
+            self.q02 = np.quantile(valid_data, 0.02, axis=-1)
+            self.q98 = np.quantile(valid_data, 0.98, axis=-1)
 
     def update_from_moments(
-        self,
-        batch_mean: np.ndarray,
-        batch_var: np.ndarray,
-        batch_min: np.ndarray,
-        batch_max: np.ndarray,
-        batch_count: float = 1.0,
-    ) -> None:
+        self, batch_mean, batch_var, batch_min, batch_max, batch_count=1.0
+    ):
         delta = batch_mean - self.mean
         tot_count = self.count + batch_count
 
         new_mean = self.mean + delta * batch_count / tot_count
         m_a = self.var * self.count
         m_b = batch_var * batch_count
-        m_2 = (
-            m_a
-            + m_b
-            + np.square(delta) * self.count * batch_count / (self.count + batch_count)
-        )
-        new_var = m_2 / (self.count + batch_count)
-
-        new_count = batch_count + self.count
+        m_2 = m_a + m_b + np.square(delta) * self.count * batch_count / tot_count
+        new_var = m_2 / tot_count
 
         self.min = np.minimum(self.min, batch_min)
         self.max = np.maximum(self.max, batch_max)
         self.mean = new_mean
         self.var = new_var
-        self.count = new_count
+        self.count = tot_count
 
 
 def pev_flux_df_phi(

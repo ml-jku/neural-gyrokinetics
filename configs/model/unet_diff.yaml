@@ -1,7 +1,7 @@
 name: diffusion
 bundle_seq_length: 1
-model_type: dit
-latent_dim: 512
+model_type: pixel_unet
+latent_dim: 256
 act_fn: GELU
 decouple_mu: true
 conditioning: ["itg", "dg", "s_hat", "q"]  # "timestep"
@@ -10,6 +10,7 @@ extra_zf_loss: false
 init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
 patching_init_weights: "kaiming_uniform"
 cond_init_weights: "kaiming_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
+num_layers: 1
 
 loss_scheduler:
   df: null
@@ -31,20 +32,40 @@ patch:
   unmerging_hidden_ratio: 1.0
   c_multiplier: 1.0
 
-vit:
-  num_heads: 8
-  depth: 4
+swin:
+  patch_size: [ 4, 0, 4, 5, 4 ]
+  window_size: [ 4, 0, 2, 9, 4 ]
+  num_heads: [8]
+  depth: [2]
   gradient_checkpoint: false
+  merging_hidden_ratio: 1.0
+  unmerging_hidden_ratio: 1.0
+  c_multiplier: 2
+  norm_output: false
   use_abs_pe: false
+  act_fn: GELU
+  patch_skip: true
+  modulation: "film"
+  drop_path: 0.1
+  swin_bottleneck: true
+  latent_cross_attn: true
   use_rpb: true
   use_rope: false
-  gated_attention: false
-  drop_path: 0.1
+  detach_flux_latents: false
+  flux_reduce: "max"
+  flux_num_heads: 8
+  flux_depth: 1
+  init_weights: "kaiming_uniform"
+  patching_init_weights: "kaiming_uniform"
+  cond_init_weights: "normal_smallvar"
 
 # diffusion specific
 scheduler:
   num_train_timesteps: 100
   beta_start: 0.001
-  beta_end: 0.01
-  beta_schedule: "squaredcos_cap_v2"
+  beta_end: 0.2
+  beta_schedule: "scaled_linear"
+  # beta_schedule: "linear"
+  # beta_schedule: "squaredcos_cap_v2"
+  # prediction_type: "v_prediction"
   prediction_type: "epsilon"

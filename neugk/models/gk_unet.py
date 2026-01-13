@@ -354,6 +354,8 @@ class SwinNDUnet(nn.Module):
         use_checkpoint: bool = False,
         merging_hidden_ratio: float = 8.0,
         unmerging_hidden_ratio: float = 8.0,
+        merging_depth: int = 2,
+        unmerging_depth: int = 2,
         conditioning: Optional[List[str]] = None,
         cond_embed: Optional[nn.Module] = None,
         modulation: str = "dit",
@@ -455,6 +457,7 @@ class SwinNDUnet(nn.Module):
             use_conv=conv_patch,
             mlp_ratio=merging_hidden_ratio,
             act_fn=act_fn,
+            mlp_depth=merging_depth,
         )
 
         # down path
@@ -583,6 +586,7 @@ class SwinNDUnet(nn.Module):
             act_fn=expand_act_fn,
             patch_skip=self.patch_skip,
             cond_dim=self.cond_embed.cond_dim if self.cond_embed else None,
+            mlp_depth=unmerging_depth,
         )
         self.reset_parameters()
 
@@ -694,6 +698,8 @@ class Swin5DUnet(SwinNDUnet):
 
         super().__init__(**kwargs)
         self.decouple_mu = decouple_mu
+        self.full_resolution = full_resolution
+        self.original_problem_dim = full_in_channels
         if decouple_mu:
             self.decoupled_dim = decoupled_dim
             # positional information for velocity mixing

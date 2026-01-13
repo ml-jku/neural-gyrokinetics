@@ -103,7 +103,7 @@ class CycloneDataset(Dataset):
             self.active_keys = np.arange(split_into_bands * 2)
         else:
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
-        assert normalization in ["zscore", "minmax", "none", None]
+        assert normalization in ["zscore", "minmax", "quantile", "none", None]
         assert normalization_scope in ["sample", "dataset", "trajectory"]
         normalization = normalization if normalization != "none" else None
         self.normalization = normalization
@@ -257,6 +257,7 @@ class CycloneDataset(Dataset):
                 per_file_t_indexes.append(orig_t_index)
                 # TODO: norm_stats is never None here!
                 if normalization_stats is None and normalization_scope == "dataset":
+                    assert split == "train", "Validation must have normalization_stats."
                     # normalization stats
                     for k in self.input_fields:
                         try:
@@ -321,11 +322,11 @@ class CycloneDataset(Dataset):
         if normalization_scope == "dataset" and normalization_stats is None:
             for k in input_fields:
                 self.stats[k]["full"]["mean"] = stats[k].mean.astype(np.float32)
-                self.stats[k]["full"]["std"] = (stats[k].var ** (1 / 2)).astype(
-                    np.float32
-                )
+                self.stats[k]["full"]["std"] = (stats[k].var ** 0.5).astype(np.float32)
                 self.stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
                 self.stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
+                self.stats[k]["full"]["q02"] = stats[k].q02.astype(np.float32)
+                self.stats[k]["full"]["q98"] = stats[k].q98.astype(np.float32)
 
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
@@ -345,10 +346,6 @@ class CycloneDataset(Dataset):
         return x
 
     def _recompute_stats(self, key: str, offset: int = 0):
-        if key in ["df", "phi"]:
-            t_indices = list(range(0, self.length, 2))
-        else:
-            t_indices = list(range(0, self.length))
 
         def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
@@ -389,6 +386,11 @@ class CycloneDataset(Dataset):
                 y_mean = y_var = y_min = y_max = None
 
             return (x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max)
+
+        if key in ["df", "phi"]:
+            t_indices = list(range(0, self.length, 2))
+        else:
+            t_indices = list(range(0, self.length))
 
         if os.path.exists(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl")):
             stats = pickle.load(
@@ -473,6 +475,9 @@ class CycloneDataset(Dataset):
 
             if flux is not None:
                 flux, *_ = self.normalize(file_index, flux=flux)
+
+        # x = self._shape_correction(x)
+        # gt = self._shape_correction(gt)
 
         return CycloneSample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
@@ -655,6 +660,11 @@ class CycloneDataset(Dataset):
             if self.normalization == "zscore":
                 shift = expand_as(self.stats[field][key]["mean"], x)
                 scale = expand_as(self.stats[field][key]["std"], x)
+            if self.normalization == "quantile":
+                q_low = expand_as(self.stats[field][key]["q02"], x)
+                q_high = expand_as(self.stats[field][key]["q98"], x)
+                scale = (q_high - q_low) / 2.0
+                shift = (q_high + q_low) / 2.0
             if self.normalization == "minmax":
                 x_min = expand_as(self.stats[field][key]["min"], x)
                 x_max = expand_as(self.stats[field][key]["max"], x)

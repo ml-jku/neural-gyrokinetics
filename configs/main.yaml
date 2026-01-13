@@ -21,3 +21,4 @@ eval: true
 device: "cuda"
 load_ckpt: false
 workflow: "gyroswin" # "gyroswin", "pinc_autoencoder", "pinc_peft"
+ae_checkpoint: "/system/user/publicwork/galletti/huggingface/autoencoders/ae/best.pth"

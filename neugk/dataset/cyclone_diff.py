@@ -45,16 +45,10 @@ class CycloneAEDataset(CycloneDataset):
         self.conditions = conditions
 
     def _recompute_stats(self, key: str, offset: int = 0):
-        if key in ["df", "phi"]:
-            t_indices = list(range(0, self.length, 2))
-        else:
-            t_indices = list(range(0, self.length))
-
         def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
             with h5py.File(self.files[file_index], "r") as f:
                 sample = self._load_data(f, file_index, t_index)
-
             if key == "df":
                 x = sample["x"]
                 norm_axes = (1, 2, 3, 4, 5)
@@ -70,35 +64,64 @@ class CycloneAEDataset(CycloneDataset):
             if self.separate_zf and key == "df":
                 x = self._separate_zf(x)
 
-            # Compute metrics for x and y
             x_mean = np.mean(x, norm_axes, keepdims=True)
             x_var = np.var(x, norm_axes, keepdims=True)
             x_min = np.min(x, norm_axes, keepdims=True)
             x_max = np.max(x, norm_axes, keepdims=True)
-            return (x_mean, x_var, x_min, x_max)
+
+            all_axes = list(range(x.ndim))
+            keep_axes = [ax for ax in all_axes if ax not in norm_axes]
+
+            permute_order = keep_axes + list(norm_axes)
+            x_permuted = np.transpose(x, permute_order)
+
+            x_flat_channels = x_permuted.reshape(
+                *x_permuted.shape[: len(keep_axes)], -1
+            )
+            n_pixels = x_flat_channels.shape[-1]
+            if n_pixels > 10000:
+                idx = np.random.choice(n_pixels, 10000, replace=False)
+                samples = x_flat_channels[..., idx]
+            else:
+                samples = x_flat_channels
+
+            return (x_mean, x_var, x_min, x_max, samples)
+
+        t_indices = (
+            list(range(0, self.length, 2))
+            if key in ["df", "phi"]
+            else list(range(self.length))
+        )
 
         traj_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        norm_type = self.normalization if self.normalization == "quantile" else "std"
         stats_dump_pkl = os.path.join(
-            self.dir, f"diff_{key}_offset{offset}_{traj_hash}_stats.pkl"
+            self.dir, f"diff_{key}_offset{offset}_{traj_hash}_{norm_type}_stats.pkl"
         )
+
         if os.path.exists(stats_dump_pkl):
             stats = pickle.load(open(stats_dump_pkl, "rb"))
         else:
             process_inds = partial(process_t_idx, key=key)
             stats = None
             with ThreadPoolExecutor(self.num_workers) as executor:
-                # indices in parallel, collect results in list
                 metrics_gen = tqdm.tqdm(
                     executor.map(process_inds, t_indices),
                     total=len(t_indices),
-                    desc=f"Re-computing normalization stats for {key}",
+                    desc=f"Computing stats for {key}",
                 )
 
                 for metrics in metrics_gen:
-                    x_mean, x_var, x_min, x_max = metrics
+                    x_mean, x_var, x_min, x_max, samples = metrics
                     if stats is None:
                         stats = RunningMeanStd(shape=x_mean.shape)
-                    stats.update(x_mean, x_var, x_min, x_max)
+
+                    # update moments AND reservoir buffer
+                    stats.update(
+                        x_mean, x_var, x_min, x_max, count=1.0, samples=samples
+                    )
+
+                stats.compute_quantiles()
 
                 pickle.dump(stats, open(stats_dump_pkl, "wb"))
 
