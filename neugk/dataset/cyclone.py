@@ -90,6 +90,7 @@ class CycloneDataset(Dataset):
         offset: int = 0,
         tail_offset: int = 0,
         separate_zf: bool = False,
+        decouple_mu: bool = False,
         num_workers: int = 4,
         real_potens: bool = False,
     ):
@@ -103,7 +104,7 @@ class CycloneDataset(Dataset):
             self.active_keys = np.arange(split_into_bands * 2)
         else:
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
-        assert normalization in ["zscore", "minmax", "quantile", "none", None]
+        assert normalization in ["zscore", "minmax", "none", None]
         assert normalization_scope in ["sample", "dataset", "trajectory"]
         normalization = normalization if normalization != "none" else None
         self.normalization = normalization
@@ -116,6 +117,7 @@ class CycloneDataset(Dataset):
         self.minmax_beta1 = minmax_beta1
         self.minmax_beta2 = minmax_beta2
         self.separate_zf = separate_zf
+        self.decouple_mu = decouple_mu
         self.num_workers = num_workers
         self.dir = path
         self.bundle_seq_length = bundle_seq_length
@@ -355,7 +357,10 @@ class CycloneDataset(Dataset):
             if key == "df":
                 x = sample["x"]
                 y = sample["gt"]
-                norm_axes = (1, 2, 3, 4, 5)
+                if self.decouple_mu:
+                    norm_axes = (1, 3, 4, 5)
+                else:
+                    norm_axes = (1, 2, 3, 4, 5)
             elif key == "phi":
                 x, y = sample["phi"], sample["y_phi"]
                 if len(x.shape) == 3:
@@ -385,7 +390,7 @@ class CycloneDataset(Dataset):
             else:
                 y_mean = y_var = y_min = y_max = None
 
-            return (x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max)
+            return x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max
 
         if key in ["df", "phi"]:
             t_indices = list(range(0, self.length, 2))
@@ -656,20 +661,15 @@ class CycloneDataset(Dataset):
                 key = "full"
             if self.normalization_scope == "trajectory":
                 key = file_index
-
             if self.normalization == "zscore":
-                shift = expand_as(self.stats[field][key]["mean"], x)
-                scale = expand_as(self.stats[field][key]["std"], x)
-            if self.normalization == "quantile":
-                q_low = expand_as(self.stats[field][key]["q02"], x)
-                q_high = expand_as(self.stats[field][key]["q98"], x)
-                scale = (q_high - q_low) / 2.0
-                shift = (q_high + q_low) / 2.0
+                shift = self.stats[field][key]["mean"]
+                scale = self.stats[field][key]["std"]
             if self.normalization == "minmax":
-                x_min = expand_as(self.stats[field][key]["min"], x)
-                x_max = expand_as(self.stats[field][key]["max"], x)
+                x_min = self.stats[field][key]["min"]
+                x_max = self.stats[field][key]["max"]
                 scale = (x_max - x_min) / self.minmax_beta1
                 shift = x_min + scale * self.minmax_beta2
+            # scale, shift = expand_as(scale, x), expand_as(shift, x)
         if isinstance(x, torch.Tensor):
             scale = torch.from_numpy(scale).to(x.device)
             shift = torch.from_numpy(shift).to(x.device)

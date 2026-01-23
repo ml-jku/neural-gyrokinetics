@@ -7,6 +7,7 @@ import hashlib
 from dataclasses import dataclass
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
+from einops import rearrange
 
 import torch
 import numpy as np
@@ -51,10 +52,13 @@ class CycloneAEDataset(CycloneDataset):
                 sample = self._load_data(f, file_index, t_index)
             if key == "df":
                 x = sample["x"]
-                norm_axes = (1, 2, 3, 4, 5)
+                if self.decouple_mu:
+                    norm_axes = (1, 3, 4, 5)
+                else:
+                    norm_axes = (1, 2, 3, 4, 5)
             elif key == "phi":
                 x = sample["phi"]
-                if len(x.shape) == 3:
+                if x.ndim == 3:
                     x = np.expand_dims(x, 0)
                 norm_axes = (1, 2, 3)
             else:
@@ -69,35 +73,19 @@ class CycloneAEDataset(CycloneDataset):
             x_min = np.min(x, norm_axes, keepdims=True)
             x_max = np.max(x, norm_axes, keepdims=True)
 
-            all_axes = list(range(x.ndim))
-            keep_axes = [ax for ax in all_axes if ax not in norm_axes]
+            return x_mean, x_var, x_min, x_max
 
-            permute_order = keep_axes + list(norm_axes)
-            x_permuted = np.transpose(x, permute_order)
-
-            x_flat_channels = x_permuted.reshape(
-                *x_permuted.shape[: len(keep_axes)], -1
-            )
-            n_pixels = x_flat_channels.shape[-1]
-            if n_pixels > 10000:
-                idx = np.random.choice(n_pixels, 10000, replace=False)
-                samples = x_flat_channels[..., idx]
-            else:
-                samples = x_flat_channels
-
-            return (x_mean, x_var, x_min, x_max, samples)
-
+        # NOTE: subsample by two for normalization stats!
         t_indices = (
             list(range(0, self.length, 2))
             if key in ["df", "phi"]
             else list(range(self.length))
         )
 
-        traj_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
-        norm_type = self.normalization if self.normalization == "quantile" else "std"
-        stats_dump_pkl = os.path.join(
-            self.dir, f"diff_{key}_offset{offset}_{traj_hash}_{norm_type}_stats.pkl"
-        )
+        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        has_mu = "_mu" if self.decouple_mu else ""
+        stats_dump_pkl = f"diff_{key}_offset{offset}{has_mu}_{file_hash}_stats.pkl"
+        stats_dump_pkl = os.path.join(self.dir, stats_dump_pkl)
 
         if os.path.exists(stats_dump_pkl):
             stats = pickle.load(open(stats_dump_pkl, "rb"))
@@ -112,16 +100,12 @@ class CycloneAEDataset(CycloneDataset):
                 )
 
                 for metrics in metrics_gen:
-                    x_mean, x_var, x_min, x_max, samples = metrics
+                    x_mean, x_var, x_min, x_max = metrics
                     if stats is None:
                         stats = RunningMeanStd(shape=x_mean.shape)
 
-                    # update moments AND reservoir buffer
-                    stats.update(
-                        x_mean, x_var, x_min, x_max, count=1.0, samples=samples
-                    )
-
-                stats.compute_quantiles()
+                    # update moments
+                    stats.update(x_mean, x_var, x_min, x_max)
 
                 pickle.dump(stats, open(stats_dump_pkl, "wb"))
 
@@ -149,7 +133,7 @@ class CycloneAEDataset(CycloneDataset):
             sample = self._load_data(f, file_index, t_index)
         # k-fields
         x = sample["x"]
-        if self.separate_zf:
+        if x is not None and self.separate_zf:
             x = self._separate_zf(x)
         # accessory fields
         phi, flux = sample["phi"], sample["flux"]
@@ -170,6 +154,9 @@ class CycloneAEDataset(CycloneDataset):
             if flux is not None:
                 flux = self.normalize(file_index, flux=flux)
 
+        if phi is not None and phi.ndim == 3:
+            phi = phi[None]
+
         return CycloneAESample(
             df=torch.tensor(x, dtype=self.dtype) if x is not None else None,
             phi=(torch.tensor(phi, dtype=self.dtype) if phi is not None else None),
@@ -187,7 +174,7 @@ class CycloneAEDataset(CycloneDataset):
         self, data, file_index, t_index
     ) -> Tuple[np.ndarray, float, float, np.ndarray]:
         orig_t_index = t_index + self.offsets[file_index]
-        xs, potens, fluxes = [], [], []
+        xs, phis, fluxes = [], [], []
         for i in range(self.bundle_seq_length):
             # read the input
             k_name = "timestep_" + str(orig_t_index + i).zfill(5)
@@ -200,8 +187,7 @@ class CycloneAEDataset(CycloneDataset):
                 else:
                     xs.append(k[self.active_keys])
             if "phi" in self.input_fields:
-                phi = data[f"data/{phi_name}"][:]
-                potens.append(phi)
+                phis.append(data[f"data/{phi_name}"][:])
 
             # target flux
             flux = data["metadata/fluxes"][orig_t_index + i]
@@ -215,15 +201,12 @@ class CycloneAEDataset(CycloneDataset):
             xs = None
 
         if "phi" in self.input_fields:
-            potens = (
-                potens[0] if self.bundle_seq_length == 1 else np.stack(potens, axis=1)
-            )
-
+            phis = phis[0] if self.bundle_seq_length == 1 else np.stack(phis, axis=1)
         else:
-            potens = None
+            phis = None
 
         sample["x"] = xs
-        sample["phi"] = potens
+        sample["phi"] = phis
         sample["flux"] = np.array(fluxes).squeeze()
         # load conditioning
         sample["timestep"] = data["metadata/timesteps"][orig_t_index]
@@ -249,8 +232,6 @@ class CycloneAEDataset(CycloneDataset):
             field = "phi"
             x = phi
         elif flux is not None:
-            # field = "flux"
-            # x = flux
             return flux
         else:
             raise ValueError
@@ -272,8 +253,6 @@ class CycloneAEDataset(CycloneDataset):
             field = "phi"
             x = phi
         elif flux is not None:
-            # field = "flux"
-            # x = flux
             return flux
         else:
             raise ValueError
