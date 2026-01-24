@@ -34,7 +34,6 @@ assert (
 ), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
 import wandb  # noqa
 
-
 class WandbManager:
     def __init__(self) -> None:
         self._initialized = False
@@ -43,17 +42,32 @@ class WandbManager:
         if not isinstance(args, dict):
             args = args.__dict__
         project_name = args["logging"].get("project", "debug")
+        
+        name_parts = []
+        name_suffix = args["logging"].get("name_suffix", None)
+        if (
+            name_suffix and name_suffix.strip()
+        ):  # Skip if None, empty, or whitespace-only
+            name_parts.append(name_suffix)
+        exp_id = args["logging"].get("run_id", None)
+        if exp_id:
+            name_parts.append(exp_id)
+        run_name = "_".join(name_parts) if name_parts else None
+
+        tags = args["logging"].get("tags", [])
 
         combined_dict = {**args, **kwargs}
         wandb.init(
             # set the wandb project where this run will be logged
             project=project_name,
+            name=run_name,
             entity=args["logging"].get("entity", None),
             # track hyperparameters and run metadata
             config=combined_dict,
             id=args["logging"].get("run_id", None),
             resume="allow" if args["logging"].get("run_id", None) else False,
             reinit=False,
+            tags=tags,
         )
         self._initialized = True
 

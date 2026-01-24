@@ -1,0 +1,50 @@
+# @package _global_
+
+# Usage: python main.py experiment=test_pincae
+
+defaults:
+  - override /dataset: cyclone
+  - override /model: pinc/ae
+  - override /logging: wandb_ae
+  - override /validation: default
+
+# Experiment settings
+experiment_id: test_pincae
+workflow: pinc_autoencoder
+seed: 0
+
+logging:
+  tags: ["norm_mu", "sigma_filter", "ex_n1"]
+  name_suffix: "nmu_sigf"
+
+dataset:
+  offset: 0
+  timestep_std_filter: 2
+  timestep_std_offset: 80
+  norm_decouple_mu: true
+
+# Training settings
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+training:
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+  # spectral_loss_type: complex_l1
+  # eval_integral_loss_type: mse
+  # eval_spectral_loss_type: l1
+
+# Distributed training
+ddp:
+  enable: false
+  n_nodes: 1
+
+# Mixed precision
+amp:
+  enable: true
+  bfloat: true
+
+# Output
+output_path: null
