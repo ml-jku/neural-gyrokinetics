@@ -336,6 +336,10 @@ class PINCLossWrapper(LossWrapper):
             pred_df, pred_phi = preds["df"], preds.get("phi")
             tgt_phi, tgt_eflux = tgts["phi"], tgts["flux"]
 
+            # squeeze channel dim to match integrator output shape
+            if tgt_phi.ndim == 5 and tgt_phi.shape[1] == 1:
+                tgt_phi = tgt_phi.squeeze(1)
+
         # Merge zonal flows if needed
         if self.separate_zf and pred_df.shape[1] > 2:
             if pred_df.shape[1] == 4:
