@@ -24,10 +24,10 @@ We introduce <img src="imgs/pinc_icon.png" alt="GyroSwin Icon" height="14px"> <s
 </div>
 
 ## Introduction
-In the [previous blogpost](https://ml-jku.github.io/blog/2025/gyroswin/) we introduced <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>GyroSwin</strong> [[1](#ref-gyroswin)], a scalable 5D vision transformer able to reliably capture the full nonlinear dynamics of gyrokinetic plasma turbulence. In this post, we present a direction orthogonal to GyroSwin, tackling one of the main challenges that transpired from large-scale training on high-dimensional data: __storage!__
+In the [previous blogpost](https://ml-jku.github.io/blog/2025/gyroswin/) we introduced <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>GyroSwin</strong> [[1](#ref-gyroswin)], a scalable 5D vision transformer able to reliably capture the full nonlinear dynamics of gyrokinetic plasma turbulence. In this post, we present a direction orthogonal to GyroSwin, tackling one of the main challenges that emerged from large-scale training on high-dimensional data: __storage!__
 
 Indeed, to achieve its impressive results GyroSwin was trained on a "simple" dataset that consisted already of __terabytes of plasma data__. "Production" gyrokinetic simulations are orders of magnitude more expensive, both in terms of compute and storage required. From a machine learning perspective this would make it unfeasible to package a complete and diverse gyrokinetic dataset.
-On the _plasma scientist_ side of the coin, entire simulations can never be stored at full resolution, and practictioners base their analysis on simpler integrated quantities, time traces and spectras.
+On the _plasma scientist_ side of the coin, entire simulations can never be stored at full resolution, and practictioners base their analysis on simpler integrated quantities, time traces and spectra.
 
 Our attempt to ease both concerns is <img src="imgs/pinc_icon.png" alt="GyroSwin Icon" height="14px"> <strong>Physics-Inspired Neural Compression (PINC)</strong>: we explore __neural compression__ models (neural implicit fields [[2](#ref-nerf)] and Vector Quantized VAEs [[3](#ref-vqvae)]) equipped with plasma-specific __physics-informed losses__ [[4](#ref-pinn)], and achieve impressive results in terms of reconstruction quality, physics preservation and compression rates (with VQ-VAEs, up to __70,000x__!).
 
@@ -47,9 +47,9 @@ To check whether compression keeps the physics intact, we look at both _spatial_
 Two core quantities come from integrating $\boldsymbol{f}$ to obtain the **electrostatic potential** $\boldsymbol{\phi}$ and **heat flux** $Q$:
 
 $$
-\boldsymbol{\phi} = \mathbf{A} \int \mathbf{J_{0}} \boldsymbol{f} , \mathrm{d}v_{\parallel}\mathrm{d}\mu,
+\boldsymbol{\phi} = \mathbf{A} \int \mathbf{J_{0}} \boldsymbol{f} \: \mathrm{d}v_{\parallel}\,\mathrm{d}\mu,
 \quad
-Q = \int \mathbf{B} \int \mathbf{v}^2 \boldsymbol{\phi} \boldsymbol{f} , \mathrm{d}v_{\parallel}\mathrm{d}\mu,\mathrm{d}x\mathrm{d}y\mathrm{d}s.
+Q = \int \mathbf{B} \int \mathbf{v}^2 \boldsymbol{\phi} \boldsymbol{f} \: \mathrm{d}v_{\parallel}\mathrm{d}\mu \:\: \mathrm{d}x\,\mathrm{d}y\,\mathrm{d}s.
 $$
 
 Additionally, turbulence is interpreted by looking at how energy distributes across spatial modes, using wave-space diagnostics like $k_y^{\text{spec}}$ and $Q^{\text{spec}}$.
@@ -57,23 +57,23 @@ Additionally, turbulence is interpreted by looking at how energy distributes acr
 ### Neural Compression
 We experiment with two dominant techniques:
 _ __Autoencoders (AEs / VQ-VAEs):__ explicit compression through a latent bottleneck, __parameters are shared across data__.
-_ __Neural Implicit Fields (NFs):__ store each snapshot as an tiny __independent__ coordinate-based network, with compression happening implicitly in weight space.
+_ __Neural Implicit Fields (NFs):__ store each snapshot as a tiny __independent__ coordinate-based network, with compression happening implicitly in weight space.
 
 Both optimize a complex MSE loss on the 5D distribution $\boldsymbol{f}$
 
 $$
 \mathcal{L}_{\text{recon}} =
-\sum \left| \Re(\boldsymbol{f}_{\text{pred}} - \boldsymbol{f}_{\text{GT}})^2 +
-\Im(\boldsymbol{f}_{\text{pred}} - \boldsymbol{f}_{\text{GT}})^2 \right|.
+\sum_{v_{\parallel}\mu s x y} \left[ \Re(\boldsymbol{f}_{\text{pred}} - \boldsymbol{f}_{\text{GT}})^2 +
+\Im(\boldsymbol{f}_{\text{pred}} - \boldsymbol{f}_{\text{GT}})^2 \right].
 $$
 
 
 ### Physics-Inspired Neural Compression
 Plain reconstruction loss isn’t enough, and high reconstruction quality does not always reflect in the physical fidelity.
-PINC adds penalties on the ground truth physical quantities $\boldsymbol{\phi}$ and $Q$, as well as the diagnostic spectras $k_y^{\text{spec}}$ and $Q^{\text{spec}}$.
+PINC adds penalties on the ground truth physical quantities $\boldsymbol{\phi}$ and $Q$, as well as the diagnostic spectra $k_y^{\text{spec}}$ and $Q^{\text{spec}}$.
 Moreover, monotonicity of the energy cascade is enforced as a knowledge-driven physical constraint.
 
-As a side note, while PINC-neural fields can be confortably trained with _off-the-shelf_ optimizers, the story is different for the more complex autoencoders. 
+As a side note, while PINC-neural fields can be comfortably trained with _off-the-shelf_ optimizers, the story is different for the more complex autoencoders. 
 Instead, naively training them on all PINC losses often leads to severe instabilities and catastrophic forgetting. We solve this complication by pretraining the larger autoencoders on the distribution $\boldsymbol{f}$, and subsequently using Explained Variance Adaptation [[5](#ref-eva)] to finetune the model on the PINC losses.
 
 
@@ -114,7 +114,7 @@ This table is obtained from the public 50GB dataset, and can be reproduced with 
   </p>
 </div>
 
-These 2D projections of the 5D (left) and 3D (right) fields demonstrate the advantage of PINC neural fields in direct density reconstruction, end even more clear for integral fidelity for the electrostatic potential. This is reflected in the higher $\boldsymbol{\phi}$ PSNR in Table 1.
+These 2D projections of the 5D (left) and 3D (right) fields demonstrate the advantage of PINC neural fields in direct density reconstruction, and even more clear for integral fidelity for the electrostatic potential. This is reflected in the higher $\boldsymbol{\phi}$ PSNR in Table 1.
 
 <figure style="text-align: center;">
     <img src="imgs/cascade.png" alt="Bi-directional energy cascade" width="100%">
@@ -123,10 +123,10 @@ These 2D projections of the 5D (left) and 3D (right) fields demonstrate the adva
     </figcaption>
 </figure>
 
-Figure 3 visualizes the __bi-directional energy cascade__ phenomena: as turbulence develops, energy is transfered from higher to lower modes and vice-versa.
+Figure 3 visualizes the __bi-directional energy cascade__ phenomenon: as turbulence develops, energy is transferred from higher to lower modes and vice-versa.
 Columns are different trajectories, rows are compression methods, lines of varied colors are the $k_y^{\text{spec}}$ and $Q^{\text{spec}}$ at specific timesteps, and transparent dashed lines are respective ground truth.
 
-While traditional compresson techniques sometimes manage to visually capture $k_y^{\text{spec}}$, they fail completely on $Q^{\text{spec}}$. On the other hand, PINCs are somewhat less accurate on high frequencies, but generally capture low frequencies and magnitude pretty well.
+While traditional compressoin techniques sometimes manage to visually capture $k_y^{\text{spec}}$, they fail completely on $Q^{\text{spec}}$. On the other hand, PINCs are somewhat less accurate on high frequencies, but generally capture low frequencies and magnitude pretty well.
 
 
 ### Rate-Distortion scaling
@@ -137,12 +137,12 @@ While traditional compresson techniques sometimes manage to visually capture $k_
     </figcaption>
 </figure>
 
-The left figure highlights an advantageous power-law scaling for the neural fields, agains a super-exponential decay for traditional compression techniques. We also notice a _"goldilocks compression rate"_ , between 200x and 10,000x where for neural fields outperform traditional compression on direct reconstruction.
+The left figure highlights an advantageous power-law scaling for the neural fields, against a super-exponential decay for traditional compression techniques. We also notice a _"goldilocks compression rate"_ , between 200x and 10,000x where neural fields outperform traditional compression on direct reconstruction.
 
-The left plot shows the improvement of PINC training in terms of the integral loss gap, reported for a single VQ-VAE (blue cross $\to$ green dot, $\Delta \mathcal{L}$ gap displayed with an arrow).
+The right plot shows the improvement of PINC training in terms of the integral loss gap, reported for a single VQ-VAE (blue cross $\to$ green dot, $\Delta \mathcal{L}$ gap displayed with an arrow).
 
 ## Conclusions and Future Work
-PINC opens new possibilities for sharing, storing, and analyzing scientific datasets that was previously too large to handle. What's next?
+PINC opens new possibilities for sharing, storing, and analyzing scientific datasets that were previously too large to handle. What's next?
 
 1. __Big small datasets.__ The initial concern that motivated this work is scaling GyroSwin to even larger data volumes, and especially higher fidelity data. With PINC, compressed representations can either be inflated _in-transit_, or directly serve as a dataset for _"compressed"_ surrogate modeling. For instance, the VQ-VAE can be leveraged for latent diffusion, where turbulent solutions are generated starting from operational parameters. 
 2. **Integration into numerical codes and workflows.** Integrating PINC in the plasma scientist workflow of GKW would enable cheap, staggered **on-the-fly (in-situ)** compression during the simulation, making it feasible to capture transient dynamics without writing massive data dumps to disk.
