@@ -3,7 +3,7 @@
     <img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=GitHub&logoColor=FFFFFF" alt="code">
   </a>
   &nbsp;&nbsp;
-  <a href="TODO" target="_blank">
+  <a href="https://arxiv.org/abs/2602.04758" target="_blank">
     <img src="https://img.shields.io/badge/arXiv-B31B1B?style=for-the-badge&logo=arXiv&logoColor=FFFFFF" alt="paper">
   </a>
   &nbsp;&nbsp;
@@ -149,7 +149,7 @@ PINC opens new possibilities for sharing, storing, and analyzing scientific data
 
 ## Resources
 
- - <a href="TODO">Paper</a>
+ - <a href="https://arxiv.org/abs/2602.04758">Paper</a>
  - <a href="https://github.com/ml-jku/neural-gyrokinetics">Code</a>
  - <a href="https://huggingface.co/datasets/gerkone/pinc_gkw">HuggingFace dataset and results</a>
  - <a href="https://ml-jku.github.io/blog/2025/gyroswin/">GyroSwin blogpost</a>
@@ -159,8 +159,15 @@ PINC opens new possibilities for sharing, storing, and analyzing scientific data
 If you found our work useful, please consider citing it.
 
 ```
-
-
+@misc{galletti2026physicsinformedneuralcompressionhighdimensional,
+      title={Physics-Informed Neural Compression of High-Dimensional Plasma Data}, 
+      author={Gianluca Galletti and Gerald Gutenbrunner and Sandeep S. Cranganore and William Hornsby and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter and Fabian Paischer},
+      year={2026},
+      eprint={2602.04758},
+      archivePrefix={arXiv},
+      primaryClass={physics.plasm-ph},
+      url={https://arxiv.org/abs/2602.04758}, 
+}
 ```
 
 ## References
