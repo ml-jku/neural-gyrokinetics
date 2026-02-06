@@ -20,3 +20,4 @@ mode: "train"
 eval: true
 device: "cuda"
 load_ckpt: false
+workflow: "gyroswin" # "gyroswin", "pinc_autoencoder", "pinc_peft"

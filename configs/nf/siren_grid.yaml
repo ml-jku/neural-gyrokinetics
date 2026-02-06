@@ -1,0 +1,33 @@
+mode: grid
+grid_save: false
+epochs: 10
+lr: 5e-3
+pinc_epochs: 0
+batch_size: 2048  # [1024, 2048]
+trajectory: [
+  iteration_13.h5,
+  iteration_115.h5,
+  iteration_131.h5,
+  iteration_134.h5,
+  # iteration_146.h5,
+  # iteration_148.h5,
+  # iteration_160.h5,
+  # iteration_200.h5,
+  # iteration_210.h5,
+  # iteration_212.h5,
+]
+ckp_path: nf_ckps/
+throttling: 1
+timesteps: [100, 140, 200]
+gpus: [1, 2, 3]
+normalization: zscore
+ky_filter: base  # [base, zfout, first2, first5, fancy1]
+
+# model
+name: siren
+dim: 64
+n_layers: 5
+first_w0: [0.1, 0.5, 1.0]
+hidden_w0: [0.5, 2.0, 5.0]
+skips: [True, False]
+embed_type: [discrete, sincos_continuous]
