@@ -2,7 +2,7 @@
 Machine learning tools to accelerate high-dimensional plasma turbulence simulations.
 Neural Gyrokinetics includes research code for
 - <img src="pages/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>[GyroSwin](https://arxiv.org/abs/2510.07314)</strong>, a 5D neural surrogate for nonlinear gyrokinetics.
-- <img src="pages/imgs/pinc_icon.png" alt="PINC Icon" height="12px"> <strong>[PINC](TODO)</strong>, physics-informed neural compression for plasma data.
+- <img src="pages/imgs/pinc_icon.png" alt="PINC Icon" height="12px"> <strong>[PINC](https://arxiv.org/abs/2602.04758)</strong>, physics-informed neural compression for plasma data.
 
 ## Who is this for?
 For researchers at the intersection between scientific machine learning and plasma physics, or in general working on (accelerating) high-dimensional simulations.
@@ -56,7 +56,7 @@ Check out our [blogpost](https://ml-jku.github.io/blog/2025/gyroswin/)!
 
 __Physics-Inspired Neural Compression (PINC)__ investigates compression of (storage intensve) gyrokinetic plasma turbulence data by up to 70,000× while preserving key physical characteristics. It also proposes a unified evaluation pipeline to assess how well different compression techniques retain spatial and temporal turbulence phenomena.
 
-PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2025/pinc/).
+PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2026/pinc/).
 
 
 ## Project structure
@@ -127,5 +127,16 @@ PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2025/pi
     author={Fabian Paischer and Gianluca Galletti and William Hornsby and Paul Setinek and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter},
     booktitle={Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 02 - 07, 2025},
     year={2025}
+}
+```
+
+```
+@misc{galletti2026pinc,
+      title={Physics-Informed Neural Compression of High-Dimensional Plasma Data}, 
+      author={Gianluca Galletti and Gerald Gutenbrunner and Sandeep S. Cranganore and William Hornsby and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter and Fabian Paischer},
+      year={2026},
+      eprint={2602.04758},
+      archivePrefix={arXiv},
+      primaryClass={physics.plasm-ph},
 }
 ```
