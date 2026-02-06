@@ -56,8 +56,8 @@ Additionally, turbulence is interpreted by looking at how energy distributes acr
 
 ### Neural Compression
 We experiment with two dominant techniques:
-_ __Autoencoders (AEs / VQ-VAEs):__ explicit compression through a latent bottleneck, __parameters are shared across data__.
-_ __Neural Implicit Fields (NFs):__ store each snapshot as a tiny __independent__ coordinate-based network, with compression happening implicitly in weight space.
+- __Autoencoders (AEs / VQ-VAEs):__ explicit compression through a latent bottleneck, __parameters are shared across data__.
+- __Neural Implicit Fields (NFs):__ store each snapshot as a tiny __independent__ coordinate-based network, with compression happening implicitly in weight space.
 
 Both optimize a complex MSE loss on the 5D distribution $\boldsymbol{f}$
 
