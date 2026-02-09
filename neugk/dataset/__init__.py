@@ -115,9 +115,11 @@ def get_data(cfg):
             minmax_beta1=cfg.dataset.minmax_beta1,
             minmax_beta2=cfg.dataset.minmax_beta2,
             offset=cfg.dataset.offset,
+            timestep_std_filter=cfg.dataset.timestep_std_filter,
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
             real_potens=cfg.dataset.real_potens,
+            decouple_mu=cfg.dataset.norm_decouple_mu,
             **train_kwargs,
         )
 
@@ -140,9 +142,12 @@ def get_data(cfg):
             minmax_beta1=cfg.dataset.minmax_beta1,
             minmax_beta2=cfg.dataset.minmax_beta2,
             offset=cfg.dataset.offset,
+            timestep_std_filter=cfg.dataset.timestep_std_filter,
+            timestep_std_offset=cfg.dataset.timestep_std_offset,
             separate_zf=cfg.dataset.separate_zf,
             num_workers=cfg.dataset.num_workers,
             real_potens=cfg.dataset.real_potens,
+            decouple_mu=cfg.dataset.norm_decouple_mu,
             **val_kwargs,
         )
 
@@ -192,9 +197,12 @@ def get_data(cfg):
                 minmax_beta1=cfg.dataset.minmax_beta1,
                 minmax_beta2=cfg.dataset.minmax_beta2,
                 offset=cfg.dataset.offset,
+                timestep_std_filter=cfg.dataset.timestep_std_filter,
+                timestep_std_offset=cfg.dataset.timestep_std_offset,
                 separate_zf=cfg.dataset.separate_zf,
                 num_workers=cfg.dataset.num_workers,
                 real_potens=cfg.dataset.real_potens,
+                decouple_mu=cfg.dataset.norm_decouple_mu,
             )
             holdout_samples_valloader = DataLoader(
                 holdout_samples_valset,

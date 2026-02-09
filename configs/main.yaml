@@ -5,6 +5,7 @@ defaults:
   - logging: no_logging
   - training: default
   - validation: default
+  - optional experiment: ???
   # - override hydra/launcher: litai
 
 experiment_id: test

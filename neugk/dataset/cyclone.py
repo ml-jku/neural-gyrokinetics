@@ -94,6 +94,8 @@ class CycloneDataset(Dataset):
         decouple_mu: bool = False,
         num_workers: int = 4,
         real_potens: bool = False,
+        timestep_std_filter: float = None,
+        timestep_std_offset: int = 80,
     ):
         self.input_fields = input_fields
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
@@ -122,6 +124,13 @@ class CycloneDataset(Dataset):
         self.num_workers = num_workers
         self.dir = path
         self.bundle_seq_length = bundle_seq_length
+        self.timestep_std_filter = timestep_std_filter
+        self.timestep_std_offset = timestep_std_offset
+
+        assert not (offset > 0 and timestep_std_filter is not None), (
+            f"Cannot use both offset={offset} and timestep_std_filter={timestep_std_filter}. "
+            "Set offset=0 when using adaptive std-based filtering."
+        )
 
         # with specified files / pattern
         if trajectories is not None:
@@ -312,6 +321,12 @@ class CycloneDataset(Dataset):
                 self.flat_index_to_file_and_tstep[flat_idx] = (file_idx, t_index)
                 self.file_and_tstep_to_flat_index[(file_idx, t_index)] = flat_idx
 
+        # std-based timestep filtering if enabled
+        if self.timestep_std_filter is not None and self.timestep_std_filter > 0:
+            self._apply_timestep_std_filter()
+            # recalculate length after filtering
+            self.length = len(self.flat_index_to_file_and_tstep)
+
         norm_dataset = normalization is not None and normalization_scope == "dataset"
         if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
             # overwrite dataset-wide stats with new stats for data after offset only
@@ -398,13 +413,14 @@ class CycloneDataset(Dataset):
             else list(range(self.length))
         )
 
-        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        # stats filename construction
+        std_filter_tag = f"_std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         has_mu = "_mu" if self.decouple_mu else ""
-        stats_dump_pkl = f"diff_{key}_offset{offset}{has_mu}_{file_hash}_stats.pkl"
-        stats_dump_pkl = os.path.join(self.dir, stats_dump_pkl)
+        stats_filename = f"{key}_offset{offset}{has_mu}{std_filter_tag}_stats.pkl"
+        stats_path = os.path.join(self.dir, stats_filename)
 
-        if os.path.exists(stats_dump_pkl):
-            stats = pickle.load(open(stats_dump_pkl, "rb"))
+        if os.path.exists(stats_path):
+            stats = pickle.load(open(stats_path, "rb"))
         else:
             process_inds = partial(process_t_idx, key=key)
             stats = None
@@ -424,8 +440,8 @@ class CycloneDataset(Dataset):
                     if y_mean is not None:
                         stats.update(y_mean, y_var, y_min, y_max)
 
-            pickle.dump(stats, open(stats_dump_pkl, "wb"))
-
+            pickle.dump(stats, open(stats_path, "wb"))
+            print(f"Saved recomputed stats to {stats_path}")
         return stats
 
     def __getitem__(
@@ -649,6 +665,57 @@ class CycloneDataset(Dataset):
                     raise UserWarning(f"`{cond_name}` not found in metadata {fname}.")
 
             return True
+
+    def _apply_timestep_std_filter(self):
+        """Filter timesteps based on flux being within k*std of reference mean
+        timesteps where flux is outside [mean - k*std, mean + k*std] are removed
+        """
+        k = self.timestep_std_filter
+        ref_offset = self.timestep_std_offset
+        valid_flat_indices = {}
+        flat_idx_counter = 0
+        
+        for file_idx, f_path in enumerate(self.files):
+            with h5py.File(f_path, "r") as f:
+                fluxes = f["metadata/fluxes"][:]
+            # mean and std
+            ref_fluxes = fluxes[ref_offset:]
+            ref_mean = np.mean(ref_fluxes)
+            ref_std = np.std(ref_fluxes)
+            
+            # bounds
+            lower = ref_mean - k * ref_std
+            upper = ref_mean + k * ref_std
+            
+            # filter timesteps
+            old_indices = [
+                (flat_idx, file_idx_stored, t_idx)
+                for flat_idx, (file_idx_stored, t_idx) in self.flat_index_to_file_and_tstep.items()
+                if file_idx_stored == file_idx
+            ]
+            
+            for old_flat_idx, file_idx_stored, t_idx in old_indices:
+                # t_idx is relative to the offset, so we need to add offset to get the original index
+                # target flux is at original_t_index + bundle_seq_length
+                original_t_index = t_idx + self.offsets[file_idx]
+                flux_idx = original_t_index + self.bundle_seq_length
+                
+                # bounds check
+                if flux_idx >= len(fluxes):
+                    flux_idx = len(fluxes) - 1
+                
+                flux_at_t = fluxes[flux_idx]
+                
+                if lower <= flux_at_t <= upper:
+                    valid_flat_indices[flat_idx_counter] = (file_idx, t_idx)
+                    flat_idx_counter += 1
+        
+        # rebuild the mappings
+        self.flat_index_to_file_and_tstep = valid_flat_indices
+        self.file_and_tstep_to_flat_index = {
+            (file_idx, t_idx): flat_idx
+            for flat_idx, (file_idx, t_idx) in valid_flat_indices.items()
+        }
 
     def _get_scale_shift(self, file_index: int, field: str, x) -> Tuple:
         shift, scale = np.array(0.0), np.array(1.0)

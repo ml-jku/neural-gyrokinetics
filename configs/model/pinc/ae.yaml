@@ -1,0 +1,50 @@
+name: ae
+model_type: ae
+bundle_seq_length: 1
+latent_dim: 512
+act_fn: GELU
+decouple_mu: true
+conditioning: ["itg", "dg", "s_hat", "q"]
+extra_zf_loss: false
+init_weights: "xavier_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
+patching_init_weights: "xavier_uniform"
+cond_init_weights: "xavier_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
+
+loss_scheduler:
+  df: null
+  phi: null
+  flux: null
+  phi_int: null
+  flux_int: null
+  phi_cross: null
+  flux_cross: null
+loss_weights:
+  df: 1.0
+extra_loss_weights: {}
+  # flux_int: 1e-4
+  # phi_int: 1e-4
+
+patch:
+  patch_size: [ 4, 0, 4, 5, 4 ]
+  window_size: [ 4, 0, 4, 9, 4 ]
+  # window_size: [ 6, 0, 4, 9, 6 ]
+  merging_hidden_ratio: 1.0
+  unmerging_hidden_ratio: 1.0
+  c_multiplier: 1.0
+
+vit:
+  num_heads: [16]
+  depth: [4]
+  gradient_checkpoint: true
+  use_abs_pe: false
+  use_rpb: true
+  use_rope: false
+  gated_attention: false
+  modulation: dit # "dit", "film"
+  drop_path: 0.1
+
+bottleneck:
+  dim: 128
+  norm_learnable: false
+  num_heads: 2
+  depth: 2

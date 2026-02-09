@@ -5,6 +5,9 @@ normalization_scope: dataset
 minmax_beta1: 8
 minmax_beta2: 4
 offset: 80
+timestep_std_filter: null # std-based timestep filtering threshold (null to disable)
+timestep_std_offset: 80
+norm_decouple_mu: false
 subsample: 1
 spatial_ifft: true
 separate_zf: true
@@ -15,8 +18,7 @@ num_workers: 4
 active_keys: ["re", "im"]
 input_fields: ["df"]
 # training_trajectories: "iteration_{0-7,9-12,14-99,101-114,116-130,132-147,149-199,201-234,236-261,263-299}.h5"
-# training_trajectories: "iteration_{0-7,9-12,14-99}.h5"
-training_trajectories: ["iteration_13.h5"]
+training_trajectories: "iteration_{0-5,7-12,14-31,33-82,84-99}.h5"
 validation_trajectories: ["iteration_13.h5"]
 partial_holdouts:
 training_cond_filters:

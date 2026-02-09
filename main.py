@@ -27,9 +27,12 @@ from neugk.diffusion import get_diffusion_runner
 
 def dispatch_runner(rank, config, world_size):
     workflow = config.get("workflow", "gyroswin")
-    if workflow == "gyroswin":
+    # get base workflow name (handle pinc_autoencoder, pinc_peft,...)
+    base_workflow = workflow.split("_")[0] if "_" in workflow else workflow
+    
+    if base_workflow == "gyroswin":
         GyroSwinRunner(rank, config, world_size=world_size)()
-    elif workflow == "pinc":
+    elif base_workflow == "pinc":
         PINCRunner(rank, config, world_size=world_size)()
     elif workflow == "diffusion":
         get_diffusion_runner(rank, config, world_size=world_size)()

@@ -84,7 +84,8 @@ class CycloneAEDataset(CycloneDataset):
 
         file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
         has_mu = "_mu" if self.decouple_mu else ""
-        stats_dump_pkl = f"diff_{key}_offset{offset}{has_mu}_{file_hash}_stats.pkl"
+        std_filter_tag = f"_std{self.timestep_std_filter}" if self.timestep_std_filter else ""
+        stats_dump_pkl = f"diff_{key}_offset{offset}{has_mu}{std_filter_tag}_{file_hash}_stats.pkl"
         stats_dump_pkl = os.path.join(self.dir, stats_dump_pkl)
 
         if os.path.exists(stats_dump_pkl):
@@ -108,7 +109,7 @@ class CycloneAEDataset(CycloneDataset):
                     stats.update(x_mean, x_var, x_min, x_max)
 
             pickle.dump(stats, open(stats_dump_pkl, "wb"))
-
+            print(f"Saved recomputed stats to {stats_dump_pkl}")
         return stats
 
     def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneAESample:

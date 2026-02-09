@@ -65,21 +65,12 @@ class PINCRunner(BaseRunner):
             ),
         )
 
-        # gradient balancer
         self.use_amp = self.cfg.amp.enable
         self.use_bf16 = (
             self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
         )
         self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
         self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
-
-        self.grad_balancer = PINCGradientBalancer(
-            self.opt,
-            mode=self.cfg.training.gradnorm_balancer,
-            scaler=self.scaler,
-            clip_grad=self.cfg.training.clip_grad,
-            n_tasks=len(self.loss_wrap.active_losses),
-        )
 
         self.model = get_autoencoder(
             self.cfg, dataset=self.trainset, rank=self.rank
@@ -121,6 +112,15 @@ class PINCRunner(BaseRunner):
                     lr=self.cfg.training.learning_rate,
                     weight_decay=self.cfg.training.weight_decay,
                 )
+
+        # gradient balancer
+        self.grad_balancer = PINCGradientBalancer(
+            self.opt,
+            mode=self.cfg.training.gradnorm_balancer,
+            scaler=self.scaler,
+            clip_grad=self.cfg.training.clip_grad,
+            n_tasks=len(self.loss_wrap.active_losses),
+        )
 
     def _load_checkpoints(self):
         # ckpt_path = self.cfg.ae_checkpoint
