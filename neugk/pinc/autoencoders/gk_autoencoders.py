@@ -1,7 +1,9 @@
 from typing import Optional, List, Dict
 
+from math import prod
 import torch
 import torch.nn as nn
+from einops import rearrange
 
 from neugk.models.layers import MLP
 from neugk.models.gk_unet import Swin5DUnet
@@ -350,7 +352,8 @@ class Swin5DSimSiam(Swin5DAE):
         # TODO(diff) make conditioning uniform across models
         super().__init__(*args, **kwargs)
 
-        self.predictor = MLP([self.bottleneck_dim, 4 * self.bottleneck_dim])
+        predictor_dim = prod(self.bottleneck_grid_size) * self.bottleneck_dim
+        self.predictor = MLP([predictor_dim, predictor_dim // 8, predictor_dim])
 
         del self.up_blocks
         del self.middle_post
@@ -384,5 +387,6 @@ class Swin5DSimSiam(Swin5DAE):
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         zdf, condition, pad_axes = self.encode(df, condition=condition)
-        xdf = self.predictor(zdf)
+        xdf = self.predictor(zdf.flatten(start_dim=1))
+        xdf = xdf.view(xdf.shape[0], *(*self.bottleneck_grid_size, self.bottleneck_dim))
         return (zdf, xdf), condition, pad_axes

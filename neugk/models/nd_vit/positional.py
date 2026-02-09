@@ -32,7 +32,7 @@ class PositionalEmbedding(nn.Module):
         if learnable:
             self.pos_embed = nn.Parameter(pos_embed)
         else:
-            self.register_buffer("pos_embed", pos_embed)
+            self.register_buffer("pos_embed", pos_embed, persistent=False)
 
         if dim < len(grid_size) and init_weights == "sincos":
             init_weights = "rand"
@@ -101,7 +101,7 @@ class RPB(nn.Module):
         # normalize to -8, 8
         rpb = 8 * rpb
         rpb = torch.sign(rpb) * torch.log2(torch.abs(rpb) + 1.0) / np.log2(8)
-        self.register_buffer("rpb", rpb)  # NOTE: fsdp does not shard buffer
+        self.register_buffer("rpb", rpb, persistent=False)
 
         # index with distances
         grid = torch.stack(
@@ -113,12 +113,16 @@ class RPB(nn.Module):
             center = max(np.prod([(2 * w - 1) for w in grid_size[(i + 1) :]]), 1)
             dists[i] = (dists[i] + grid_size[i] - 1) * center
 
-        self.register_buffer("rpb_idx", dists.sum(0))
+        # NOTE: for DDP
+        # self.register_buffer("rpb_idx", dists.sum(0), persistent=False)
+        self.rpb_idx = dists.sum(0)
 
     def reset_parameters(self, init_weights: str):
         pass  # TODO
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.rpb_idx.device != x.device:
+            self.rpb_idx = self.rpb_idx.to(x.device)
         # rpb from swinv2
         sl = x.shape[2]
         rpb = self.cpb_mlp(self.rpb).view(-1, self.num_heads)
@@ -168,7 +172,7 @@ class RotaryPE(nn.Module):
         if learnable:
             self.rotations = nn.Parameter(rotations)
         else:
-            self.register_buffer("rotations", rotations)
+            self.register_buffer("rotations", rotations, persistent=False)
 
     def forward(self, x: torch.Tensor, flatten: bool = False) -> torch.Tensor:
         if x.ndim < len(self.grid_size) + 3:

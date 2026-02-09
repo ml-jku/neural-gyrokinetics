@@ -57,7 +57,7 @@ class BaseRunner:
         self.loss_scheduler_dict = {}
 
     def setup_data(self):
-        datasets, dataloaders, self.augmentations = get_data(self.cfg)
+        datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.rank)
         if len(datasets) == 3:
             self.trainset, self.valsets = datasets[0], datasets[1:]
             self.trainloader, self.valloaders = dataloaders[0], dataloaders[1:]

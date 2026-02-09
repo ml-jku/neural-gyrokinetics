@@ -1,7 +1,7 @@
 name: simsiam
 model_type: simsiam
 bundle_seq_length: 1
-latent_dim: 512
+latent_dim: 1024
 act_fn: GELU
 decouple_mu: true
 conditioning: ["itg", "dg", "s_hat", "q"]  # "timestep"
@@ -11,15 +11,6 @@ init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uni
 patching_init_weights: "kaiming_uniform"
 cond_init_weights: "kaiming_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
 
-vq:
-  codebook_size: 8192
-  embedding_dim: 256
-  commitment_weight: 0.25
-  codebook_type: "euclidean" # "euclidean" or "cosine" 
-  ema_decay: 0.99
-  entropy_loss_weight: 0.01
-  threshold_ema_dead_code: 2
-  
 loss_scheduler:
   df: null
   phi: null
@@ -56,10 +47,10 @@ vit:
   use_rope: false
   gated_attention: false
   modulation: dit # "dit", "film"
-  drop_path: 0.1
+  drop_path: 0.0
 
 bottleneck:
-  dim: 32
-  norm_learnable: true
+  dim: 128
+  norm_learnable: false
   num_heads: 2
   depth: 2

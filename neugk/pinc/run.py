@@ -80,7 +80,9 @@ class PINCRunner(BaseRunner):
         self._load_checkpoints()
 
         if self.use_ddp:
-            self.model = DDP(self.model, device_ids=[self.rank])
+            self.model = DDP(
+                self.model, device_ids=[self.rank], find_unused_parameters=True
+            )
 
         is_muon = (
             hasattr(self.cfg.training, "optimizer")
@@ -334,6 +336,7 @@ class PINCRunner(BaseRunner):
             with torch.autocast(
                 str(self.device), dtype=self.amp_dtype, enabled=self.use_amp
             ):
+                torch.autograd.set_detect_anomaly(True)
                 # dispatch to correct step function
                 if self.cfg.stage == "autoencoder":
                     step_fn = train_step_autoencoder
@@ -393,6 +396,8 @@ class PINCRunner(BaseRunner):
         return loss_logs, info_dict
 
     def evaluate(self, epoch):
+        if self.cfg.stage == "simsiam":
+            return {}, None
         log_metric_dict, val_plots, self.loss_val_min = pinc_evaluate(
             rank=self.rank,
             world_size=self.world_size,

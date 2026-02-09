@@ -5,12 +5,10 @@ normalization_scope: dataset
 minmax_beta1: 8
 minmax_beta2: 4
 offset: 80
-timestep_std_filter: null # std-based timestep filtering threshold (null to disable)
-timestep_std_offset: 80
-norm_decouple_mu: false
 subsample: 1
 spatial_ifft: true
 separate_zf: true
+norm_decouple_mu: true
 real_potens: true
 split_into_bands: null
 log_transform: false
@@ -31,3 +29,6 @@ eval_cond_filters:
 augment:
   noise: false
   noise_std: 1e-4
+
+timestep_std_filter: null  # std-based timestep filtering threshold (null to disable)
+timestep_std_offset: 80

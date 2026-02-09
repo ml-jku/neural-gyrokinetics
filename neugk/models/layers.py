@@ -158,7 +158,9 @@ class IntegerSincosConditionEmbed(nn.Module):
         self.cond_dim = cond_dim
         for i, m in enumerate(max_size):
             self.register_buffer(
-                f"cond_embed{i}", get_sincos_1d_from_seqlen(m, dim // n_cond)
+                f"cond_embed{i}",
+                get_sincos_1d_from_seqlen(m, dim // n_cond),
+                persistent=False,
             )
         if use_mlp:
             self.mlp = nn.Sequential(nn.Linear(dim, cond_dim), act_fn())
@@ -267,6 +269,7 @@ class ContinuousConditionEmbed(nn.Module):
         self.register_buffer(
             "omega",
             1.0 / max_wavelength ** (torch.arange(0, cond_per_wave, 2) / cond_per_wave),
+            persistent=False,
         )
         self.cond_dim = 4 * dim
         self.mlp = nn.Sequential(

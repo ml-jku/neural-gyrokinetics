@@ -210,7 +210,9 @@ class WindowAttention(nn.Module):
             self.logit_scale = nn.Parameter(
                 torch.log(10 * torch.ones((num_heads, 1, 1)))
             )
-            self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
+            self.register_buffer(
+                "max_logits", torch.log(torch.tensor(1.0 / 0.01)), persistent=False
+            )
             self.attn_drop = nn.Dropout(attn_drop)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -665,7 +667,7 @@ class SwinLayer(nn.Module):
             )
             mask_dims = [ceil(grid_size[i] / w) * w for i, w in enumerate(window_size)]
             attn_mask = compute_mask(mask_dims, window_size, shift_size)
-            self.register_buffer("attn_mask", attn_mask)
+            self.register_buffer("attn_mask", attn_mask, persistent=False)
         else:
             self.attn_mask = None
 

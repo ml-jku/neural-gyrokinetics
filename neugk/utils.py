@@ -34,6 +34,7 @@ assert (
 ), "wandb is not installed but is selected as default for logging, please install via pip install wandb"
 import wandb  # noqa
 
+
 class WandbManager:
     def __init__(self) -> None:
         self._initialized = False
@@ -42,7 +43,7 @@ class WandbManager:
         if not isinstance(args, dict):
             args = args.__dict__
         project_name = args["logging"].get("project", "debug")
-        
+
         name_parts = []
         name_suffix = args["logging"].get("name_suffix", None)
         if (

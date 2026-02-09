@@ -102,9 +102,8 @@ def train_step_simsiam(
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     def D(p, z):
         z = z.detach()
-        p = F.normalize(p, dim=1)
-        z = F.normalize(z, dim=1)
-        return -(p * z).sum(dim=1).mean()
+        p, z = F.normalize(p, dim=1), F.normalize(z, dim=1)
+        return -torch.mean(torch.sum(p * z, dim=1))
 
     model.train()
 
@@ -115,8 +114,7 @@ def train_step_simsiam(
 
     loss = 0.5 * D(p1, z2) + 0.5 * D(p2, z1)
 
-    losses = {"simsiam_loss": loss}
-
+    losses = {"simsiam_loss": loss, "latent_std": z1.std()}
     return loss, losses
 
 

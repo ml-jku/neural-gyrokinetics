@@ -5,8 +5,7 @@ defaults:
   - logging: no_logging
   - training: default
   - validation: default
-  - optional experiment: ???
-  # - override hydra/launcher: litai
+  - optional experiment: null
 
 experiment_id: test
 seed: 0
@@ -15,8 +14,8 @@ ddp:
   enable: false
   n_nodes: 1
 amp: 
-  enable: false  # set to false when using rope or integrals in training (complex / fft)
-  bfloat: false  # set to false for fno
+  enable: true  # set to false when using rope or integrals in training (complex / fft)
+  bfloat: true  # set to false for fno
 mode: "train"
 eval: true
 device: "cuda"

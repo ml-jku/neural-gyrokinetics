@@ -414,7 +414,9 @@ class CycloneDataset(Dataset):
         )
 
         # stats filename construction
-        std_filter_tag = f"_std{self.timestep_std_filter}" if self.timestep_std_filter else ""
+        std_filter_tag = (
+            f"_std{self.timestep_std_filter}" if self.timestep_std_filter else ""
+        )
         has_mu = "_mu" if self.decouple_mu else ""
         stats_filename = f"{key}_offset{offset}{has_mu}{std_filter_tag}_stats.pkl"
         stats_path = os.path.join(self.dir, stats_filename)
@@ -674,7 +676,7 @@ class CycloneDataset(Dataset):
         ref_offset = self.timestep_std_offset
         valid_flat_indices = {}
         flat_idx_counter = 0
-        
+
         for file_idx, f_path in enumerate(self.files):
             with h5py.File(f_path, "r") as f:
                 fluxes = f["metadata/fluxes"][:]
@@ -682,34 +684,37 @@ class CycloneDataset(Dataset):
             ref_fluxes = fluxes[ref_offset:]
             ref_mean = np.mean(ref_fluxes)
             ref_std = np.std(ref_fluxes)
-            
+
             # bounds
             lower = ref_mean - k * ref_std
             upper = ref_mean + k * ref_std
-            
+
             # filter timesteps
             old_indices = [
                 (flat_idx, file_idx_stored, t_idx)
-                for flat_idx, (file_idx_stored, t_idx) in self.flat_index_to_file_and_tstep.items()
+                for flat_idx, (
+                    file_idx_stored,
+                    t_idx,
+                ) in self.flat_index_to_file_and_tstep.items()
                 if file_idx_stored == file_idx
             ]
-            
+
             for old_flat_idx, file_idx_stored, t_idx in old_indices:
                 # t_idx is relative to the offset, so we need to add offset to get the original index
                 # target flux is at original_t_index + bundle_seq_length
                 original_t_index = t_idx + self.offsets[file_idx]
                 flux_idx = original_t_index + self.bundle_seq_length
-                
+
                 # bounds check
                 if flux_idx >= len(fluxes):
                     flux_idx = len(fluxes) - 1
-                
+
                 flux_at_t = fluxes[flux_idx]
-                
+
                 if lower <= flux_at_t <= upper:
                     valid_flat_indices[flat_idx_counter] = (file_idx, t_idx)
                     flat_idx_counter += 1
-        
+
         # rebuild the mappings
         self.flat_index_to_file_and_tstep = valid_flat_indices
         self.file_and_tstep_to_flat_index = {
