@@ -10,6 +10,7 @@ from neugk.dataset.cyclone import (
     CoordinateCycloneDataset,
 )
 from neugk.dataset.cyclone_diff import CycloneAEDataset, CycloneAESample
+from neugk.dataset.cyclone_diff_simsiam import CycloneSimSiamDataset
 
 
 def check_partial_holdouts(dataset_cfg):
@@ -64,6 +65,7 @@ def get_data(cfg):
             assert not (
                 "flux" in input_fields and "fluxavg" in input_fields
             ), "Cannot predict both fluxavg and flux..."
+            train_input_fields = val_input_fields = input_fields
             # NOTE: for autoregressive evaluation, crop end of trajectory
             train_kwargs = {}
             val_kwargs = {"tail_offset": cfg.validation.n_eval_steps}
@@ -75,21 +77,28 @@ def get_data(cfg):
             else:
                 dataset_class = CycloneDataset
         elif cfg.workflow == "pinc":
-            input_fields = ["df", "phi", "flux"]
+
+            train_input_fields = ["df", "phi", "flux"]
+            val_input_fields = ["df", "phi", "flux"]
             train_kwargs = {"conditions": list(cfg.model.conditioning)}
             val_kwargs = {"conditions": list(cfg.model.conditioning)}
-            dataset_class = CycloneAEDataset
+            if cfg.stage == "simsiam":
+                dataset_class = CycloneSimSiamDataset
+            else:
+                dataset_class = CycloneAEDataset
         elif cfg.workflow == "diffusion":
-            input_fields = ["df", "phi", "flux"]
+            train_input_fields = cfg.dataset.input_fields
+            val_input_fields = ["df", "phi", "flux"]
             train_kwargs = {"conditions": list(cfg.model.conditioning)}
             val_kwargs = {"conditions": list(cfg.model.conditioning)}
             dataset_class = CycloneAEDataset
+            # dataset_class = CycloneAEDatasetGaussianized
         else:
             raise NotImplementedError
 
         trainset = dataset_class(
             active_keys=cfg.dataset.active_keys,
-            input_fields=input_fields,
+            input_fields=train_input_fields,
             path=cfg.dataset.path,
             split="train",
             random_seed=cfg.seed,
@@ -114,7 +123,7 @@ def get_data(cfg):
 
         holdout_trajectories_valset = dataset_class(
             active_keys=cfg.dataset.active_keys,
-            input_fields=input_fields,
+            input_fields=val_input_fields,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,

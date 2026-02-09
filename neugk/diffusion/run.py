@@ -11,6 +11,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
 from torch.utils._pytree import tree_map
 from diffusers import DDPMScheduler
+from torch.distributions import StudentT, Laplace
+from torch.utils._pytree import tree_map
+from torchdiffeq import odeint
 
 from neugk.diffusion.models import get_diffusion_model, DummyAE
 from neugk.diffusion.evaluate import evaluate as diff_evaluate
@@ -81,6 +84,8 @@ class DDPMRunner(BaseRunner):
         self.input_fields = set(self.cfg.dataset.input_fields)
         self.idx_keys = ["file_index", "timestep_index"]
 
+        self.i = 0
+
     def _load_checkpoints(self):
         # Load the diffusion model checkpoint (not the VAE one)
         ckpt_path = os.path.join(self.cfg.output_path, "ckp.pth")
@@ -104,7 +109,7 @@ class DDPMRunner(BaseRunner):
         self.cur_update_step = self.start_epoch * len(self.trainloader)
 
     def forward_step_diffusion(self, sample: Dict[str, torch.Tensor], condition):
-        df = sample["df"]
+        df = sample["phi"]
         with torch.no_grad():
             latents, _, _ = self.autoencoder.encode(df, condition=condition)
         bs = latents.shape[0]
@@ -113,14 +118,33 @@ class DDPMRunner(BaseRunner):
         timesteps = torch.randint(0, n_timesteps, (bs,), device=self.device).long()
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
         model_output = self.model(noisy_latents, tstep=timesteps, condition=condition)
+        # target selection
         pred_type = self.noise_scheduler.config.prediction_type
         if pred_type == "epsilon":
             target = noise
-        elif pred_type == "sample":
-            target = latents  # TODO(diff) is this correct or consistency model?
         elif pred_type == "v_prediction":
             target = self.noise_scheduler.get_velocity(latents, noise, timesteps)
-        return F.mse_loss(model_output, target)
+        loss = F.mse_loss(model_output, target, reduction="none")
+        loss = loss.flatten(1).mean(1)
+        # min snr loss weighting
+        alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(self.device)
+        alpha_prod_t = alphas_cumprod[timesteps]
+        snr = alpha_prod_t / (1 - alpha_prod_t)
+        snr_gamma = 5.0
+        if pred_type == "v_prediction":
+            weights = torch.clamp(snr, max=snr_gamma) / (snr + 1)
+        elif pred_type == "epsilon":
+            weights = torch.clamp(snr, max=snr_gamma) / snr
+
+        self.i += 1
+        if self.i % 200 == 0:
+            from neugk.pinc.neural_fields.nf_utils import plotND
+
+            x = self.sample(condition, df)["df"][0]
+            fig = plotND(x, df[0].detach().cpu(), n=(x.ndim - 1), cmap="plasma")
+            fig.savefig(f"tmp/fig{self.i}.png")
+
+        return (loss * weights).mean()
 
     def train_epoch(self, epoch):
         loss_logs = defaultdict(list)
@@ -192,12 +216,12 @@ class DDPMRunner(BaseRunner):
         self,
         condition: torch.Tensor,
         dummy: torch.Tensor,
-        num_inference_steps: int = 100,
     ):
         self.model.eval()
         bs = condition.shape[0]
         latents = torch.randn((bs, *self.model.latent_shape), device=self.device)
-        self.noise_scheduler.set_timesteps(num_inference_steps)
+        n_train_steps = self.noise_scheduler.config.num_train_timesteps
+        self.noise_scheduler.set_timesteps(n_train_steps)
 
         for t in self.noise_scheduler.timesteps:
             t_batch = torch.full((bs,), t, device=self.device, dtype=torch.long)
@@ -227,3 +251,161 @@ class DDPMRunner(BaseRunner):
             loss_val_min=self.loss_val_min,
         )
         return log_metric_dict, val_plots
+
+
+class StudentTRunner(DDPMRunner):
+    """https://arxiv.org/abs/2410.14171"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.nu = getattr(self.cfg.model, "nu", 5.0)
+        assert self.nu > 2, "not sure why? I think variance is undefined"
+        self.distr = StudentT(torch.tensor(self.nu, device=self.device))
+
+    def forward_step_diffusion(self, sample: Dict[str, torch.Tensor], condition):
+        assert self.noise_scheduler.config.prediction_type == "epsilon"
+        df = sample["df"]
+        with torch.no_grad():
+            latents, _, _ = self.autoencoder.encode(df, condition=condition)
+        bs = latents.shape[0]
+        # sampled from student's t distribution
+        noise = self.distr.sample(latents.shape)
+        # rest stays the same
+        n_timesteps = self.noise_scheduler.config.num_train_timesteps
+        timesteps = torch.randint(0, n_timesteps, (bs,), device=self.device).long()
+        noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+        model_output = self.model(noisy_latents, tstep=timesteps, condition=condition)
+
+        # eq 9
+        loss = F.mse_loss(model_output, noise, reduction="none")
+        loss = loss.flatten(1).mean(1)
+
+        alphas_cumprod = self.noise_scheduler.alphas_cumprod.to(self.device)
+        alpha_prod_t = alphas_cumprod[timesteps]
+        snr = alpha_prod_t / (1 - alpha_prod_t)
+        # NOTE: change, effective variance
+        var_factor = self.nu / (self.nu - 2)
+        snr = snr / var_factor
+
+        snr_gamma = 5.0
+        weights = torch.clamp(snr, max=snr_gamma) / snr
+
+        self.i += 1
+        if self.i % 50 == 0:
+            from neugk.pinc.neural_fields.nf_utils import plotND
+
+            plotND(self.sample(condition, df)["df"][0]).savefig(f"tmp/fig{self.i}.png")
+
+        return (loss * weights).mean()
+
+    @torch.no_grad()
+    def sample(
+        self,
+        condition: torch.Tensor,
+        dummy: torch.Tensor,
+        num_inference_steps: int = 100,
+    ):
+        self.model.eval()
+        bs = condition.shape[0]
+        # sampled from student's t distribution
+        latents = self.distr.sample((bs, *self.model.latent_shape))
+        # rest stays the same
+        self.noise_scheduler.set_timesteps(num_inference_steps)
+
+        for t in self.noise_scheduler.timesteps:
+            t_batch = torch.full((bs,), t, device=self.device, dtype=torch.long)
+            pred = self.model(latents, tstep=t_batch, condition=condition)
+            step_output = self.noise_scheduler.step(pred, t, latents)
+            latents = step_output.prev_sample
+
+        dummy = torch.zeros((bs, *dummy.shape[1:])).to(self.device)
+        _, ae_cond, pad_axes = self.autoencoder.encode(dummy, condition=condition)
+        decoded = self.autoencoder.decode(latents, pad_axes, condition=ae_cond)
+        self.model.train()
+        return decoded
+
+
+class LaplaceFlowRunner(DDPMRunner):
+    """Rectified Flow / Optimal Transport with Laplace Noise"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.nu = getattr(self.cfg.model, "nu", 5.0)
+        self.laplace_scale = getattr(self.cfg.model, "laplace_scale", 0.1)
+        self.mix_ratio = getattr(self.cfg.model, "mix_ratio", 0.5)
+
+        # self.distr_student = StudentT(torch.tensor(self.nu, device=self.device))
+        # self.distr_laplace = Laplace(
+        #     torch.tensor(0.0, device=self.device),
+        #     torch.tensor(self.laplace_scale, device=self.device)
+        # )
+
+        from torch.distributions import Normal
+
+        self.distr_student = Normal(
+            torch.tensor(0.0, device=self.device), torch.tensor(1.0, device=self.device)
+        )
+        self.distr_laplace = Normal(
+            torch.tensor(0.0, device=self.device), torch.tensor(1.0, device=self.device)
+        )
+
+    def _sample_mixture(self, shape):
+        samples_laplace = self.distr_laplace.sample(shape)
+        samples_student = self.distr_student.sample(shape)
+        mask = torch.bernoulli(torch.full(shape, self.mix_ratio, device=self.device))
+        return torch.where(mask.bool(), samples_laplace, samples_student)
+
+    def forward_step_diffusion(self, sample: Dict[str, torch.Tensor], condition):
+        df = sample["df"]
+        with torch.no_grad():
+            latents, _, _ = self.autoencoder.encode(df, condition=condition)
+        bs = latents.shape[0]
+        # x0 = self.distr.sample(latents.shape)
+        x0, x1 = self._sample_mixture(latents.shape), latents
+        n_train_steps = self.noise_scheduler.config.num_train_timesteps
+        t_indices = torch.randint(0, n_train_steps, (bs,), device=self.device).long()
+        t = (t_indices.float() / n_train_steps).view(-1, *[1] * (x1.ndim - 1))
+        # linear scheduler
+        xt = t * x1 + (1.0 - t) * x0
+        target_v = x1 - x0
+        pred = self.model(xt, tstep=t_indices, condition=condition)
+        loss = F.mse_loss(pred, target_v)
+
+        self.i += 1
+        if self.i % 50 == 0:
+            from neugk.pinc.neural_fields.nf_utils import plotND
+
+            plotND(self.sample(condition, df)["df"][0]).savefig(f"tmp/fig{self.i}.png")
+
+        return loss
+
+    @torch.no_grad()
+    def sample(self, condition: torch.Tensor, dummy: torch.Tensor):
+        self.model.eval()
+        bs = condition.shape[0]
+        # latents = self.distr.sample((bs, *self.model.latent_shape))
+        latents = self._sample_mixture((bs, *self.model.latent_shape))
+        n_train_steps = self.noise_scheduler.config.num_train_timesteps
+
+        class ODEFunc(torch.nn.Module):
+            def __init__(self, model):
+                super().__init__()
+                self.model = model
+
+            def forward(self, t, x):
+                t_idx = int(t.item() * n_train_steps)
+                t_idx = min(max(t_idx, 0), n_train_steps - 1)
+                t_batch = torch.full((bs,), t_idx, device=x.device, dtype=torch.long)
+                return self.model(x, tstep=t_batch, condition=condition)
+
+        t_span = torch.tensor([0.0, 1.0], device=self.device)
+        func = ODEFunc(self.model)
+        pred = odeint(func, latents, t_span, rtol=1e-5, atol=1e-5, method="rk4")[-1]
+
+        # dummy = torch.zeros((bs, *dummy.shape[1:])).to(self.device)
+        _, ae_cond, pad_axes = self.autoencoder.encode(dummy, condition=condition)
+        decoded = self.autoencoder.decode(pred, pad_axes, condition=ae_cond)
+        self.model.train()
+        return decoded

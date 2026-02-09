@@ -125,6 +125,8 @@ def plotND(
         labels = [r"t", r"v_{\parallel}", r"\mu", r"s", r"x", r"y"]
     if n == 5:
         labels = [r"v_{\parallel}", r"\mu", r"s", r"x", r"y"]
+    if n == 4:
+        labels = [r"v_{\parallel}", r"s", r"x", r"y"]
     if n == 3:
         labels = [r"x", r"s", r"y"]
     if isinstance(x, torch.Tensor):
@@ -147,12 +149,16 @@ def plotND(
         other = tuple([o for o in range(n) if o != i and o != j])
         if aggregate == "mean":
             xx = x.mean(0).mean(other)
+        if aggregate == "std":
+            xx = x.mean(0).std(other)
         if aggregate == "slice":
             xx = x.mean(0)[*[x.shape[o + 1] // 2 for o in other]]
         if y is not None:
             spacer = np.nan * np.ones((xx.shape[0], 1))
             if aggregate == "mean":
                 yy = y.mean(0).mean(other)
+            if aggregate == "std":
+                yy = y.mean(0).std(other)
             if aggregate == "slice":
                 yy = y.mean(0)[*[y.shape[o + 1] // 2 for o in other]]
             xx = np.concat([xx, spacer, yy], -1)
@@ -480,7 +486,7 @@ def optical_flow_5d(
     # account for deltas
     deltas = deltas if deltas is not None else np.ones(x1.shape[0])
     deltas = deltas.reshape(-1, *[1] * 5)
-    xt = x2 - x1 / deltas
+    xt = (x2 - x1) / deltas
     x_mid = 0.5 * (x1 + x2)
 
     # generalized 5d spatial gradients

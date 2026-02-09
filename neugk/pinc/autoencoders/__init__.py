@@ -16,7 +16,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
     # Get model type (ae, vae, vqvae)
     model_type = getattr(ae_cfg, "model_type", "ae")
 
-    if ae_cfg.name in ["ae", "vae", "vqvae"]:
+    if ae_cfg.name in ["ae", "vae", "vqvae", "simsiam"]:
         # Import appropriate model class
         if model_type == "ae":
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DAE as AE
@@ -24,6 +24,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVAE as AE
         elif model_type == "vqvae":
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVQVAE as AE
+        elif model_type == "simsiam":
+            from neugk.pinc.autoencoders.gk_autoencoders import Swin5DSimSiam as AE
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 

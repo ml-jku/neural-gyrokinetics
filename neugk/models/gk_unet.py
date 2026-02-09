@@ -609,39 +609,34 @@ class SwinNDUnet(nn.Module):
         x, pad_axes = self.patch_encode(x)
         if self.patch_skip:
             first_res = x.clone()
-
         # backbone
         cond = self.condition(kwargs)
-
         # down path
         feature_maps = []
         for blk in self.down_blocks:
             x, x_pre = blk(x, **cond)
             feature_maps.append(x_pre)
-
         # middle block
         if hasattr(self, "middle_pe"):
             x = self.middle_pe(x)
         x = self.middle(x, **cond)
         x = self.middle_upscale(x)
-
         # up path
         feature_maps = feature_maps[::-1]
         for i, blk in enumerate(self.up_blocks):
             x = blk(x, s=feature_maps[i], **cond)
-
         # expand to original
         if self.patch_skip:
             x = torch.cat([x, first_res], -1)
-
-        x = self.patch_decode(x, pad_axes, condition=cond["condition"])
-
-        return x
+        return self.patch_decode(x, pad_axes, condition=cond["condition"])
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
+        x = rearrange(x, "b c ... -> b ... c")
+        # pad to patch blocks
+        x, pad_axes = pad_to_blocks(x, self.patch_size)
         # linear flat patch embedding
         x = self.patch_embed(x)
-        return x
+        return x, pad_axes
 
     def patch_decode(
         self,
@@ -709,13 +704,12 @@ class Swin5DUnet(SwinNDUnet):
         return {"df": super().forward(x, **kwargs)}
 
     def patch_encode(self, df: torch.Tensor):
+        df = rearrange(df, "b c ... -> b ... c")
         # decouple mu and add positional information
         if self.decouple_mu:
-            df = rearrange(df, "b c ... -> b ... c")
             df = self.vel_pe(df)
-            df = rearrange(df, "b vp mu ... c -> b (c mu) vp ...")
+            df = rearrange(df, "b vp mu ... c -> b vp ... (c mu)")
         # pad to patch blocks
-        df = rearrange(df, "b c ... -> b ... c")
         df, pad_axes = pad_to_blocks(df, self.patch_size)
         # linear flat patch embedding
         df = self.patch_embed(df)

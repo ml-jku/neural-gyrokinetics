@@ -22,7 +22,7 @@ from neugk.pinc.autoencoders.ae_utils import restart_config_autoencoder
 
 from neugk.gyroswin import GyroSwinRunner
 from neugk.pinc import PINCRunner
-from neugk.diffusion import DDPMRunner
+from neugk.diffusion import get_diffusion_runner
 
 
 def dispatch_runner(rank, config, world_size):
@@ -32,7 +32,7 @@ def dispatch_runner(rank, config, world_size):
     elif workflow == "pinc":
         PINCRunner(rank, config, world_size=world_size)()
     elif workflow == "diffusion":
-        DDPMRunner(rank, config, world_size=world_size)()
+        get_diffusion_runner(rank, config, world_size=world_size)()
     else:
         raise NotImplementedError
 
@@ -142,7 +142,7 @@ def main(config: DictConfig):
         else:
             # set training style for pinc
             workflow = config.get("workflow", "unknown")
-            stage = workflow.split("_")[-1] if "_" in workflow else "autoencoder"
+            stage = config.get("stage", "autoencoder")
             config.stage = stage
             if stage == "autoencoder":
                 name = f"{stage}_{config.model.name}"

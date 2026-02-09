@@ -23,6 +23,7 @@ from neugk.pinc.autoencoders.ae_utils import (
     load_autoencoder,
     train_step_autoencoder,
     train_step_peft,
+    train_step_simsiam,
 )
 from neugk.pinc.peft_utils import setup_peft_stage
 
@@ -334,11 +335,14 @@ class PINCRunner(BaseRunner):
                 str(self.device), dtype=self.amp_dtype, enabled=self.use_amp
             ):
                 # dispatch to correct step function
-                step_fn = (
-                    train_step_peft
-                    if self.cfg.stage == "peft"
-                    else train_step_autoencoder
-                )
+                if self.cfg.stage == "autoencoder":
+                    step_fn = train_step_autoencoder
+                if self.cfg.stage == "peft":
+                    step_fn = train_step_peft
+                if self.cfg.stage == "simsiam":
+                    step_fn = train_step_simsiam
+                    xs["df_aug"] = getattr(sample, "df_aug").to(self.device)
+
                 loss, losses = step_fn(
                     self.cfg,
                     model=self.model,

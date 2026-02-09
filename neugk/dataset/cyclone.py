@@ -13,8 +13,9 @@ from torch.utils._pytree import tree_map
 import random
 import pickle
 from functools import partial
+import hashlib
 
-from neugk.utils import expand_as, RunningMeanStd
+from neugk.utils import RunningMeanStd
 
 
 @dataclass
@@ -327,8 +328,6 @@ class CycloneDataset(Dataset):
                 self.stats[k]["full"]["std"] = (stats[k].var ** 0.5).astype(np.float32)
                 self.stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
                 self.stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
-                self.stats[k]["full"]["q02"] = stats[k].q02.astype(np.float32)
-                self.stats[k]["full"]["q98"] = stats[k].q98.astype(np.float32)
 
         # TODO assume same resolution across all files
         with h5py.File(self.files[0], "r") as f:
@@ -392,15 +391,20 @@ class CycloneDataset(Dataset):
 
             return x_mean, x_var, x_min, x_max, y_mean, y_var, y_min, y_max
 
-        if key in ["df", "phi"]:
-            t_indices = list(range(0, self.length, 2))
-        else:
-            t_indices = list(range(0, self.length))
+        # NOTE: subsample by two for normalization stats!
+        t_indices = (
+            list(range(0, self.length, 2))
+            if key in ["df", "phi"]
+            else list(range(self.length))
+        )
 
-        if os.path.exists(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl")):
-            stats = pickle.load(
-                open(os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl"), "rb")
-            )
+        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        has_mu = "_mu" if self.decouple_mu else ""
+        stats_dump_pkl = f"diff_{key}_offset{offset}{has_mu}_{file_hash}_stats.pkl"
+        stats_dump_pkl = os.path.join(self.dir, stats_dump_pkl)
+
+        if os.path.exists(stats_dump_pkl):
+            stats = pickle.load(open(stats_dump_pkl, "rb"))
         else:
             process_inds = partial(process_t_idx, key=key)
             stats = None
@@ -420,12 +424,7 @@ class CycloneDataset(Dataset):
                     if y_mean is not None:
                         stats.update(y_mean, y_var, y_min, y_max)
 
-                pickle.dump(
-                    stats,
-                    open(
-                        os.path.join(self.dir, f"{key}_offset{offset}_stats.pkl"), "wb"
-                    ),
-                )
+            pickle.dump(stats, open(stats_dump_pkl, "wb"))
 
         return stats
 

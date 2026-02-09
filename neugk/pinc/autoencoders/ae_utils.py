@@ -10,6 +10,7 @@ from omegaconf import OmegaConf
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 import torch.distributed as dist
 from omegaconf import DictConfig
@@ -85,6 +86,36 @@ def train_step_peft(
         progress_remaining=progress_remaining,
         separate_zf=separate_zf,
     )
+
+    return loss, losses
+
+
+def train_step_simsiam(
+    cfg: DictConfig,
+    model: nn.Module,
+    xs: Dict[str, torch.Tensor],
+    condition: Dict[str, torch.Tensor],
+    idx_data: Dict[str, torch.Tensor],
+    geometry: Dict[str, torch.Tensor],
+    loss_wrap: nn.Module,
+    progress_remaining: float,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    def D(p, z):
+        z = z.detach()
+        p = F.normalize(p, dim=1)
+        z = F.normalize(z, dim=1)
+        return -(p * z).sum(dim=1).mean()
+
+    model.train()
+
+    df1, df2 = xs["df"], xs["df_aug"]  # TODO how to obtain df from same traj?
+
+    (z1, p1), _, _ = model(df1, condition=condition)
+    (z2, p2), _, _ = model(df2, condition=condition)
+
+    loss = 0.5 * D(p1, z2) + 0.5 * D(p2, z1)
+
+    losses = {"simsiam_loss": loss}
 
     return loss, losses
 

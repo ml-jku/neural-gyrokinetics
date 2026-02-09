@@ -3,6 +3,7 @@ from typing import Optional, List, Dict
 import torch
 import torch.nn as nn
 
+from neugk.models.layers import MLP
 from neugk.models.gk_unet import Swin5DUnet
 from neugk.pinc.autoencoders.vector_quantize import VectorQuantize
 
@@ -342,3 +343,46 @@ class Swin5DVQVAE(Swin5DAE):
             raise RuntimeError(
                 "No VQ indices available. Run encode() or forward() first."
             )
+
+
+class Swin5DSimSiam(Swin5DAE):
+    def __init__(self, *args, **kwargs):
+        # TODO(diff) make conditioning uniform across models
+        super().__init__(*args, **kwargs)
+
+        self.predictor = MLP([self.bottleneck_dim, 4 * self.bottleneck_dim])
+
+        del self.up_blocks
+        del self.middle_post
+        del self.middle_upproj
+
+    def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        # compress to patch space
+        zdf, pad_axes = self.patch_encode(df)
+
+        if condition is not None:
+            condition = self.cond_embed(condition)
+        # down path
+        for blk in self.down_blocks:
+            zdf = blk(zdf, return_skip=False, condition=condition)
+
+        # bottleneck
+        if hasattr(self, "middle_pe"):
+            zdf = self.middle_pe(zdf)  # TODO(diff) middle layers always need PE
+
+        zdf = self.middle_pre(zdf, condition=condition)
+        zdf = self.middle_downproj(zdf)
+
+        # layer norm on latents
+        if self.normalized_latent:
+            zdf = self.pre_z_norm(zdf)
+
+        return zdf, condition, pad_axes
+
+    def decode(self, *_):
+        raise NotImplementedError
+
+    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        zdf, condition, pad_axes = self.encode(df, condition=condition)
+        xdf = self.predictor(zdf)
+        return (zdf, xdf), condition, pad_axes

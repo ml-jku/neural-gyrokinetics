@@ -182,7 +182,9 @@ class BaseRunner:
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # evaluate
-            log_metric_dict, val_plots = self.evaluate(epoch)
+            # log_metric_dict, val_plots = self.evaluate(epoch)
+            log_metric_dict = {}
+            val_plots = {}
 
             # log
             epoch_logs = train_losses_dict | log_metric_dict

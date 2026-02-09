@@ -107,7 +107,7 @@ class CycloneAEDataset(CycloneDataset):
                     # update moments
                     stats.update(x_mean, x_var, x_min, x_max)
 
-                pickle.dump(stats, open(stats_dump_pkl, "wb"))
+            pickle.dump(stats, open(stats_dump_pkl, "wb"))
 
         return stats
 
