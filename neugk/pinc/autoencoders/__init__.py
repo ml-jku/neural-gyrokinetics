@@ -44,7 +44,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         c_multiplier = ae_cfg.patch.c_multiplier
         act_fn = getattr(torch.nn, ae_cfg.act_fn)
         
-        normalized_latent = model_type != "simsiam"
+        normalized_latent = True  # model_type != "simsiam"
 
         num_heads = ae_cfg.vit.num_heads
         depth = ae_cfg.vit.depth

@@ -107,17 +107,14 @@ def train_step_simsiam(
         return -torch.mean(torch.sum(p * z, dim=1))
 
     model.train()
-    df1, df2 = xs["df"], xs["df_aug"]  # TODO how to obtain df from same traj?
-
-    (z1, p1, x_preds), _, _ = model(df1, condition=condition, decoder=True)
-    
-    with model.no_sync() if dist.is_initialized() else nullcontext():
-        # NOTE: don't sync second pass again with DDP
-        # TODO find better workaround?
-        (z2, p2), _, _ = model(df2, condition=condition)
-
+    # stack along batch (same trajectory)
+    df_ = torch.cat([xs["df"], xs["df_aug"]], dim=0)
+    condition = torch.cat([condition, condition], dim=0)
+    # batched prediction and split
+    (zs, ps, x_preds), _, _ = model(df_, condition=condition, decoder=True)
+    (z1, z2), (p1, p2) = torch.chunk(zs, 2), torch.chunk(ps, 2)
     simsiam_loss = 0.5 * (D(p1, z2) + D(p2, z1))
-    
+    # autoencoder reconstruction loss
     if len(set(loss_wrap.active_losses).difference({"simsiam"})) > 0:
         # TODO does not work with DDP at the moment
         model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
@@ -127,6 +124,8 @@ def train_step_simsiam(
             and getattr(cfg, model_key).extra_zf_loss
             else False
         )
+        # update target with stacked version (2x batch)
+        xs["df"] = df_
         recon_loss, ae_losses = loss_wrap(
             x_preds,
             xs,
@@ -199,6 +198,8 @@ def load_autoencoder(
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVAE as AE
         elif model_type == "vqvae":
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVQVAE as AE
+        elif model_type == "simsiam":
+            from neugk.pinc.autoencoders.gk_autoencoders import Swin5DSimSiam as AE
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -259,6 +260,8 @@ def load_autoencoder(
                     "threshold_ema_dead_code": 2,
                 }
             model_kwargs["vq_config"] = vq_config
+        elif model_type == "simsiam":
+            model_kwargs["use_simae_decoder"] = True
 
         model = AE(
             dim=ae_cfg.latent_dim,

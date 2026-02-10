@@ -363,35 +363,12 @@ class Swin5DSimSiam(Swin5DAE):
             del self.middle_upscale
             del self.unpatch
 
-    def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        # compress to patch space
-        zdf, pad_axes = self.patch_encode(df)
-
-        if condition is not None:
-            condition = self.cond_embed(condition)
-        # down path
-        for blk in self.down_blocks:
-            zdf = blk(zdf, return_skip=False, condition=condition)
-
-        # bottleneck
-        if hasattr(self, "middle_pe"):
-            zdf = self.middle_pe(zdf)  # TODO(diff) middle layers always need PE
-
-        zdf = self.middle_pre(zdf, condition=condition)
-        zdf = self.middle_downproj(zdf)
-
-        # layer norm on latents
-        if self.normalized_latent:
-            zdf = self.pre_z_norm(zdf)
-
-        return zdf, condition, pad_axes
-
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, decoder: bool = False):
         zdf, condition, pad_axes = self.encode(df, condition=condition)
-        xdf = self.predictor(zdf.flatten(start_dim=1))
-        xdf = xdf.view(xdf.shape[0], *(*self.bottleneck_grid_size, self.bottleneck_dim))
+        pdf = self.predictor(zdf.flatten(start_dim=1))
+        pdf = pdf.view(pdf.shape[0], *(*self.bottleneck_grid_size, self.bottleneck_dim))
         if decoder and self.use_simae_decoder:
             pred = self.decode(zdf, pad_axes, condition)
-            return (zdf, xdf, pred), condition, pad_axes
+            return (zdf, pdf, pred), condition, pad_axes
         else:
-            return (zdf, xdf), condition, pad_axes
+            return (zdf, pdf), condition, pad_axes
