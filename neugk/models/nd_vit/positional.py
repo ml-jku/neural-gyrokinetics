@@ -113,7 +113,7 @@ class RPB(nn.Module):
             center = max(np.prod([(2 * w - 1) for w in grid_size[(i + 1) :]]), 1)
             dists[i] = (dists[i] + grid_size[i] - 1) * center
 
-        # NOTE: for DDP
+        # NOTE: for DDP, to avoid sharing buffers (inplace operation)
         # self.register_buffer("rpb_idx", dists.sum(0), persistent=False)
         self.rpb_idx = dists.sum(0)
 

@@ -5,6 +5,8 @@ plus EMA normalization and custom Conflict-Free Gradient Descent (ConFIG) patchi
 """
 
 from typing import List, Callable, Dict, Optional
+import warnings
+
 import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
@@ -551,11 +553,18 @@ class PINCLossWrapper(LossWrapper):
             + self._vqvae_losses
             + self._spectral_losses
         )
-        all_keys = (
-            [k for k, w in self.weights.items() if w > 0.0]
-            if self.training
-            else list(set(self.weights.keys()) | set(losses.keys()))
-        )
+        available_keys = list(set(tgts.keys()) | set(preds.keys()))
+        nonzero_keys = [k for k, w in self.weights.items() if w > 0.0]
+        if any((n not in available_keys) for n in nonzero_keys):
+            # TODO communicate weight dict mismatch to the user
+            # warnings.warn(f"keys mitmatch: {available_keys} vs {nonzero_keys}")
+            nonzero_keys = [n for n in nonzero_keys if n in available_keys]
+
+        if self.training:
+            all_keys = nonzero_keys
+        else:
+            list(set(self.weights.keys()) | set(losses.keys()))
+
         data_keys = [k for k in all_keys if k not in special_keys]
 
         for k in data_keys:
@@ -709,7 +718,8 @@ class PINCGradientBalancer(GradientBalancer):
             idx, loss_i = self.loss_selector.select(1, losses)
 
             print(
-                f"Pseudo momentum step {self._debug_step}: selected idx={idx}, loss={loss_i.item():.6f}"
+                f"Pseudo momentum step {self._debug_step}: "
+                f"selected idx={idx}, loss={loss_i.item():.6f}"
             )
             self._debug_step += 1
 

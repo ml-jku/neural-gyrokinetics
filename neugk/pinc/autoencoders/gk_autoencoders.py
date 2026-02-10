@@ -348,16 +348,20 @@ class Swin5DVQVAE(Swin5DAE):
 
 
 class Swin5DSimSiam(Swin5DAE):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, use_simae_decoder: bool = False, **kwargs):
         # TODO(diff) make conditioning uniform across models
         super().__init__(*args, **kwargs)
 
         predictor_dim = prod(self.bottleneck_grid_size) * self.bottleneck_dim
         self.predictor = MLP([predictor_dim, predictor_dim // 8, predictor_dim])
 
-        del self.up_blocks
-        del self.middle_post
-        del self.middle_upproj
+        self.use_simae_decoder = use_simae_decoder
+        if not use_simae_decoder:
+            del self.up_blocks
+            del self.middle_post
+            del self.middle_upproj
+            del self.middle_upscale
+            del self.unpatch
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         # compress to patch space
@@ -382,11 +386,12 @@ class Swin5DSimSiam(Swin5DAE):
 
         return zdf, condition, pad_axes
 
-    def decode(self, *_):
-        raise NotImplementedError
-
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, decoder: bool = False):
         zdf, condition, pad_axes = self.encode(df, condition=condition)
         xdf = self.predictor(zdf.flatten(start_dim=1))
         xdf = xdf.view(xdf.shape[0], *(*self.bottleneck_grid_size, self.bottleneck_dim))
-        return (zdf, xdf), condition, pad_axes
+        if decoder and self.use_simae_decoder:
+            pred = self.decode(zdf, pad_axes, condition)
+            return (zdf, xdf, pred), condition, pad_axes
+        else:
+            return (zdf, xdf), condition, pad_axes

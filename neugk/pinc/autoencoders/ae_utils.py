@@ -1,6 +1,7 @@
 from typing import Dict, Optional, Tuple, List
 
 import os
+from contextlib import nullcontext
 import os.path as osp
 import sys
 import hydra
@@ -106,15 +107,44 @@ def train_step_simsiam(
         return -torch.mean(torch.sum(p * z, dim=1))
 
     model.train()
-
     df1, df2 = xs["df"], xs["df_aug"]  # TODO how to obtain df from same traj?
 
-    (z1, p1), _, _ = model(df1, condition=condition)
-    (z2, p2), _, _ = model(df2, condition=condition)
+    (z1, p1, x_preds), _, _ = model(df1, condition=condition, decoder=True)
+    
+    with model.no_sync() if dist.is_initialized() else nullcontext():
+        # NOTE: don't sync second pass again with DDP
+        # TODO find better workaround?
+        (z2, p2), _, _ = model(df2, condition=condition)
 
-    loss = 0.5 * D(p1, z2) + 0.5 * D(p2, z1)
+    simsiam_loss = 0.5 * (D(p1, z2) + D(p2, z1))
+    
+    if len(set(loss_wrap.active_losses).difference({"simsiam"})) > 0:
+        # TODO does not work with DDP at the moment
+        model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
+        separate_zf = (
+            cfg.dataset.separate_zf
+            if hasattr(getattr(cfg, model_key), "extra_zf_loss")
+            and getattr(cfg, model_key).extra_zf_loss
+            else False
+        )
+        recon_loss, ae_losses = loss_wrap(
+            x_preds,
+            xs,
+            idx_data,
+            geometry=geometry,
+            progress_remaining=progress_remaining,
+            separate_zf=separate_zf,
+        )
+        loss = simsiam_loss + recon_loss
+    else:
+        loss = simsiam_loss
 
-    losses = {"simsiam_loss": loss, "latent_std": z1.std()}
+    losses = {
+        "df": recon_loss,
+        "simsiam": simsiam_loss,
+        "latent_std": 0.5 * z1.std() + 0.5 * z2.std()
+    }
+    losses.update(ae_losses)
     return loss, losses
 
 

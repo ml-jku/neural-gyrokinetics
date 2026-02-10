@@ -74,6 +74,7 @@ class BaseRunner:
         for key in weights.keys():
             if (
                 hasattr(weights_cfg, "loss_scheduler")
+                and weights_cfg.loss_scheduler is not None
                 and key in weights_cfg.loss_scheduler
                 and weights_cfg.loss_scheduler[key]
             ):

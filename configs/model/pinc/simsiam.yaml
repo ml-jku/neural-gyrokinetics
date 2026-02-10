@@ -11,22 +11,11 @@ init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uni
 patching_init_weights: "kaiming_uniform"
 cond_init_weights: "kaiming_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
 
-loss_scheduler:
-  df: null
-  phi: null
-  flux: null
-  phi_int: null
-  flux_int: null
-    # start: 0.0
-    # end: 1.0
-    # start_fraction: 0.5
-    # end_fraction: 0.7
-  phi_cross: null
-  flux_cross: null
-  vq_commit: null
+loss_scheduler: null
 loss_weights:
   df: 1.0
-  vq_commit: 1.0
+  simsiam: 1.0
+
 extra_loss_weights:
   # flux_int: 1e-4
   # phi_int: 1e-4
@@ -47,7 +36,7 @@ vit:
   use_rope: false
   gated_attention: false
   modulation: dit # "dit", "film"
-  drop_path: 0.0
+  drop_path: 0.1
 
 bottleneck:
   dim: 128

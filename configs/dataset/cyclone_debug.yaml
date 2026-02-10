@@ -4,7 +4,7 @@ normalization: zscore
 normalization_scope: dataset
 minmax_beta1: 8
 minmax_beta2: 4
-offset: 80
+offset: 100
 subsample: 1
 spatial_ifft: true
 separate_zf: true
@@ -15,7 +15,7 @@ log_transform: false
 num_workers: 4
 active_keys: ["re", "im"]
 input_fields: ["df"]
-training_trajectories: ["iteration_13.h5"]
+training_trajectories: ["iteration_8.h5"]
 validation_trajectories: ["iteration_13.h5"]
 partial_holdouts:
 training_cond_filters:

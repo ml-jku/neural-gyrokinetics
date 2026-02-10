@@ -16,6 +16,7 @@ from neugk.runner import BaseRunner
 from neugk.pinc.autoencoders import get_autoencoder
 from neugk.pinc.losses import PINCLossWrapper, PINCGradientBalancer
 from neugk.pinc.autoencoders.evaluate import evaluate as pinc_evaluate
+from neugk.pinc.autoencoders.evaluate_simsiam import evaluate_linear_probe
 from neugk.pinc.autoencoders.ae_utils import (
     aggregate_dataset_stats,
     MuonWithAuxAdam,
@@ -79,9 +80,12 @@ class PINCRunner(BaseRunner):
         # peft setup vs standard setup
         self._load_checkpoints()
 
+        self.simae = len(set(self.loss_wrap.active_losses).difference({"simsiam"})) > 0
         if self.use_ddp:
             self.model = DDP(
-                self.model, device_ids=[self.rank], find_unused_parameters=True
+                self.model,
+                device_ids=[self.rank],
+                find_unused_parameters=True
             )
 
         is_muon = (
@@ -97,6 +101,9 @@ class PINCRunner(BaseRunner):
                 else SingleDeviceMuonWithAuxAdam(param_groups)
             )
             self.opt.defaults = {"lr": self.cfg.training.learning_rate}
+        elif self.cfg.training.gradnorm_balancer == "pseudo":
+            params = [p for p in self.model.parameters() if p.requires_grad]
+            self.opt = torch.optim.SGD(params, lr=self.cfg.training.learning_rate)
         else:
             # Standard Adam
             params = [p for p in self.model.parameters() if p.requires_grad]
@@ -336,7 +343,6 @@ class PINCRunner(BaseRunner):
             with torch.autocast(
                 str(self.device), dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                torch.autograd.set_detect_anomaly(True)
                 # dispatch to correct step function
                 if self.cfg.stage == "autoencoder":
                     step_fn = train_step_autoencoder
@@ -397,19 +403,32 @@ class PINCRunner(BaseRunner):
 
     def evaluate(self, epoch):
         if self.cfg.stage == "simsiam":
-            return {}, None
-        log_metric_dict, val_plots, self.loss_val_min = pinc_evaluate(
-            rank=self.rank,
-            world_size=self.world_size,
-            model=self.model,
-            loss_wrap=self.loss_wrap,
-            valsets=self.valsets,
-            valloaders=self.valloaders,
-            opt=self.opt,
-            lr_scheduler=self.scheduler,
-            epoch=epoch,
-            cfg=self.cfg,
-            device=self.device,
-            loss_val_min=self.loss_val_min,
-        )
+            val_plots = None
+            log_metric_dict, self.loss_val_min = evaluate_linear_probe(
+                rank=self.rank,
+                model=self.model,
+                trainloader=self.trainloader,
+                valloaders=self.valloaders,
+                opt=self.opt,
+                lr_scheduler=self.scheduler,
+                epoch=epoch,
+                cfg=self.cfg,
+                device=self.device,
+                loss_val_min=self.loss_val_min,
+            )
+        else:
+            log_metric_dict, val_plots, self.loss_val_min = pinc_evaluate(
+                rank=self.rank,
+                world_size=self.world_size,
+                model=self.model,
+                loss_wrap=self.loss_wrap,
+                valsets=self.valsets,
+                valloaders=self.valloaders,
+                opt=self.opt,
+                lr_scheduler=self.scheduler,
+                epoch=epoch,
+                cfg=self.cfg,
+                device=self.device,
+                loss_val_min=self.loss_val_min,
+            )
         return log_metric_dict, val_plots

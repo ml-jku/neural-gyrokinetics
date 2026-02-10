@@ -43,6 +43,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         unmerging_hidden_ratio = ae_cfg.patch.unmerging_hidden_ratio
         c_multiplier = ae_cfg.patch.c_multiplier
         act_fn = getattr(torch.nn, ae_cfg.act_fn)
+        
+        normalized_latent = model_type != "simsiam"
 
         num_heads = ae_cfg.vit.num_heads
         depth = ae_cfg.vit.depth
@@ -88,6 +90,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
                     "threshold_ema_dead_code": 2,
                 }
             model_kwargs["vq_config"] = vq_config
+        elif model_type == "simsiam":
+            model_kwargs["use_simae_decoder"] = True
 
         ae = AE(
             dim=latent_dim,
@@ -120,7 +124,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             modulation=modulation,
             decouple_mu=decouple_mu,  # make it 4D
             conditioning=True,
-            normalized_latent=True,
+            normalized_latent=normalized_latent,
             mid_norm_learnable=(
                 ae_cfg.bottleneck.norm_learnable
                 if hasattr(ae_cfg.bottleneck, "norm_learnable")
