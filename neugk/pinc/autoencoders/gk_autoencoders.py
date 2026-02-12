@@ -10,6 +10,7 @@ from neugk.pinc.autoencoders.vector_quantize import VectorQuantize
 from neugk.models.nd_vit.vit_layers import ViTLayer
 from neugk.models.nd_vit.positional import APE
 
+
 class Swin5DAE(Swin5DUnet):
     def __init__(
         self,
@@ -375,11 +376,16 @@ class Swin5DSimSiam(Swin5DAE):
             del self.middle_upscale
             del self.unpatch
 
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, decoder: bool = False):
+    def forward(
+        self,
+        df: torch.Tensor,
+        condition: Optional[torch.Tensor] = None,
+        decoder: bool = True
+    ):
         zdf, condition, pad_axes = self.encode(df, condition=condition)
         pdf = self.predictor(zdf)
         if decoder and self.use_simae_decoder:
             pred = self.decode(zdf, pad_axes, condition)["df"]
-            return {"df": pred, "z": zdf, "p": pdf}, condition, pad_axes
+            return {"df": pred, "z": zdf, "p": pdf}
         else:
-            return {"z": zdf, "p": pdf}, condition, pad_axes
+            return {"z": zdf, "p": pdf}

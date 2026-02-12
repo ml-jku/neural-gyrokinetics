@@ -315,17 +315,14 @@ class PINCLossWrapper(LossWrapper):
             p, z = p.flatten(1), z.flatten(1)
             z = z.detach()
             p, z = F.normalize(p, dim=1), F.normalize(z, dim=1)
-            # # mse instead of basic similarity
-            # return 2 - 2 * torch.mean(torch.sum(p * z, dim=1))
-            return -torch.mean(torch.sum(p * z, dim=1))
+            # mse instead of basic similarity
+            return 2 - 2 * torch.mean(torch.sum(p * z, dim=1))
+            # return -torch.mean(torch.sum(p * z, dim=1))
 
         assert all(k in preds for k in ["z", "p"]), "SimSiam requires z and p in preds."
         z1, z2 = torch.chunk(preds["z"], 2)
         p1, p2 = torch.chunk(preds["p"], 2)
-        return {
-            "simsiam": 0.5 * (D(p1, z2) + D(p2, z1)),
-            "latent_std": 0.5 * z1.std() + 0.5 * z2.std()
-        }
+        return {"simsiam": 0.5 * (D(p1, z2) + D(p2, z1))}
 
     def integral_loss(self, geometry, preds, tgts, idx_data, integral_loss_type="mse"):
         # Note: Override base implementation to return 3-tuple (losses, monitor, integrated)

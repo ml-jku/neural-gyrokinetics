@@ -8,7 +8,12 @@ from neugk.utils import save_model_and_config
 
 
 @torch.no_grad()
-def collect_xy(dataloader: torch.utils.data.DataLoader, model: torch.nn.Module, device: torch.device, desc: str = "Validation holdout trajectories"):
+def collect_xy(
+    dataloader: torch.utils.data.DataLoader,
+    model: torch.nn.Module,
+    device: torch.device,
+    desc: str = "Linear probe"
+):
     model.eval()
     latents, fluxes = [], []
     
@@ -23,7 +28,7 @@ def collect_xy(dataloader: torch.utils.data.DataLoader, model: torch.nn.Module, 
         condition = sample.conditioning.to(device, non_blocking=True)
         flux = sample.flux.to(device, non_blocking=True)
         
-        z = model(xs, condition=condition)[0]["z"]
+        z = model(xs, condition=condition, decoder=False)["z"]
         
         zpool = z.view(z.shape[0], -1, z.shape[-1]).mean(1)
         latents.append(zpool.cpu())
@@ -49,13 +54,14 @@ def evaluate_linear_probe(
         return log_metric_dict, loss_val_min
 
     X_train, Y_train = collect_xy(trainloader, model, device)
+    
     X_mean, Y_mean = X_train.mean(0), Y_train.mean(0)
     X_centered, Y_centered = X_train - X_mean, Y_train - Y_mean
 
     W = torch.linalg.lstsq(X_centered, Y_centered, driver="gels").solution
 
     train_mse = torch.mean(((X_centered @ W) - Y_centered) ** 2)
-    log_metric_dict["probe/train_mse"] = train_mse.item()
+    log_metric_dict["val_traj/probe_train_mse"] = train_mse.item()
 
     for val_idx, valloader in enumerate(valloaders):
         valname = "val_traj" if val_idx == 0 else "val_samples"
@@ -64,19 +70,6 @@ def evaluate_linear_probe(
         X_val_centered, Y_val_centered = X_val - X_mean, Y_val - Y_mean
 
         val_mse = torch.mean(((X_val_centered @ W) - Y_val_centered) ** 2)
-        log_metric_dict[f"probe/{valname}_mse"] = val_mse.item()
-
-    if not rank:
-        val_loss = log_metric_dict["probe/val_traj_mse"]
-        loss_val_min = save_model_and_config(
-            model,
-            optimizer=opt,
-            scheduler=lr_scheduler,
-            cfg=cfg,
-            epoch=epoch,
-            # TODO decide target metric
-            val_loss=val_loss,
-            loss_val_min=loss_val_min,
-        )
+        log_metric_dict[f"{valname}/probe_val_mse"] = val_mse.item()
 
     return log_metric_dict, loss_val_min

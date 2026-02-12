@@ -1,7 +1,7 @@
 name: simsiam
 model_type: simsiam
 bundle_seq_length: 1
-latent_dim: 512
+latent_dim: 1024
 act_fn: GELU
 decouple_mu: true
 conditioning: ["itg", "dg", "s_hat", "q"]  # "timestep"
@@ -16,7 +16,7 @@ loss_scheduler:
     type: "linear"
     start: 1.0
     end: 0.3
-    start_fraction: 0.5
+    start_fraction: 0.6
     end_fraction: 1.0
   simsiam:
     type: "linear"
@@ -35,6 +35,8 @@ extra_loss_weights:
 patch:
   patch_size: [ 4, 0, 2, 5, 4 ]
   window_size: [ 4, 0, 4, 9, 4 ]
+  merging_depth: 1
+  unmerging_depth: 1
   merging_hidden_ratio: 1.0
   unmerging_hidden_ratio: 1.0
   c_multiplier: 1.0
@@ -51,7 +53,7 @@ vit:
   drop_path: 0.1
 
 bottleneck:
-  dim: 128
+  dim: 256
   norm_learnable: false
   num_heads: 2
   depth: 2

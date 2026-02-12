@@ -402,21 +402,7 @@ class PINCRunner(BaseRunner):
         return loss_logs, info_dict
 
     def evaluate(self, epoch):
-        if self.cfg.stage == "simsiam":
-            val_plots = None
-            log_metric_dict, self.loss_val_min = evaluate_linear_probe(
-                rank=self.rank,
-                model=self.model,
-                trainloader=self.trainloader,
-                valloaders=self.valloaders,
-                opt=self.opt,
-                lr_scheduler=self.scheduler,
-                epoch=epoch,
-                cfg=self.cfg,
-                device=self.device,
-                loss_val_min=self.loss_val_min,
-            )
-        else:
+        if getattr(self.model, "use_simae_decoder", True):
             log_metric_dict, val_plots, self.loss_val_min = pinc_evaluate(
                 rank=self.rank,
                 world_size=self.world_size,
@@ -431,4 +417,17 @@ class PINCRunner(BaseRunner):
                 device=self.device,
                 loss_val_min=self.loss_val_min,
             )
-        return log_metric_dict, val_plots
+        if self.cfg.stage == "simsiam":
+            probe_log_metric_dict, _ = evaluate_linear_probe(
+                rank=self.rank,
+                model=self.model,
+                trainloader=self.trainloader,
+                valloaders=self.valloaders,
+                opt=self.opt,
+                lr_scheduler=self.scheduler,
+                epoch=epoch,
+                cfg=self.cfg,
+                device=self.device,
+                loss_val_min=self.loss_val_min,
+            )
+        return (log_metric_dict | probe_log_metric_dict), val_plots

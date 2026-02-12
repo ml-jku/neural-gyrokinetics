@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 from functools import partial
 import warnings
@@ -73,7 +73,6 @@ def evaluate(
             for key in loss_wrap.all_losses:
                 metrics[key] = torch.tensor(0.0)
             n_timesteps_acc = torch.tensor(0.0)
-            use_tqdm = False
             if use_tqdm or (dist.is_initialized() and not rank):
                 valloader = tqdm(
                     valloader,

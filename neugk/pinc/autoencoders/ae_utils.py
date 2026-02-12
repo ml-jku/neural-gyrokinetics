@@ -101,7 +101,7 @@ def train_step_simsiam(
     model.train()
     # stack along batch (same trajectory) 
     df_, cond_ = torch.cat([xs["df"], xs["df_aug"]]), torch.cat([condition, condition])
-    preds, _, _ = model(df_, condition=cond_, decoder=True)
+    preds = model(df_, condition=cond_, decoder=True)
     xs["df"] = df_  # update target with stacked version (2x batch)
     return loss_wrap(
         preds,
