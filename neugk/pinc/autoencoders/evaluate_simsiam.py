@@ -23,7 +23,7 @@ def collect_xy(dataloader: torch.utils.data.DataLoader, model: torch.nn.Module, 
         condition = sample.conditioning.to(device, non_blocking=True)
         flux = sample.flux.to(device, non_blocking=True)
         
-        (z, _), _, _ = model(xs, condition=condition)
+        z = model(xs, condition=condition)[0]["z"]
         
         zpool = z.view(z.shape[0], -1, z.shape[-1]).mean(1)
         latents.append(zpool.cpu())

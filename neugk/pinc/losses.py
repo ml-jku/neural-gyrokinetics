@@ -82,6 +82,7 @@ class PINCLossWrapper(LossWrapper):
             "qspec_monotonicity",
             "mass",
         ]
+        self._simsiam_losses = ["simsiam"]
 
         self.integrator = FluxIntegral(
             real_potens=real_potens,
@@ -117,6 +118,7 @@ class PINCLossWrapper(LossWrapper):
 
         self.complex_metrics = None
 
+
     @property
     def all_losses(self):
         return (
@@ -124,6 +126,7 @@ class PINCLossWrapper(LossWrapper):
             + self._vae_losses
             + self._vqvae_losses
             + self._spectral_losses
+            + self._simsiam_losses # Add this
         )
 
     def _update_ema_loss_scale(self, loss_name: str, loss_value: torch.Tensor):
@@ -306,8 +309,23 @@ class PINCLossWrapper(LossWrapper):
 
     def compute_vqvae_loss(self, preds):
         return {"vq_commit": preds.get("vq_commit_loss", None)}
+    
+    def compute_simsiam_loss(self, preds: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        def D(p, z):
+            p, z = p.flatten(1), z.flatten(1)
+            z = z.detach()
+            p, z = F.normalize(p, dim=1), F.normalize(z, dim=1)
+            # # mse instead of basic similarity
+            # return 2 - 2 * torch.mean(torch.sum(p * z, dim=1))
+            return -torch.mean(torch.sum(p * z, dim=1))
 
-    # --- PINC Specific Logic Overrides ---
+        assert all(k in preds for k in ["z", "p"]), "SimSiam requires z and p in preds."
+        z1, z2 = torch.chunk(preds["z"], 2)
+        p1, p2 = torch.chunk(preds["p"], 2)
+        return {
+            "simsiam": 0.5 * (D(p1, z2) + D(p2, z1)),
+            "latent_std": 0.5 * z1.std() + 0.5 * z2.std()
+        }
 
     def integral_loss(self, geometry, preds, tgts, idx_data, integral_loss_type="mse"):
         # Note: Override base implementation to return 3-tuple (losses, monitor, integrated)
@@ -449,8 +467,8 @@ class PINCLossWrapper(LossWrapper):
         t_df, t_phi_raw = prep(tgts)
 
         # Integrate & FFT
-        p_phi, (p_pf, p_ef, _) = self.integrator_spec(geometry, p_df, p_phi_raw)
-        t_phi, (t_pf, t_ef, _) = self.integrator_spec(geometry, t_df, t_phi_raw)
+        p_phi, (_, p_ef, _) = self.integrator_spec(geometry, p_df, p_phi_raw)
+        t_phi, (_, t_ef, _) = self.integrator_spec(geometry, t_df, t_phi_raw)
 
         p_fft, t_fft = self.phi_fft(preds.get("phi", p_phi)), self.phi_fft(
             tgts.get("phi", t_phi)
@@ -545,15 +563,17 @@ class PINCLossWrapper(LossWrapper):
         ) and geometry is not None:
             losses.update(self.compute_spectral_losses(preds, tgts, geometry))
 
-        # 3. Compute Data Losses
-        # Identify data keys (those not in int/vae/spec lists)
+        if sum([self.weights.get(k, 0.0) for k in self._simsiam_losses]) > 0:
+            losses.update(self.compute_simsiam_loss(preds))
+
         special_keys = set(
             self._int_losses
             + self._vae_losses
             + self._vqvae_losses
             + self._spectral_losses
+            + self._simsiam_losses
         )
-        available_keys = list(set(tgts.keys()) | set(preds.keys()))
+        available_keys = list(set(tgts.keys()) | set(preds.keys()) | special_keys)
         nonzero_keys = [k for k, w in self.weights.items() if w > 0.0]
         if any((n not in available_keys) for n in nonzero_keys):
             # TODO communicate weight dict mismatch to the user
@@ -563,7 +583,8 @@ class PINCLossWrapper(LossWrapper):
         if self.training:
             all_keys = nonzero_keys
         else:
-            list(set(self.weights.keys()) | set(losses.keys()))
+            
+            all_keys = list(set(self.weights.keys()) | set(losses.keys()))
 
         data_keys = [k for k in all_keys if k not in special_keys]
 

@@ -5,7 +5,7 @@ from torch import nn
 from functools import partial
 
 from neugk.models.nd_vit.vit_layers import ViTLayer, DiTLayer, FilmViTLayer
-from neugk.models.nd_vit.positional import PositionalEmbedding
+from neugk.models.nd_vit.positional import APE
 from neugk.models.nd_vit.patching import (
     PatchEmbed,
     PatchExpand,
@@ -99,7 +99,7 @@ class DiT(nn.Module):
             GlobalLayer = partial(FilmViTLayer, cond_dim=cond_dim)
 
         self.encoder = nn.Sequential(nn.Linear(z_dim, dim, bias=False), act_fn())
-        self.ape = PositionalEmbedding(z_dim, grid_size, init_weights="sincos")
+        self.ape = APE(z_dim, grid_size, init_weights="sincos")
         self.backbone = GlobalLayer(
             space,
             dim,

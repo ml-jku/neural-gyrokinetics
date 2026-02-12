@@ -10,7 +10,7 @@ from warnings import warn
 from neugk.models.layers import MLP
 
 
-class PositionalEmbedding(nn.Module):
+class APE(nn.Module):
     """
     Absolute positional embedding module
     """

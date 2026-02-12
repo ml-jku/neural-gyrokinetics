@@ -1,6 +1,6 @@
 from neugk.models.nd_vit.swin_layers import SwinLayer, FilmSwinLayer, DiTSwinLayer
 from neugk.models.nd_vit.vit_layers import ViTLayer, FilmViTLayer, DiTLayer, LayerModes
-from neugk.models.nd_vit.positional import PositionalEmbedding
+from neugk.models.nd_vit.positional import APE
 from neugk.models.nd_vit.patching import (
     PatchEmbed,
     PatchMerge,
@@ -17,7 +17,7 @@ __all__ = [
     "FilmViTLayer",
     "DiTLayer",
     "LayerModes",
-    "PositionalEmbedding",
+    "APE",
     "PatchEmbed",
     "PatchMerge",
     "PatchExpand",

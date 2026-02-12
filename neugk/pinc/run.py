@@ -85,7 +85,7 @@ class PINCRunner(BaseRunner):
             self.model = DDP(
                 self.model,
                 device_ids=[self.rank],
-                find_unused_parameters=(not self.simae)  # NOTE unused only if no decode
+                find_unused_parameters=True  #(not self.simae)  # NOTE unused only if no decode
             )
 
         is_muon = (

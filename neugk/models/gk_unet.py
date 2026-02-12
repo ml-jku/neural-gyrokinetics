@@ -16,7 +16,7 @@ from neugk.models.nd_vit import (
     DiTLayer,
     FilmViTLayer,
     LayerModes,
-    PositionalEmbedding,
+    APE,
     PatchEmbed,
     PatchMerge,
     PatchExpand,
@@ -75,7 +75,7 @@ class SwinBlockDown(nn.Module):
         self.grid_size = grid_size
 
         if use_abs_pe:
-            self.pos_embed = PositionalEmbedding(
+            self.pos_embed = APE(
                 dim, grid_size, learnable=learnable_pos_embed, init_weights="sincos"
             )
 
@@ -190,7 +190,7 @@ class SwinBlockUp(nn.Module):
         self.grid_size = grid_size
 
         if use_abs_pe:
-            self.pos_embed = PositionalEmbedding(
+            self.pos_embed = APE(
                 dim, grid_size, learnable=learnable_pos_embed, init_weights="sincos"
             )
 
@@ -390,6 +390,7 @@ class SwinNDUnet(nn.Module):
         self.norm_output = norm_output
         self.patch_skip = patch_skip
         self.problem_dim = in_channels
+        self.act_fn = act_fn
         padded_base_resolution, pad_axes = pad_to_blocks(base_resolution, patch_size)
         self.pad_axes = [int(p) for p in pad_axes]
 
@@ -510,7 +511,7 @@ class SwinNDUnet(nn.Module):
         )
 
         if use_abs_pe:
-            self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
+            self.middle_pe = APE(down_dims[-1], grid_sizes[-1])
 
         self.middle_upscale = PatchExpand(
             space=space,
@@ -698,7 +699,7 @@ class Swin5DUnet(SwinNDUnet):
         if decouple_mu:
             self.decoupled_dim = decoupled_dim
             # positional information for velocity mixing
-            self.vel_pe = PositionalEmbedding(full_in_channels, vel_pe_resolution, True)
+            self.vel_pe = APE(full_in_channels, vel_pe_resolution, True)
 
     def forward(self, x, **kwargs):
         return {"df": super().forward(x, **kwargs)}

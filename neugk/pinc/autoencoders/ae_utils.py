@@ -30,7 +30,7 @@ def train_step_autoencoder(
     geometry: Dict[str, torch.Tensor],
     loss_wrap: nn.Module,
     progress_remaining: float,
-):
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
     separate_zf = (
         cfg.dataset.separate_zf
@@ -48,7 +48,7 @@ def train_step_autoencoder(
     # loss = F.mse_loss(x_preds["df"], xs["df"])
     # losses = {"df": loss}
 
-    loss, losses = loss_wrap(
+    return loss_wrap(
         x_preds,
         xs,  # autoencoder
         idx_data,
@@ -56,7 +56,6 @@ def train_step_autoencoder(
         progress_remaining=progress_remaining,
         separate_zf=separate_zf,
     )
-    return loss, losses
 
 
 def train_step_peft(
@@ -68,7 +67,7 @@ def train_step_peft(
     geometry: Dict[str, torch.Tensor],
     loss_wrap: nn.Module,
     progress_remaining: float,
-):
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
     separate_zf = (
         cfg.dataset.separate_zf
@@ -79,7 +78,7 @@ def train_step_peft(
     model.train()
     x_preds = model(xs["df"], condition=condition)
 
-    loss, losses = loss_wrap(
+    return loss_wrap(
         x_preds,
         xs,
         idx_data,
@@ -87,8 +86,6 @@ def train_step_peft(
         progress_remaining=progress_remaining,
         separate_zf=separate_zf,
     )
-
-    return loss, losses
 
 
 def train_step_simsiam(
@@ -101,50 +98,19 @@ def train_step_simsiam(
     loss_wrap: nn.Module,
     progress_remaining: float,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-    def D(p, z):
-        z = z.detach()
-        p, z = F.normalize(p, dim=1), F.normalize(z, dim=1)
-        return -torch.mean(torch.sum(p * z, dim=1))
-
     model.train()
-    # stack along batch (same trajectory)
-    df_ = torch.cat([xs["df"], xs["df_aug"]], dim=0)
-    condition = torch.cat([condition, condition], dim=0)
-    # batched prediction and split
-    (zs, ps, x_preds), _, _ = model(df_, condition=condition, decoder=True)
-    (z1, z2), (p1, p2) = torch.chunk(zs, 2), torch.chunk(ps, 2)
-    simsiam_loss = 0.5 * (D(p1, z2) + D(p2, z1))
-    # autoencoder reconstruction loss
-    if len(set(loss_wrap.active_losses).difference({"simsiam"})) > 0:
-        # TODO does not work with DDP at the moment
-        model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
-        separate_zf = (
-            cfg.dataset.separate_zf
-            if hasattr(getattr(cfg, model_key), "extra_zf_loss")
-            and getattr(cfg, model_key).extra_zf_loss
-            else False
-        )
-        # update target with stacked version (2x batch)
-        xs["df"] = df_
-        recon_loss, ae_losses = loss_wrap(
-            x_preds,
-            xs,
-            idx_data,
-            geometry=geometry,
-            progress_remaining=progress_remaining,
-            separate_zf=separate_zf,
-        )
-        loss = simsiam_loss + recon_loss
-    else:
-        loss = simsiam_loss
-
-    losses = {
-        "df": recon_loss,
-        "simsiam": simsiam_loss,
-        "latent_std": 0.5 * z1.std() + 0.5 * z2.std()
-    }
-    losses.update(ae_losses)
-    return loss, losses
+    # stack along batch (same trajectory) 
+    df_, cond_ = torch.cat([xs["df"], xs["df_aug"]]), torch.cat([condition, condition])
+    preds, _, _ = model(df_, condition=cond_, decoder=True)
+    xs["df"] = df_  # update target with stacked version (2x batch)
+    return loss_wrap(
+        preds,
+        xs,
+        idx_data,
+        geometry=geometry,
+        progress_remaining=progress_remaining,
+        separate_zf=getattr(cfg.dataset, "separate_zf", False)
+    )
 
 
 def load_autoencoder(
@@ -294,7 +260,7 @@ def load_autoencoder(
             modulation=modulation,
             decouple_mu=decouple_mu,
             conditioning=True,
-            normalized_latent=True,
+            normalized_latent=False,
             mid_norm_learnable=(
                 ae_cfg.bottleneck.norm_learnable
                 if hasattr(ae_cfg.bottleneck, "norm_learnable")

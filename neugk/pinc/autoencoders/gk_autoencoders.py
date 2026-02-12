@@ -1,14 +1,14 @@
 from typing import Optional, List, Dict
 
-from math import prod
 import torch
 import torch.nn as nn
-from einops import rearrange
 
 from neugk.models.layers import MLP
 from neugk.models.gk_unet import Swin5DUnet
 from neugk.pinc.autoencoders.vector_quantize import VectorQuantize
 
+from neugk.models.nd_vit.vit_layers import ViTLayer
+from neugk.models.nd_vit.positional import APE
 
 class Swin5DAE(Swin5DUnet):
     def __init__(
@@ -344,17 +344,29 @@ class Swin5DVQVAE(Swin5DAE):
         else:
             raise RuntimeError(
                 "No VQ indices available. Run encode() or forward() first."
-            )
+            )  
 
 
 class Swin5DSimSiam(Swin5DAE):
     def __init__(self, *args, use_simae_decoder: bool = False, **kwargs):
-        # TODO(diff) make conditioning uniform across models
         super().__init__(*args, **kwargs)
 
-        predictor_dim = prod(self.bottleneck_grid_size) * self.bottleneck_dim
-        self.predictor = MLP([predictor_dim, predictor_dim // 8, predictor_dim])
-
+        # predictor network (flat vit)
+        predictor_dim = self.bottleneck_dim // 8
+        encoder = MLP([self.bottleneck_dim, predictor_dim], act_fn=self.act_fn)
+        ape = APE(predictor_dim, self.bottleneck_grid_size, init_weights="sincos")
+        backbone = ViTLayer(
+            space=len(self.bottleneck_grid_size),
+            dim=predictor_dim,
+            grid_size=self.bottleneck_grid_size,
+            depth=2,
+            num_heads=4,
+            mlp_ratio=2.0,
+            act_fn=self.act_fn,
+        )
+        decoder = MLP([predictor_dim, self.bottleneck_dim], act_fn=self.act_fn)
+        self.predictor = nn.Sequential(encoder, ape, backbone, decoder)
+        # autoencoder + simsiam
         self.use_simae_decoder = use_simae_decoder
         if not use_simae_decoder:
             del self.up_blocks
@@ -365,10 +377,9 @@ class Swin5DSimSiam(Swin5DAE):
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, decoder: bool = False):
         zdf, condition, pad_axes = self.encode(df, condition=condition)
-        pdf = self.predictor(zdf.flatten(start_dim=1))
-        pdf = pdf.view(pdf.shape[0], *(*self.bottleneck_grid_size, self.bottleneck_dim))
+        pdf = self.predictor(zdf)
         if decoder and self.use_simae_decoder:
-            pred = self.decode(zdf, pad_axes, condition)
-            return (zdf, pdf, pred), condition, pad_axes
+            pred = self.decode(zdf, pad_axes, condition)["df"]
+            return {"df": pred, "z": zdf, "p": pdf}, condition, pad_axes
         else:
-            return (zdf, pdf), condition, pad_axes
+            return {"z": zdf, "p": pdf}, condition, pad_axes
