@@ -31,6 +31,8 @@ from neugk.pinc.peft_utils import setup_peft_stage
 
 class PINCRunner(BaseRunner):
     def setup_components(self):
+        assert self.cfg.stage is not None, "Stage is not set."
+
         model_key = "autoencoder" if hasattr(self.cfg, "autoencoder") else "model"
         model_cfg = getattr(self.cfg, model_key)
 
@@ -85,7 +87,7 @@ class PINCRunner(BaseRunner):
             self.model = DDP(
                 self.model,
                 device_ids=[self.rank],
-                find_unused_parameters=True  #(not self.simae)  # NOTE unused only if no decode
+                find_unused_parameters=True,  # (not self.simae)  # NOTE unused only if no decode
             )
 
         is_muon = (
@@ -132,23 +134,22 @@ class PINCRunner(BaseRunner):
         )
 
     def _load_checkpoints(self):
-        # ckpt_path = self.cfg.ae_checkpoint
-        ckpt_path = os.path.join(self.cfg.output_path, "ckp.pth")
+        # TODO workaround to load. as of now loading does not work
+        ckpt_path = os.path.join(
+            self.cfg.output_path,
+            "..",
+            (
+                "ckp.pth"
+                if getattr(self.cfg.training, "use_latest_checkpoint", False)
+                else "best.pth"
+            ),
+        )
 
         self.ae_ckpt_dict = {}
 
         if self.cfg.stage == "peft":
             if not ckpt_path and not os.path.exists(ckpt_path):
                 raise ValueError("PEFT requires ae_checkpoint")
-            if os.path.isdir(ckpt_path):
-                ckpt_path = os.path.join(
-                    ckpt_path,
-                    (
-                        "ckp.pth"
-                        if getattr(self.cfg.training, "use_latest_checkpoint", False)
-                        else "best.pth"
-                    ),
-                )
 
             print(f"Loading checkpoint: {ckpt_path}")
             loaded_ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
@@ -419,12 +420,9 @@ class PINCRunner(BaseRunner):
             )
         if self.cfg.stage == "simsiam":
             probe_log_metric_dict, _ = evaluate_linear_probe(
-                rank=self.rank,
                 model=self.model,
                 trainloader=self.trainloader,
                 valloaders=self.valloaders,
-                opt=self.opt,
-                lr_scheduler=self.scheduler,
                 epoch=epoch,
                 cfg=self.cfg,
                 device=self.device,

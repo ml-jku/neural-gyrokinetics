@@ -99,7 +99,7 @@ def train_step_simsiam(
     progress_remaining: float,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     model.train()
-    # stack along batch (same trajectory) 
+    # stack along batch (same trajectory)
     df_, cond_ = torch.cat([xs["df"], xs["df_aug"]]), torch.cat([condition, condition])
     preds = model(df_, condition=cond_, decoder=True)
     xs["df"] = df_  # update target with stacked version (2x batch)
@@ -109,7 +109,7 @@ def train_step_simsiam(
         idx_data,
         geometry=geometry,
         progress_remaining=progress_remaining,
-        separate_zf=getattr(cfg.dataset, "separate_zf", False)
+        separate_zf=getattr(cfg.dataset, "separate_zf", False),
     )
 
 
@@ -177,6 +177,8 @@ def load_autoencoder(
         decouple_mu = ae_cfg.decouple_mu
         patch_size = ae_cfg.patch.patch_size
         window_size = ae_cfg.patch.window_size
+        merging_depth = getattr(ae_cfg.patch, "merging_depth", 2)
+        unmerging_depth = getattr(ae_cfg.patch, "unmerging_depth", 2)
         patching_hidden_ratio = ae_cfg.patch.merging_hidden_ratio
         unmerging_hidden_ratio = ae_cfg.patch.unmerging_hidden_ratio
         c_multiplier = ae_cfg.patch.c_multiplier
@@ -227,7 +229,12 @@ def load_autoencoder(
                 }
             model_kwargs["vq_config"] = vq_config
         elif model_type == "simsiam":
-            model_kwargs["use_simae_decoder"] = True
+            model_kwargs["use_simae_decoder"] = getattr(
+                ae_cfg.bottleneck, "use_simae_decoder", True
+            )
+            model_kwargs["vit_predictor"] = getattr(
+                ae_cfg.bottleneck, "vit_predictor", True
+            )
 
         model = AE(
             dim=ae_cfg.latent_dim,
@@ -248,6 +255,8 @@ def load_autoencoder(
             conv_patch=False,
             hidden_mlp_ratio=2.0,
             c_multiplier=c_multiplier,
+            merging_depth=merging_depth,
+            unmerging_depth=unmerging_depth,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
             cond_embed=cond_fn,
@@ -260,7 +269,7 @@ def load_autoencoder(
             modulation=modulation,
             decouple_mu=decouple_mu,
             conditioning=True,
-            normalized_latent=False,
+            normalized_latent=True,
             mid_norm_learnable=(
                 ae_cfg.bottleneck.norm_learnable
                 if hasattr(ae_cfg.bottleneck, "norm_learnable")

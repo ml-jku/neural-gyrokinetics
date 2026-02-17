@@ -78,6 +78,7 @@ def main(config: DictConfig):
         if config.output_path is None:
             dict_config["output_path"] = osp.join("outputs", date_and_time)
         else:
+            # TODO ignores if there are checkpoints in there
             dict_config["output_path"] = osp.join(
                 dict_config["output_path"], date_and_time
             )

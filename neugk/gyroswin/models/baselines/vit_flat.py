@@ -90,9 +90,7 @@ class ViTFlat(nn.Module):
         )
 
         if abs_pe:
-            self.ape = APE(
-                dim, self.patch_embed.grid_size, learnable=True
-            )
+            self.ape = APE(dim, self.patch_embed.grid_size, learnable=True)
 
         # unpatch
         self.unpatch = PatchExpand(

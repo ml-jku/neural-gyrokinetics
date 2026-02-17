@@ -22,7 +22,6 @@ class Swin5DAE(Swin5DUnet):
         bottleneck_depth: int = 2,
         **kwargs
     ):
-        # TODO(diff) make conditioning uniform across models
         super().__init__(*args, conditioning=[] if conditioning else None, **kwargs)
 
         self.bottleneck_dim = bottleneck_dim if bottleneck_dim else self.middle.dim
@@ -345,26 +344,39 @@ class Swin5DVQVAE(Swin5DAE):
         else:
             raise RuntimeError(
                 "No VQ indices available. Run encode() or forward() first."
-            )  
+            )
 
 
 class Swin5DSimSiam(Swin5DAE):
-    def __init__(self, *args, use_simae_decoder: bool = False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        use_simae_decoder: bool = False,
+        vit_predictor: bool = True,
+        **kwargs
+    ):
         super().__init__(*args, **kwargs)
 
-        # predictor network (flat vit)
+        # predictor network
         predictor_dim = self.bottleneck_dim // 8
+        if vit_predictor:
+            # flat vit
+            ape = APE(predictor_dim, self.bottleneck_grid_size, init_weights="sincos")
+            backbone = ViTLayer(
+                space=len(self.bottleneck_grid_size),
+                dim=predictor_dim,
+                grid_size=self.bottleneck_grid_size,
+                depth=2,
+                num_heads=4,
+                mlp_ratio=2.0,
+                act_fn=self.act_fn,
+            )
+        else:
+            # basic mlp
+            ape = nn.Identity()
+            backbone = nn.Identity()
+        # further 8x bottleneck in prediction
         encoder = MLP([self.bottleneck_dim, predictor_dim], act_fn=self.act_fn)
-        ape = APE(predictor_dim, self.bottleneck_grid_size, init_weights="sincos")
-        backbone = ViTLayer(
-            space=len(self.bottleneck_grid_size),
-            dim=predictor_dim,
-            grid_size=self.bottleneck_grid_size,
-            depth=2,
-            num_heads=4,
-            mlp_ratio=2.0,
-            act_fn=self.act_fn,
-        )
         decoder = MLP([predictor_dim, self.bottleneck_dim], act_fn=self.act_fn)
         self.predictor = nn.Sequential(encoder, ape, backbone, decoder)
         # autoencoder + simsiam
@@ -380,7 +392,7 @@ class Swin5DSimSiam(Swin5DAE):
         self,
         df: torch.Tensor,
         condition: Optional[torch.Tensor] = None,
-        decoder: bool = True
+        decoder: bool = True,
     ):
         zdf, condition, pad_axes = self.encode(df, condition=condition)
         pdf = self.predictor(zdf)

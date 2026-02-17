@@ -371,6 +371,7 @@ class SwinNDUnet(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         gated_attention: bool = False,
+        qk_norm: bool = False,
         mid_norm_learnable: bool = True,
     ):
         super().__init__()
@@ -439,9 +440,13 @@ class SwinNDUnet(nn.Module):
             use_rpb=use_rpb,
             use_rope=use_rope,
             gated_attention=gated_attention,
+            qk_norm=qk_norm,
         )
         self.GlobalLayerType = partial(
-            GlobalLayer, use_rope=use_rope, gated_attention=gated_attention
+            GlobalLayer,
+            use_rope=use_rope,
+            gated_attention=gated_attention,
+            qk_norm=qk_norm,
         )
         if swin_bottleneck:
             self.GlobalLayerType = partial(

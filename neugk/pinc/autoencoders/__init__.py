@@ -45,7 +45,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         unmerging_hidden_ratio = ae_cfg.patch.unmerging_hidden_ratio
         c_multiplier = ae_cfg.patch.c_multiplier
         act_fn = getattr(torch.nn, ae_cfg.act_fn)
-        
+
         normalized_latent = True  # model_type != "simsiam"
 
         num_heads = ae_cfg.vit.num_heads
@@ -57,6 +57,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         use_abs_pe = ae_cfg.vit.use_abs_pe
         modulation = ae_cfg.vit.modulation
         drop_path = ae_cfg.vit.drop_path
+        qk_norm = getattr(ae_cfg.vit, "qk_norm", True)
         num_layers = len(depth)
         assert num_layers == len(num_heads)
 
@@ -93,7 +94,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
                 }
             model_kwargs["vq_config"] = vq_config
         elif model_type == "simsiam":
-            model_kwargs["use_simae_decoder"] = True
+            model_kwargs["use_simae_decoder"] = ae_cfg.bottleneck.use_simae_decoder
+            model_kwargs["vit_predictor"] = ae_cfg.bottleneck.vit_predictor
 
         ae = AE(
             dim=latent_dim,
@@ -122,9 +124,10 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             init_weights=ae_cfg.init_weights,
             patching_init_weights=ae_cfg.patching_init_weights,
             act_fn=act_fn,
+            use_rpb=use_rpb,
             use_rope=use_rope,
             gated_attention=gated_attention,
-            use_rpb=use_rpb,
+            qk_norm=qk_norm,
             modulation=modulation,
             decouple_mu=decouple_mu,  # make it 4D
             conditioning=True,

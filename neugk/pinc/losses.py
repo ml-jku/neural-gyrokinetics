@@ -118,7 +118,6 @@ class PINCLossWrapper(LossWrapper):
 
         self.complex_metrics = None
 
-
     @property
     def all_losses(self):
         return (
@@ -126,7 +125,7 @@ class PINCLossWrapper(LossWrapper):
             + self._vae_losses
             + self._vqvae_losses
             + self._spectral_losses
-            + self._simsiam_losses # Add this
+            + self._simsiam_losses
         )
 
     def _update_ema_loss_scale(self, loss_name: str, loss_value: torch.Tensor):
@@ -309,8 +308,10 @@ class PINCLossWrapper(LossWrapper):
 
     def compute_vqvae_loss(self, preds):
         return {"vq_commit": preds.get("vq_commit_loss", None)}
-    
-    def compute_simsiam_loss(self, preds: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+
+    def compute_simsiam_loss(
+        self, preds: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
         def D(p, z):
             p, z = p.flatten(1), z.flatten(1)
             z = z.detach()
@@ -560,7 +561,11 @@ class PINCLossWrapper(LossWrapper):
         ) and geometry is not None:
             losses.update(self.compute_spectral_losses(preds, tgts, geometry))
 
-        if sum([self.weights.get(k, 0.0) for k in self._simsiam_losses]) > 0:
+        # simsiam only in training
+        if (
+            self.training
+            and sum([self.weights.get(k, 0.0) for k in self._simsiam_losses]) > 0
+        ):
             losses.update(self.compute_simsiam_loss(preds))
 
         special_keys = set(
@@ -580,7 +585,7 @@ class PINCLossWrapper(LossWrapper):
         if self.training:
             all_keys = nonzero_keys
         else:
-            
+
             all_keys = list(set(self.weights.keys()) | set(losses.keys()))
 
         data_keys = [k for k in all_keys if k not in special_keys]
