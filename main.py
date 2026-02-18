@@ -154,9 +154,8 @@ def main(config: DictConfig):
                 ae_type = config.get("model", {}).get("name", "unknown")
                 name = f"peft_{ae_type}"
             elif stage == "diffusion":
-                sched = config.diffusion.scheduler.name
-                model = config.diffusion.model.name
-                name = f"{stage}_{sched}_{model}"
+                model = config.model.model_type
+                name = f"{stage}_{model}"
             else:
                 name = "experiment"
 

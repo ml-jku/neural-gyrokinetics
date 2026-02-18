@@ -1,17 +1,18 @@
-from typing import Optional, Tuple, Dict, Sequence
+from typing import Optional, Dict, Sequence
 import h5py
 import os
 import pickle
-import tqdm
+from tqdm import tqdm
 import hashlib
 from dataclasses import dataclass
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
-from einops import rearrange
 
 import torch
 import numpy as np
+import torch.distributed as dist
 from torch.utils._pytree import tree_map
+from torch.utils.data import DataLoader
 
 from neugk.dataset import CycloneDataset
 from neugk.utils import RunningMeanStd
@@ -40,10 +41,19 @@ class CycloneAESample:
 
 
 class CycloneAEDataset(CycloneDataset):
-    def __init__(self, *args, conditions: Sequence[str], **kwargs):
+    def __init__(
+        self,
+        *args,
+        conditions: Sequence[str],
+        precomputed_latents: Optional[Dict] = None,
+        autoencoder: Optional[torch.nn.Module] = None,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
 
         self.conditions = conditions
+        self.precomputed_latents = precomputed_latents
+        self.autoencoder = autoencoder
 
     def _recompute_stats(self, key: str, offset: int = 0):
         def process_t_idx(t_idx, key):
@@ -75,7 +85,7 @@ class CycloneAEDataset(CycloneDataset):
 
             return x_mean, x_var, x_min, x_max
 
-        # NOTE: subsample by two for normalization stats!
+        # subsample by two for normalization stats
         t_indices = (
             list(range(0, self.length, 2))
             if key in ["df", "phi"]
@@ -98,10 +108,10 @@ class CycloneAEDataset(CycloneDataset):
             process_inds = partial(process_t_idx, key=key)
             stats = None
             with ThreadPoolExecutor(self.num_workers) as executor:
-                metrics_gen = tqdm.tqdm(
+                metrics_gen = tqdm(
                     executor.map(process_inds, t_indices),
                     total=len(t_indices),
-                    desc=f"Computing stats for {key}",
+                    desc=f"computing stats for {key}",
                 )
 
                 for metrics in metrics_gen:
@@ -113,33 +123,22 @@ class CycloneAEDataset(CycloneDataset):
                     stats.update(x_mean, x_var, x_min, x_max)
 
             pickle.dump(stats, open(stats_dump_pkl, "wb"))
-            print(f"Saved recomputed stats to {stats_dump_pkl}")
+            print(f"saved recomputed stats to {stats_dump_pkl}")
         return stats
 
     def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneAESample:
-        """
-        Args:
-            index (int): Flat index with dataset ordering.
-
-        Returns:
-            CycloneAESample: dataclass
-                - df (torch.Tensor): target density, shape `(c, bundle, v1, v2, s, x, y)`
-                - phi (torch.Tensor): target potential, shape `(c, bundle, x, s, y)`
-                - flux (torch.Tensor): target flux, shape `()`
-                - timestep (torch.Tensor): physical timestep, shape `()`
-                - itg (torch.Tensor): ion temperature gradient, shape `()`
-                - file_index (torch.Tensor): accessory file index, shape `()`
-                - timestep_index (torch.Tensor): accessory timestep index, shape `()`
-        """
         # lookup file index and time index from flat index
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
-        with h5py.File(self.files[file_index], "r") as f:
-            sample = self._load_data(f, file_index, t_index)
-        # k-fields
-        x = sample["x"]
-        if x is not None and self.separate_zf:
-            x = self._separate_zf(x)
+        if self.precomputed_latents is not None:
+            sample = self._load_data(None, file_index, t_index)
+            x = sample["x"]
+        else:
+            with h5py.File(self.files[file_index], "r") as f:
+                sample = self._load_data(f, file_index, t_index)
+            x = sample["x"]
+            if x is not None and self.separate_zf:
+                x = self._separate_zf(x)
         # accessory fields
         phi, flux = sample["phi"], sample["flux"]
         avg_flux = self.get_avg_flux(file_index)
@@ -149,8 +148,10 @@ class CycloneAEDataset(CycloneDataset):
             [torch.tensor(sample[k], dtype=self.dtype) for k in self.conditions], dim=-1
         )
         geometry = sample["geometry"]
+
         if self.normalization is not None and get_normalized:
-            if x is not None:
+            # skip normalization if latents are precomputed
+            if x is not None and self.precomputed_latents is None:
                 x = self.normalize(file_index, df=x)
 
             if phi is not None:
@@ -175,9 +176,10 @@ class CycloneAEDataset(CycloneDataset):
             conditioning=conditioning,
         )
 
-    def _load_data(
-        self, data, file_index, t_index
-    ) -> Tuple[np.ndarray, float, float, np.ndarray]:
+    def _load_data(self, data, file_index, t_index) -> Dict:
+        if self.precomputed_latents is not None:
+            return self.precomputed_latents[(file_index, t_index)]
+
         orig_t_index = t_index + self.offsets[file_index]
         xs, phis, fluxes = [], [], []
         for i in range(self.bundle_seq_length):
@@ -250,8 +252,11 @@ class CycloneAEDataset(CycloneDataset):
         df: Optional[torch.Tensor] = None,
         phi: Optional[torch.Tensor] = None,
         flux: Optional[torch.Tensor] = None,
+        **kwargs,
     ):
         if df is not None:
+            if self.autoencoder is not None:
+                df = self.autoencoder.decode(df, **kwargs)["df"]
             field = "df"
             x = df
         elif phi is not None:
@@ -266,7 +271,7 @@ class CycloneAEDataset(CycloneDataset):
         return x * scale + shift
 
     def collate(self, batch: Sequence[CycloneAESample]):
-        # batch is a list of CycloneSamples
+        # batch is a list of cyclonesamples
         return CycloneAESample(
             df=(
                 torch.stack([sample.df for sample in batch])
@@ -286,3 +291,105 @@ class CycloneAEDataset(CycloneDataset):
             conditioning=torch.stack([sample.conditioning for sample in batch]),
             geometry=tree_map(lambda *x: torch.stack(x), *[s.geometry for s in batch]),
         )
+
+    @torch.no_grad()
+    def precompute_latents(
+        self,
+        rank: int,
+        dataloader: DataLoader,
+        autoencoder: torch.nn.Module,
+        device: torch.device = "cuda",
+        latent_stats: Optional[RunningMeanStd] = None,
+    ):
+        self.autoencoder = autoencoder
+        # unique filenames
+        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        latents_dump_pkl = os.path.join(
+            self.dir, f"diff_{self.split}_latents_{file_hash}.pkl"
+        )
+        # load latents from disk if already computed
+        if os.path.exists(latents_dump_pkl):
+            if rank == 0:
+                print(f"Loading precomputed latents from {latents_dump_pkl}")
+            with open(latents_dump_pkl, "rb") as f:
+                self.precomputed_latents = pickle.load(f)
+            if dist.is_initialized():
+                dist.barrier()
+        else:
+            autoencoder.eval()
+            autoencoder.to(device)
+            latents_dict = {}
+            desc = f"Precomputing {self.split} latents (rank:{rank})"
+            for batch in tqdm(dataloader, desc=desc):
+                df = batch.df.to(device)
+                cond = (
+                    batch.conditioning.to(device)
+                    if hasattr(batch, "conditioning")
+                    else None
+                )
+                if cond is not None:
+                    z, _, _ = autoencoder.encode(df, condition=cond)
+                else:
+                    z, _, _ = autoencoder.encode(df)
+                z = z.cpu().numpy()
+                # cache local batch latents
+                for i in range(len(batch.file_index)):
+                    f_idx = batch.file_index[i].item()
+                    t_idx = batch.timestep_index[i].item()
+                    with h5py.File(self.files[f_idx], "r") as f:
+                        cached_latents = self.precomputed_latents
+                        self.precomputed_latents = None
+                        sample = self._load_data(f, f_idx, t_idx)
+                        self.precomputed_latents = cached_latents
+                    sample["x"] = z[i]
+                    latents_dict[(f_idx, t_idx)] = sample
+            # ddp merge
+            if dist.is_initialized():
+                gathered_dict = [None for _ in range(dist.get_world_size())]
+                dist.all_gather_object(gathered_dict, latents_dict)
+                full_latents_dict = {}
+                for d in gathered_dict:
+                    full_latents_dict.update(d)
+                self.precomputed_latents = full_latents_dict
+            else:
+                self.precomputed_latents = latents_dict
+            # save latents on main process
+            if rank == 0:
+                with open(latents_dump_pkl, "wb") as f:
+                    pickle.dump(self.precomputed_latents, f)
+                print(f"Saved precomputed latents to {latents_dump_pkl}")
+            if dist.is_initialized():
+                dist.barrier()
+
+        # normalization stats
+        # stats_dump_pkl = os.path.join(self.dir, f"diff_{self.split}_latent_stats_{file_hash}.pkl")
+        # if os.path.exists(stats_dump_pkl):
+        #     with open(stats_dump_pkl, "rb") as f:
+        #         self.latent_stats = pickle.load(f)
+        # else:
+        if self.split == "train":
+            stats = None
+            l2_norms = []
+            for sample in self.precomputed_latents.values():
+                x = sample["x"]
+                norm_axes = tuple(range(0, x.ndim))
+                x_mean = np.mean(x, axis=norm_axes, keepdims=True)
+                x_var = np.var(x, axis=norm_axes, keepdims=True)
+                x_min = np.min(x, axis=norm_axes, keepdims=True)
+                x_max = np.max(x, axis=norm_axes, keepdims=True)
+                l2_norms.append(np.sqrt(np.sum(x**2, axis=norm_axes, keepdims=True)))
+                if stats is None:
+                    stats = RunningMeanStd(shape=x_mean.shape)
+                stats.update(x_mean, x_var, x_min, x_max)
+            self.latent_stats = stats
+            l2_norm = np.mean(l2_norms, axis=0)
+            if rank == 0:
+                print(f"Latent mean: {np.squeeze(stats.mean)}")
+                print(f"Latent var: {np.squeeze(stats.var)}")
+                print(f"Latent l2 norm: {np.squeeze(l2_norm)}")
+            # wait until done
+            if dist.is_initialized():
+                dist.barrier()
+        else:
+            assert latent_stats is not None
+            self.latent_stats = latent_stats

@@ -49,6 +49,7 @@ vit:
   gated_attention: true
   modulation: dit # "dit", "film"
   drop_path: 0.1
+  qk_norm: true
 
 bottleneck:
   dim: 256

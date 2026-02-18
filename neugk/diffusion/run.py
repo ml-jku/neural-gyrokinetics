@@ -30,12 +30,25 @@ class DDPMRunner(BaseRunner):
             raise ValueError(f"AE not found at {ckpt_path}.")
 
         if "latent" in self.cfg.model.model_type:
-            # TODO(diff) what does load_peft=True do
-            self.autoencoder, _, _ = load_autoencoder(
-                ckpt_path, device=self.device, load_peft=True
+            self.autoencoder, _, _ = load_autoencoder(ckpt_path, device=self.device)
+            # TODO(gg) clean up latent dataset creation
+            self.trainset.precompute_latents(
+                self.rank,
+                dataloader=self.trainloader,
+                autoencoder=self.autoencoder,
+                device=self.device,
             )
+
+            for i, valloader in enumerate(self.valloaders):
+                self.valsets[i].precompute_latents(
+                    self.rank,
+                    dataloader=valloader,
+                    autoencoder=self.autoencoder,
+                    device=self.device,
+                    latent_stats=self.trainset.latent_stats,
+                )
         else:
-            # TODO(diff) for now dummy autoencoder for pixel diffusion
+            # dummy autoencoder for pixel diffusion
             self.autoencoder = DummyAE()
 
         self.autoencoder.to(self.device)
@@ -84,8 +97,6 @@ class DDPMRunner(BaseRunner):
         self.input_fields = set(self.cfg.dataset.input_fields)
         self.idx_keys = ["file_index", "timestep_index"]
 
-        self.i = 0
-
     def _load_checkpoints(self):
         # Load the diffusion model checkpoint (not the VAE one)
         ckpt_path = os.path.join(self.cfg.output_path, "ckp.pth")
@@ -109,9 +120,7 @@ class DDPMRunner(BaseRunner):
         self.cur_update_step = self.start_epoch * len(self.trainloader)
 
     def forward_step_diffusion(self, sample: Dict[str, torch.Tensor], condition):
-        df = sample["phi"]
-        with torch.no_grad():
-            latents, _, _ = self.autoencoder.encode(df, condition=condition)
+        latents = sample["df"]
         bs = latents.shape[0]
         noise = torch.randn_like(latents, device=self.device)
         n_timesteps = self.noise_scheduler.config.num_train_timesteps
@@ -135,14 +144,6 @@ class DDPMRunner(BaseRunner):
             weights = torch.clamp(snr, max=snr_gamma) / (snr + 1)
         elif pred_type == "epsilon":
             weights = torch.clamp(snr, max=snr_gamma) / snr
-
-        self.i += 1
-        if self.i % 200 == 0:
-            from neugk.pinc.neural_fields.nf_utils import plotND
-
-            x = self.sample(condition, df)["df"][0]
-            fig = plotND(x, df[0].detach().cpu(), n=(x.ndim - 1), cmap="plasma")
-            fig.savefig(f"tmp/fig{self.i}.png")
 
         return (loss * weights).mean()
 
@@ -290,13 +291,6 @@ class StudentTRunner(DDPMRunner):
 
         snr_gamma = 5.0
         weights = torch.clamp(snr, max=snr_gamma) / snr
-
-        self.i += 1
-        if self.i % 50 == 0:
-            from neugk.pinc.neural_fields.nf_utils import plotND
-
-            plotND(self.sample(condition, df)["df"][0]).savefig(f"tmp/fig{self.i}.png")
-
         return (loss * weights).mean()
 
     @torch.no_grad()
@@ -336,19 +330,10 @@ class LaplaceFlowRunner(DDPMRunner):
         self.laplace_scale = getattr(self.cfg.model, "laplace_scale", 0.1)
         self.mix_ratio = getattr(self.cfg.model, "mix_ratio", 0.5)
 
-        # self.distr_student = StudentT(torch.tensor(self.nu, device=self.device))
-        # self.distr_laplace = Laplace(
-        #     torch.tensor(0.0, device=self.device),
-        #     torch.tensor(self.laplace_scale, device=self.device)
-        # )
-
-        from torch.distributions import Normal
-
-        self.distr_student = Normal(
-            torch.tensor(0.0, device=self.device), torch.tensor(1.0, device=self.device)
-        )
-        self.distr_laplace = Normal(
-            torch.tensor(0.0, device=self.device), torch.tensor(1.0, device=self.device)
+        self.distr_student = StudentT(torch.tensor(self.nu, device=self.device))
+        self.distr_laplace = Laplace(
+            torch.tensor(0.0, device=self.device),
+            torch.tensor(self.laplace_scale, device=self.device),
         )
 
     def _sample_mixture(self, shape):
@@ -372,13 +357,6 @@ class LaplaceFlowRunner(DDPMRunner):
         target_v = x1 - x0
         pred = self.model(xt, tstep=t_indices, condition=condition)
         loss = F.mse_loss(pred, target_v)
-
-        self.i += 1
-        if self.i % 50 == 0:
-            from neugk.pinc.neural_fields.nf_utils import plotND
-
-            plotND(self.sample(condition, df)["df"][0]).savefig(f"tmp/fig{self.i}.png")
-
         return loss
 
     @torch.no_grad()

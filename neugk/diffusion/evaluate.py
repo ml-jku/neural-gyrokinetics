@@ -73,7 +73,7 @@ def evaluate(
                 metrics[key] = torch.tensor(0.0)
             n_timesteps_acc = torch.tensor(0.0)
             use_tqdm = False
-            if use_tqdm or (dist.is_initialized() and not rank):
+            if use_tqdm and (not dist.is_initialized() or rank == 0):
                 valloader = tqdm(
                     valloader,
                     desc=(

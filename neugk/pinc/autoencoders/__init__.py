@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+from torch import nn
 
 
 def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
@@ -128,6 +129,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             use_rope=use_rope,
             gated_attention=gated_attention,
             qk_norm=qk_norm,
+            norm_layer=nn.RMSNorm,
             modulation=modulation,
             decouple_mu=decouple_mu,  # make it 4D
             conditioning=True,

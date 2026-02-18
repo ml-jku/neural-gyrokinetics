@@ -9,6 +9,7 @@ from neugk.utils import save_model_and_config
 
 @torch.no_grad()
 def collect_xy(
+    rank: int,
     dataloader: torch.utils.data.DataLoader,
     model: torch.nn.Module,
     device: torch.device,
@@ -17,7 +18,7 @@ def collect_xy(
     model.eval()
     latents, fluxes = [], []
 
-    if (not dist.is_initialized() or dist.get_rank() == 0) and desc is not None:
+    if (not dist.is_initialized() or rank == 0) and desc is not None:
         iterator = tqdm(dataloader, desc=desc)
     else:
         iterator = dataloader
@@ -38,6 +39,7 @@ def collect_xy(
 
 
 def evaluate_linear_probe(
+    rank: int,
     model: torch.nn.Module,
     trainloader: torch.utils.data.DataLoader,
     valloaders: list,
@@ -50,7 +52,7 @@ def evaluate_linear_probe(
     if (epoch % val_freq) != 0 and epoch != 1:
         return log_metric_dict, loss_val_min
 
-    X_train, Y_train = collect_xy(trainloader, model, device)
+    X_train, Y_train = collect_xy(rank, trainloader, model, device)
 
     X_mean, Y_mean = X_train.mean(0), Y_train.mean(0)
     X_centered, Y_centered = X_train - X_mean, Y_train - Y_mean
@@ -62,7 +64,7 @@ def evaluate_linear_probe(
 
     for val_idx, valloader in enumerate(valloaders):
         valname = "val_traj" if val_idx == 0 else "val_samples"
-        X_val, Y_val = collect_xy(valloader, model, device, desc=None)
+        X_val, Y_val = collect_xy(rank, valloader, model, device, desc=None)
 
         X_val_centered, Y_val_centered = X_val - X_mean, Y_val - Y_mean
 

@@ -76,7 +76,6 @@ def get_data(cfg, rank: int = 0):
         else:
             dataset_class = CycloneDataset
     elif cfg.workflow == "pinc":
-
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
         train_kwargs = {"conditions": list(cfg.model.conditioning)}
@@ -86,12 +85,11 @@ def get_data(cfg, rank: int = 0):
         else:
             dataset_class = CycloneAEDataset
     elif cfg.workflow == "diffusion":
-        train_input_fields = cfg.dataset.input_fields
+        train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
         train_kwargs = {"conditions": list(cfg.model.conditioning)}
         val_kwargs = {"conditions": list(cfg.model.conditioning)}
         dataset_class = CycloneAEDataset
-        # dataset_class = CycloneAEDatasetGaussianized
     else:
         raise NotImplementedError
 

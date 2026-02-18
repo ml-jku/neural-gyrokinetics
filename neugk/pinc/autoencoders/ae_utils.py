@@ -189,6 +189,7 @@ def load_autoencoder(
         use_rpb = getattr(ae_cfg.vit, "use_rpb", None)
         use_rope = getattr(ae_cfg.vit, "use_rope", None)
         gated_attention = getattr(ae_cfg.vit, "gated_attention", None)
+        qk_norm = getattr(ae_cfg.vit, "qk_norm", True)
         gradient_checkpoint = ae_cfg.vit.gradient_checkpoint
         use_abs_pe = ae_cfg.vit.use_abs_pe
         modulation = ae_cfg.vit.modulation
@@ -266,6 +267,7 @@ def load_autoencoder(
             use_rope=use_rope,
             gated_attention=gated_attention,
             use_rpb=use_rpb,
+            qk_norm=qk_norm,
             modulation=modulation,
             decouple_mu=decouple_mu,
             conditioning=True,

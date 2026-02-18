@@ -102,23 +102,18 @@ class Swin5DAE(Swin5DUnet):
     ):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
-
         # re-normalize latents before bottleneck
         if self.normalized_latent:
             zdf = self.post_z_norm(zdf)
-
         # bottleneck up
         zdf = self.middle_upproj(zdf)
         zdf = self.middle_post(zdf, condition=condition)
         zdf = self.middle_upscale(zdf)
-
         # up path
         for blk in self.up_blocks:
             zdf = blk(zdf, condition=condition)
-
         # expand to original
         df = self.patch_decode(zdf, pad_axes, condition=condition)
-
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
@@ -151,30 +146,23 @@ class Swin5DVAE(Swin5DAE):
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
-
         if condition is not None:
             condition = self.cond_embed(condition)
-
         # down path
         for blk in self.down_blocks:
             zdf = blk(zdf, return_skip=False, condition=condition)
-
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)
-
         # first Transformer, then project to 2x dim and split
         zdf = self.middle_pre(zdf, condition=condition)
         mu_logvar = self.middle_vae_downproj(zdf)
         mu, logvar = torch.chunk(mu_logvar, 2, dim=-1)
-
         # sampling via reparameterization trick
         z = self.reparameterize(mu, logvar)
-
         # for loss computation
         self._mu = mu
         self._logvar = logvar
-
         return z, condition, pad_axes
 
     def decode(
@@ -185,29 +173,23 @@ class Swin5DVAE(Swin5DAE):
     ):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
-
         # bottleneck up
         zdf = self.middle_upproj(zdf)
         zdf = self.middle_post(zdf, condition=condition)
         zdf = self.middle_upscale(zdf)
-
         # up path
         for blk in self.up_blocks:
             zdf = blk(zdf, condition=condition)
-
         # expand to original
         df = self.patch_decode(zdf, pad_axes, condition=condition)
-
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         zdf, condition, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
-
         # for loss computation
         outputs["mu"] = self._mu
         outputs["logvar"] = self._logvar
-
         return outputs
 
     def compute_kl_loss(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -253,44 +235,33 @@ class Swin5DVQVAE(Swin5DAE):
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
-
         if condition is not None:
             condition = self.cond_embed(condition)
-
         # down path
         for blk in self.down_blocks:
             zdf = blk(zdf, return_skip=False, condition=condition)
-
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)
-
         zdf = self.middle_pre(zdf, condition=condition)
         z_continuous = self.middle_vq_downproj(zdf)
-
         # set original shape for reshaping after VQ
         original_shape = z_continuous.shape
         batch_size = original_shape[0]
         spatial_shape = original_shape[1:-1]  # All spatial dimensions
         embedding_dim = original_shape[-1]
-
         # reshape for VQ: [B, spatial_dims..., embedding_dim] -> [B, prod(spatial_dims), embedding_dim]
         # codebook lookup is via the embedding dimension (TODO(ae) use 4/5D VQ?)
         z_flat = z_continuous.view(batch_size, -1, embedding_dim)
-
         # VQ lookup
         z_quantized, indices, commit_loss = self.vq(z_flat)
-
         # reshape back to original shape
         z_quantized = z_quantized.view(original_shape)
-
         # handle indices
         indices_shape = (batch_size,) + spatial_shape
         self._vq_indices = indices.view(indices_shape)
-
         # for loss computation
         self._vq_commit_loss = commit_loss
-
         return z_quantized, condition, pad_axes
 
     def decode(
@@ -302,16 +273,12 @@ class Swin5DVQVAE(Swin5DAE):
         # first post-VQ projection
         zdf = self.middle_vq_upproj(zdf)
         zdf = self.middle_post(zdf, condition=condition)
-
         zdf = self.middle_upscale(zdf)
-
         # up path
         for blk in self.up_blocks:
             zdf = blk(zdf, condition=condition)
-
         # expand to original
         df = self.patch_decode(zdf, pad_axes, condition=condition)
-
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
@@ -319,7 +286,6 @@ class Swin5DVQVAE(Swin5DAE):
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["vq_commit_loss"] = self._vq_commit_loss
         outputs["vq_indices"] = self._vq_indices
-
         return outputs
 
     def get_codebook_usage(self) -> torch.Tensor:

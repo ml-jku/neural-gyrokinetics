@@ -100,6 +100,7 @@ class CycloneDataset(Dataset):
         self.input_fields = input_fields
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
         assert split in ["train", "val"]
+        self.split = split
         self.dtype = dtype
         active_keys = active_keys if active_keys is not None else ["re", "im"]
         assert all([a in ["re", "im"] for a in active_keys])

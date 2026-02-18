@@ -123,9 +123,8 @@ class BaseRunner:
                 if "ms" in k and isinstance(v, (int, float))
             )
             epoch_str = str(epoch).zfill(len(str(int(self.cfg.training.n_epochs))))
-            print(
-                f"Epoch: {epoch_str}, {', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}, step time: {total_time:.2f}ms"
-            )
+            logged = ", ".join([f"{k}: {v:.5f}" for k, v in epoch_logs.items()])
+            print(f"Epoch: {epoch_str}, {logged}, step time: {total_time:.2f}ms")
 
     @abstractmethod
     def train_epoch(self, epoch):

@@ -87,7 +87,8 @@ class PINCRunner(BaseRunner):
             self.model = DDP(
                 self.model,
                 device_ids=[self.rank],
-                find_unused_parameters=True,  # (not self.simae)  # NOTE unused only if no decode
+                # NOTE unused only if no decode
+                find_unused_parameters=(self.cfg.stage == "simsiam"),
             )
 
         is_muon = (
@@ -249,20 +250,19 @@ class PINCRunner(BaseRunner):
                 if "optimizer_state_dict" in self.ae_ckpt_dict:
                     self.opt.load_state_dict(self.ae_ckpt_dict["optimizer_state_dict"])
                 if "scheduler_state_dict" in self.ae_ckpt_dict and self.scheduler:
-                    self.scheduler.load_state_dict(
-                        self.ae_ckpt_dict["scheduler_state_dict"]
-                    )
+                    # self.scheduler.load_state_dict(
+                    #     self.ae_ckpt_dict["scheduler_state_dict"]
+                    # )
+                    pass
             except Exception as e:
                 print(f"Warning: Could not load optimizer/scheduler state: {e}")
-
-        use_tqdm = self.cfg.logging.tqdm if not self.use_ddp else False
 
         # input fields caching
         self.input_fields = set(self.cfg.dataset.input_fields)
         self.idx_keys = ["file_index", "timestep_index"]
 
         for epoch in range(self.start_epoch + 1, self.cfg.training.n_epochs + 1):
-            if use_tqdm or (self.use_ddp and not self.rank):
+            if self.cfg.logging.tqdm and (not self.use_ddp or not self.rank):
                 self.pbar = tqdm(self.trainloader, "Training")
             else:
                 self.pbar = self.trainloader
@@ -420,6 +420,7 @@ class PINCRunner(BaseRunner):
             )
         if self.cfg.stage == "simsiam":
             probe_log_metric_dict, _ = evaluate_linear_probe(
+                rank=self.rank,
                 model=self.model,
                 trainloader=self.trainloader,
                 valloaders=self.valloaders,
@@ -428,4 +429,5 @@ class PINCRunner(BaseRunner):
                 device=self.device,
                 loss_val_min=self.loss_val_min,
             )
-        return (log_metric_dict | probe_log_metric_dict), val_plots
+            log_metric_dict = log_metric_dict | probe_log_metric_dict
+        return log_metric_dict, val_plots
