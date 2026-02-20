@@ -321,13 +321,9 @@ def generate_val_plots(
     plots = {}
     ts = f"T={ts[0].item():.2f}, " if ts is not None else ""
     val_plots_dict = {
-        "df": {
-            f"pred ({phase})": plot4x4_sided,
-            # f"std (T={ts[0].item():.2f}, {phase})": distribution_5D,
-            # f"2D RA spectrum (T={ts[0].item():.2f}, {phase})": plot_4x4_2D_raspec,
-        },
-        "phi": {f"Potentials ({ts}{phase})": plot_potentials},
-        "phi_int": {f"Integral potentials ({ts}{phase})": plot_potentials},
+        "df": {f"df ({ts}{phase})": plot4x4_sided},
+        # "phi": {f"phi ({ts}{phase})": plot_potentials},
+        # "phi_int": {f"phi int ({ts}{phase})": plot_potentials},
     }
 
     for key in rollout.keys():

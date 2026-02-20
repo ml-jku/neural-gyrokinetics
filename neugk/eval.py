@@ -361,8 +361,8 @@ class ComplexMetrics:
         preds,
         gts,
         dims=None,
-        return_dict=True,
-        include_spectral=True,
+        return_dict: bool = True,
+        include_spectral: bool = False,
         spatial_dims=(-2, -1),
     ):
         """
@@ -379,52 +379,45 @@ class ComplexMetrics:
         z_gts = self.to_complex(gts)
 
         # Compute standard metrics
-        pearson_mag, pearson_phase = self.complex_pearson(z_preds, z_gts, dims)
-        plv = self.phase_locking_value(z_preds, z_gts, dims)
+        # pearson_mag, pearson_phase = self.complex_pearson(z_preds, z_gts, dims)
+        # plv = self.phase_locking_value(z_preds, z_gts, dims)
         cssim = self.complex_ssim(z_preds, z_gts, dims)
         mse = self.complex_mse(z_preds, z_gts, dims)
-        l1 = self.complex_l1(z_preds, z_gts, dims)
-        spectral_energy = self.spectral_energy_metric(z_preds, z_gts, dims)
-        psnr = self.complex_psnr(z_gts, z_preds, spatial_dims)
+        # l1 = self.complex_l1(z_preds, z_gts, dims)
+        # spectral_energy = self.spectral_energy_metric(z_preds, z_gts, dims)
+        # psnr = self.complex_psnr(z_gts, z_preds, spatial_dims)
 
         results = {
-            "pearson_magnitude": pearson_mag.mean().item(),
-            "pearson_phase": pearson_phase.mean().item(),
-            "phase_locking": plv.mean().item(),
+            # "pearson_magnitude": pearson_mag.mean().item(),
+            # "pearson_phase": pearson_phase.mean().item(),
+            # "phase_locking": plv.mean().item(),
             "ssim": cssim.mean().item(),
             "mse": mse.mean().item(),
-            "l1": l1.mean().item(),
-            "spectral_energy": spectral_energy.item(),
-            "psnr": psnr.item(),
+            # "l1": l1.mean().item(),
+            # "spectral_energy": spectral_energy.item(),
+            # "psnr": psnr.item(),
         }
 
-        # Add spectral analysis if requested
         if include_spectral:
             try:
-                # Transform to spectral domain and use existing complex functions
                 z_preds_fft = self._to_spectral_domain(z_preds, spatial_dims)
                 z_gts_fft = self._to_spectral_domain(z_gts, spatial_dims)
 
-                # Use existing complex_pearson in frequency domain (equivalent to spectral correlation)
                 avg_dims = list(range(1, z_preds_fft.dim()))
                 spectral_pearson_mag, _ = self.complex_pearson(
                     z_preds_fft, z_gts_fft, dims=avg_dims
                 )
 
-                # Use existing phase_locking_value in frequency domain
                 spectral_plv = self.phase_locking_value(
                     z_preds_fft, z_gts_fft, dims=avg_dims
                 )
 
-                # Compute kx/ky directional analysis (unique spectral info)
                 kx_ky_results = self.kx_ky_analysis(z_preds, z_gts, spatial_dims)
 
-                # Magnitude-weighted phase coherence (advanced spectral metric)
                 weighted_plv = self.magnitude_weighted_phase_coherence(
                     z_preds, z_gts, spatial_dims
                 )
 
-                # Add to results
                 results.update(
                     {
                         "spectral_pearson_magnitude": spectral_pearson_mag.mean().item(),
@@ -452,13 +445,13 @@ class ComplexMetrics:
             # Stack main metrics into a tensor (excluding spectral for tensor output)
             return torch.stack(
                 [
-                    pearson_mag.mean(),
-                    pearson_phase.mean(),
-                    plv.mean(),
+                    # pearson_mag.mean(),
+                    # pearson_phase.mean(),
+                    # plv.mean(),
                     cssim.mean(),
                     mse.mean(),
-                    l1.mean(),
-                    spectral_energy,
+                    # l1.mean(),
+                    # spectral_energy,
                 ]
             )
 

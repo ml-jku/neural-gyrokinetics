@@ -3,6 +3,7 @@ from typing import List, Callable
 from functools import partial
 from collections import defaultdict
 import re
+import warnings
 
 import torch
 import numpy as np
@@ -12,10 +13,12 @@ import torch.distributed as dist
 from tqdm import tqdm
 from omegaconf import DictConfig
 
+from neugk.utils import save_model_and_config
 from neugk.dataset import CycloneAESample
 from neugk.eval import validation_metrics
 from neugk.plot_utils import generate_val_plots, avg_flux_confidence
 from neugk.losses import LossWrapper
+
 
 
 def denormalize_single(preds, idx_data, denormalize_fn):
@@ -36,9 +39,12 @@ def denormalize_single(preds, idx_data, denormalize_fn):
 def evaluate(
     rank: int,
     world_size: int,
+    model: torch.nn.Module,
     sample_fn: Callable,
     valsets: List[Dataset],
     valloaders: List[DataLoader],
+    opt: torch.optim.Optimizer,
+    lr_scheduler: torch.optim.lr_scheduler,
     epoch: int,
     cfg: DictConfig,
     device: torch.device,
@@ -160,41 +166,43 @@ def evaluate(
                 n_timesteps_acc += 1
 
                 # temporary dicts for plotting
-                t_idx = idx_data["timestep_index"].tolist()
-                batch_idx = torch.randint(0, len(t_idx), (1,)).item()
-                # TODO(diff) batch_idx only used for df/phi, flux needs the batch
-                #            with more trajectories need to ensure sample within one
-                # use df, phi_int, flux_int for plotting
-                preds_plots = {
-                    "df": preds["df"] if "df" in preds else None,
-                    "phi": preds["phi_int"] if "phi_int" in preds else None,
-                    "flux": preds["flux_int"] if "flux_int" in preds else None,
-                }
+                # TODO(gg) for now limit number of plots
+                if len(val_plots) == 0:
+                    t_idx = idx_data["timestep_index"].tolist()
+                    batch_idx = torch.randint(0, len(t_idx), (1,)).item()
+                    # TODO(diff) batch_idx only used for df/phi, flux needs the batch
+                    #            with more trajectories need to ensure sample within one
+                    # use df, phi_int, flux_int for plotting
+                    preds_plots = {
+                        "df": preds["df"] if "df" in preds else None,
+                        "phi": preds["phi_int"] if "phi_int" in preds else None,
+                        "flux": preds["flux_int"] if "flux_int" in preds else None,
+                    }
 
-                preds_plots = {
-                    k: preds_plots[k][batch_idx] if "flux" not in k else preds_plots[k]
-                    for k in preds_plots
-                }
-                tgts = {k: tgts[k][batch_idx] for k in tgts}
-                if val_idx == 0:
-                    # holdout trajectories valset
-                    plots = generate_val_plots(
-                        rollout=preds_plots,
-                        gt=tgts,
-                        ts=sample.timestep,
-                        phase="Random draw",
-                    )
-                    val_plots.update(plots)
-                else:
-                    # holdout samples valset
-                    if idx == 0:
+                    preds_plots = {
+                        k: preds_plots[k][batch_idx] if "flux" not in k else preds_plots[k]
+                        for k in preds_plots
+                    }
+                    tgts = {k: tgts[k][batch_idx] for k in tgts}
+                    if val_idx == 0:
+                        # holdout trajectories valset
                         plots = generate_val_plots(
                             rollout=preds_plots,
                             gt=tgts,
-                            timestep=sample.timestep,
-                            phase="Holdout samples",
+                            ts=sample.timestep,
+                            phase="Random draw",
                         )
                         val_plots.update(plots)
+                    else:
+                        # holdout samples valset
+                        if idx == 0:
+                            plots = generate_val_plots(
+                                rollout=preds_plots,
+                                gt=tgts,
+                                timestep=sample.timestep,
+                                phase="Holdout samples",
+                            )
+                            val_plots.update(plots)
 
             if dist.is_initialized():
                 # for phase in metrics.keys():
@@ -249,8 +257,23 @@ def evaluate(
                 avg_flux_rmse = np.sqrt(((pred_means - tgt_vals) ** 2).mean())
                 log_metric_dict[f"{valname}/avg_flux_rmse"] = avg_flux_rmse.item()
 
-                val_plots[f"flux_ci_plot_{valname}"] = avg_flux_confidence(
+                val_plots["avg_flux_UQ"] = avg_flux_confidence(
                     pred_means, pred_stds, tgt_vals, traj_ids
                 )
+        
+        if not rank:
+            val_loss = log_metric_dict["val_traj/avg_flux_rmse"]
+            loss_val_min = save_model_and_config(
+                model,
+                optimizer=opt,
+                scheduler=lr_scheduler,
+                cfg=cfg,
+                epoch=epoch,
+                # TODO decide target metric
+                val_loss=val_loss,
+                loss_val_min=loss_val_min,
+            )
+        else:
+            warnings.warn(f"checkpoints will not be stored for rank {rank}")
 
     return log_metric_dict, val_plots, loss_val_min

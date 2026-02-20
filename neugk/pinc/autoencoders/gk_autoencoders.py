@@ -2,6 +2,7 @@ from typing import Optional, List, Dict
 
 import torch
 import torch.nn as nn
+import warnings
 
 from neugk.models.layers import MLP
 from neugk.models.gk_unet import Swin5DUnet
@@ -31,6 +32,7 @@ class Swin5DAE(Swin5DUnet):
         # Store middle dim before deleting (needed for VAE/VQ-VAE subclasses)
         self.middle_dim = self.middle.dim
         if normalized_latent:
+            warnings.warn("LayerNorm on latent might lead to scale problems.")
             self.pre_z_norm = nn.LayerNorm(self.bottleneck_dim)
             self.post_z_norm = nn.LayerNorm(self.bottleneck_dim)
 

@@ -1,3 +1,5 @@
+from typing import Optional
+
 import os
 from abc import abstractmethod
 from tqdm import tqdm
@@ -42,19 +44,14 @@ class BaseRunner:
         self.writer = setup_logging(cfg) if not rank else None
 
         # common state
-        self.model = None
-        self.opt = None
-        self.scheduler = None
-        self.loss_wrap = None
-        self.grad_balancer = None
-        self.scaler = None
-        self.trainloader = None
-        self.valsets = None
-        self.valloaders = None
         self.start_epoch = 0
         self.loss_val_min = torch.inf
         self.cur_update_step = 0.0
         self.loss_scheduler_dict = {}
+        
+        self.setup_data()
+        self.setup_components()
+        self.setup_scheduler()
 
     def setup_data(self):
         datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.rank)
@@ -138,11 +135,7 @@ class BaseRunner:
     def setup_components(self):
         raise NotImplementedError
 
-    def __call__(self):
-        self.setup_data()
-        self.setup_components()
-        self.setup_scheduler()
-
+    def __call__(self, skip_eval: bool = False):
         # amp setup
         self.use_amp = self.cfg.amp.enable
         self.use_bf16 = (
@@ -162,7 +155,7 @@ class BaseRunner:
 
             # training step
             self.model.train()
-            if self.loss_wrap is not None:
+            if getattr(self, "loss_wrap", None) is not None:
                 self.loss_wrap.train().to(self.device)
             loss_logs, info_dict = self.train_epoch(epoch)
 
@@ -182,14 +175,13 @@ class BaseRunner:
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # evaluate
-            log_metric_dict, val_plots = self.evaluate(epoch)
+            log_metric_dict, val_plots = {}, {}
+            if not skip_eval:
+                log_metric_dict, val_plots = self.evaluate(epoch)
 
             # log
             epoch_logs = train_losses_dict | log_metric_dict
             self._log_epoch(epoch, epoch_logs, info_dict, val_plots)
-
-            # TODO need?
-            # memory_cleanup(self.device, aggressive=True)
 
         if self.writer:
             self.writer.finish()

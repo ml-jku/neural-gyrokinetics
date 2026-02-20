@@ -243,9 +243,12 @@ class DDPMRunner(BaseRunner):
         log_metric_dict, val_plots, self.loss_val_min = diff_evaluate(
             rank=self.rank,
             world_size=self.world_size,
+            model=self.model,
             sample_fn=self.sample,
             valsets=self.valsets,
             valloaders=self.valloaders,
+            opt=self.opt,
+            lr_scheduler=self.scheduler,
             epoch=epoch,
             cfg=self.cfg,
             device=self.device,
@@ -484,7 +487,7 @@ class FlowMatchingRunner(DDPMRunner):
         return F.mse_loss(pred, target_v)
 
     @torch.no_grad()
-    def sample(self, condition: torch.Tensor, steps: int = 30):
+    def sample(self, condition: torch.Tensor, steps: int = 30, latent_only: bool = False):
         self.model.eval()
         bs = condition.shape[0]
         x = self._get_prior((bs, *self.model.latent_shape))
@@ -511,10 +514,11 @@ class FlowMatchingRunner(DDPMRunner):
             x = x + v_pred * dt
 
         pred = x / getattr(self, "latent_scale", 1.0)
-        # TODO temporary
-        ch = 2 + 2 * self.trainset.separate_zf
-        dummy = torch.zeros((1, ch, *self.trainset.resolution), device=self.device)
-        _, pad_axes = self.autoencoder.encode(dummy, condition=condition)
-        decoded = self.autoencoder.decode(pred, pad_axes, condition=condition)
+        if not latent_only:
+            # TODO temporary
+            ch = 2 + 2 * self.trainset.separate_zf
+            dummy = torch.zeros((1, ch, *self.trainset.resolution), device=self.device)
+            _, pad_axes = self.autoencoder.encode(dummy, condition=condition)
+            pred = self.autoencoder.decode(pred, pad_axes, condition=condition)
         self.model.train()
-        return decoded
+        return pred

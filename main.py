@@ -199,14 +199,4 @@ def main(config: DictConfig):
 
 
 if __name__ == "__main__":
-    use_manual_load = False
-    for arg in sys.argv:
-        if "ae_checkpoint=" in arg:
-            use_manual_load = True
-            break
-
-    if use_manual_load:
-        with hydra.initialize(version_base=None, config_path="configs"):
-            main(restart_config_autoencoder())
-    else:
-        main()
+    main()

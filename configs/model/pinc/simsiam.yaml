@@ -54,6 +54,7 @@ vit:
 bottleneck:
   dim: 256
   norm_learnable: false
+  normalized_latent: true
   num_heads: 4
   depth: 2
   use_simae_decoder: true

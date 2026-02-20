@@ -120,7 +120,8 @@ def load_autoencoder(
     load_peft: bool = False,
 ) -> Tuple[nn.Module, Dict, int]:
     # TODO latest or best?
-
+    if os.path.isdir(ckp_path):
+        ckp_path = os.path.join(ckp_path, "best.pth")
     loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
     state_dict = loaded_ckpt["model_state_dict"]
 

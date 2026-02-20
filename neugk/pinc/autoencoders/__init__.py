@@ -35,6 +35,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         bottleneck_dim = ae_cfg.bottleneck.dim
         bottleneck_num_heads = getattr(ae_cfg.bottleneck, "num_heads", None)
         bottleneck_depth = getattr(ae_cfg.bottleneck, "depth", None)
+        normalized_latent = getattr(ae_cfg.bottleneck, "normalized_latent", True)
+        norm_learnable = getattr(ae_cfg.bottleneck, "norm_learnable", False)
 
         base_resolution = dataset.resolution
         decouple_mu = ae_cfg.decouple_mu
@@ -47,8 +49,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         c_multiplier = ae_cfg.patch.c_multiplier
         act_fn = getattr(torch.nn, ae_cfg.act_fn)
 
-        normalized_latent = True  # model_type != "simsiam"
-
+        
         num_heads = ae_cfg.vit.num_heads
         depth = ae_cfg.vit.depth
         use_rpb = getattr(ae_cfg.vit, "use_rpb", None)
@@ -134,11 +135,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             decouple_mu=decouple_mu,  # make it 4D
             conditioning=True,
             normalized_latent=normalized_latent,
-            mid_norm_learnable=(
-                ae_cfg.bottleneck.norm_learnable
-                if hasattr(ae_cfg.bottleneck, "norm_learnable")
-                else True
-            ),
+            mid_norm_learnable=norm_learnable,
             **model_kwargs,  # VAE/VQ-VAE configs
         )
 
