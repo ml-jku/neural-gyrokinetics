@@ -171,7 +171,6 @@ def evaluate(
                         gt=tgts,
                         ts=sample.timestep,
                         phase="Random draw",
-                        workflow="autoencoder",
                     )
                     val_plots.update(plots)
                 else:
@@ -182,7 +181,6 @@ def evaluate(
                             gt=tgts,
                             timestep=sample.timestep,
                             phase="Holdout samples",
-                            workflow="autoencoder",
                         )
                         val_plots.update(plots)
 

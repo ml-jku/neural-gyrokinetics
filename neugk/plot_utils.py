@@ -2,6 +2,7 @@
 
 from typing import Dict, Optional
 
+from collections import defaultdict
 import io
 from PIL import Image as PILImage
 import wandb
@@ -287,11 +288,34 @@ def plot_potentials(x1, x2):
     return plt_to_wandb_image(fig)
 
 
+def avg_flux_confidence(pred_means, pred_stds, tgt_vals, traj_ids):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    x_pos = np.arange(len(traj_ids))
+    ax.errorbar(
+        x_pos,
+        pred_means,
+        yerr=pred_stds,
+        fmt="o",
+        capsize=5,
+        label="predicted (mean ± std)",
+        color="blue",
+        alpha=0.7,
+    )
+    ax.plot(x_pos, tgt_vals, "rx", markersize=8, label="ground truth", zorder=3)
+    ax.set_xticks(x_pos)
+    ax.set_xticklabels(traj_ids, rotation=45)
+    ax.set_xlabel("trajectory id")
+    ax.set_ylabel("average flux")
+    ax.set_title(f"average flux predictions per trajectory")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    return plt_to_wandb_image(fig)
+
+
 def generate_val_plots(
     rollout: Dict[str, torch.Tensor],
     gt: torch.Tensor,
     phase: str,
-    workflow: str = "gyroswin",
     ts: Optional[torch.Tensor] = None,
 ):
     plots = {}
@@ -305,9 +329,6 @@ def generate_val_plots(
         "phi": {f"Potentials ({ts}{phase})": plot_potentials},
         "phi_int": {f"Integral potentials ({ts}{phase})": plot_potentials},
     }
-
-    if workflow == "autoencoder":
-        del val_plots_dict["phi"]
 
     for key in rollout.keys():
         if key not in val_plots_dict:

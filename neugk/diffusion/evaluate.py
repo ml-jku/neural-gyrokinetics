@@ -1,17 +1,20 @@
 from typing import List, Callable
 
 from functools import partial
+from collections import defaultdict
+import re
+
 import torch
-import torch.nn as nn
+import numpy as np
 from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
+
 from tqdm import tqdm
 from omegaconf import DictConfig
 
-from neugk.utils import save_model_and_config
 from neugk.dataset import CycloneAESample
 from neugk.eval import validation_metrics
-from neugk.plot_utils import generate_val_plots
+from neugk.plot_utils import generate_val_plots, avg_flux_confidence
 from neugk.losses import LossWrapper
 
 
@@ -36,8 +39,6 @@ def evaluate(
     sample_fn: Callable,
     valsets: List[Dataset],
     valloaders: List[DataLoader],
-    opt: torch.optim.Optimizer,
-    lr_scheduler: torch.optim.lr_scheduler,
     epoch: int,
     cfg: DictConfig,
     device: torch.device,
@@ -45,7 +46,6 @@ def evaluate(
 ):
     # Validation loop
     eval_integrals = cfg.validation.eval_integrals
-    use_tqdm = cfg.logging.tqdm
     idx_keys = ["file_index", "timestep_index"]
     log_metric_dict = {}
     val_plots = {}
@@ -63,17 +63,12 @@ def evaluate(
     if (epoch % val_freq) == 0 or epoch == 1:
         for val_idx, (valset, valloader) in enumerate(zip(valsets, valloaders)):
 
-            # TODO(diff) temporary
-            dummy5d = torch.zeros_like(next(iter(valloader)).df)
-            eval_fn = partial(sample_fn, dummy=dummy5d)
-
             valname = "val_traj" if val_idx == 0 else "val_samples"
             metrics = {}
             for key in loss_wrap.all_losses:
                 metrics[key] = torch.tensor(0.0)
             n_timesteps_acc = torch.tensor(0.0)
-            use_tqdm = False
-            if use_tqdm and (not dist.is_initialized() or rank == 0):
+            if cfg.logging.tqdm and (not dist.is_initialized() or rank == 0):
                 valloader = tqdm(
                     valloader,
                     desc=(
@@ -83,10 +78,14 @@ def evaluate(
                     ),
                 )
 
+            # lists to collect flux across all batches for the two TODOs
+            all_preds_flux = []
+            all_tgts_flux = []
+
             for idx, sample in enumerate(valloader):
                 sample: CycloneAESample
-                # TODO(diff) tgts don't make much sense here, leave for now
                 # for integral evaluation, etc
+                # NOTE: validation target are not latent
                 tgts = {
                     k: getattr(sample, k).to(device, non_blocking=True)
                     for k in ["df", "phi", "flux", "avg_flux"]
@@ -97,10 +96,12 @@ def evaluate(
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
                 # get the rolled out validation trajectories
-                preds = eval_fn(condition)
+                preds = sample_fn(condition)
 
                 # NOTE denormalize always true for integrals if denormalize:
-                preds = denormalize_single(preds, idx_data, valset.denormalize)
+                preds = denormalize_single(
+                    preds, idx_data, partial(valset.denormalize, condition=condition)
+                )
                 tgts = denormalize_single(tgts, idx_data, valset.denormalize)
 
                 tgts = {k: v.cpu() for k, v in tgts.items()}
@@ -133,6 +134,21 @@ def evaluate(
                 # add integrated quantities to rollout for comparison
                 preds["phi_int"] = integrated_i["phi"]
                 preds["flux_int"] = integrated_i["eflux"]
+
+                # collect avg_flux and file_index for plotting and rmse
+                if "flux_int" in preds and "avg_flux" in tgts:
+                    all_preds_flux.append(
+                        {
+                            "val": preds["flux_int"].cpu(),
+                            "file_index": idx_data["file_index"].cpu(),
+                        }
+                    )
+                    all_tgts_flux.append(
+                        {
+                            "val": tgts["avg_flux"].cpu(),
+                            "file_index": idx_data["file_index"].cpu(),
+                        }
+                    )
 
                 for key in metrics_i.keys():
                     if key not in metrics:
@@ -167,7 +183,6 @@ def evaluate(
                         gt=tgts,
                         ts=sample.timestep,
                         phase="Random draw",
-                        workflow="autoencoder",
                     )
                     val_plots.update(plots)
                 else:
@@ -178,7 +193,6 @@ def evaluate(
                             gt=tgts,
                             timestep=sample.timestep,
                             phase="Holdout samples",
-                            workflow="autoencoder",
                         )
                         val_plots.update(plots)
 
@@ -211,6 +225,32 @@ def evaluate(
                     metrics[m] = metrics[m] / n_timesteps_acc
                     log_metric_dict[f"{valname}/{m}"] = metrics[m].item()
 
-        # TODO(diff) model checkpointing
+            # fluxes averaged per trajetory
+            if len(all_preds_flux) > 0 and (not dist.is_initialized() or rank == 0):
+                fpreds = torch.cat([b["val"].flatten() for b in all_preds_flux])
+                ftgts = torch.cat([b["val"].flatten() for b in all_tgts_flux])
+                fidxs = torch.cat([b["file_index"].flatten() for b in all_preds_flux])
+
+                # group by trajectory to calculate actual avg_flux
+                grouped_preds = defaultdict(list)
+                grouped_tgts = {}
+
+                for p, t, i in zip(fpreds, ftgts, fidxs):
+                    idx = re.search(r"iteration_\d+", valset.files[i.item()]).group()
+                    grouped_preds[idx].append(p.item())
+                    grouped_tgts[idx] = t.item()
+
+                traj_ids = sorted(list(grouped_preds.keys()))
+                pred_means = np.array([np.mean(grouped_preds[i]) for i in traj_ids])
+                pred_stds = np.array([np.std(grouped_preds[i]) for i in traj_ids])
+                tgt_vals = np.array([grouped_tgts[i] for i in traj_ids])
+
+                # compute rmse on the trajectory averages
+                avg_flux_rmse = np.sqrt(((pred_means - tgt_vals) ** 2).mean())
+                log_metric_dict[f"{valname}/avg_flux_rmse"] = avg_flux_rmse.item()
+
+                val_plots[f"flux_ci_plot_{valname}"] = avg_flux_confidence(
+                    pred_means, pred_stds, tgt_vals, traj_ids
+                )
 
     return log_metric_dict, val_plots, loss_val_min

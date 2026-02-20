@@ -107,7 +107,7 @@ class LossWrapper(nn.Module):
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
         int_losses = {}
         # NOTE: these losses are in unnormalized space
-        int_losses["phi_int"] = F.mse_loss(pphi_int, tgt_phi)
+        int_losses["phi_int"] = F.mse_loss(pphi_int.squeeze(), tgt_phi.squeeze())
         # pflux -> 0, eflux -> heat flux
         int_losses["flux_int"] = (pflux**2).mean() + F.mse_loss(eflux, tgt_eflux)
         # mimicry / cross terms in the loss (between prediction heads and integrals)

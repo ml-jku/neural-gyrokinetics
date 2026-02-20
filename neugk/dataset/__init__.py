@@ -133,7 +133,7 @@ def get_data(cfg, rank: int = 0):
         bundle_seq_length=cfg.model.bundle_seq_length,
         trajectories=cfg.dataset.validation_trajectories,
         cond_filters=cfg.dataset.eval_cond_filters,
-        subsample=cfg.dataset.subsample,
+        subsample=getattr(cfg.dataset, "val_subsample", 1),
         log_transform=cfg.dataset.log_transform,
         split_into_bands=cfg.dataset.split_into_bands,
         minmax_beta1=cfg.dataset.minmax_beta1,
@@ -175,7 +175,7 @@ def get_data(cfg, rank: int = 0):
     if partial_holdouts:
         holdout_samples_valset = dataset_class(
             active_keys=cfg.dataset.active_keys,
-            input_fields=input_fields,
+            input_fields=val_input_fields,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,

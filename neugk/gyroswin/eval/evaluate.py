@@ -309,7 +309,6 @@ def evaluate(
                             gt=plot_gt,
                             ts=conds["timestep"],
                             phase="Random draw",
-                            workflow="gyroswin",
                         )
                         val_plots.update(plots)
                     else:
@@ -320,7 +319,6 @@ def evaluate(
                                 gt=tgts,  # TODO ?
                                 ts=conds["timestep"],
                                 phase="Holdout samples",
-                                workflow="gyroswin",
                             )
                             val_plots.update(plots)
 

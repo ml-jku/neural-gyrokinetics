@@ -256,7 +256,12 @@ class CycloneAEDataset(CycloneDataset):
     ):
         if df is not None:
             if self.autoencoder is not None:
-                df = self.autoencoder.decode(df, **kwargs)["df"]
+                condition = kwargs["condition"]
+                ch = 2 + 2 * self.separate_zf
+                dummy = torch.zeros((1, ch, *self.resolution), device=condition.device)
+                dummy_cond = condition[0:1]
+                _, pad_axes = self.autoencoder.encode(dummy, condition=dummy_cond)
+                df = self.autoencoder.decode(df, pad_axes, condition=condition)["df"]
             field = "df"
             x = df
         elif phi is not None:
@@ -327,10 +332,7 @@ class CycloneAEDataset(CycloneDataset):
                     if hasattr(batch, "conditioning")
                     else None
                 )
-                if cond is not None:
-                    z, _, _ = autoencoder.encode(df, condition=cond)
-                else:
-                    z, _, _ = autoencoder.encode(df)
+                z, _, _ = autoencoder.encode(df, condition=cond)
                 z = z.cpu().numpy()
                 # cache local batch latents
                 for i in range(len(batch.file_index)):
@@ -361,12 +363,6 @@ class CycloneAEDataset(CycloneDataset):
             if dist.is_initialized():
                 dist.barrier()
 
-        # normalization stats
-        # stats_dump_pkl = os.path.join(self.dir, f"diff_{self.split}_latent_stats_{file_hash}.pkl")
-        # if os.path.exists(stats_dump_pkl):
-        #     with open(stats_dump_pkl, "rb") as f:
-        #         self.latent_stats = pickle.load(f)
-        # else:
         if self.split == "train":
             stats = None
             l2_norms = []

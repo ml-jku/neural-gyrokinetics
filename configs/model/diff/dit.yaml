@@ -11,15 +11,7 @@ init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uni
 patching_init_weights: "kaiming_uniform"
 cond_init_weights: "kaiming_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
 
-loss_scheduler:
-  df: null
-  phi: null
-  flux: null
-  phi_int: null
-  flux_int: null
-  phi_cross: null
-  flux_cross: null
-  vq_commit: null
+loss_scheduler: null
 loss_weights:
   df: 1.0
 extra_loss_weights:
@@ -27,12 +19,9 @@ extra_loss_weights:
 patch:
   patch_size: null
   window_size: null
-  merging_hidden_ratio: 1.0
-  unmerging_hidden_ratio: 1.0
-  c_multiplier: 1.0
 
 vit:
-  num_heads: 8
+  num_heads: 16
   depth: 4
   gradient_checkpoint: false
   use_abs_pe: false
@@ -42,9 +31,14 @@ vit:
   drop_path: 0.1
 
 # diffusion specific
-scheduler:
-  num_train_timesteps: 100
-  beta_start: 0.001
-  beta_end: 0.2
-  beta_schedule: "squaredcos_cap_v2"
-  prediction_type: "epsilon"
+diffusion:
+  noise_distribution: gaussian
+  formulation: flow
+  continuous_time: true
+  minibatch_ot: true
+  scheduler:
+    num_train_timesteps: 1000
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: "linear"
+    prediction_type: "epsilon"

@@ -2,9 +2,8 @@ from typing import Sequence, Union, Optional, Type
 
 import torch
 from torch import nn
-from functools import partial
 
-from neugk.models.nd_vit.vit_layers import ViTLayer, DiTLayer, FilmViTLayer
+from neugk.models.nd_vit.vit_layers import DiTLayer
 from neugk.models.nd_vit.positional import APE
 from neugk.models.nd_vit.patching import (
     PatchEmbed,
@@ -31,14 +30,14 @@ class DiT(nn.Module):
         merging_hidden_ratio: float = 8.0,
         unmerging_hidden_ratio: float = 8.0,
         cond_embed: Optional[nn.Module] = None,
-        modulation: str = "dit",
         act_fn: nn.Module = nn.GELU,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         expand_act_fn: nn.Module = nn.LeakyReLU,
         init_weights: str = "xavier_uniform",
         patching_init_weights: str = "xavier_uniform",
         norm_output: bool = False,
-        patch_skip: bool = False,
+        use_rope: bool = False,
+        gated_attention: bool = False,
     ):
         super().__init__()
         if isinstance(patch_size, int):
@@ -49,7 +48,6 @@ class DiT(nn.Module):
         self.patching_init_weights = patching_init_weights
         self.base_resolution = base_resolution
         self.norm_output = norm_output
-        self.patch_skip = patch_skip
 
         num_heads = num_heads if isinstance(num_heads, int) else sum(num_heads)
         self.num_heads = num_heads
@@ -79,7 +77,6 @@ class DiT(nn.Module):
                 norm_layer=None,
                 mlp_ratio=unmerging_hidden_ratio,
                 act_fn=expand_act_fn,
-                patch_skip=self.patch_skip,
                 cond_dim=self.cond_embed.cond_dim if self.cond_embed else None,
             )
 
@@ -93,14 +90,10 @@ class DiT(nn.Module):
         if cond_embed:
             self.cond_embed = cond_embed
             cond_dim += self.cond_embed.cond_dim
-        if modulation == "dit":
-            GlobalLayer = partial(DiTLayer, cond_dim=cond_dim)
-        if modulation == "film":
-            GlobalLayer = partial(FilmViTLayer, cond_dim=cond_dim)
 
         self.encoder = nn.Sequential(nn.Linear(z_dim, dim, bias=False), act_fn())
-        self.ape = APE(z_dim, grid_size, init_weights="sincos")
-        self.backbone = GlobalLayer(
+        self.ape = APE(dim, grid_size, init_weights="rand", learnable=True)
+        self.backbone = DiTLayer(
             space,
             dim,
             grid_size=grid_size,
@@ -111,21 +104,28 @@ class DiT(nn.Module):
             use_checkpoint=use_checkpoint,
             norm_layer=norm_layer,
             act_fn=act_fn,
+            cond_dim=cond_dim,
+            use_rope=use_rope,
+            gated_attention=gated_attention,
         )
-        self.decoder = nn.Sequential(nn.Linear(dim, z_dim, bias=False), act_fn())
+        self.decoder = nn.Linear(dim, z_dim, bias=False)
 
         self.reset_parameters()
 
     def reset_parameters(self):
-        # patching
         if hasattr(self, "patch_embed"):
             self.patch_embed.reset_parameters(self.patching_init_weights)
             self.unpatch.reset_parameters(self.patching_init_weights)
-        # conditioning
+
         if hasattr(self, "cond_embed") and self.cond_embed is not None:
             self.cond_embed.reset_parameters(self.init_weights)
-        # backbone
+
         self.backbone.reset_parameters(self.init_weights)
+
+        # zero decoder initialization
+        nn.init.constant_(self.decoder.weight, 0)
+        if self.decoder.bias is not None:
+            nn.init.constant_(self.decoder.bias, 0)
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         # pad to patch blocks
@@ -155,8 +155,6 @@ class DiT(nn.Module):
         # compress to patch space
         if hasattr(self, "patch_embed"):
             x, pad_axes = self.patch_encode(x)
-            if self.patch_skip:
-                first_res = x.clone()
 
         tstep = self.time_embed(tstep)
 
@@ -166,16 +164,12 @@ class DiT(nn.Module):
         else:
             condition = tstep
 
-        x = self.ape(x)
-
         x = self.encoder(x)
+        x = self.ape(x)
         x = self.backbone(x, condition=condition)
         x = self.decoder(x)
 
         # expand to original
         if hasattr(self, "patch_embed"):
-            if self.patch_skip:
-                x = torch.cat([x, first_res], -1)
-
             x = self.patch_decode(x, pad_axes, condition=condition)
         return x

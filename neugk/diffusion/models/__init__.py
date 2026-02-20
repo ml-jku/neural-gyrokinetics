@@ -4,6 +4,7 @@ import torch
 from torch import nn
 
 from neugk.diffusion.models.dit import DiT
+from neugk.diffusion.models.mlp import LatentMLP
 from neugk.models.layers import ContinuousConditionEmbed, IntegerConditionEmbed
 
 
@@ -30,29 +31,43 @@ class DummyAE(nn.Module):
 
 
 def get_diffusion_model(cfg, autoencoder):
-    diffuser_cfg = cfg.model
+    diff_cfg = cfg.model
 
     # time conditioning
-    diff_steps = cfg.model.scheduler.num_train_timesteps
-    time_fn = IntegerConditionEmbed(128, 1, max_size=diff_steps + 1, use_mlp=False)
+    diff_steps = diff_cfg.diffusion.scheduler.num_train_timesteps
+    if getattr(diff_cfg.diffusion, "continuous_time", True):
+        time_fn = ContinuousConditionEmbed(32, 1)
+    else:
+        time_fn = IntegerConditionEmbed(128, 1, max_size=diff_steps + 1, use_mlp=False)
     # parameter conditioning
     cond_fn = None
-    n_cond = len(diffuser_cfg.conditioning)
+    n_cond = len(diff_cfg.conditioning)
     if n_cond > 0:
         cond_fn = ContinuousConditionEmbed(32, n_cond)
 
-    if "dit" in diffuser_cfg.model_type:
+    if "dit" in diff_cfg.model_type:
         model = DiT(
             space=5 - int(autoencoder.decouple_mu),
-            dim=diffuser_cfg.latent_dim,
+            dim=diff_cfg.latent_dim,
             z_dim=autoencoder.bottleneck_dim,
             base_resolution=autoencoder.bottleneck_grid_size,
             patch_size=None,
-            depth=diffuser_cfg.vit.depth,
-            num_heads=diffuser_cfg.vit.num_heads,
-            use_checkpoint=diffuser_cfg.vit.gradient_checkpoint,
-            drop_path=diffuser_cfg.vit.drop_path,
+            depth=diff_cfg.vit.depth,
+            num_heads=diff_cfg.vit.num_heads,
+            use_checkpoint=diff_cfg.vit.gradient_checkpoint,
+            drop_path=diff_cfg.vit.drop_path,
             hidden_mlp_ratio=2.0,
+            time_embed=time_fn,
+            cond_embed=cond_fn,
+            use_rope=diff_cfg.vit.use_rope,
+            gated_attention=diff_cfg.vit.gated_attention,
+        )
+
+    if "mlp" in diff_cfg.model_type:
+        model = LatentMLP(
+            z_dim=autoencoder.bottleneck_dim,
+            dim=diff_cfg.latent_dim,
+            base_resolution=autoencoder.bottleneck_grid_size,
             time_embed=time_fn,
             cond_embed=cond_fn,
         )
@@ -76,7 +91,6 @@ def get_diffusion_model(cfg, autoencoder):
         norm_output = cfg.model.swin.norm_output
         use_abs_pe = cfg.model.swin.use_abs_pe
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
-        patch_skip = cfg.model.swin.patch_skip
         modulation = cfg.model.swin.modulation
         swin_bottleneck = cfg.model.swin.swin_bottleneck
         use_rpb = cfg.model.swin.use_rpb
@@ -92,7 +106,7 @@ def get_diffusion_model(cfg, autoencoder):
             base_resolution = (bundle_steps,) + tuple(base_resolution)
 
         model = Swin5DDiffUnet(
-            dim=diffuser_cfg.latent_dim,
+            dim=diff_cfg.latent_dim,
             base_resolution=base_resolution,
             patch_size=patch_size,
             window_size=window_size,
@@ -115,7 +129,7 @@ def get_diffusion_model(cfg, autoencoder):
             cond_embed=cond_fn,
             norm_output=norm_output,
             act_fn=act_fn,
-            patch_skip=patch_skip,
+            patch_skip=False,
             modulation=modulation,
             swin_bottleneck=swin_bottleneck,
             decouple_mu=decouple_mu,
@@ -148,7 +162,6 @@ def get_diffusion_model(cfg, autoencoder):
         norm_output = cfg.model.swin.norm_output
         use_abs_pe = cfg.model.swin.use_abs_pe
         act_fn = getattr(torch.nn, cfg.model.swin.act_fn)
-        patch_skip = cfg.model.swin.patch_skip
         modulation = cfg.model.swin.modulation
         swin_bottleneck = cfg.model.swin.swin_bottleneck
         use_rpb = cfg.model.swin.use_rpb
@@ -163,7 +176,7 @@ def get_diffusion_model(cfg, autoencoder):
             base_resolution = (bundle_steps,) + tuple(base_resolution)
 
         model = Swin3DDiffUnet(
-            #     dim=diffuser_cfg.latent_dim,
+            #     dim=diff_cfg.latent_dim,
             #     base_resolution=base_resolution,
             #     patch_size=patch_size,
             #     window_size=window_size,
@@ -193,7 +206,7 @@ def get_diffusion_model(cfg, autoencoder):
             #     use_rope=use_rope,
             #     conditioning={},
             # )
-            dim=diffuser_cfg.latent_dim,
+            dim=diff_cfg.latent_dim,
             base_resolution=base_resolution,
             max_tsteps=diff_steps + 1,
             in_channels=problem_dim,
@@ -211,7 +224,7 @@ def get_diffusion_model(cfg, autoencoder):
         problem_dim = 2 + (2 * int(cfg.dataset.separate_zf))
 
         model = FNO5DDiff(
-            dim=diffuser_cfg.latent_dim,
+            dim=diff_cfg.latent_dim,
             base_resolution=base_resolution,
             max_tsteps=diff_steps + 1,
             in_channels=problem_dim,
@@ -229,7 +242,7 @@ def get_diffusion_model(cfg, autoencoder):
         problem_dim = 2 + (2 * int(cfg.dataset.separate_zf))
 
         model = Basic5DDiff(
-            dim=diffuser_cfg.latent_dim,
+            dim=diff_cfg.latent_dim,
             base_resolution=base_resolution,
             patch_size=patch_size,
             max_tsteps=diff_steps + 1,

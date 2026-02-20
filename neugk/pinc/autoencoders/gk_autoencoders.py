@@ -72,27 +72,22 @@ class Swin5DAE(Swin5DUnet):
         del self.middle
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
+            condition = self.cond_embed(condition)
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
-
-        if condition is not None:
-            condition = self.cond_embed(condition)
         # down path
         for blk in self.down_blocks:
             zdf = blk(zdf, return_skip=False, condition=condition)
-
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)  # TODO(diff) middle layers always need PE
-
         zdf = self.middle_pre(zdf, condition=condition)
         zdf = self.middle_downproj(zdf)
-
         # layer norm on latents
         if self.normalized_latent:
             zdf = self.pre_z_norm(zdf)
-
-        return zdf, condition, pad_axes
+        return zdf, pad_axes
 
     def decode(
         self,
@@ -117,7 +112,9 @@ class Swin5DAE(Swin5DUnet):
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        zdf, condition, pad_axes = self.encode(df, condition=condition)
+        if condition is not None:
+            condition = self.cond_embed(condition)
+        zdf, pad_axes = self.encode(df, condition=condition)
         return self.decode(zdf, pad_axes, condition=condition)
 
 
@@ -144,10 +141,10 @@ class Swin5DVAE(Swin5DAE):
         return mu + eps * std
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
+            condition = self.cond_embed(condition)
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
-        if condition is not None:
-            condition = self.cond_embed(condition)
         # down path
         for blk in self.down_blocks:
             zdf = blk(zdf, return_skip=False, condition=condition)
@@ -163,7 +160,7 @@ class Swin5DVAE(Swin5DAE):
         # for loss computation
         self._mu = mu
         self._logvar = logvar
-        return z, condition, pad_axes
+        return z, pad_axes
 
     def decode(
         self,
@@ -185,7 +182,9 @@ class Swin5DVAE(Swin5DAE):
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        zdf, condition, pad_axes = self.encode(df, condition=condition)
+        if condition is not None:
+            condition = self.cond_embed(condition)
+        zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         # for loss computation
         outputs["mu"] = self._mu
@@ -233,10 +232,10 @@ class Swin5DVQVAE(Swin5DAE):
         self.middle_vq_upproj = nn.Linear(embedding_dim, self.middle_dim)
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
+            condition = self.cond_embed(condition)
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
-        if condition is not None:
-            condition = self.cond_embed(condition)
         # down path
         for blk in self.down_blocks:
             zdf = blk(zdf, return_skip=False, condition=condition)
@@ -262,7 +261,7 @@ class Swin5DVQVAE(Swin5DAE):
         self._vq_indices = indices.view(indices_shape)
         # for loss computation
         self._vq_commit_loss = commit_loss
-        return z_quantized, condition, pad_axes
+        return z_quantized, pad_axes
 
     def decode(
         self,
@@ -270,6 +269,8 @@ class Swin5DVQVAE(Swin5DAE):
         pad_axes: List,
         condition: Optional[torch.Tensor] = None,
     ):
+        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
+            condition = self.cond_embed(condition)
         # first post-VQ projection
         zdf = self.middle_vq_upproj(zdf)
         zdf = self.middle_post(zdf, condition=condition)
@@ -282,7 +283,9 @@ class Swin5DVQVAE(Swin5DAE):
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        zdf, condition, pad_axes = self.encode(df, condition=condition)
+        if condition is not None:
+            condition = self.cond_embed(condition)
+        zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["vq_commit_loss"] = self._vq_commit_loss
         outputs["vq_indices"] = self._vq_indices
@@ -360,7 +363,7 @@ class Swin5DSimSiam(Swin5DAE):
         condition: Optional[torch.Tensor] = None,
         decoder: bool = True,
     ):
-        zdf, condition, pad_axes = self.encode(df, condition=condition)
+        zdf, pad_axes = self.encode(df, condition=condition)
         pdf = self.predictor(zdf)
         if decoder and self.use_simae_decoder:
             pred = self.decode(zdf, pad_axes, condition)["df"]

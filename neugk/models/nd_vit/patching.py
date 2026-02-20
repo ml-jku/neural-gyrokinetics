@@ -223,6 +223,7 @@ class PatchMerge(nn.Module):
         grid_size: Sequence[int],
         norm_layer: Type[nn.LayerNorm] = nn.LayerNorm,
         c_multiplier: int = 2,
+        merge_mask: Optional[Sequence[int]] = None,
         init_weights: Optional[str] = None,
     ) -> None:
         super().__init__()
@@ -230,7 +231,9 @@ class PatchMerge(nn.Module):
         self.dim = dim
 
         # NOTE only merge those with more than two patches -> otherwise risk of nans
-        self.merge_subspace = [g > 2 for g in grid_size]
+        if merge_mask is None:
+            merge_mask = [True] * space
+        self.merge_subspace = [g > 2 and mm for mm, g in zip(merge_mask, grid_size)]
         self.grid_size = grid_size
         # grid resolution after patch merging
         self.target_grid_size = [
