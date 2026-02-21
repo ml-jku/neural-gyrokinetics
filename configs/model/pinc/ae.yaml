@@ -1,7 +1,7 @@
 name: ae
 model_type: ae
 bundle_seq_length: 1
-latent_dim: 512
+latent_dim: 1024
 act_fn: GELU
 decouple_mu: true
 conditioning: ["itg", "dg", "s_hat", "q"]
