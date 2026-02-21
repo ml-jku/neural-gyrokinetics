@@ -6,9 +6,9 @@ act_fn: GELU
 decouple_mu: true
 conditioning: ["itg", "dg", "s_hat", "q"]
 extra_zf_loss: false
-init_weights: "xavier_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
-patching_init_weights: "xavier_uniform"
-cond_init_weights: "xavier_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
+init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
+patching_init_weights: "kaiming_uniform"
+cond_init_weights: "kaiming_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
 
 loss_scheduler: null
 loss_weights:
