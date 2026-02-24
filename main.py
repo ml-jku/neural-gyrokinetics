@@ -8,13 +8,17 @@ import os.path as osp
 import sys
 import traceback
 from datetime import datetime
+import subprocess
+import random
 
-import hydra
 import torch
 import torch.multiprocessing as mp
 import yaml
+
+import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
+import submitit
 
 # Project Imports
 from neugk.utils import set_seed, compress_src, find_free_port, filter_cli_priority
@@ -48,8 +52,7 @@ def main(config: DictConfig):
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    set_seed(config.seed)
-
+    rand_suffix = random.randint(0, 999)
     print("#" * 88, "\nStarting Cyclone with configs:")
     print(OmegaConf.to_yaml(config))
     print("#" * 88, "\n")
@@ -57,6 +60,7 @@ def main(config: DictConfig):
     workflow = config.get("workflow")
     dict_config = OmegaConf.to_container(config)
     date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
+    date_and_time = f"{date_and_time}_{rand_suffix:03d}"
     if HydraConfig.initialized():
         dict_config["choices"] = HydraConfig.get().runtime.choices
 
@@ -161,18 +165,46 @@ def main(config: DictConfig):
 
         config.logging.run_id = f"{name}_{date_and_time}"
 
-    # setup distributed training
-    if torch.cuda.is_available():
-        n_gpus = torch.cuda.device_count()
-        world_size = n_gpus * config.ddp.n_nodes
-    else:
-        world_size = 1
-
     try:
-        if config.ddp.enable and world_size > 1:
-            # should be run with torchrun
-            rank = int(os.environ["RANK"])
-            dispatch_runner(rank, config, world_size=world_size)
+        is_ddp = config.ddp.enable
+        is_torchrun = "RANK" in os.environ
+        is_slurm = "SLURM_JOB_ID" in os.environ
+        if is_ddp:
+            world_size = config.ddp.n_nodes * torch.cuda.device_count()
+            if not is_torchrun and is_slurm:
+                overrides = HydraConfig.get().overrides.task
+                overrides = [
+                    o for o in overrides
+                    if not o.startswith("hydra/launcher=")
+                ]
+                if config.ddp.n_nodes == 1:
+                    # should be run with torchrun
+                    cmd = [
+                        "torchrun",
+                        f"--nproc_per_node={torch.cuda.device_count()}",
+                        "main.py"
+                    ] + overrides
+                else:
+                    # multinode setup
+                    cmd = [
+                        "torchrun",
+                        f"--nnodes={config.ddp.n_nodes}",
+                        f"--nproc_per_node={torch.cuda.device_count()}",
+                        f"--rdzv_backend={os.environ['RDZV_BACKEND']}",
+                        f"--rdzv_id={os.environ['RDZV_ID']}",
+                        f"--rdzv_endpoint={os.environ['HEAD_NODE_IP']}:29501",
+                        "main.py"
+                    ] + overrides
+
+                print(f"Launching DDP job with command: {' '.join(cmd)}")
+                subprocess.check_call(cmd)
+                return
+            elif is_torchrun and not is_slurm or is_torchrun and is_slurm:
+                rank = int(os.environ["RANK"])
+                dispatch_runner(rank, config, world_size=world_size)
+            else:
+                # here we could again revert to mp.spawn, but ideally should not be done anymore
+                raise ValueError("Invalid DDP setup: torchrun and SLURM env vars are inconsistent")
         else:
             # single gpu
             rank = 0

@@ -1,0 +1,29 @@
+defaults:
+  - submitit_slurm
+
+_target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
+nodes: 4
+gpus_per_node: 4
+timeout_min: 1440
+cpus_per_task: 32
+submitit_folder: /home/u6eb/fpaische.u6eb/plasmamodelling/slurm/multirun/%j
+
+setup:
+  - "head_node=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)"
+  - "head_node_ip=$(srun --nodes=1 --ntasks=1 -w \"$head_node\" hostname --ip-address)"
+  - "export HEAD_NODE_IP=$head_node_ip"
+  - "RANDOM=84210"
+  - "export RDZV_ID=$RANDOM"
+  - "export RDZV_BACKEND=c10d"
+  - "echo Node IP: $head_node_ip"
+  - "echo Nodes array: $nodes"
+  - "echo Head node: $head_node"
+  - "echo head_node_ip: $head_node_ip"
+  - "nvidia-smi"
+  - "unset CUDA_VISIBLE_DEVICES"
+  - "export NCCL_DEBUG=INFO"
+  - "cd $HOME/plasmamodelling"
+  - "source /projects/u6eb/miniconda3/bin/activate plasmamd"
+  - "which conda"
+  - "which python"
+  - "sleep 20"

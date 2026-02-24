@@ -13,6 +13,7 @@ from neugk.utils import (
     setup_logging,
     get_linear_burn_in_fn,
     remainig_progress,
+    set_seed,
 )
 from neugk.dataset import get_data
 
@@ -22,6 +23,7 @@ class BaseRunner:
         self.rank = rank
         self.cfg = cfg
         self.world_size = world_size
+        set_seed(cfg.seed)
 
         # ddp setup
         if cfg.ddp.enable and cfg.ddp.n_nodes > 1 and world_size > 1:
