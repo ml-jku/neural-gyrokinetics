@@ -9,6 +9,8 @@ from neugk.dataset.cyclone import (
     CycloneSample,
     CoordinateCycloneDataset,
 )
+from neugk.dataset.cyclone_kvikio import KvikioCycloneDataset
+from neugk.dataset.cyclone_diff_kvikio import KvikioCycloneAEDataset
 from neugk.dataset.cyclone_diff import CycloneAEDataset, CycloneAESample
 from neugk.dataset.cyclone_diff_simsiam import CycloneSimSiamDataset
 
@@ -36,6 +38,7 @@ def get_data(cfg, rank: int = 0):
             )
         )
 
+    datatype = getattr(cfg.dataset, "datatype", "h5")
     use_ddp = dist.is_initialized()
     partial_holdouts = {}
     if cfg.dataset.partial_holdouts:
@@ -74,7 +77,12 @@ def get_data(cfg, rank: int = 0):
         # elif cfg.choices.model == "baselines/linear_ablation":
         #     dataset_class = LinearCycloneDataset
         else:
-            dataset_class = CycloneDataset
+            if datatype == "h5":
+                dataset_class = CycloneDataset
+            elif datatype == "gds":
+                dataset_class = KvikioCycloneDataset
+                train_kwargs["rank"] = rank
+                val_kwargs["rank"] = rank
     elif cfg.workflow == "pinc":
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
@@ -83,7 +91,14 @@ def get_data(cfg, rank: int = 0):
         if cfg.stage == "simsiam":
             dataset_class = CycloneSimSiamDataset
         else:
-            dataset_class = CycloneAEDataset
+            if datatype == "h5":
+                dataset_class = CycloneAEDataset
+            elif datatype == "gds":
+                dataset_class = KvikioCycloneAEDataset
+                train_kwargs["rank"] = rank
+                val_kwargs["rank"] = rank
+                # NOTE: for validation load without gds, save space, slow is acceptable
+                val_kwargs["load_with_kvikio"] = False
     elif cfg.workflow == "diffusion":
         train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
@@ -148,16 +163,27 @@ def get_data(cfg, rank: int = 0):
         **val_kwargs,
     )
 
+    # dataloaders
+    prefetch_factor = min(2, cfg.training.num_workers // 2)
+    # NOTE: must be false when returning gpu data
+    pin_memory = cfg.training.pin_memory and datatype != "gds"
+    dataloader_kwargs = {}
+    if datatype == "gds":
+        import torch.multiprocessing as mp
+
+        dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
+
     trainloader = DataLoader(
         trainset,
         cfg.training.batch_size,
         num_workers=cfg.training.num_workers,
         shuffle=True if not use_ddp else False,
         collate_fn=trainset.collate,
-        pin_memory=cfg.training.pin_memory,
+        pin_memory=pin_memory,
         sampler=DistributedSampler(trainset) if use_ddp else None,
         persistent_workers=True,
-        prefetch_factor=cfg.training.num_workers // 2,
+        prefetch_factor=prefetch_factor,
+        **dataloader_kwargs,
     )
 
     holdout_trajectories_valloader = DataLoader(
@@ -166,10 +192,11 @@ def get_data(cfg, rank: int = 0):
         num_workers=cfg.training.num_workers,
         shuffle=False,
         collate_fn=holdout_trajectories_valset.collate,
-        pin_memory=cfg.training.pin_memory,
+        pin_memory=pin_memory,
         sampler=(DistributedSampler(holdout_trajectories_valset) if use_ddp else None),
         persistent_workers=True,
-        prefetch_factor=cfg.training.num_workers // 2,
+        prefetch_factor=prefetch_factor,
+        **dataloader_kwargs,
     )
 
     if partial_holdouts:
@@ -205,7 +232,7 @@ def get_data(cfg, rank: int = 0):
             num_workers=cfg.training.num_workers,
             shuffle=False,
             collate_fn=holdout_samples_valset.collate,
-            pin_memory=cfg.training.pin_memory,
+            pin_memory=pin_memory,
             sampler=(DistributedSampler(holdout_samples_valset) if use_ddp else None),
         )
 
@@ -213,6 +240,7 @@ def get_data(cfg, rank: int = 0):
     dataloaders = (trainloader, holdout_trajectories_valloader)
 
     val_ratio = len(holdout_trajectories_valset) / len(trainset)
+
     if rank == 0:
         print(f"Train: {len(trainset)}")
         print(f"Holdout trajectories (val): {len(holdout_trajectories_valset)}")

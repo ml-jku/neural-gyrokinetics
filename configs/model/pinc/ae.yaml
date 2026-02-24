@@ -5,6 +5,7 @@ latent_dim: 1024
 act_fn: GELU
 decouple_mu: true
 conditioning: ["itg", "dg", "s_hat", "q"]
+# conditioning: []
 extra_zf_loss: false
 init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
 patching_init_weights: "kaiming_uniform"
@@ -16,7 +17,7 @@ loss_weights:
 extra_loss_weights: {}
 
 patch:
-  patch_size: [ 4, 0, 2, 5, 4 ]
+  patch_size: [ 4, 0, 4, 5, 4 ]
   window_size: [ 4, 0, 4, 9, 4 ]
   merging_depth: 1
   unmerging_depth: 1

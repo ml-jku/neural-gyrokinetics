@@ -487,7 +487,9 @@ class FlowMatchingRunner(DDPMRunner):
         return F.mse_loss(pred, target_v)
 
     @torch.no_grad()
-    def sample(self, condition: torch.Tensor, steps: int = 30, latent_only: bool = False):
+    def sample(
+        self, condition: torch.Tensor, steps: int = 50, latent_only: bool = False
+    ):
         self.model.eval()
         bs = condition.shape[0]
         x = self._get_prior((bs, *self.model.latent_shape))

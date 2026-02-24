@@ -1,5 +1,6 @@
 name: cyclone
 path: /local00/bioinf/gyrokinetics/preprocessed
+datatype: h5  # gds, h5
 normalization: zscore
 normalization_scope: dataset
 minmax_beta1: 8
@@ -16,7 +17,7 @@ log_transform: false
 num_workers: 4
 active_keys: ["re", "im"]
 input_fields: ["df"]
-training_trajectories: "iteration_{0-5,7-12,14-31,33-82,84-99}.h5"
+training_trajectories: "iteration_{0-5,7-12,14-31,33-64,67-82,84-99}.h5"
 validation_trajectories: ["iteration_13.h5", "iteration_100.h5", "iteration_200.h5"]
 # validation_trajectories: "ood_iteration_{0-4}.h5"
 partial_holdouts:

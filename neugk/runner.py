@@ -48,7 +48,15 @@ class BaseRunner:
         self.loss_val_min = torch.inf
         self.cur_update_step = 0.0
         self.loss_scheduler_dict = {}
-        
+
+        # amp setup
+        self.use_amp = self.cfg.amp.enable
+        self.use_bf16 = (
+            self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
+        )
+        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
+        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
+
         self.setup_data()
         self.setup_components()
         self.setup_scheduler()
@@ -136,14 +144,6 @@ class BaseRunner:
         raise NotImplementedError
 
     def __call__(self, skip_eval: bool = False):
-        # amp setup
-        self.use_amp = self.cfg.amp.enable
-        self.use_bf16 = (
-            self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
-        )
-        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
-        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
-
         use_tqdm = self.cfg.logging.tqdm if not self.use_ddp else False
 
         # main loop

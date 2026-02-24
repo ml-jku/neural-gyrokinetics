@@ -634,7 +634,7 @@ class SwinNDUnet(nn.Module):
         # expand to original
         if self.patch_skip:
             x = torch.cat([x, first_res], -1)
-        return self.patch_decode(x, pad_axes, condition=cond["condition"])
+        return self.patch_decode(x, pad_axes, **cond)
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         x = rearrange(x, "b c ... -> b ... c")
@@ -659,7 +659,6 @@ class SwinNDUnet(nn.Module):
         return x
 
     def condition(self, kwconds: Dict[str, torch.Tensor]) -> Dict:
-        # drop input fields
         kwconds = {k: v for k, v in kwconds.items() if k in self.condition_keys}
         if len(kwconds) == 0:
             return {}
@@ -668,11 +667,13 @@ class SwinNDUnet(nn.Module):
             "Mismatch in conditioning keys "
             f"{self.condition_keys} != {sorted(list(kwconds.keys()))}"
         )
+
         cond = torch.cat(
-            [kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1
+            [kwconds[k].view(kwconds[k].shape[0], -1) for k in self.condition_keys],
+            dim=-1,
         )
+
         if self.cond_embed is not None:
-            # embed conditioning is e.g. sincos
             return {"condition": self.cond_embed(cond)}
         else:
             return {}

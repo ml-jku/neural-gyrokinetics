@@ -1,4 +1,5 @@
 from typing import Type, Optional, List, Tuple, Dict, Sequence, Union
+
 import re
 import os
 import h5py
@@ -13,7 +14,6 @@ from torch.utils._pytree import tree_map
 import random
 import pickle
 from functools import partial
-import hashlib
 
 from neugk.utils import RunningMeanStd
 
@@ -242,7 +242,7 @@ class CycloneDataset(Dataset):
             self.n_tail_holdout = tail_offset
             if self.partial_holdouts.get(filename, 0) > self.n_tail_holdout:
                 self.n_tail_holdout += self.partial_holdouts.get(filename, 0)
-            with h5py.File(f_path, "r") as f:
+            with h5py.File(f_path, "r", swmr=True) as f:
                 # read the timesteps
                 if self.n_tail_holdout:
                     if split == "train":
@@ -346,7 +346,7 @@ class CycloneDataset(Dataset):
                 self.stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
 
         # TODO assume same resolution across all files
-        with h5py.File(self.files[0], "r") as f:
+        with h5py.File(self.files[0], "r", swmr=True) as f:
             self.resolution = f["metadata/resolution"][:]
             self.phi_resolution = (
                 self.resolution[3],
@@ -366,7 +366,7 @@ class CycloneDataset(Dataset):
 
         def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
-            with h5py.File(self.files[file_index], "r") as f:
+            with h5py.File(self.files[file_index], "r", swmr=True) as f:
                 sample = self._load_data(f, file_index, t_index)
 
             if key == "df":
@@ -474,7 +474,7 @@ class CycloneDataset(Dataset):
             assert file_index < len(self.files)
             assert t_index < self.num_ts(file_index) + self.n_tail_holdout
 
-        with h5py.File(self.files[file_index], "r") as f:
+        with h5py.File(self.files[file_index], "r", swmr=True) as f:
             sample = self._load_data(f, file_index, t_index)
         # k-fields
         x, gt = sample["x"], sample["gt"]
@@ -648,7 +648,7 @@ class CycloneDataset(Dataset):
         return x * scale + shift
 
     def _conditioning_filter(self, fname: str, offset: int) -> bool:
-        with h5py.File(fname, "r") as f:
+        with h5py.File(fname, "r", swmr=True) as f:
             for cond_name, cond_range in self.cond_filters.items():
                 if len(cond_name.split("_")) > 1:
                     where, cond_name = cond_name.split("_")
@@ -679,7 +679,7 @@ class CycloneDataset(Dataset):
         flat_idx_counter = 0
 
         for file_idx, f_path in enumerate(self.files):
-            with h5py.File(f_path, "r") as f:
+            with h5py.File(f_path, "r", swmr=True) as f:
                 fluxes = f["metadata/fluxes"][:]
             # mean and std
             ref_fluxes = fluxes[ref_offset:]
@@ -700,7 +700,7 @@ class CycloneDataset(Dataset):
                 if file_idx_stored == file_idx
             ]
 
-            for old_flat_idx, file_idx_stored, t_idx in old_indices:
+            for _, _, t_idx in old_indices:
                 # t_idx is relative to the offset, so we need to add offset to get the original index
                 # target flux is at original_t_index + bundle_seq_length
                 original_t_index = t_idx + self.offsets[file_idx]
@@ -826,7 +826,7 @@ class CycloneDataset(Dataset):
             # lookup file index and time index
             file_index, t_index = self.flat_index_to_file_and_tstep[idx]
 
-            with h5py.File(self.files[file_index], "r") as f:
+            with h5py.File(self.files[file_index], "r", swmr=True) as f:
                 timesteps_array = f["metadata/timesteps"][offset:]
                 step_value = timesteps_array[t_index]
 
@@ -843,7 +843,7 @@ class CycloneDataset(Dataset):
         return timesteps_tensor
 
     def get_fluxes(self, file_index: int):
-        with h5py.File(self.files[file_index], "r") as f:
+        with h5py.File(self.files[file_index], "r", swmr=True) as f:
             fluxes = f["metadata/fluxes"][:]
         return torch.tensor(fluxes[1:])  # discard flux at t=0
 
@@ -947,7 +947,7 @@ class LinearCycloneDataset(CycloneDataset):
         # lookup file index and time index from flat index
         file_index = index
 
-        with h5py.File(self.files[file_index], "r") as f:
+        with h5py.File(self.files[file_index], "r", swmr=True) as f:
             df_files = [key for key in f["data"].keys() if key.startswith("timestep")]
             t_index = len(df_files) - 1
             sample = self._load_data(f, file_index, t_index)
@@ -1099,7 +1099,7 @@ class LinearCycloneDataset(CycloneDataset):
 
         timesteps_tensor = torch.zeros_like(file_idx)
         for i, file_index in enumerate(file_idx):
-            with h5py.File(self.files[file_index], "r") as f:
+            with h5py.File(self.files[file_index], "r", swmr=True) as f:
                 df_files = [
                     key for key in f["data"].keys() if key.startswith("timestep")
                 ]
@@ -1129,7 +1129,7 @@ class LinearCycloneDataset(CycloneDataset):
             ):
                 file_index = index
 
-                with h5py.File(self.files[file_index], "r") as f:
+                with h5py.File(self.files[file_index], "r", swmr=True) as f:
                     df_files = [
                         key for key in f["data"].keys() if key.startswith("timestep")
                     ]
@@ -1265,7 +1265,7 @@ class CoordinateCycloneDataset(CycloneDataset):
         # lookup file index and time index from flat index
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
-        with h5py.File(self.files[file_index], "r") as f:
+        with h5py.File(self.files[file_index], "r", swmr=True) as f:
             sample = self._load_data(f, file_index, t_index)
         # k-fields
         x, gt = sample["x"], sample["gt"]

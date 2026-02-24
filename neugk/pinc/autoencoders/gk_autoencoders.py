@@ -76,15 +76,16 @@ class Swin5DAE(Swin5DUnet):
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
         # down path
         for blk in self.down_blocks:
-            zdf = blk(zdf, return_skip=False, condition=condition)
+            zdf = blk(zdf, return_skip=False, **kwcond)
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)  # TODO(diff) middle layers always need PE
-        zdf = self.middle_pre(zdf, condition=condition)
+        zdf = self.middle_pre(zdf, **kwcond)
         zdf = self.middle_downproj(zdf)
         # layer norm on latents
         if self.normalized_latent:
@@ -99,18 +100,19 @@ class Swin5DAE(Swin5DUnet):
     ):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # re-normalize latents before bottleneck
         if self.normalized_latent:
             zdf = self.post_z_norm(zdf)
         # bottleneck up
         zdf = self.middle_upproj(zdf)
-        zdf = self.middle_post(zdf, condition=condition)
+        zdf = self.middle_post(zdf, **kwcond)
         zdf = self.middle_upscale(zdf)
         # up path
         for blk in self.up_blocks:
-            zdf = blk(zdf, condition=condition)
+            zdf = blk(zdf, **kwcond)
         # expand to original
-        df = self.patch_decode(zdf, pad_axes, condition=condition)
+        df = self.patch_decode(zdf, pad_axes, **kwcond)
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
@@ -145,16 +147,17 @@ class Swin5DVAE(Swin5DAE):
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
         # down path
         for blk in self.down_blocks:
-            zdf = blk(zdf, return_skip=False, condition=condition)
+            zdf = blk(zdf, return_skip=False, **kwcond)
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)
         # first Transformer, then project to 2x dim and split
-        zdf = self.middle_pre(zdf, condition=condition)
+        zdf = self.middle_pre(zdf, **kwcond)
         mu_logvar = self.middle_vae_downproj(zdf)
         mu, logvar = torch.chunk(mu_logvar, 2, dim=-1)
         # sampling via reparameterization trick
@@ -172,15 +175,16 @@ class Swin5DVAE(Swin5DAE):
     ):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # bottleneck up
         zdf = self.middle_upproj(zdf)
-        zdf = self.middle_post(zdf, condition=condition)
+        zdf = self.middle_post(zdf, **kwcond)
         zdf = self.middle_upscale(zdf)
         # up path
         for blk in self.up_blocks:
-            zdf = blk(zdf, condition=condition)
+            zdf = blk(zdf, **kwcond)
         # expand to original
-        df = self.patch_decode(zdf, pad_axes, condition=condition)
+        df = self.patch_decode(zdf, pad_axes, **kwcond)
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
@@ -236,15 +240,16 @@ class Swin5DVQVAE(Swin5DAE):
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
         # down path
         for blk in self.down_blocks:
-            zdf = blk(zdf, return_skip=False, condition=condition)
+            zdf = blk(zdf, return_skip=False, **kwcond)
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)
-        zdf = self.middle_pre(zdf, condition=condition)
+        zdf = self.middle_pre(zdf, **kwcond)
         z_continuous = self.middle_vq_downproj(zdf)
         # set original shape for reshaping after VQ
         original_shape = z_continuous.shape
@@ -273,15 +278,16 @@ class Swin5DVQVAE(Swin5DAE):
     ):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # first post-VQ projection
         zdf = self.middle_vq_upproj(zdf)
-        zdf = self.middle_post(zdf, condition=condition)
+        zdf = self.middle_post(zdf, **kwcond)
         zdf = self.middle_upscale(zdf)
         # up path
         for blk in self.up_blocks:
-            zdf = blk(zdf, condition=condition)
+            zdf = blk(zdf, **kwcond)
         # expand to original
-        df = self.patch_decode(zdf, pad_axes, condition=condition)
+        df = self.patch_decode(zdf, pad_axes, **kwcond)
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):

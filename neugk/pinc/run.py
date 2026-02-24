@@ -68,13 +68,6 @@ class PINCRunner(BaseRunner):
             ),
         )
 
-        self.use_amp = self.cfg.amp.enable
-        self.use_bf16 = (
-            self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
-        )
-        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
-        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
-
         self.model = get_autoencoder(
             self.cfg, dataset=self.trainset, rank=self.rank
         ).to(self.device)
@@ -240,10 +233,6 @@ class PINCRunner(BaseRunner):
         return groups
 
     def __call__(self):
-        self.setup_data()
-        self.setup_components()
-        self.setup_scheduler()
-
         # load states now that everything is initialized
         if self.ae_ckpt_dict:
             try:
@@ -330,7 +319,9 @@ class PINCRunner(BaseRunner):
                 for k in self.input_fields
                 if getattr(sample, k) is not None
             }
-            condition = sample.conditioning.to(self.device)
+            condition = None
+            if sample.conditioning is not None:
+                condition = sample.conditioning.to(self.device)
             idx_data = {k: getattr(sample, k).to(self.device) for k in self.idx_keys}
             geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
 

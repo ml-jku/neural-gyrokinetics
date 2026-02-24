@@ -48,8 +48,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         unmerging_hidden_ratio = ae_cfg.patch.unmerging_hidden_ratio
         c_multiplier = ae_cfg.patch.c_multiplier
         act_fn = getattr(torch.nn, ae_cfg.act_fn)
+        norm_fn = getattr(torch.nn, getattr(ae_cfg, "norm_fn", "LayerNorm"))
 
-        
         num_heads = ae_cfg.vit.num_heads
         depth = ae_cfg.vit.depth
         use_rpb = getattr(ae_cfg.vit, "use_rpb", None)
@@ -130,7 +130,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             use_rope=use_rope,
             gated_attention=gated_attention,
             qk_norm=qk_norm,
-            norm_layer=nn.RMSNorm,
+            norm_layer=norm_fn,
             modulation=modulation,
             decouple_mu=decouple_mu,  # make it 4D
             conditioning=True,

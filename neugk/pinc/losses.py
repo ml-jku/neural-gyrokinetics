@@ -377,7 +377,10 @@ class PINCLossWrapper(LossWrapper):
 
         # Always compute MSE for monitoring
         monitor["phi_int_mse"] = F.mse_loss(pphi_int, tgt_phi)
-        monitor["flux_int_mse"] = torch.abs(pflux).mean() + F.l1_loss(eflux, tgt_eflux)
+        # momentum flux should be 0
+        monitor["flux_int_mse"] = torch.abs(pflux).mean()
+        # heat flux target
+        monitor["flux_int_mse"] += F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze())
 
         # Compute actual training objective
         if integral_loss_type == "mse":

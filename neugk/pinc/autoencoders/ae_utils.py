@@ -1,7 +1,7 @@
 from typing import Dict, Optional, Tuple, List
 
 import os
-from contextlib import nullcontext
+import pickle
 import os.path as osp
 import sys
 import hydra
@@ -173,6 +173,8 @@ def load_autoencoder(
         bottleneck_dim = ae_cfg.bottleneck.dim
         bottleneck_num_heads = getattr(ae_cfg.bottleneck, "num_heads", None)
         bottleneck_depth = getattr(ae_cfg.bottleneck, "depth", None)
+        normalized_latent = getattr(ae_cfg.bottleneck, "normalized_latent", True)
+        norm_learnable = getattr(ae_cfg.bottleneck, "norm_learnable", False)
 
         base_resolution = (32, 8, 16, 85, 32)
         decouple_mu = ae_cfg.decouple_mu
@@ -184,6 +186,7 @@ def load_autoencoder(
         unmerging_hidden_ratio = ae_cfg.patch.unmerging_hidden_ratio
         c_multiplier = ae_cfg.patch.c_multiplier
         act_fn = getattr(torch.nn, ae_cfg.act_fn)
+        norm_fn = getattr(torch.nn, getattr(ae_cfg, "norm_fn", "LayerNorm"))
 
         num_heads = ae_cfg.vit.num_heads
         depth = ae_cfg.vit.depth
@@ -269,15 +272,12 @@ def load_autoencoder(
             gated_attention=gated_attention,
             use_rpb=use_rpb,
             qk_norm=qk_norm,
+            norm_layer=norm_fn,
             modulation=modulation,
             decouple_mu=decouple_mu,
             conditioning=True,
-            normalized_latent=True,
-            mid_norm_learnable=(
-                ae_cfg.bottleneck.norm_learnable
-                if hasattr(ae_cfg.bottleneck, "norm_learnable")
-                else True
-            ),
+            normalized_latent=normalized_latent,
+            mid_norm_learnable=norm_learnable,
             **model_kwargs,
         )
 
@@ -425,6 +425,11 @@ def aggregate_dataset_stats(file_paths: List[str]) -> Dict[str, float]:
     total_samples = 0
 
     for file_path in file_paths:
+        phi_mean, phi_std = None, None
+        flux_mean, flux_std = None, None
+        n_samples = 0
+
+        # standard h5
         try:
             with h5py.File(file_path, "r") as f:
                 if "metadata" not in f:
@@ -432,7 +437,6 @@ def aggregate_dataset_stats(file_paths: List[str]) -> Dict[str, float]:
 
                 metadata = f["metadata"]
 
-                # Get number of samples in this file
                 if "data" in f:
                     n_samples = len(
                         [k for k in f["data"].keys() if k.startswith("timestep_")]
@@ -440,74 +444,102 @@ def aggregate_dataset_stats(file_paths: List[str]) -> Dict[str, float]:
                 else:
                     n_samples = len(metadata["timesteps"][()])
 
-                # Load per-file statistics
                 if "phi_mean" in metadata and "phi_std" in metadata:
                     phi_mean = metadata["phi_mean"][()]
                     phi_std = metadata["phi_std"][()]
-                    phi_var = phi_std**2
-
-                    # phi has shape (2, 1, 1, 1) for [real, imaginary] channels
-                    # For integral loss normalization, use the magnitude (combined statistics)
-                    if phi_mean.shape[0] == 2:  # separate real/imaginary channels
-                        # Compute magnitude statistics: sqrt(real^2 + imag^2)
-                        # For mean: use RMS of both channels
-                        phi_mean_combined = np.sqrt(np.mean(phi_mean**2))
-                        # For variance: combine variances assuming independence
-                        phi_var_combined = np.mean(
-                            phi_var
-                        )  # average variance across channels
-                    else:
-                        phi_mean_combined = (
-                            float(phi_mean)
-                            if np.isscalar(phi_mean)
-                            else float(phi_mean.item())
-                        )
-                        phi_var_combined = (
-                            float(phi_var)
-                            if np.isscalar(phi_var)
-                            else float(phi_var.item())
-                        )
-
-                    # Update running statistics (weighted by number of samples)
-                    phi_stats.update_from_moments(
-                        batch_mean=np.array([phi_mean_combined]),
-                        batch_var=np.array([phi_var_combined]),
-                        batch_min=np.array(
-                            [phi_mean_combined]
-                        ),  # Using mean as min/max
-                        batch_max=np.array([phi_mean_combined]),
-                        batch_count=float(n_samples),
-                    )
 
                 if "flux_mean" in metadata and "flux_std" in metadata:
                     flux_mean = metadata["flux_mean"][()]
                     flux_std = metadata["flux_std"][()]
-                    flux_var = flux_std**2
 
-                    flux_mean = (
-                        float(flux_mean)
-                        if np.isscalar(flux_mean)
-                        else float(flux_mean.item())
+        except Exception as h5_err:
+            # kvikio pkl fallback
+            try:
+                meta_path = os.path.join(file_path, "metadata.pkl")
+                with open(meta_path, "rb") as mf:
+                    metadata = pickle.load(mf)
+
+                data_dir = os.path.join(file_path, "data")
+                if os.path.exists(data_dir):
+                    n_samples = len(
+                        [
+                            k
+                            for k in os.listdir(data_dir)
+                            if k.startswith("timestep_") and k.endswith(".bin")
+                        ]
                     )
-                    flux_var = (
-                        float(flux_var)
-                        if np.isscalar(flux_var)
-                        else float(flux_var.item())
-                    )
+                else:
+                    n_samples = len(metadata["timesteps"])
 
-                    flux_stats.update_from_moments(
-                        batch_mean=np.array([flux_mean]),
-                        batch_var=np.array([flux_var]),
-                        batch_min=np.array([flux_mean]),  # Using mean as min/max
-                        batch_max=np.array([flux_mean]),
-                        batch_count=float(n_samples),
-                    )
+                if "phi_mean" in metadata and "phi_std" in metadata:
+                    phi_mean = metadata["phi_mean"]
+                    phi_std = metadata["phi_std"]
 
-                total_samples += n_samples
+                if "flux_mean" in metadata and "flux_std" in metadata:
+                    flux_mean = metadata["flux_mean"]
+                    flux_std = metadata["flux_std"]
 
-        except Exception as e:
-            print(f"Warning: Could not process {file_path}: {e}")
+            except Exception as pkl_err:
+                print(
+                    f"Warning: Could not process {file_path}.\n"
+                    f"H5 Error: {h5_err}\n  -> Pickle Error: {pkl_err}"
+                )
+                continue
+
+        if n_samples == 0:
             continue
+
+        total_samples += n_samples
+
+        if phi_mean is not None and phi_std is not None:
+            phi_var = phi_std**2
+
+            # phi has shape (2, 1, 1, 1) for [real, imaginary] channels
+            # For integral loss normalization, use the magnitude (combined statistics)
+            if (
+                hasattr(phi_mean, "shape")
+                and len(phi_mean.shape) > 0
+                and phi_mean.shape[0] == 2
+            ):
+                # Compute magnitude statistics: sqrt(real^2 + imag^2)
+                # For mean: use RMS of both channels
+                phi_mean_combined = np.sqrt(np.mean(phi_mean**2))
+                # For variance: combine variances assuming independence
+                phi_var_combined = np.mean(phi_var)  # average variance across channels
+            else:
+                phi_mean_combined = (
+                    float(phi_mean) if np.isscalar(phi_mean) else float(phi_mean.item())
+                )
+                phi_var_combined = (
+                    float(phi_var) if np.isscalar(phi_var) else float(phi_var.item())
+                )
+
+            # Update running statistics (weighted by number of samples)
+            phi_stats.update_from_moments(
+                batch_mean=np.array([phi_mean_combined]),
+                batch_var=np.array([phi_var_combined]),
+                batch_min=np.array([phi_mean_combined]),  # Using mean as min/max
+                batch_max=np.array([phi_mean_combined]),
+                batch_count=float(n_samples),
+            )
+
+        if flux_mean is not None and flux_std is not None:
+            flux_var = flux_std**2
+
+            flux_mean = (
+                float(flux_mean) if np.isscalar(flux_mean) else float(flux_mean.item())
+            )
+            flux_var = (
+                float(flux_var) if np.isscalar(flux_var) else float(flux_var.item())
+            )
+
+            flux_stats.update_from_moments(
+                batch_mean=np.array([flux_mean]),
+                batch_var=np.array([flux_var]),
+                batch_min=np.array([flux_mean]),  # Using mean as min/max
+                batch_max=np.array([flux_mean]),
+                batch_count=float(n_samples),
+            )
 
     # Extract final aggregated statistics
     aggregated_stats = {}

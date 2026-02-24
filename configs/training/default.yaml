@@ -1,6 +1,6 @@
 batch_size: 16
 n_epochs: 400
-num_workers: 4
+num_workers: 2
 pin_memory: true
 learning_rate: 3e-4
 use_latest_checkpoint: False

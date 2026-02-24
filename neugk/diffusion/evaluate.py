@@ -20,7 +20,6 @@ from neugk.plot_utils import generate_val_plots, avg_flux_confidence
 from neugk.losses import LossWrapper
 
 
-
 def denormalize_single(preds, idx_data, denormalize_fn):
     # denormalize physics data keys
     physics_keys = {"df", "phi", "flux"}
@@ -180,7 +179,11 @@ def evaluate(
                     }
 
                     preds_plots = {
-                        k: preds_plots[k][batch_idx] if "flux" not in k else preds_plots[k]
+                        k: (
+                            preds_plots[k][batch_idx]
+                            if "flux" not in k
+                            else preds_plots[k]
+                        )
                         for k in preds_plots
                     }
                     tgts = {k: tgts[k][batch_idx] for k in tgts}
@@ -260,7 +263,7 @@ def evaluate(
                 val_plots["avg_flux_UQ"] = avg_flux_confidence(
                     pred_means, pred_stds, tgt_vals, traj_ids
                 )
-        
+
         if not rank:
             val_loss = log_metric_dict["val_traj/avg_flux_rmse"]
             loss_val_min = save_model_and_config(
