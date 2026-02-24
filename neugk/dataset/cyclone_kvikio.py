@@ -19,16 +19,17 @@ from neugk.utils import RunningMeanStd
 from neugk.dataset.cyclone import CycloneDataset, CycloneSample
 
 
-def read_cupy_bin(filepath: str, shape: tuple, rank: int = 0, use_kvikio: bool = True):
+def read_cupy_bin(file: str, shape: tuple, rank: int = 0, use_kvikio: bool = True):
     if use_kvikio:
         n_elements = np.prod(shape)
         with cp.cuda.Device(rank):
             gpu_array = cp.empty(n_elements, dtype=cp.float32)
-            with kvikio.CuFile(filepath, "r") as f:
+            with kvikio.CuFile(file, "r") as f:
                 f.read(gpu_array)
-        return gpu_array.reshape(shape)
+        return torch.from_dlpack(gpu_array.reshape(shape))
+        
     else:
-        cpu_array = np.fromfile(filepath, dtype=np.float32)
+        cpu_array = np.fromfile(file, dtype=np.float32)
         return torch.from_numpy(cpu_array.reshape(shape))
 
 
@@ -471,21 +472,24 @@ class KvikioCycloneDataset(CycloneDataset):
             t_str = str(original_t_index + i).zfill(5)
             t_str_gt = str(original_t_index + self.bundle_seq_length + i).zfill(5)
 
-            k_path = os.path.join(data_dir, f"timestep_{t_str}.bin")
-            k_path_gt = os.path.join(data_dir, f"timestep_{t_str_gt}.bin")
-            phi_path = os.path.join(data_dir, f"poten_{t_str}.bin")
-            phi_path_gt = os.path.join(data_dir, f"poten_{t_str_gt}.bin")
+            kfile = os.path.join(data_dir, f"timestep_{t_str}.bin")
+            kfile_gt = os.path.join(data_dir, f"timestep_{t_str_gt}.bin")
+            phifile = os.path.join(data_dir, f"poten_{t_str}.bin")
+            phifile_gt = os.path.join(data_dir, f"poten_{t_str_gt}.bin")
 
             if "df" in self.input_fields:
-                k_cp = read_cupy_bin(
-                    k_path, self.df_shape, rank=self.rank, use_kvikio=use_kvikio
+                k = read_cupy_bin(
+                    file=kfile,
+                    shape=self.df_shape,
+                    rank=self.rank,
+                    use_kvikio=use_kvikio
                 )
-                k_gt_cp = read_cupy_bin(
-                    k_path_gt, self.df_shape, rank=self.rank, use_kvikio=use_kvikio
+                k_gt = read_cupy_bin(
+                    file=kfile_gt,
+                    shape=self.df_shape,
+                    rank=self.rank,
+                    use_kvikio=use_kvikio
                 )
-
-                k = torch.from_dlpack(k_cp)
-                k_gt = torch.from_dlpack(k_gt_cp)
 
                 if all(self.active_keys == np.array([0, 1])):
                     x.append(k)
@@ -495,18 +499,21 @@ class KvikioCycloneDataset(CycloneDataset):
                     gt.append(k_gt[self.active_keys])
 
             if "phi" in self.input_fields:
-                phi_cp = read_cupy_bin(
-                    phi_path, self.phi_resolution, rank=self.rank, use_kvikio=use_kvikio
+                phi = read_cupy_bin(
+                    file=phifile,
+                    shape=self.phi_resolution,
+                    rank=self.rank,
+                    use_kvikio=use_kvikio
                 )
-                phi_gt_cp = read_cupy_bin(
-                    phi_path_gt,
-                    self.phi_resolution,
+                phi_gt = read_cupy_bin(
+                    file=phifile_gt,
+                    shape=self.phi_resolution,
                     rank=self.rank,
                     use_kvikio=use_kvikio,
                 )
 
-                poten.append(torch.from_dlpack(phi_cp))
-                y_poten.append(torch.from_dlpack(phi_gt_cp))
+                poten.append(phi)
+                y_poten.append(phi_gt)
 
             flux = meta["fluxes"][original_t_index + self.bundle_seq_length + i]
             gt_flux.append(flux)

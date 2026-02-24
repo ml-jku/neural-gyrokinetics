@@ -15,7 +15,7 @@ from torch.utils._pytree import tree_map
 from torch.utils.data import DataLoader
 
 from neugk.utils import RunningMeanStd
-from neugk.dataset.cyclone_kvikio import KvikioCycloneDataset
+from neugk.dataset.cyclone_kvikio import KvikioCycloneDataset, read_cupy_bin
 from neugk.dataset.cyclone_diff import CycloneAESample
 
 
@@ -45,10 +45,10 @@ class KvikioCycloneAEDataset(KvikioCycloneDataset):
                 sample["phi"], torch.Tensor
             ):
                 sample["phi"] = sample["phi"].numpy()
-            if sample.get("gt_flux") is not None and isinstance(
-                sample["gt_flux"], torch.Tensor
+            if sample.get("flux") is not None and isinstance(
+                sample["flux"], torch.Tensor
             ):
-                sample["gt_flux"] = sample["gt_flux"].numpy()
+                sample["flux"] = sample["flux"].numpy()
 
             if key == "df":
                 x = sample["x"]
@@ -62,7 +62,7 @@ class KvikioCycloneAEDataset(KvikioCycloneDataset):
                     x = np.expand_dims(x, 0)
                 norm_axes = (1, 2, 3)
             else:
-                x = np.array([sample["gt_flux"]], dtype=np.float32)
+                x = np.array([sample["flux"]], dtype=np.float32)
                 norm_axes = (0,)
 
             if self.separate_zf and key == "df":
@@ -117,30 +117,24 @@ class KvikioCycloneAEDataset(KvikioCycloneDataset):
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
         if getattr(self, "precomputed_latents", None) is not None:
-            # fetch directly from RAM dict
             sample = self.precomputed_latents[(file_index, t_index)]
             x = sample["x"]
-            phi = sample["phi"]
-            flux = sample["flux"]
-            timestep = sample["timestep"]
-            geometry = sample["geometry"]
         else:
             # load from raw bin files via kvikio
-            sample = self._load_data(file_index, t_index, use_kvikio=True)
+            sample = self._load_data(file_index, t_index, use_kvikio=self.load_with_kvikio)
             x = sample["x"]
             if x is not None and self.separate_zf:
                 x = self._separate_zf(x)
 
-            phi = sample["phi"]
-            flux = sample["gt_flux"]
-            timestep = sample["timestep"]
-            geometry = sample["geometry"]
+        phi = sample["phi"]
+        flux = sample["flux"]
+        timestep = sample["timestep"]
+        geometry = sample["geometry"]
 
         avg_flux = self.get_avg_flux(file_index)
 
         conditioning = None
         if self.conditions is not None and len(self.conditions) > 0:
-            # support both dict lookups (precomputed) and raw tensors
             cond_list = []
             for k in self.conditions:
                 val = sample[k]
@@ -164,7 +158,6 @@ class KvikioCycloneAEDataset(KvikioCycloneDataset):
                 else np.expand_dims(phi, 0)
             )
 
-        # handle types since x/phi can be numpy (from dict) or torch (from kvikio)
         x_out = (
             torch.tensor(x, dtype=self.dtype)
             if not isinstance(x, torch.Tensor) and x is not None
@@ -192,8 +185,73 @@ class KvikioCycloneAEDataset(KvikioCycloneDataset):
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             conditioning=conditioning,
         )
+        
+        
+    def _load_data(
+        self, file_index: int, t_index: int, use_kvikio: bool = True
+    ) -> dict:
+        original_t_index = t_index + self.offsets[file_index]
+        meta = self.metadata[file_index]
+        data_dir = os.path.join(self.files[file_index], "data")
 
-    # inherited normalize and denormalize logic works as long as tensor operations are supported
+        xs, phis, fluxes = [], [], []
+
+        for i in range(self.bundle_seq_length):
+            t_str = str(original_t_index + i).zfill(5)
+
+            kfile = os.path.join(data_dir, f"timestep_{t_str}.bin")
+            phifile = os.path.join(data_dir, f"poten_{t_str}.bin")
+
+            if "df" in self.input_fields:
+                k = read_cupy_bin(
+                    file=kfile,
+                    shape=self.df_shape,
+                    rank=self.rank,
+                    use_kvikio=use_kvikio
+                )
+
+                if all(self.active_keys == np.array([0, 1])):
+                    xs.append(k)
+                else:
+                    xs.append(k[self.active_keys])
+
+            if "phi" in self.input_fields:
+                phi = read_cupy_bin(
+                    file=phifile,
+                    shape=self.phi_resolution,
+                    rank=self.rank,
+                    use_kvikio=use_kvikio
+                )
+
+                phis.append(phi)
+
+            flux = meta["fluxes"][original_t_index + self.bundle_seq_length + i]
+            fluxes.append(flux)
+
+        sample = {}
+        if "df" in self.input_fields:
+            # stack to shape (c, t, v1, v2, s, x, y)
+            xs = xs[0] if self.bundle_seq_length == 1 else torch.stack(xs, 1)
+        else:
+            xs = None
+
+        if "phi" in self.input_fields:
+            phis = phis[0] if self.bundle_seq_length == 1 else torch.stack(phis, 1)
+        else:
+            phis = None
+
+        sample["x"] = xs
+        sample["phi"] = phis
+        sample["flux"] = torch.tensor(fluxes).squeeze()
+
+        sample["timestep"] = meta["timesteps"][original_t_index]
+        sample["itg"] = meta["ion_temp_grad"]
+        sample["dg"] = meta["density_grad"]
+        sample["s_hat"] = meta["s_hat"]
+        sample["q"] = meta["q"]
+        sample["geometry"] = meta["geometry"]
+
+        return sample
 
     def collate(self, batch: Sequence[CycloneAESample]):
         return CycloneAESample(
@@ -278,7 +336,7 @@ class KvikioCycloneAEDataset(KvikioCycloneDataset):
 
                     # format to match expected dict structure
                     sample["x"] = z[i]
-                    sample["flux"] = sample.pop("gt_flux")  # rename to match logic
+                    sample["flux"] = sample.pop("flux")  # rename to match logic
 
                     # convert torch/numpy fields cleanly
                     if isinstance(sample["phi"], torch.Tensor):

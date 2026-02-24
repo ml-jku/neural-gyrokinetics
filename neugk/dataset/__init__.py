@@ -2,6 +2,7 @@ from torch.utils.data.dataloader import DataLoader
 
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
 from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import (
@@ -169,8 +170,6 @@ def get_data(cfg, rank: int = 0):
     pin_memory = cfg.training.pin_memory and datatype != "gds"
     dataloader_kwargs = {}
     if datatype == "gds":
-        import torch.multiprocessing as mp
-
         dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
 
     trainloader = DataLoader(
@@ -196,7 +195,6 @@ def get_data(cfg, rank: int = 0):
         sampler=(DistributedSampler(holdout_trajectories_valset) if use_ddp else None),
         persistent_workers=True,
         prefetch_factor=prefetch_factor,
-        **dataloader_kwargs,
     )
 
     if partial_holdouts:
