@@ -14,8 +14,9 @@ import random
 import pickle
 from functools import partial
 import hashlib
+import warnings
 
-from neugk.utils import RunningMeanStd
+from neugk.utils import RunningMeanStd, expand_as
 
 
 @dataclass
@@ -71,7 +72,7 @@ class CycloneDataset(Dataset):
         path: str = "/restricteddata/ukaea/gyrokinetics/preprocessed",
         split: str = "train",
         active_keys: Optional[List[str]] = None,
-        input_fields: Optional[List[str]] = ["df"],
+        fields_to_load: Optional[List[str]] = ["df"],
         trajectories: Optional[List[str]] = None,
         partial_holdouts: Optional[dict] = None,
         normalization: Optional[str] = "zscore",
@@ -97,7 +98,7 @@ class CycloneDataset(Dataset):
         timestep_std_filter: float = None,
         timestep_std_offset: int = 80,
     ):
-        self.input_fields = input_fields
+        self.fields_to_load = fields_to_load
         self.partial_holdouts = partial_holdouts if partial_holdouts is not None else {}
         assert split in ["train", "val"]
         self.split = split
@@ -108,10 +109,10 @@ class CycloneDataset(Dataset):
             self.active_keys = np.arange(split_into_bands * 2)
         else:
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
-        assert normalization in ["zscore", "minmax", "none", None]
         assert normalization_scope in ["sample", "dataset", "trajectory"]
         normalization = normalization if normalization != "none" else None
-        self.normalization = normalization
+        assert set(fields_to_load).issubset(set(normalization.keys())), "Normalization must be specified for all fields to load"
+        self.normalizers = normalization
         if normalization_stats is not None:
             self.stats = normalization_stats
         self.normalization_scope = normalization_scope
@@ -127,6 +128,7 @@ class CycloneDataset(Dataset):
         self.bundle_seq_length = bundle_seq_length
         self.timestep_std_filter = timestep_std_filter
         self.timestep_std_offset = timestep_std_offset
+        self._handles = {}
 
         assert not (offset > 0 and timestep_std_filter is not None), (
             f"Cannot use both offset={offset} and timestep_std_filter={timestep_std_filter}. "
@@ -208,8 +210,14 @@ class CycloneDataset(Dataset):
 
         # remove duplicates
         self.files = list(set(self.files))
+        existing_files = []
         for f in self.files:
-            assert os.path.isfile(f), f"Trajectory  '{f}' does not exist!"
+            if os.path.isfile(f):
+                existing_files.append(f)
+        diff = len(self.files) - len(existing_files)
+        if diff:
+            warnings.warn(f"{diff} files not found, training on existing ones...") 
+        self.files = existing_files
 
         # we use offsets for flux filtering
         if self.cond_filters:
@@ -226,7 +234,7 @@ class CycloneDataset(Dataset):
         self.file_num_timesteps = []
         self.steps_per_file = {}
         if normalization_stats is None:
-            self.stats = {k: defaultdict(dict) for k in input_fields}
+            self.stats = {k: defaultdict(dict) for k in fields_to_load}
         per_file_t_indexes = []
         stats: Dict[str, RunningMeanStd] = {}
         for f_id, f_path in enumerate(self.files):
@@ -272,26 +280,27 @@ class CycloneDataset(Dataset):
                 if normalization_stats is None and normalization_scope == "dataset":
                     assert split == "train", "Validation must have normalization_stats."
                     # normalization stats
-                    for k in self.input_fields:
-                        try:
-                            self.stats[k][f_id]["mean"] = f[f"metadata/{k}_mean"][:]
-                            self.stats[k][f_id]["std"] = f[f"metadata/{k}_std"][:]
-                            self.stats[k][f_id]["min"] = f[f"metadata/{k}_min"][:]
-                            self.stats[k][f_id]["max"] = f[f"metadata/{k}_max"][:]
-                        except:
-                            print(f_path)
-                            exit(1)
-                        if k not in stats:
-                            stats[k] = RunningMeanStd(
-                                shape=self.stats[k][f_id]["mean"].shape
+                    for k in self.fields_to_load:
+                        if k not in stats and k not in ["position", "krloc", "flux_class"]:
+                            stats[k] = RunningMeanStd()
+                        mean = f[f"metadata/{k}_mean"][:]
+                        std = f[f"metadata/{k}_std"][:]
+                        if self.normalizers[k]["agg_axes"]:
+                            # aggregate along specified dimensions
+                            mean, std = stats[k].aggregate_stats(mean, std, agg_axes=tuple(self.normalizers[k]["agg_axes"]))
+                        self.stats[k][f_id]["mean"] = mean
+                        self.stats[k][f_id]["std"] = std
+                        self.stats[k][f_id]["min"] = f[f"metadata/{k}_min"][:]
+                        self.stats[k][f_id]["max"] = f[f"metadata/{k}_max"][:]
+ 
+                        if k not in ["position", "krloc", "flux_class"]:
+                            stats[k].update(
+                                self.stats[k][f_id][f"mean"],
+                                self.stats[k][f_id][f"std"] ** 2,
+                                self.stats[k][f_id][f"min"],
+                                self.stats[k][f_id][f"max"],
+                                count=len(timesteps),
                             )
-                        stats[k].update(
-                            self.stats[k][f_id]["mean"],
-                            self.stats[k][f_id]["std"] ** 2,
-                            self.stats[k][f_id]["min"],
-                            self.stats[k][f_id]["max"],
-                            count=len(timesteps),
-                        )
 
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
@@ -334,12 +343,12 @@ class CycloneDataset(Dataset):
             if separate_zf and not offset:
                 stats["df"] = self._recompute_stats(key="df")
             else:
-                for key in self.input_fields:
+                for key in self.fields_to_load:
                     # TODO: assumes offsets are equal across all sims
                     stats[key] = self._recompute_stats(key=key, offset=self.offsets[0])
 
         if normalization_scope == "dataset" and normalization_stats is None:
-            for k in input_fields:
+            for k in fields_to_load:
                 self.stats[k]["full"]["mean"] = stats[k].mean.astype(np.float32)
                 self.stats[k]["full"]["std"] = (stats[k].var ** 0.5).astype(np.float32)
                 self.stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
@@ -362,26 +371,30 @@ class CycloneDataset(Dataset):
         x = np.concatenate([zf, x - zf], axis=0)
         return x
 
+    def _get_file(self, path):
+        if path not in self._handles:
+            self._handles[path] = h5py.File(
+                path, "r", libver="latest", swmr=True
+            )
+        return self._handles[path]
+
     def _recompute_stats(self, key: str, offset: int = 0):
 
         def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
-            with h5py.File(self.files[file_index], "r") as f:
-                sample = self._load_data(f, file_index, t_index)
+            f = self._get_file(self.files[file_index])
+            sample = self._load_data(f, file_index, t_index)
 
             if key == "df":
                 x = sample["x"]
                 y = sample["gt"]
-                if self.decouple_mu:
-                    norm_axes = (1, 3, 4, 5)
-                else:
-                    norm_axes = (1, 2, 3, 4, 5)
+                norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3, 4, 5)
             elif key == "phi":
                 x, y = sample["phi"], sample["y_phi"]
                 if len(x.shape) == 3:
                     x = np.expand_dims(x, 0)
                     y = np.expand_dims(y, 0)
-                norm_axes = (1, 2, 3)
+                norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3)
             else:
                 x = np.array([sample["gt_flux"]], dtype=np.float32)
                 y = None
@@ -474,8 +487,8 @@ class CycloneDataset(Dataset):
             assert file_index < len(self.files)
             assert t_index < self.num_ts(file_index) + self.n_tail_holdout
 
-        with h5py.File(self.files[file_index], "r") as f:
-            sample = self._load_data(f, file_index, t_index)
+        f = self._get_file(self.files[file_index])
+        sample = self._load_data(f, file_index, t_index)
         # k-fields
         x, gt = sample["x"], sample["gt"]
         if self.separate_zf:
@@ -487,7 +500,7 @@ class CycloneDataset(Dataset):
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
         geometry = sample["geometry"]
-        if self.normalization is not None and get_normalized:
+        if get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
                 gt = (gt - shift) / scale
@@ -541,7 +554,7 @@ class CycloneDataset(Dataset):
             phi_name_gt = "poten_" + str(
                 original_t_index + self.bundle_seq_length + i
             ).zfill(5)
-            if "df" in self.input_fields:
+            if "df" in self.fields_to_load:
                 k = data[f"data/{k_name}"][:]
                 k_gt = data[f"data/{k_name_gt}"][:]
                 # select only active re/im parts
@@ -551,7 +564,7 @@ class CycloneDataset(Dataset):
                 else:
                     x.append(k[self.active_keys])
                     gt.append(k_gt[self.active_keys])
-            if "phi" in self.input_fields:
+            if "phi" in self.fields_to_load:
                 phi = data[f"data/{phi_name}"][:]
                 phi_gt = data[f"data/{phi_name_gt}"][:]
                 poten.append(phi)
@@ -565,7 +578,7 @@ class CycloneDataset(Dataset):
             gt_flux.append(flux)
 
         sample = {}
-        if "df" in self.input_fields:
+        if "df" in self.fields_to_load:
             # stack to shape (c, t, v1, v2, s, x, y)
             if self.bundle_seq_length == 1:
                 # sqeeze out time if we only have 1 timestep
@@ -576,7 +589,7 @@ class CycloneDataset(Dataset):
         else:
             x, gt = None, None
 
-        if "phi" in self.input_fields:
+        if "phi" in self.fields_to_load:
             # stack to shape (c, t, x, s, y)
             if self.bundle_seq_length == 1:
                 poten = poten[0]
@@ -609,6 +622,7 @@ class CycloneDataset(Dataset):
         df: Optional[torch.Tensor] = None,
         phi: Optional[torch.Tensor] = None,
         flux: Optional[torch.Tensor] = None,
+        return_stats: bool = True,
     ):
         if df is not None:
             field = "df"
@@ -623,7 +637,10 @@ class CycloneDataset(Dataset):
             raise ValueError
 
         scale, shift = self._get_scale_shift(file_index, field, x)
-        return (x - shift) / scale, shift, scale
+        if return_stats:
+            return (x - shift) / scale, shift, scale
+        else:
+            return (x - shift) / scale
 
     def denormalize(
         self,
@@ -733,15 +750,14 @@ class CycloneDataset(Dataset):
                 key = "full"
             if self.normalization_scope == "trajectory":
                 key = file_index
-            if self.normalization == "zscore":
-                shift = self.stats[field][key]["mean"]
-                scale = self.stats[field][key]["std"]
-            if self.normalization == "minmax":
-                x_min = self.stats[field][key]["min"]
-                x_max = self.stats[field][key]["max"]
+            if self.normalizers[field]["type"] == "zscore":
+                shift = expand_as(self.stats[field][key][f"mean"], x)
+                scale = expand_as(self.stats[field][key][f"std"], x)
+            if self.normalizers[field]["type"] == "minmax":
+                x_min = expand_as(self.stats[field][key][f"min"], x)
+                x_max = expand_as(self.stats[field][key][f"max"], x)
                 scale = (x_max - x_min) / self.minmax_beta1
                 shift = x_min + scale * self.minmax_beta2
-            # scale, shift = expand_as(scale, x), expand_as(shift, x)
         if isinstance(x, torch.Tensor):
             scale = torch.from_numpy(scale).to(x.device)
             shift = torch.from_numpy(shift).to(x.device)
@@ -826,9 +842,9 @@ class CycloneDataset(Dataset):
             # lookup file index and time index
             file_index, t_index = self.flat_index_to_file_and_tstep[idx]
 
-            with h5py.File(self.files[file_index], "r") as f:
-                timesteps_array = f["metadata/timesteps"][offset:]
-                step_value = timesteps_array[t_index]
+            f = self._get_file(self.files[file_index])
+            timesteps_array = f["metadata/timesteps"][offset:]
+            step_value = timesteps_array[t_index]
 
             timesteps_list.append(torch.tensor(step_value, dtype=self.dtype))
 
@@ -843,8 +859,8 @@ class CycloneDataset(Dataset):
         return timesteps_tensor
 
     def get_fluxes(self, file_index: int):
-        with h5py.File(self.files[file_index], "r") as f:
-            fluxes = f["metadata/fluxes"][:]
+        f = self._get_file(self.files[file_index])
+        fluxes = f["metadata/fluxes"][:]
         return torch.tensor(fluxes[1:])  # discard flux at t=0
 
     def get_avg_flux(self, file_index: Union[int, Sequence[int]]):
@@ -920,9 +936,6 @@ class LinearCycloneDataset(CycloneDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, linear_sims=True, **kwargs)
         temp_stats = self._recompute_stats_linear()
-        import pdb
-
-        pdb.set_trace()
         self.stats["df"]["full"]["mean"] = temp_stats.mean.astype(np.float32)
         self.stats["df"]["full"]["std"] = (temp_stats.var ** (1 / 2)).astype(np.float32)
         self.stats["df"]["full"]["min"] = temp_stats.min.astype(np.float32)
@@ -947,10 +960,10 @@ class LinearCycloneDataset(CycloneDataset):
         # lookup file index and time index from flat index
         file_index = index
 
-        with h5py.File(self.files[file_index], "r") as f:
-            df_files = [key for key in f["data"].keys() if key.startswith("timestep")]
-            t_index = len(df_files) - 1
-            sample = self._load_data(f, file_index, t_index)
+        f = self._get_file(self.files[file_index])
+        df_files = [key for key in f["data"].keys() if key.startswith("timestep")]
+        t_index = len(df_files) - 1
+        sample = self._load_data(f, file_index, t_index)
         # k-fields
         x = sample["x"]
         if self.separate_zf:
@@ -965,7 +978,7 @@ class LinearCycloneDataset(CycloneDataset):
         geometry = sample["geometry"]
         # accessory
         fluxavg = sample["fluxavg"]
-        if self.normalization is not None and get_normalized:
+        if get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
 
@@ -1018,7 +1031,7 @@ class LinearCycloneDataset(CycloneDataset):
             k_name = "timestep_" + str(original_t_index + i).zfill(5)
             phi_name = "poten_" + str(original_t_index + i).zfill(5)
 
-            if "df" in self.input_fields:
+            if "df" in self.fields_to_load:
                 k = data[f"data/{k_name}"][:]
                 # select only active re/im parts
                 if all(self.active_keys == np.array([0, 1])):
@@ -1026,17 +1039,17 @@ class LinearCycloneDataset(CycloneDataset):
                 else:
                     x.append(k[self.active_keys])
 
-            if "phi" in self.input_fields:
+            if "phi" in self.fields_to_load:
                 phi = data[f"data/{phi_name}"][:]
                 poten.append(phi)
 
-            if "flux" in self.input_fields:
+            if "flux" in self.fields_to_load:
                 # target flux
                 flux = data["metadata/fluxes"][:].squeeze().item()
                 gt_flux.append(flux)
 
         sample = {}
-        if "df" in self.input_fields:
+        if "df" in self.fields_to_load:
             # stack to shape (c, t, v1, v2, s, x, y)
             if self.bundle_seq_length == 1:
                 # sqeeze out time if we only have 1 timestep
@@ -1046,7 +1059,7 @@ class LinearCycloneDataset(CycloneDataset):
         else:
             x = None
 
-        if "phi" in self.input_fields:
+        if "phi" in self.fields_to_load:
             # stack to shape (c, t, x, s, y)
             if self.bundle_seq_length == 1:
                 poten = poten[0]
@@ -1055,7 +1068,7 @@ class LinearCycloneDataset(CycloneDataset):
         else:
             poten = None
 
-        if "flux" in self.input_fields:
+        if "flux" in self.fields_to_load:
             # stack to shape (c, t, x, s, y)
             if self.bundle_seq_length == 1:
                 gt_flux = np.array(gt_flux).squeeze()
@@ -1079,7 +1092,7 @@ class LinearCycloneDataset(CycloneDataset):
         sample["geometry"] = {k: np.array(v[()]) for k, v in data["geometry"].items()}
         sample["fluxavg"] = (
             self.get_avg_flux(file_index).squeeze()
-            if "fluxavg" in self.input_fields
+            if "fluxavg" in self.fields_to_load
             else None
         )
         sample["position"] = None
@@ -1128,13 +1141,12 @@ class LinearCycloneDataset(CycloneDataset):
                 t_indices, desc="Re-computing normalization stats for df"
             ):
                 file_index = index
-
-                with h5py.File(self.files[file_index], "r") as f:
-                    df_files = [
-                        key for key in f["data"].keys() if key.startswith("timestep")
-                    ]
-                    t_index = len(df_files) - 1
-                    sample = self._load_data(f, file_index, t_index)
+                f = self._get_file(self.files[file_index])
+                df_files = [
+                    key for key in f["data"].keys() if key.startswith("timestep")
+                ]
+                t_index = len(df_files) - 1
+                sample = self._load_data(f, file_index, t_index)
 
                 x = sample["x"]
                 norm_axes = (1, 2, 3, 4, 5)
@@ -1184,9 +1196,9 @@ class CoordinateCycloneDataset(CycloneDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         assert (
-            len(self.input_fields) == 2 and "position" in self.input_fields
+            len(self.fields_to_load) == 2 and "position" in self.fields_to_load
         ), "Cannot load multiple fields for coordinates"
-        assert "flux" not in self.input_fields, "Loading flux coordinates not supported"
+        assert "flux" not in self.fields_to_load, "Loading flux coordinates not supported"
 
     def _load_data(
         self,
@@ -1204,7 +1216,7 @@ class CoordinateCycloneDataset(CycloneDataset):
         k_name_gt = "timestep_" + str(original_t_index + 1).zfill(5)
         phi_name = "poten_" + str(original_t_index + 1).zfill(5)
 
-        if "df" in self.input_fields:
+        if "df" in self.fields_to_load:
             k = data[f"data/{k_name}"][:]
             k_gt = data[f"data/{k_name_gt}"][:]
             # select only active re/im parts
@@ -1214,7 +1226,7 @@ class CoordinateCycloneDataset(CycloneDataset):
         else:
             x = None
 
-        if "phi" in self.input_fields:
+        if "phi" in self.fields_to_load:
             phi = data[f"data/{phi_name}"][:]
             poten = phi.ravel()
             position = np.indices(phi.shape).reshape(5, -1).T
@@ -1241,7 +1253,7 @@ class CoordinateCycloneDataset(CycloneDataset):
         sample["geometry"] = {k: np.array(v[()]) for k, v in data["geometry"].items()}
         sample["fluxavg"] = (
             self.get_avg_flux(file_index).squeeze()
-            if "fluxavg" in self.input_fields
+            if "fluxavg" in self.fields_to_load
             else None
         )
         return sample
@@ -1265,8 +1277,8 @@ class CoordinateCycloneDataset(CycloneDataset):
         # lookup file index and time index from flat index
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
-        with h5py.File(self.files[file_index], "r") as f:
-            sample = self._load_data(f, file_index, t_index)
+        f = self._get_file(self.files[file_index])
+        sample = self._load_data(f, file_index, t_index)
         # k-fields
         x, gt = sample["x"], sample["gt"]
         if self.separate_zf:
@@ -1281,7 +1293,7 @@ class CoordinateCycloneDataset(CycloneDataset):
         fluxavg = sample["fluxavg"]
         position = sample["position"]
 
-        if self.normalization is not None and get_normalized:
+        if get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
                 gt = (gt - shift) / scale

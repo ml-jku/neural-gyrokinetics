@@ -16,7 +16,7 @@ loss_weights:
 extra_loss_weights: {}
 
 patch:
-  patch_size: [ 4, 0, 2, 5, 4 ]
+  patch_size: [ 4, 0, 4, 5, 4 ]
   window_size: [ 4, 0, 4, 9, 4 ]
   merging_depth: 1
   unmerging_depth: 1

@@ -49,11 +49,10 @@ class CycloneAEDataset(CycloneDataset):
         autoencoder: Optional[torch.nn.Module] = None,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
-
         self.conditions = conditions
         self.precomputed_latents = precomputed_latents
         self.autoencoder = autoencoder
+        super().__init__(*args, **kwargs)
 
     def _recompute_stats(self, key: str, offset: int = 0):
         def process_t_idx(t_idx, key):
@@ -62,15 +61,12 @@ class CycloneAEDataset(CycloneDataset):
                 sample = self._load_data(f, file_index, t_index)
             if key == "df":
                 x = sample["x"]
-                if self.decouple_mu:
-                    norm_axes = (1, 3, 4, 5)
-                else:
-                    norm_axes = (1, 2, 3, 4, 5)
+                norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3, 4, 5)
             elif key == "phi":
                 x = sample["phi"]
                 if x.ndim == 3:
                     x = np.expand_dims(x, 0)
-                norm_axes = (1, 2, 3)
+                norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3)
             else:
                 x = np.array([sample["flux"]], dtype=np.float32)
                 norm_axes = (0,)
@@ -149,7 +145,7 @@ class CycloneAEDataset(CycloneDataset):
         )
         geometry = sample["geometry"]
 
-        if self.normalization is not None and get_normalized:
+        if get_normalized:
             # skip normalization if latents are precomputed
             if x is not None and self.precomputed_latents is None:
                 x = self.normalize(file_index, df=x)
@@ -186,14 +182,14 @@ class CycloneAEDataset(CycloneDataset):
             # read the input
             k_name = "timestep_" + str(orig_t_index + i).zfill(5)
             phi_name = "poten_" + str(orig_t_index + i).zfill(5)
-            if "df" in self.input_fields:
+            if "df" in self.fields_to_load:
                 k = data[f"data/{k_name}"][:]
                 # select only active re/im parts
                 if all(self.active_keys == np.array([0, 1])):
                     xs.append(k)
                 else:
                     xs.append(k[self.active_keys])
-            if "phi" in self.input_fields:
+            if "phi" in self.fields_to_load:
                 phis.append(data[f"data/{phi_name}"][:])
 
             # target flux
@@ -201,13 +197,13 @@ class CycloneAEDataset(CycloneDataset):
             fluxes.append(flux)
 
         sample = {}
-        if "df" in self.input_fields:
+        if "df" in self.fields_to_load:
             # stack to shape (c, t, v1, v2, s, x, y)
             xs = xs[0] if self.bundle_seq_length == 1 else np.stack(xs, axis=1)
         else:
             xs = None
 
-        if "phi" in self.input_fields:
+        if "phi" in self.fields_to_load:
             phis = phis[0] if self.bundle_seq_length == 1 else np.stack(phis, axis=1)
         else:
             phis = None

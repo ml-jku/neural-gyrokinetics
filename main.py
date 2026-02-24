@@ -170,20 +170,9 @@ def main(config: DictConfig):
 
     try:
         if config.ddp.enable and world_size > 1:
-            if config.ddp.n_nodes == 1:
-                # single node, multi gpu
-                os.environ["MASTER_ADDR"] = os.environ.get(
-                    "SLURM_NODELIST", "localhost"
-                )
-                os.environ["MASTER_PORT"] = str(find_free_port())
-                if "NCCL_SOCKET_IFNAME" in os.environ:
-                    del os.environ["NCCL_SOCKET_IFNAME"]
-
-                mp.spawn(dispatch_runner, args=(config, world_size), nprocs=world_size)
-            else:
-                # multiple nodes (launch via torchrun)
-                rank = int(os.environ["RANK"])
-                dispatch_runner(rank, config, world_size=world_size)
+            # should be run with torchrun
+            rank = int(os.environ["RANK"])
+            dispatch_runner(rank, config, world_size=world_size)
         else:
             # single gpu
             rank = 0

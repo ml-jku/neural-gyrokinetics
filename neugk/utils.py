@@ -225,7 +225,8 @@ def expand_as(src: np.ndarray, tgt: np.ndarray):
         ss == 1 or ss == st for ss, st in zip(src.shape, tgt.shape)
     ):
         return src
-    src = src.squeeze()
+    # squeeze is causing issues with arbitrary aggregating of dimensions for stats computation
+    # src = src.squeeze()
     while src.ndim < tgt.ndim:
         if isinstance(src, np.ndarray):
             src = np.expand_dims(src, axis=-1)
@@ -299,7 +300,7 @@ def filter_cli_priority(cli: Sequence, source: DictConfig, key: str = ""):
 
 
 class RunningMeanStd:
-    def __init__(self, shape: Sequence[int], epsilon: float = 1e-4):
+    def __init__(self, shape: Optional[Sequence[int]] = None, epsilon: float = 1e-4):
         """
         Calculates the running mean and std of a data stream
         https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
@@ -307,16 +308,20 @@ class RunningMeanStd:
         :param epsilon: helps with arithmetic issues
         :param shape: the shape of the data stream's output
         """
-        self.mean = np.zeros(shape, np.float32)
-        self.min = np.zeros(shape, np.float32)
-        self.max = np.zeros(shape, np.float32)
-        self.var = np.ones(shape, np.float32)
+        if shape is not None:
+            self.mean = np.zeros(shape, np.float32)
+            self.min = np.full_like(self.mean, fill_value=np.inf, dtype=np.float32)
+            self.max = np.zeros(shape, np.float32)
+            self.var = np.ones(shape, np.float32)
+        else:
+            self.mean = self.var = self.min = self.max = None
         self.count = epsilon
 
     def copy(self) -> "RunningMeanStd":
         """
         :return: Return a copy of the current object.
         """
+        assert self.mean is not None, "Cannot copy an uninitialized RunningMeanStd object"
         new_object = RunningMeanStd(shape=self.mean.shape)
         new_object.mean = self.mean.copy()
         new_object.var = self.var.copy()
@@ -329,11 +334,18 @@ class RunningMeanStd:
 
         :param other: The other object to combine with.
         """
+        assert self.mean is not None and other.mean is not None, "Cannot combine uninitialized RunningMeanStd objects"
         self.update_from_moments(
             other.mean, other.var, other.min, other.max, other.count
         )
 
-    def update(self, mean, var, min, max, count=1.0) -> None:
+    def update(self, mean, var, min, max, count=1.) -> None:
+        if self.mean is None:
+            # initialize with shape that we receive
+            self.mean = np.zeros_like(mean, np.float32)
+            self.min = np.full_like(self.mean, fill_value=np.inf, dtype=np.float32)
+            self.max = np.zeros_like(mean, np.float32)
+            self.var = np.ones_like(mean, np.float32)
         self.update_from_moments(mean, var, min, max, count)
 
     def update_from_moments(
@@ -364,6 +376,34 @@ class RunningMeanStd:
         self.mean = new_mean
         self.var = new_var
         self.count = new_count
+
+    @staticmethod
+    def aggregate_stats(means, stds, agg_axes=(1,2,3,4,5)) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Reduces coordinate-wise stats to channel-wise stats.
+        
+        Args:
+            coord_means: Array of shape (C, D, H, W)
+            coord_stds:  Array of shape (C, D, H, W)
+        """
+        # The mean of means is the global mean.
+        channel_means = np.mean(means, axis=agg_axes, keepdims=True)
+        
+        # Convert stds to variance first
+        coord_vars = stds ** 2
+        
+        # average of the local variances
+        avg_of_vars = np.mean(coord_vars, axis=agg_axes, keepdims=True)
+        
+        # variance of the local means 
+        diff_sq = (means - channel_means) ** 2
+        var_of_means = np.mean(diff_sq, axis=agg_axes, keepdims=True)
+        
+        # Total Variance = Average of Variances + Variance of Means
+        channel_vars = avg_of_vars + var_of_means
+        channel_stds = np.sqrt(channel_vars)
+        
+        return channel_means, channel_stds
 
 
 def pev_flux_df_phi(

@@ -24,9 +24,10 @@ from neugk.utils import (
 parser = ArgumentParser()
 parser.add_argument("--debug", action="store_true")
 parser.add_argument("--num_workers", type=int, default=10)
+parser.add_argument("--assemble_to_shard", action="store_true")
 args = parser.parse_args()
 
-ROOT = "/restricteddata/ukaea/gyrokinetics"
+ROOT = "/projects/u6eb/gyrokinetics"
 
 
 def do_ifft(knth):
@@ -179,7 +180,6 @@ def preprocess(
     spatial_ifft=False,
     separate_zf=False,
     split_into_bands=None,
-    norm_axes=(1, 2, 3, 4, 5),
 ):
     assert not (
         separate_zf and not spatial_ifft
@@ -194,30 +194,33 @@ def preprocess(
     ifft_tag = "_ifft" if spatial_ifft else ""
     zf_tag = "_separate_zf" if separate_zf else ""
     split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-    h5_filename = (
-        f"{dir_out}/{filename}{ifft_tag}{zf_tag}{split_into_bands_tag}_realpotens.h5"
-    )
+    h5_filename = f"{dir_out}/{filename}{ifft_tag}{zf_tag}{split_into_bands_tag}_realpotens.h5"
+    write_mode = "w"
     if os.path.exists(h5_filename):
-        # print(f"File {h5_filename} already exists, skipping...")
-        # return h5_filename, True
-        write_mode = "a"
-    else:
-        write_mode = "w"
+        print(f"File {h5_filename} already exists, skipping...")
+        return h5_filename, True
 
     ks = K_files(dir_in.replace("_Lin", ""))
     potens, _ = poten_files(dir_in.replace("_Lin", ""))
+    k_dir = dir_in.replace("_Lin", "")
+    if not len(ks):
+        # load k dump files of other sim, they are sampled the same anyways
+        # this is only for extracting the correct flux timesteps
+        ks = K_files("/restricteddata/ukaea/gyrokinetics/raw/iteration_0")
+        potens, _ = poten_files("/restricteddata/ukaea/gyrokinetics/raw/iteration_0")
+        k_dir = "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
     # get timestamps
     ts = []
     for k in ks:
         # load corresponding timestep
-        with open(f"{dir_in.replace('_Lin', '')}/{k}.dat", "r") as file:
+        with open(f"{k_dir}/{k}.dat", "r") as file:
             for line in file:
                 line_split = line.split("=")
                 if line_split[0].strip() == "TIME":
                     time = float(line_split[1].strip().strip(",").strip())
                     ts.append(time)
     timesteps = np.array(ts)
-
+    
     # read helper vars
     sgrid = np.loadtxt(f"{dir_in}/sgrid")
     xphi = np.loadtxt(f"{dir_in}/xphi")
@@ -236,13 +239,14 @@ def preprocess(
 
     # always load nonlinear fluxes
     fluxes = np.loadtxt(f"{dir_in.replace('_Lin', '')}/fluxes.dat")[:, 1]
-    # print(ks)
-    orig_times = np.loadtxt(f"{dir_in.replace('_Lin', '')}/time.dat")
-    ts_slices = [np.isclose(orig_times, t).nonzero()[0][0] for t in timesteps]
-    fluxes = fluxes[ts_slices]
-
     orig_fluxes = fluxes.copy()
-    fluxes = np.clip(fluxes, a_min=0.0, a_max=None)
+    # print(ks)
+    if not "Lin" in h5_filename:
+        orig_times = np.loadtxt(f"{dir_in.replace('_Lin', '')}/time.dat")
+        ts_slices = [np.isclose(orig_times, t).nonzero()[0][0] for t in timesteps]
+        fluxes = fluxes[ts_slices]
+    
+    fluxes = np.clip(fluxes, a_min=0., a_max=None)
     # load parameters
     config = parse_input_dat(f"{dir_in}/input.dat")
     ion_temp_grad = config["species"]["rlt"]
@@ -252,7 +256,7 @@ def preprocess(
 
     shape = tuple(
         [
-            1 if ax in norm_axes else resolution[ax - 1]
+            resolution[ax - 1]
             for ax in np.arange(1, len(resolution) + 1)
         ]
     )
@@ -263,51 +267,47 @@ def preprocess(
             df_stats = RunningMeanStd(shape=(4,) + shape)
     else:
         df_stats = RunningMeanStd(shape=(2,) + shape)
-        phi_stats = RunningMeanStd((1, 1, 1))
+        phi_stats = RunningMeanStd((1,1,1))
         flux_stats = RunningMeanStd((1,))
 
     ks = K_files(dir_in.replace("_Lin", ""))
-    potens, _ = poten_files(dir_in.replace("_Lin", ""))
+    potens, _ = poten_files(dir_in)
     if "Lin" in h5_filename:
         # if linear sim, only take last timestep
-        ks = [ks[-1]]
+        ks = ["FDS"]
         potens = [potens[-1]]
+        kyspec = np.loadtxt(dir_in.replace("_Lin", "/kyspec"))
+        growth_rate = np.loadtxt(os.path.join(dir_in, "growth.dat"))[-1, :]
+        ky_frequencies = np.loadtxt(os.path.join(dir_in, "frequencies.dat"))[-1, :]
+
 
     with h5py.File(h5_filename, write_mode) as file:
 
         geometry = load_geometry(dir_in)
-        if "metadata" not in file.keys():
-            # group for metadata (e.g. timesteps)
-            metadata_group = file.create_group("metadata")
-            metadata_group.create_dataset("timesteps", data=timesteps)
-            metadata_group.create_dataset("resolution", data=resolution)
-            metadata_group.create_dataset(
-                "ion_temp_grad", data=ion_temp_grad, shape=(1,)
-            )
-            metadata_group.create_dataset("density_grad", data=density_grad, shape=(1,))
-            metadata_group.create_dataset("fluxes", data=fluxes)
-            metadata_group.create_dataset("s_hat", data=s_hat, shape=(1,))
-            metadata_group.create_dataset("q", data=q, shape=(1,))
-            geometry_group = file.create_group("geometry")
-            np_geom = {
-                k: (
-                    geometry[k]
-                    if type(geometry[k]) != torch.Tensor
-                    else np.array(geometry[k])
-                )
-                for k in geometry.keys()
-            }
-            for key in np_geom.keys():
-                geometry_group.create_dataset(key, data=np_geom[key])
-            # metadata_group.create_dataset("geometry", data=geometry)
-        else:
-            metadata_group = file["metadata"]
+        # group for metadata (e.g. timesteps)
+        metadata_group = file.create_group("metadata")
+        metadata_group.create_dataset("timesteps", data=timesteps)
+        metadata_group.create_dataset("resolution", data=resolution)
+        metadata_group.create_dataset("ion_temp_grad", data=ion_temp_grad, shape=(1,))
+        metadata_group.create_dataset("density_grad", data=density_grad, shape=(1,))
+        metadata_group.create_dataset("fluxes", data=fluxes)
+        metadata_group.create_dataset("s_hat", data=s_hat, shape=(1,))
+        metadata_group.create_dataset("q", data=q, shape=(1,))
+        if "Lin" in h5_filename:
+            metadata_group.create_dataset("kyspec", data=kyspec)
+            metadata_group.create_dataset("growth_rate", data=growth_rate)
+            metadata_group.create_dataset("frequency", data=ky_frequencies)
+        geometry_group = file.create_group("geometry")
+        np_geom = {
+            k: geometry[k].numpy() if isinstance(geometry[k], torch.Tensor) 
+            else geometry[k]
+            for k in geometry.keys()
+        }
+        for key in np_geom.keys():
+            geometry_group.create_dataset(key, data=np_geom[key])
 
         # group for our 6D field data
-        if "data" not in file.keys():
-            data_group = file.create_group("data")
-        else:
-            data_group = file["data"]
+        data_group = file.create_group("data")
         for idx, (k, pot) in tqdm(
             enumerate(zip(ks, potens)),
             f"Processing {filename} -> {h5_filename}",
@@ -363,45 +363,34 @@ def preprocess(
             # load the potential field
             a = np.loadtxt(f"{dir_in}/{pot}")
             phi = np.reshape(a, (nx, ns, ny), order="F").astype("float32").copy()
-            spc_file = pot.replace("Poten", "Spc3d")
-            b = np.loadtxt(f"{dir_in}/{spc_file}")
-            gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
-            phi_fft_unpadded = phi_to_spc(phi, gt_spc, out_shape=(nkx, ns, nky))
+            if not "Lin" in h5_filename:
+                spc_file = pot.replace("Poten", "Spc3d")
+                b = np.loadtxt(f"{dir_in}/{spc_file}")
+                gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
+            else:
+                gt_spc = None
+            phi_fft_unpadded = phi_to_spc(phi, out_shape=(nkx, ns, nky), gt_spc=gt_spc)
             phi = phi_fft_to_real(phi_fft_unpadded, out_shape=phi_fft_unpadded.shape)
 
             df = np.moveaxis(orig_knth, 0, -1).copy()
             df = df.view(dtype=np.complex64).squeeze()
             df = torch.tensor(df)
-
-            if "Lin" not in h5_filename:
+            
+            if not "Lin" in h5_filename:
                 # do not compute integral for linear sims => it will fail!
                 phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
-                _, eflux, _ = pev_flux_df_phi(
-                    df, phi_fft_unpadded, geometry, aggregate=False
-                )
+                _, eflux, _ = pev_flux_df_phi(df, phi_fft_unpadded, geometry, aggregate=False)
 
-                try:
-                    assert np.isclose(
-                        eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1e-4
-                    ), "Flux integral failed..."
-                except:
-                    warnings.warn("Flux integral failed...")
+                if not np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-4):
+                    warnings.warn(
+                        f"Flux integral does not match original flux! Computed: {eflux.sum().item()}, Original: {orig_fluxes[idx]}"
+                    )
+                assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-2), "Strong deviation for flux!!"
 
             # update running averages
-            df_stats.update(
-                np.mean(knth, axis=norm_axes, keepdims=True),
-                np.var(knth, axis=norm_axes, keepdims=True),
-                np.min(knth, axis=norm_axes, keepdims=True),
-                np.max(knth, axis=norm_axes, keepdims=True),
-            )
-            flux_stats.update(fluxes[idx], fluxes[idx], fluxes[idx], fluxes[idx])
-            phi_stats.update(
-                np.mean(phi, axis=(0, 1, 2), keepdims=True),
-                np.var(phi, axis=(0, 1, 2), keepdims=True),
-                np.min(phi, axis=(0, 1, 2), keepdims=True),
-                np.max(phi, axis=(0, 1, 2), keepdims=True),
-            )
-
+            df_stats.update(knth, np.zeros_like(knth), knth, knth)
+            flux_stats.update(fluxes[idx], np.zeros_like(fluxes[idx]), fluxes[idx], fluxes[idx])
+            phi_stats.update(phi, np.zeros_like(phi), phi, phi)
             # Add the reshaped data as a dataset to the "data" group
             k_name = "timestep_" + str(idx).zfill(5)
             if k_name not in file["data"].keys():
@@ -409,51 +398,47 @@ def preprocess(
             poten_name = "poten_" + str(idx).zfill(5)
             if poten_name not in file["data"].keys():
                 data_group.create_dataset(poten_name, data=phi)
-
-        if "metadata/df_mean" not in file:
-            metadata_group.create_dataset("df_mean", data=df_stats.mean)
-            metadata_group.create_dataset("df_std", data=np.sqrt(df_stats.var))
-            metadata_group.create_dataset("df_min", data=df_stats.min)
-            metadata_group.create_dataset("df_max", data=df_stats.max)
-        if "metadata/phi_mean" not in file:
-            metadata_group.create_dataset("phi_mean", data=phi_stats.mean)
-            metadata_group.create_dataset("phi_std", data=np.sqrt(phi_stats.var))
-            metadata_group.create_dataset("phi_min", data=phi_stats.min)
-            metadata_group.create_dataset("phi_max", data=phi_stats.max)
-        if "metadata/flux_mean" not in file:
-            metadata_group.create_dataset("flux_mean", data=flux_stats.mean)
-            metadata_group.create_dataset("flux_std", data=np.sqrt(flux_stats.var))
-            metadata_group.create_dataset("flux_min", data=flux_stats.min)
-            metadata_group.create_dataset("flux_max", data=flux_stats.max)
-
-        return h5_filename, False
+            
+        metadata_group.create_dataset("df_mean", data=df_stats.mean)
+        metadata_group.create_dataset("df_std", data=np.sqrt(df_stats.var))
+        metadata_group.create_dataset("df_min", data=df_stats.min)
+        metadata_group.create_dataset("df_max", data=df_stats.max)
+        metadata_group.create_dataset("phi_mean", data=phi_stats.mean)
+        metadata_group.create_dataset("phi_std", data=np.sqrt(phi_stats.var))
+        metadata_group.create_dataset("phi_min", data=phi_stats.min)
+        metadata_group.create_dataset("phi_max", data=phi_stats.max)
+        metadata_group.create_dataset("flux_mean", data=flux_stats.mean)
+        metadata_group.create_dataset("flux_std", data=np.sqrt(flux_stats.var))
+        metadata_group.create_dataset("flux_min", data=flux_stats.min)
+        metadata_group.create_dataset("flux_max", data=flux_stats.max)
+    
+    return h5_filename, False
 
 
 IFFT = True
 separate_zf = False
 split_into_bands = None
-norm_axes = (1, 2, 3, 4, 5)
 ifft_tag = "_ifft" if IFFT else ""
 zf_tag = "_separate_zf" if separate_zf else ""
 split_into_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
 # datasets = [file for file in os.listdir(f"{ROOT}/raw") if file.endswith("Lin")]
-# datasets = [f"iteration_{i}" for i in range(100,300)]
+datasets = [f"iteration_{i}" for i in range(301)]
 # df = pd.read_csv("/system/user/publicwork/fpaische/plasmamodelling/misc/original_unstable.csv")
 # originals = df["name"].values
-originals = [
-    "iteration_262",
-    "iteration_115",
-    "iteration_148",
-    "iteration_235",
-    "iteration_131",
-    "iteration_8",
-    "ood/iteration_0",
-    "ood/iteration_1",
-    "ood/iteration_2",
-    "ood/iteration_3",
-    "ood/iteration_4",
-]
-datasets = [f"{name}_Lin" for name in originals]
+# originals = [
+#     "iteration_262",
+#     "iteration_115",
+#     "iteration_148",
+#     "iteration_235",
+#     "iteration_131",
+#     "iteration_8",
+#     "ood/iteration_0",
+#     "ood/iteration_1",
+#     "ood/iteration_2",
+#     "ood/iteration_3",
+#     "ood/iteration_4",
+# ]
+# datasets = [f"{name}_Lin" for name in originals]
 
 if not args.debug:
     # if we don't debug, we launch multiprocessing
@@ -462,7 +447,6 @@ if not args.debug:
         spatial_ifft=IFFT,
         separate_zf=separate_zf,
         split_into_bands=split_into_bands,
-        norm_axes=norm_axes,
     )
 
     with ThreadPoolExecutor(args.num_workers) as executor:
@@ -478,13 +462,20 @@ if not args.debug:
             print(f"{filename} was skipped!")
 else:
     for f in datasets:
-        h5_filename, skipped = preprocess(
-            f,
-            spatial_ifft=IFFT,
-            separate_zf=separate_zf,
-            split_into_bands=split_into_bands,
-            norm_axes=norm_axes,
-        )
+        try:
+            h5_filename, skipped = preprocess(
+                f,
+                spatial_ifft=IFFT,
+                separate_zf=separate_zf,
+                split_into_bands=split_into_bands,
+            )
+        except Exception as e:
+            print(f"Error processing {f}: {e}, deleting incomplete file if exists...")
+            ifft_tag = "_ifft" if IFFT else ""
+            h5_filename = f"{ROOT}/preprocessed/{f}{ifft_tag}_realpotens.h5"
+            if os.path.exists(h5_filename):
+                os.remove(h5_filename)
+            continue
 
         # set rwx permissions
         try:
@@ -506,3 +497,11 @@ else:
                     f"\tpoints: {timesteps}, shape of timestep_00000: {timestep_0.shape}\n"
                     f"\trlt: {rlt}\n"
                 )
+
+if args.assemble_to_shard:
+    # After multiprocessing finishes:
+    with h5py.File(f"{ROOT}/preprocessed/master_shard.h5", "w") as master:
+        for small_h5 in glob.glob(f"{ROOT}/preprocessed/*.h5"):
+            with h5py.File(small_h5, "r") as source:
+                # This is a very fast metadata-level copy
+                master.copy(source, small_h5.replace(".h5", ""))

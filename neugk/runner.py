@@ -29,6 +29,7 @@ class BaseRunner:
         else:
             self.local_rank = rank
 
+        torch.cuda.set_device(self.local_rank)
         self.device = (
             torch.device(f"cuda:{self.local_rank}")
             if torch.cuda.is_available()
