@@ -47,6 +47,7 @@ augment:
     weights: null
     rescale: false
     mask_zero_mode: true
+    df_delta_weight: 1.0
 
 timestep_std_filter: null  # std-based timestep filtering threshold (null to disable)
 timestep_std_offset: 80
