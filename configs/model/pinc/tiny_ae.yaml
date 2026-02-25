@@ -3,8 +3,10 @@ model_type: ae
 bundle_seq_length: 1
 latent_dim: 2048
 act_fn: GELU
+norm_fn: RMSNorm
 decouple_mu: true
 conditioning: ["itg", "dg", "s_hat", "q"]
+# conditioning: []
 extra_zf_loss: false
 init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
 patching_init_weights: "kaiming_uniform"
@@ -15,7 +17,6 @@ loss_scheduler:
 loss_weights:
   df: 1.0
 extra_loss_weights:
-
 
 patch:
   patch_size: [ 4, 0, 4, 5, 4 ]
