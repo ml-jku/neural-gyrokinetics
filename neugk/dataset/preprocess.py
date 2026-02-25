@@ -199,13 +199,15 @@ def preprocess(
                 innter_pbar = tqdm(
                     innter_pbar, desc=filename, total=len(ks), position=pos, leave=False
                 )
-            
+
             for idx, (k, pot) in enumerate(innter_pbar):
                 # load df
                 with open(f"{dir_in}/{k}", "rb") as fid:
                     ff = np.fromfile(fid, dtype=np.float64)
 
-                knth = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+                knth = (
+                    np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+                )
                 orig_knth = knth.copy()
 
                 if spatial_ifft:
@@ -226,7 +228,9 @@ def preprocess(
                                 cur_knth = np.zeros_like(knth_no_zf)
                                 offset = 1 + band * modes_per_channel
                                 if (split_into_bands - 1) == band:
-                                    cur_knth[..., offset:, :] = knth_no_zf[..., offset:, :]
+                                    cur_knth[..., offset:, :] = knth_no_zf[
+                                        ..., offset:, :
+                                    ]
                                 else:
                                     cur_knth[
                                         ..., offset : offset + modes_per_channel, :
@@ -254,7 +258,9 @@ def preprocess(
                 b = np.loadtxt(f"{dir_in}/{spc_file}")
                 gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
                 phi_fft_unpadded = phi_to_spc(phi, gt_spc, out_shape=(nkx, ns, nky))
-                phi = phi_fft_to_real(phi_fft_unpadded, out_shape=phi_fft_unpadded.shape)
+                phi = phi_fft_to_real(
+                    phi_fft_unpadded, out_shape=phi_fft_unpadded.shape
+                )
 
                 df = np.moveaxis(orig_knth, 0, -1).copy()
                 df = df.view(dtype=np.complex64).squeeze()
@@ -314,7 +320,7 @@ def preprocess(
             backend.write_metadata(f, metadata)
 
         return out_path, False
-        
+
     finally:
         # Free up the terminal row for the next job
         if position_queue is not None:
@@ -382,7 +388,7 @@ if __name__ == "__main__":
                 )
             for res in pbar:
                 returns.append(res)
-                
+
         # Cleanly print out the skipped files at the very end to avoid messing up the UI
         skipped_files = [f for f, skipped in returns if skipped]
         if skipped_files:

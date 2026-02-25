@@ -421,7 +421,7 @@ class CycloneDataset(Dataset):
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
-        geometry = sample["geometry"]
+        geom = sample["geometry"]
 
         if self.normalization is not None and get_normalized:
             if x is not None:
@@ -434,25 +434,19 @@ class CycloneDataset(Dataset):
                 flux, *_ = self.normalize(file_index, flux=flux)
 
         return CycloneSample(
-            df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
-            y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
-            phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
-            y_phi=(
-                torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
-            ),
-            y_flux=(
-                torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None
-            ),
-            timestep=torch.as_tensor(timestep, dtype=self.dtype),
-            file_index=torch.tensor(file_index, dtype=torch.long),
-            timestep_index=torch.tensor(t_index, dtype=torch.long),
-            geometry=tree_map(
-                lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry
-            ),
-            itg=torch.as_tensor(itg, dtype=self.dtype),
-            dg=torch.as_tensor(dg, dtype=self.dtype),
-            s_hat=torch.as_tensor(s_hat, dtype=self.dtype),
-            q=torch.as_tensor(q, dtype=self.dtype),
+            df=torch.as_tensor(x, self.dtype) if x is not None else None,
+            y_df=torch.as_tensor(gt, self.dtype) if gt is not None else None,
+            phi=torch.as_tensor(phi, self.dtype) if phi is not None else None,
+            y_phi=(torch.as_tensor(y_phi, self.dtype) if y_phi is not None else None),
+            y_flux=(torch.as_tensor(flux, self.dtype) if flux is not None else None),
+            timestep=torch.as_tensor(timestep, self.dtype),
+            file_index=torch.tensor(file_index, torch.long),
+            timestep_index=torch.tensor(t_index, torch.long),
+            geometry=tree_map(lambda g: torch.as_tensor(g, torch.float64), geom),
+            itg=torch.as_tensor(itg, self.dtype),
+            dg=torch.as_tensor(dg, self.dtype),
+            s_hat=torch.as_tensor(s_hat, self.dtype),
+            q=torch.as_tensor(q, self.dtype),
         )
 
     def _load_data(self, f: Any, file_index: int, t_index: int) -> dict:
@@ -778,39 +772,29 @@ class CycloneDataset(Dataset):
         return self.file_num_timesteps[file_idx]
 
     def collate(self, batch: Sequence[CycloneSample]):
+
+        def stack_batch(_b: Sequence[CycloneSample], key: str):
+            if hasattr(_b[0], key) is not None:
+                return torch.stack([getattr(sample, key) for sample in _b])
+            return None
+
         return CycloneSample(
-            df=(
-                torch.stack([sample.df for sample in batch])
-                if batch[0].df is not None
-                else None
-            ),
-            y_df=(
-                torch.stack([sample.y_df for sample in batch])
-                if batch[0].y_df is not None
-                else None
-            ),
-            phi=(
-                torch.stack([sample.phi for sample in batch])
-                if batch[0].phi is not None
-                else None
-            ),
-            y_phi=(
-                torch.stack([sample.y_phi for sample in batch])
-                if batch[0].y_phi is not None
-                else None
-            ),
-            y_flux=torch.stack([sample.y_flux for sample in batch]),
-            timestep=torch.stack([sample.timestep for sample in batch]),
-            file_index=torch.stack([sample.file_index for sample in batch]),
-            timestep_index=torch.stack([sample.timestep_index for sample in batch]),
+            df=stack_batch(batch, "df"),
+            y_df=stack_batch(batch, "y_df"),
+            phi=stack_batch(batch, "phi"),
+            y_phi=stack_batch(batch, "y_phi"),
+            y_flux=stack_batch(batch, "y_flux"),
+            timestep=stack_batch(batch, "timestep"),
+            file_index=stack_batch(batch, "file_index"),
+            timestep_index=stack_batch(batch, "timestep_index"),
+            itg=stack_batch(batch, "itg"),
+            dg=stack_batch(batch, "dg"),
+            s_hat=stack_batch(batch, "s_hat"),
+            q=stack_batch(batch, "q"),
             geometry=tree_map(
                 lambda *x: torch.stack([torch.as_tensor(v) for v in x]),
                 *[s.geometry for s in batch],
             ),
-            itg=torch.stack([sample.itg for sample in batch]),
-            dg=torch.stack([sample.dg for sample in batch]),
-            s_hat=torch.stack([sample.s_hat for sample in batch]),
-            q=torch.stack([sample.q for sample in batch]),
         )
 
 

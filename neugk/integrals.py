@@ -58,6 +58,8 @@ class FluxIntegral(nn.Module):
     def _geom_tensors(
         self, geometry: Dict[str, torch.Tensor], dtype: torch.dtype = torch.float32
     ) -> Dict[str, torch.Tensor]:
+        # NOTE: float64 to avoid instabilities
+        geometry = tree_map(lambda g: g.to(dtype=torch.float64), geometry)
         geom_ = {}
         # expand geometry constants for broadcasting
         # grids

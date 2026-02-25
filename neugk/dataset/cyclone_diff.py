@@ -71,7 +71,7 @@ class CycloneAEDataset(CycloneDataset):
         phi = sample["phi"]
         flux = sample["flux"]
         timestep = sample["timestep"]
-        geometry = sample["geometry"]
+        geom = sample["geometry"]
 
         avg_flux = self.get_avg_flux(file_index)
 
@@ -122,9 +122,7 @@ class CycloneAEDataset(CycloneDataset):
             avg_flux=torch.as_tensor(avg_flux, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
-            geometry=tree_map(
-                lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry
-            ),
+            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             conditioning=conditioning,
         )
@@ -220,27 +218,21 @@ class CycloneAEDataset(CycloneDataset):
         return x * scale + shift
 
     def collate(self, batch: Sequence[CycloneAESample]):
+
+        def stack_batch(_b: Sequence[CycloneAESample], key: str):
+            if hasattr(_b[0], key):
+                return torch.stack([getattr(sample, key) for sample in _b])
+            return None
+
         return CycloneAESample(
-            df=(
-                torch.stack([sample.df for sample in batch])
-                if batch[0].df is not None
-                else None
-            ),
-            phi=(
-                torch.stack([sample.phi for sample in batch])
-                if batch[0].phi is not None
-                else None
-            ),
-            flux=torch.stack([sample.flux for sample in batch]),
-            avg_flux=torch.stack([sample.avg_flux for sample in batch]),
-            file_index=torch.stack([sample.file_index for sample in batch]),
-            timestep_index=torch.stack([sample.timestep_index for sample in batch]),
-            timestep=torch.stack([sample.timestep for sample in batch]),
-            conditioning=(
-                torch.stack([sample.conditioning for sample in batch])
-                if batch[0].conditioning is not None
-                else None
-            ),
+            df=stack_batch(batch, "df"),
+            phi=stack_batch(batch, "phi"),
+            flux=stack_batch(batch, "flux"),
+            avg_flux=stack_batch(batch, "avg_flux"),
+            timestep=stack_batch(batch, "timestep"),
+            file_index=stack_batch(batch, "file_index"),
+            timestep_index=stack_batch(batch, "timestep_index"),
+            conditioning=stack_batch(batch, "conditioning"),
             geometry=tree_map(
                 lambda *x: torch.stack([torch.as_tensor(v) for v in x]),
                 *[s.geometry for s in batch],
@@ -383,7 +375,7 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         phi, flux = sample["phi"], sample["flux"]
         avg_flux = self.get_avg_flux(file_index)
         timestep = sample["timestep"]
-        geometry = sample["geometry"]
+        geom = sample["geometry"]
 
         cond_list = []
         for k in self.conditions:
@@ -441,9 +433,7 @@ class CycloneSimSiamDataset(CycloneAEDataset):
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
             timestep_index_aug=torch.tensor(t_index_aug, dtype=torch.long),
-            geometry=tree_map(
-                lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry
-            ),
+            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             conditioning=conditioning,
         )
@@ -534,27 +524,22 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         return sample
 
     def collate(self, batch: Sequence[CycloneSimSiamSample]):
+
+        def stack_batch(_b: Sequence[CycloneSimSiamSample], key: str):
+            if hasattr(_b[0], key) is not None:
+                return torch.stack([getattr(sample, key) for sample in _b])
+            return None
+
         return CycloneSimSiamSample(
-            df=(
-                torch.stack([s.df for s in batch]) if batch[0].df is not None else None
-            ),
-            df_aug=(
-                torch.stack([s.df_aug for s in batch])
-                if batch[0].df_aug is not None
-                else None
-            ),
-            phi=(
-                torch.stack([s.phi for s in batch])
-                if batch[0].phi is not None
-                else None
-            ),
-            flux=torch.stack([s.flux for s in batch]),
-            avg_flux=torch.stack([s.avg_flux for s in batch]),
-            file_index=torch.stack([s.file_index for s in batch]),
-            timestep_index=torch.stack([s.timestep_index for s in batch]),
-            timestep_index_aug=torch.stack([s.timestep_index_aug for s in batch]),
-            timestep=torch.stack([s.timestep for s in batch]),
-            conditioning=torch.stack([s.conditioning for s in batch]),
+            df=stack_batch(batch, "df"),
+            df_aug=stack_batch(batch, "df_aug"),
+            phi=stack_batch(batch, "phi"),
+            flux=stack_batch(batch, "flux"),
+            avg_flux=stack_batch(batch, "avg_flux"),
+            timestep=stack_batch(batch, "timestep"),
+            file_index=stack_batch(batch, "file_index"),
+            timestep_index=stack_batch(batch, "timestep_index"),
+            conditioning=stack_batch(batch, "conditioning"),
             geometry=tree_map(
                 lambda *x: torch.stack([torch.as_tensor(v) for v in x]),
                 *[s.geometry for s in batch],

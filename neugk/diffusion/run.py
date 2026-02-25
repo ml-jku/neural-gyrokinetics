@@ -370,15 +370,16 @@ class EDMRunner(DDPMRunner):
         return loss.mean()
 
     @torch.no_grad()
-    def sample(self, condition: torch.Tensor, steps: int = 5, latent_only: bool = False):
+    def sample(
+        self, condition: torch.Tensor, steps: int = 5, latent_only: bool = False
+    ):
         self.model.eval()
         bs = condition.shape[0]
         step_indices = torch.arange(steps, dtype=torch.float32, device=self.device)
         sigma_max_rho = self.sigma_max ** (1 / self.rho)
         sigma_min_rho = self.sigma_min ** (1 / self.rho)
         sigmas = (
-            sigma_max_rho
-            + step_indices / (steps - 1) * (sigma_min_rho - sigma_max_rho)
+            sigma_max_rho + step_indices / (steps - 1) * (sigma_min_rho - sigma_max_rho)
         ) ** self.rho
         sigmas = torch.cat(
             [sigmas, torch.zeros_like(sigmas[:1])]
