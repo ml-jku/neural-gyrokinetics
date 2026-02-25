@@ -27,7 +27,7 @@ def read_cupy_bin(file: str, shape: tuple, rank: int = 0, use_kvikio: bool = Tru
             with kvikio.CuFile(file, "r") as f:
                 f.read(gpu_array)
         return torch.from_dlpack(gpu_array.reshape(shape))
-        
+
     else:
         cpu_array = np.fromfile(file, dtype=np.float32)
         return torch.from_numpy(cpu_array.reshape(shape))
@@ -482,13 +482,13 @@ class KvikioCycloneDataset(CycloneDataset):
                     file=kfile,
                     shape=self.df_shape,
                     rank=self.rank,
-                    use_kvikio=use_kvikio
+                    use_kvikio=use_kvikio,
                 )
                 k_gt = read_cupy_bin(
                     file=kfile_gt,
                     shape=self.df_shape,
                     rank=self.rank,
-                    use_kvikio=use_kvikio
+                    use_kvikio=use_kvikio,
                 )
 
                 if all(self.active_keys == np.array([0, 1])):
@@ -503,7 +503,7 @@ class KvikioCycloneDataset(CycloneDataset):
                     file=phifile,
                     shape=self.phi_resolution,
                     rank=self.rank,
-                    use_kvikio=use_kvikio
+                    use_kvikio=use_kvikio,
                 )
                 phi_gt = read_cupy_bin(
                     file=phifile_gt,

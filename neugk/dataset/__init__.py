@@ -7,13 +7,16 @@ import torch.multiprocessing as mp
 from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import (
     CycloneDataset,
-    CycloneSample,
     CoordinateCycloneDataset,
+    LinearCycloneDataset,
+    CycloneSample,
 )
-from neugk.dataset.cyclone_kvikio import KvikioCycloneDataset
-from neugk.dataset.cyclone_diff_kvikio import KvikioCycloneAEDataset
-from neugk.dataset.cyclone_diff import CycloneAEDataset, CycloneAESample
-from neugk.dataset.cyclone_diff_simsiam import CycloneSimSiamDataset
+from neugk.dataset.cyclone_diff import (
+    CycloneAEDataset,
+    CycloneSimSiamDataset,
+    CycloneAESample,
+)
+from neugk.dataset.backend import H5backend, KvikIOBackend
 
 
 def check_partial_holdouts(dataset_cfg):
@@ -39,7 +42,7 @@ def get_data(cfg, rank: int = 0):
             )
         )
 
-    datatype = getattr(cfg.dataset, "datatype", "h5")
+    backend = getattr(cfg.dataset, "backend", "h5")
     use_ddp = dist.is_initialized()
     partial_holdouts = {}
     if cfg.dataset.partial_holdouts:
@@ -78,12 +81,7 @@ def get_data(cfg, rank: int = 0):
         # elif cfg.choices.model == "baselines/linear_ablation":
         #     dataset_class = LinearCycloneDataset
         else:
-            if datatype == "h5":
-                dataset_class = CycloneDataset
-            elif datatype == "gds":
-                dataset_class = KvikioCycloneDataset
-                train_kwargs["rank"] = rank
-                val_kwargs["rank"] = rank
+            dataset_class = CycloneDataset
     elif cfg.workflow == "pinc":
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
@@ -92,14 +90,7 @@ def get_data(cfg, rank: int = 0):
         if cfg.stage == "simsiam":
             dataset_class = CycloneSimSiamDataset
         else:
-            if datatype == "h5":
-                dataset_class = CycloneAEDataset
-            elif datatype == "gds":
-                dataset_class = KvikioCycloneAEDataset
-                train_kwargs["rank"] = rank
-                val_kwargs["rank"] = rank
-                # NOTE: for validation load without gds, save space, slow is acceptable
-                val_kwargs["load_with_kvikio"] = False
+            dataset_class = CycloneAEDataset
     elif cfg.workflow == "diffusion":
         train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
@@ -109,7 +100,17 @@ def get_data(cfg, rank: int = 0):
     else:
         raise NotImplementedError
 
+    # dataloading backend
+    if backend == "h5":
+        train_backend = H5backend(rank)
+        val_backend = H5backend(rank)
+    elif backend == "gds":
+        train_backend = KvikIOBackend(rank)
+        # NOTE: for validation load without gds, save space, slow is acceptable
+        val_backend = KvikIOBackend(rank, use_kvikio=False)
+
     trainset = dataset_class(
+        backend=train_backend,
         active_keys=cfg.dataset.active_keys,
         input_fields=train_input_fields,
         path=cfg.dataset.path,
@@ -137,6 +138,7 @@ def get_data(cfg, rank: int = 0):
     )
 
     holdout_trajectories_valset = dataset_class(
+        backend=val_backend,
         active_keys=cfg.dataset.active_keys,
         input_fields=val_input_fields,
         path=cfg.dataset.path,
@@ -167,9 +169,9 @@ def get_data(cfg, rank: int = 0):
     # dataloaders
     prefetch_factor = min(2, cfg.training.num_workers // 2)
     # NOTE: must be false when returning gpu data
-    pin_memory = cfg.training.pin_memory and datatype != "gds"
+    pin_memory = cfg.training.pin_memory and backend != "gds"
     dataloader_kwargs = {}
-    if datatype == "gds":
+    if backend == "gds":
         dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
 
     trainloader = DataLoader(
@@ -199,6 +201,7 @@ def get_data(cfg, rank: int = 0):
 
     if partial_holdouts:
         holdout_samples_valset = dataset_class(
+            backend=val_backend,
             active_keys=cfg.dataset.active_keys,
             input_fields=val_input_fields,
             path=cfg.dataset.path,
