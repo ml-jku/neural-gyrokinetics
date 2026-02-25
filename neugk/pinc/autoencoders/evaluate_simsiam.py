@@ -3,8 +3,7 @@ import torch.distributed as dist
 from omegaconf import DictConfig
 from tqdm import tqdm
 
-from neugk.dataset.cyclone_diff_simsiam import CycloneSimSiamSample
-from neugk.utils import save_model_and_config
+from neugk.dataset.cyclone_diff import CycloneSimSiamSample
 
 
 @torch.no_grad()

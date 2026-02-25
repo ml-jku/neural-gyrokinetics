@@ -193,10 +193,7 @@ def preprocess(
             "geometry": np_geom,
         }
 
-        # delegate writing mechanism to the selected backend
         with backend.create(out_path) as f:
-            
-            # Create the worker's progress bar (leave=False clears it when complete)
             innter_pbar = zip(ks, potens)
             if args.tqdm:
                 innter_pbar = tqdm(
@@ -204,6 +201,7 @@ def preprocess(
                 )
             
             for idx, (k, pot) in enumerate(innter_pbar):
+                # load df
                 with open(f"{dir_in}/{k}", "rb") as fid:
                     ff = np.fromfile(fid, dtype=np.float64)
 
@@ -272,7 +270,6 @@ def preprocess(
                             eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1e-4
                         ), "Flux integral failed..."
                     except:
-                        # TODO(gg) what's up here?
                         pass
 
                 # update running averages
@@ -313,7 +310,7 @@ def preprocess(
             metadata["flux_min"] = flux_stats.min
             metadata["flux_max"] = flux_stats.max
 
-            # dump metadata using the backend
+            # dump metadata as last operation
             backend.write_metadata(f, metadata)
 
         return out_path, False
@@ -343,7 +340,7 @@ if __name__ == "__main__":
     split_into_bands = None
     norm_axes = (1, 2, 3, 4, 5)
 
-    originals = [f"iteration_{i}" for i in range(100, 150)]
+    originals = [f"iteration_{i}" for i in range(0, 150)]
 
     datasets = originals
 

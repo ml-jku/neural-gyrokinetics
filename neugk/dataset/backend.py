@@ -197,7 +197,7 @@ class H5backend(DataBackend):
                 if k not in meta_grp.keys():
                     meta_grp.create_dataset(k, data=v)
 
-    def write(self, f, timestamp: str, df: np.ndarray):
+    def write_df(self, f, timestamp: str, df: np.ndarray):
         k_name = f"timestep_{timestamp}"
         if k_name not in f["data"].keys():
             f["data"].create_dataset(k_name, data=df)
