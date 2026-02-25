@@ -8,7 +8,6 @@ from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import (
     CycloneDataset,
     CoordinateCycloneDataset,
-    LinearCycloneDataset,
     CycloneSample,
 )
 from neugk.dataset.cyclone_diff import (

@@ -1,4 +1,3 @@
-from typing import Optional
 
 import os
 from abc import abstractmethod

@@ -257,7 +257,7 @@ def preprocess(
                 assert np.isclose(
                     eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1e-4
                 ), "Flux integral failed..."
-            except:
+            except AssertionError:
                 warnings.warn("Flux integral failed...")
 
         # update running averages

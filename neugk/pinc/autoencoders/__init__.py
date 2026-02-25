@@ -1,7 +1,6 @@
 from typing import Optional
 
 import torch
-from torch import nn
 
 
 def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):

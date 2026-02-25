@@ -12,8 +12,6 @@ from torch.cuda import reset_peak_memory_stats, max_memory_allocated
 from torch.utils._pytree import tree_map
 from diffusers import DDPMScheduler
 from torch.distributions import Normal, StudentT, Laplace
-from torch.utils._pytree import tree_map
-from torchdiffeq import odeint
 import scipy.optimize
 
 from neugk.diffusion.models import get_diffusion_model, DummyAE

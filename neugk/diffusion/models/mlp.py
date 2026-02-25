@@ -1,6 +1,5 @@
 from typing import Sequence, Optional
 
-from math import prod
 
 import torch
 from torch import nn

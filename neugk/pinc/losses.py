@@ -5,7 +5,6 @@ plus EMA normalization and custom Conflict-Free Gradient Descent (ConFIG) patchi
 """
 
 from typing import List, Callable, Dict, Optional
-import warnings
 
 import torch
 import torch.nn.functional as F

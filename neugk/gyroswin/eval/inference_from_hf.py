@@ -15,11 +15,12 @@ import h5py
 
 from huggingface_hub import login, hf_hub_download
 
-auth_token = open(os.path.expanduser("~/.cache/huggingface/token"), "r").read()
-login(auth_token)
-
 from neugk.gyroswin.models import get_model
 from neugk.utils import expand_as
+
+
+auth_token = open(os.path.expanduser("~/.cache/huggingface/token"), "r").read()
+login(auth_token)
 
 
 def create_parser():

@@ -11,7 +11,6 @@ from omegaconf import OmegaConf
 import h5py
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import nn
 import torch.distributed as dist
 from omegaconf import DictConfig

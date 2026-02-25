@@ -5,7 +5,7 @@ from torch import nn
 from einops import rearrange
 
 from neugk.gyroswin.models.baselines.fno import DfVSpace3DTFNO
-from neugk.models.gk_unet import Swin5DUnet, SwinNDUnet
+from neugk.models.gk_unet import Swin5DUnet
 from neugk.models.nd_vit.patching import PatchEmbed, PatchExpand, pad_to_blocks
 from neugk.models.layers import Film
 

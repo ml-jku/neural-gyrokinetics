@@ -112,7 +112,7 @@ class H5backend(DataBackend):
             tag = (
                 f"_ifft_separate_zf{n_bands_tag}.h5"
                 if split_into_bands
-                else (f"_ifft_realpotens.h5" if real_potens else "_ifft.h5")
+                else ("_ifft_realpotens.h5" if real_potens else "_ifft.h5")
             )
             path = path if tag in path else re.sub(r"\.h5$", tag, path)
         elif not path.endswith(".h5"):

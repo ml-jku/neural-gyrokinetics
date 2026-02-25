@@ -184,7 +184,7 @@ class KvikioCycloneDataset(CycloneDataset):
             filename = os.path.split(f_path)[-1]
             if spatial_ifft:
                 # optional preprocessing filename tags
-                filename = filename.replace(f"_ifft_separate_zf", "")
+                filename = filename.replace("_ifft_separate_zf", "")
                 real_potens_tag = "_realpotens" if real_potens else ""
                 filename = filename.replace(f"_ifft{real_potens_tag}", "")
             # number of offset samples on the tail (as holdout or for n_eval_steps)
@@ -261,7 +261,7 @@ class KvikioCycloneDataset(CycloneDataset):
             for file_idx, file in enumerate(self.files):
                 filename = os.path.split(file)[-1]
                 # optional preprocessing filename tags
-                filename = filename.replace(f"_ifft_separate_zf", "")
+                filename = filename.replace("_ifft_separate_zf", "")
                 real_potens_tag = "_realpotens" if real_potens else ""
                 filename = filename.replace(f"_ifft{real_potens_tag}", "")
                 if self.n_tail_holdout:

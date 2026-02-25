@@ -310,15 +310,6 @@ class ComplexMetrics:
             dim=-1,
         ).mean()
 
-        # Radial binning for k-space analysis
-        # Create k-space grid for the spatial dimensions
-        ny, nx = psd1.shape[spatial_dims[-2]], psd1.shape[spatial_dims[-1]]
-        kx_vals = torch.fft.fftfreq(nx, device=psd1.device).view(1, -1)
-        ky_vals = torch.fft.fftfreq(ny, device=psd1.device).view(-1, 1)
-        k_magnitude = torch.sqrt(kx_vals**2 + ky_vals**2)
-
-        # Simple radial correlation (averaging over non-spatial dimensions)
-        # Average PSD over all non-spatial dimensions: [v_par, mu, s]
         non_spatial_dims = tuple(range(1, len(psd1.shape) - 2))
         if non_spatial_dims:
             psd1_spatial_avg = psd1.mean(dim=non_spatial_dims)  # [BS, x, y]
@@ -327,7 +318,6 @@ class ComplexMetrics:
             psd1_spatial_avg = psd1
             psd2_spatial_avg = psd2
 
-        # Average over batch dimension and flatten for correlation
         psd1_radial = psd1_spatial_avg.mean(dim=0).flatten()  # [x*y]
         psd2_radial = psd2_spatial_avg.mean(dim=0).flatten()  # [x*y]
 
@@ -335,8 +325,6 @@ class ComplexMetrics:
             psd1_radial.unsqueeze(0), psd2_radial.unsqueeze(0), dim=1
         ).item()
 
-        # Total spectral power ratio: power2 / power1 (predictions / ground truth)
-        # Sum over spatial dimensions, then average over all other dimensions
         total_power1 = psd1.sum(dim=spatial_dims).mean()
         total_power2 = psd2.sum(dim=spatial_dims).mean()
         total_power_ratio = total_power2 / (total_power1 + self.epsilon)
