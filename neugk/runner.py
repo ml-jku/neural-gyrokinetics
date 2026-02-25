@@ -85,6 +85,8 @@ class BaseRunner:
                     start_fraction=sp.start_fraction,
                     end_fraction=sp.end_fraction,
                 )
+        if self.cfg.dataset.augment.mask_modes.active:
+            weights["df_delta"] = self.cfg.dataset.augment.mask_modes.df_delta_weight
         return weights
 
     def setup_scheduler(self):
