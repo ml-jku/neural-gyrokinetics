@@ -18,7 +18,6 @@ from omegaconf import DictConfig, OmegaConf
 
 # Project Imports
 from neugk.utils import set_seed, compress_src, find_free_port, filter_cli_priority
-from neugk.pinc.autoencoders.ae_utils import restart_config_autoencoder
 
 from neugk.gyroswin import GyroSwinRunner
 from neugk.pinc import PINCRunner
