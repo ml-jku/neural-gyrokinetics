@@ -19,7 +19,7 @@
 
 ## TL;DR
 <div style="border-left: 4px solid #5e4931ff; background-color: #e8cfcfff; padding: 12px 16px; margin: 1em 0; border-radius: 4px;">
-<strong>Nuclear fusion is hard</strong>, as it requires understanding physical phenomena like plasma turbulence. One way to do this is with very expensive <strong>numerical simulations, called gyrokinetics</strong>. We propose <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>GyroSwin</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models Plasma turbulence in a <strong>5D phase space</strong>, unlike existing methods which take reduced approaches, and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
+<strong>Nuclear fusion is hard</strong>, as it requires understanding physical phenomena like plasma turbulence. One way to do this is with very expensive <strong>numerical simulations, called gyrokinetics</strong>. We propose <img src="imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>GyroSwin</strong>, a neural surrogate model based on <strong>swin transformers</strong> for nonlinear gyrokinetic equations, which models plasma turbulence in a <strong>5D phase space</strong>, unlike existing methods which take reduced approaches, and offers a <strong>>1000x speedup</strong> compared to numerical gyrokinetics solvers.
 </div>
 
 ## Introduction
@@ -33,10 +33,10 @@ Nuclear Fusion is a promising contender for sustainable energy production. For h
     </figcaption>
 </figure>
 
-Since the gravitational force on planet Earth is insufficient to overcome this barrier, we require massive amounts of heat to increase the probability of atoms fusing. In reality, this means heating up a gas to hundreds of millions of degrees, which is also called a **Plasma**. At these conditions, hydrogen atoms split into ions and electrons. Due the amount of heat, the Plasma has to be confined within magnetic fields, as there is no material that could withstand such extreme temperatures.
+Since the gravitational force on planet Earth is insufficient to overcome this barrier, we require massive amounts of heat to increase the probability of atoms fusing. In reality, this means heating up a gas to hundreds of millions of degrees, which is also called a **plasma**. At these conditions, hydrogen atoms split into ions and electrons. Due to the amount of heat, the plasma has to be confined within magnetic fields, as there is no material that could withstand such extreme temperatures.
 
-To turn nuclar fusion into a viable energy source, Plasma needs to be confined over long periods of time. This is difficult, as it's inherently unstable, and often tries to escape confinement. One contributor to this behavior is __turbulence__, which arises due to temperature gradients within the Plasma. Therefore it is essential to understand and model Plasma turbulence in modern reactors such as Tokamaks, in order to downstream design new reactors and confinement control systems.
-However, understanding and modelling Plasma turbulence is an incredibly hard problem, and practictioners must rely on expensive numerical simulations.
+To turn nuclear fusion into a viable energy source, plasma needs to be confined over long periods of time. This is difficult, as it's inherently unstable, and often tries to escape confinement. One contributor to this behavior is __turbulence__, which arises due to temperature gradients within the plasma. Therefore it is essential to understand and model plasma turbulence in modern reactors such as Tokamaks, in order to downstream design new reactors and confinement control systems.
+However, understanding and modelling plasma turbulence is an incredibly hard problem, and practitioners must rely on expensive numerical simulations.
 
 > _"Nuclear fusion is not rocket science, because it's way harder."_  
 > — *William Hornsby*
@@ -45,7 +45,7 @@ Because it promises __sustainable, safe, and relatively affordable energy__, __n
 
 ## The Problem
 
-Understanding **plasma turbulence** is crucial for modelling plasma scenarios for confinement control and reactor design. Numerically, Plasma turbulence is governed by the **nonlinear gyrokinetic equation**, which evolves a **5D distribution function** over time **in phase space**.
+Understanding **plasma turbulence** is crucial for modelling plasma scenarios for confinement control and reactor design. Numerically, plasma turbulence is governed by the **nonlinear gyrokinetic equation**, which evolves a **5D distribution function** over time **in phase space**.
 
 Let $f = f(x, y, s, v_{\parallel}, \mu)$ where:
 
@@ -54,8 +54,7 @@ Let $f = f(x, y, s, v_{\parallel}, \mu)$ where:
 - $v_{\parallel}$ the parallel velocity component along the field lines.
 - $\mu$ is the magnetic angular moment, related to the gyral motion of particles.
 
-The time-evolution of the perturbed distribution $f$
-, usually called $\delta f$, is governed by the gyrokinetic equation [[5](#ref-gyrokinetics), [6](#ref-gyrokinetics2), [7](#ref-gyrokinetics3)], a reduced form of the Vlasov-Maxwell PDE system
+The time-evolution of the perturbed distribution $f$, usually called $\delta f$, is governed by the gyrokinetic equation [[5](#ref-gyrokinetics), [6](#ref-gyrokinetics2), [7](#ref-gyrokinetics3)], a reduced form of the Vlasov-Maxwell PDE system
 
 $$\frac{\partial f}{\partial t} + (v_\parallel \mathbf{b} + \mathbf{v}_D) \cdot \nabla f -\frac{\mu B}{m} \frac{\mathbf{B} \cdot \nabla B}{B^2} \frac{\partial f}{\partial v_\parallel} + \mathbf{v}_\chi \cdot \nabla f = S$$
 
@@ -80,12 +79,12 @@ Fully resolved gyrokinetics simulations are prohibitively expensive and often ti
 
 ## Our Approach
 
-Our intuition is that **modeling the entire 5D distribution function is vital** to accurately model and comprehend turbulence in Plasmas.
-Therefore we require techniques that can process 5D data. The classic repertoire of an ML engineer comprises a variety of different techniques. Let's break it down whether there are suitable to proccess 5D data.
+Our intuition is that **modelling the entire 5D distribution function is vital** to accurately model and comprehend turbulence in plasmas.
+Therefore we require techniques that can process 5D data. The classic repertoire of an ML engineer comprises a variety of different techniques. Let's break it down whether they are suitable to process 5D data.
 
 - **Convolutions?** There is no out-of-the-box convolution kernel for &gt;3D, so they need to be implemented either directly, recursively, or in a factorized manner. Regardless, convolutions become expensive and memory-intensive. [[11](#ref-cnn)]
 - **Transformers?** ViTs can be applied to any number of dimension (provided proper patching / unpatching layers), but their quadratic scaling makes them unfeasible in our 5D setting due to quickly growing sequence lengths. [[12](#ref-attention), [13](#ref-vit)]
-- **Linear Attention?** Vision Transformers with linear attention such as the Shifted Window Transformer (swin) [[14](#ref-swin)] overcome quadratic scaling by performing attention locally in a simple way, making them an handy candidate for our case. However, to date, no implementation of swin Transformer exists that can process 5D data.
+- **Linear Attention?** Vision Transformers with linear attention such as the Shifted Window Transformer (swin) [[14](#ref-swin)] overcome quadratic scaling by performing attention locally in a simple way, making them a handy candidate for our case. However, to date, no implementation of swin Transformer exists that can process 5D data.
 
 <strong> <span>&#8618;</span> </strong> There is no architecture out there that can natively handle 5D inputs. <strong><em>So, now what?</em></strong>
 
@@ -104,7 +103,7 @@ We propose Gyrokinetic Swin, <img src="imgs/gyroswin_icon.png" alt="GyroSwin Ico
 <figure style="text-align: center;">
     <img src="imgs/figure1.png" alt="GyroSwin architecture compared to quasilinear" width="80%">
     <figcaption style="color: black; font-size: 14px; margin-top: 8px;">
-    Figure 4: GyroSwin multitask trainin pipeline. We directly model the 5D distribution function of nonlinear gyrokinetics and incorporates 3D electrostatic potential fields and turbulent transport quantities, such as heat flux.
+    Figure 4: GyroSwin multitask training pipeline. We directly model the 5D distribution function of nonlinear gyrokinetics and incorporates 3D electrostatic potential fields and turbulent transport quantities, such as heat flux.
     </figcaption>
 </figure>
 
@@ -126,9 +125,9 @@ The general landscape of surrogate models for gyrokinetics can be classified int
 
 | **Method**                                  | **Average Flux** | **Diagnostics** | **Zonal Flows** | **Turbulence** |
 | ------------------------------------------- | ---------------- | --------------- | --------------- | -------------- |
-| Tabular Regressors (e.g., GPR, MLP)         | ✅ **1D → 0D**    | ❌               | ❌               | ❌              |
-| SOTA Reduced Numerical Modelling (e.g., QL) | ✅ **3D → 0D**    | ✅ **3D → 1D**   | ❌               | ❌              |
-| Neural Surrogates (e.g., GyroSwin)        | ✅ **5D → 0D**    | ✅ **5D → 1D**   | ✅ **5D → 1D**   | ✅ **5D → 5D**  |
+| Tabular Regressors (e.g., GPR, MLP)         | ✅ **1D → 0D**   | ❌              | ❌              | ❌             |
+| SOTA Reduced Numerical Modelling (e.g., QL) | ✅ **3D → 0D**   | ✅ **3D → 1D**  | ❌              | ❌             |
+| Neural Surrogates (e.g., GyroSwin)          | ✅ **5D → 0D**   | ✅ **5D → 1D**  | ✅ **5D → 1D**  | ✅ **5D → 5D** |
 
 
 <br>
@@ -196,7 +195,7 @@ We visualize this spectrum for all neural surrogates and the QL model in the lef
 
 Another intriguing nonlinear phenomena are zonal flows. They arise naturally with emerging turbulence in a plasma and regulate the system to reach a statistically steady state. They are only captured in the nonlinear term of gyrokinetics, therefore QL models cannot model them. However, they play a vital role in turbulence simulation as their amplitude determines the strength of emerging turbulence.
 
-We can investigate whether GyroSwin is capable of capturing such zonal flows as they are represented as an isolated mode in the $k_y$ dimension. The right figure below shows the profile, time-averaged for an **OOD** case, as well as GyroSwin's prediction thereof. As we can see the zonal flow profile aligns very well with the ground-truth, indicating that GyroSwin indeed captures nonlinear physics. 
+We can investigate whether GyroSwin is capable of capturing such zonal flows as they are represented as an isolated mode in the $k_y$ dimension. The right figure below shows the profile, time-averaged for an **OOD** case, as well as GyroSwin's prediction thereof. As we can see the zonal flow profile aligns very well with the ground truth, indicating that GyroSwin indeed captures nonlinear physics. 
 
 <figure style="text-align: center;">
     <img src="imgs/kyspec_zf.png" alt="GyroSwin captures physics" width="100%">
@@ -227,7 +226,7 @@ If you found our work useful, please consider citing it.
 
 ``` 
 @inproceedings{paischer2025gyroswin,
-    title={GyroSwin: 5D Surrogates for Gyrokinetic Plasma Turbulence Simulations}, 
+    title={GyroSwin: 5D Surrogates for Gyrokinetic plasma Turbulence Simulations}, 
     author={Fabian Paischer and Gianluca Galletti and William Hornsby and Paul Setinek and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter},
     booktitle={Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 02 - 07, 2025},
     year={2025}
@@ -259,7 +258,7 @@ If you found our work useful, please consider citing it.
 <a name="ref-pic"></a>
 [8] C. K. Birdsall and A. B. Langdon, *Plasma Physics via Computer Simulation*, Taylor & Francis, 2004.
 
-<a name="ref-fokker-planck"></a>
+<a name="ref-fokker"></a>
 [9] H. Risken, *The Fokker-Planck Equation: Methods of Solution and Applications*, 2nd ed., Springer, 1989.
 
 <a name="ref-qualikiz"></a>
