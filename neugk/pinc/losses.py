@@ -367,10 +367,8 @@ class PINCLossWrapper(LossWrapper):
                     dim=1,
                 )
 
-        # 2. Integrate
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
 
-        # 3. Compute Losses
         int_losses = {}
         monitor = {}
 

@@ -93,7 +93,7 @@ class DataBackend(ABC):
         raise NotImplementedError
 
 
-class H5backend(DataBackend):
+class H5Backend(DataBackend):
     def is_valid(self, path: str) -> bool:
         return os.path.isfile(path)
 

@@ -18,7 +18,7 @@ from neugk.utils import (
     parse_input_dat,
 )
 
-from neugk.dataset.backend import H5backend, KvikIOBackend, DataBackend
+from neugk.dataset.backend import H5Backend, KvikIOBackend, DataBackend
 
 
 def do_ifft(knth):
@@ -347,7 +347,7 @@ if __name__ == "__main__":
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)
     else:
-        backend = H5backend()
+        backend = H5Backend()
 
     if not args.debug:
         # Define how many terminal rows we need (one per thread)
@@ -403,7 +403,7 @@ if __name__ == "__main__":
             )
 
             try:
-                if isinstance(backend, H5backend):
+                if isinstance(backend, H5Backend):
                     os.chmod(out_path, 0o777)
             except PermissionError:
                 pass

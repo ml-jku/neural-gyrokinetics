@@ -15,7 +15,7 @@ from neugk.dataset.cyclone_diff import (
     CycloneSimSiamDataset,
     CycloneAESample,
 )
-from neugk.dataset.backend import H5backend, KvikIOBackend
+from neugk.dataset.backend import H5Backend, KvikIOBackend
 
 
 def check_partial_holdouts(dataset_cfg):
@@ -101,8 +101,8 @@ def get_data(cfg, rank: int = 0):
 
     # dataloading backend
     if backend == "h5":
-        train_backend = H5backend(rank)
-        val_backend = H5backend(rank)
+        train_backend = H5Backend(rank)
+        val_backend = H5Backend(rank)
     elif backend == "gds":
         train_backend = KvikIOBackend(rank)
         # NOTE: for validation load without gds, save space, slow is acceptable

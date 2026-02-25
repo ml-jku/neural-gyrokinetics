@@ -324,14 +324,14 @@ class EDMRunner(DDPMRunner):
         super().__init__(*args, **kwargs)
 
         # assumes latents scaled to var=1.0
-        self.sigma_data = getattr(self.cfg.model, "sigma_data", 1.0)
+        self.sigma_data = getattr(self.cfg.model.diffusion, "sigma_data", 1.0)
         # training distribution
-        self.p_mean = getattr(self.cfg.model, "p_mean", -1.2)
-        self.p_std = getattr(self.cfg.model, "p_std", 1.2)
+        self.p_mean = getattr(self.cfg.model.diffusion, "p_mean", -1.2)
+        self.p_std = getattr(self.cfg.model.diffusion, "p_std", 1.2)
         # sampling schedule
-        self.sigma_min = getattr(self.cfg.model, "sigma_min", 0.002)
-        self.sigma_max = getattr(self.cfg.model, "sigma_max", 80.0)
-        self.rho = getattr(self.cfg.model, "rho", 7.0)
+        self.sigma_min = getattr(self.cfg.model.diffusion, "sigma_min", 0.002)
+        self.sigma_max = getattr(self.cfg.model.diffusion, "sigma_max", 80.0)
+        self.rho = getattr(self.cfg.model.diffusion, "rho", 7.0)
 
         del self.noise_scheduler
 
@@ -370,16 +370,15 @@ class EDMRunner(DDPMRunner):
         return loss.mean()
 
     @torch.no_grad()
-    def sample(self, condition: torch.Tensor, dummy: torch.Tensor):
+    def sample(self, condition: torch.Tensor, steps: int = 5, latent_only: bool = False):
         self.model.eval()
         bs = condition.shape[0]
-        num_steps = self.noise_scheduler.config.num_train_timesteps
-        step_indices = torch.arange(num_steps, dtype=torch.float32, device=self.device)
+        step_indices = torch.arange(steps, dtype=torch.float32, device=self.device)
         sigma_max_rho = self.sigma_max ** (1 / self.rho)
         sigma_min_rho = self.sigma_min ** (1 / self.rho)
         sigmas = (
             sigma_max_rho
-            + step_indices / (num_steps - 1) * (sigma_min_rho - sigma_max_rho)
+            + step_indices / (steps - 1) * (sigma_min_rho - sigma_max_rho)
         ) ** self.rho
         sigmas = torch.cat(
             [sigmas, torch.zeros_like(sigmas[:1])]
@@ -407,11 +406,15 @@ class EDMRunner(DDPMRunner):
                 d_prime = (x_next - denoised_next) / sigma_next
                 x_next = x + 0.5 * (d_i + d_prime) * (sigma_next - sigma_hat)
             x = x_next
-        x = x / getattr(self, "latent_scale", 1.0)
-        _, pad_axes = self.autoencoder.encode(dummy, condition=condition)
-        decoded = self.autoencoder.decode(x, pad_axes, condition=condition)
+        pred = x / getattr(self, "latent_scale", 1.0)
+        if not latent_only:
+            # TODO temporary
+            ch = 2 + 2 * self.trainset.separate_zf
+            dummy = torch.zeros((1, ch, *self.trainset.resolution), device=self.device)
+            _, pad_axes = self.autoencoder.encode(dummy, condition=condition)
+            pred = self.autoencoder.decode(pred, pad_axes, condition=condition)
         self.model.train()
-        return decoded
+        return pred
 
 
 class FlowMatchingRunner(DDPMRunner):
