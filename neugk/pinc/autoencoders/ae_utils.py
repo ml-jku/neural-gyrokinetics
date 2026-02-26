@@ -152,7 +152,7 @@ def load_autoencoder(
             def __init__(self, problem_dim):
                 self.active_keys = [0] * problem_dim
                 self.resolution = (32, 8, 16, 85, 32)
-        
+
         model = get_autoencoder(config, DummyDataset(problem_dim), rank=None)
 
     # Check if the checkpoint has 'module.' prefix and if the model expects it

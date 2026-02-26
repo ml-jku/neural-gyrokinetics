@@ -223,8 +223,8 @@ class WindowAttention(nn.Module):
             self.gate = Gate(self.head_dim)
 
         if qk_norm:
-            self.q_norm = nn.RMSNorm(self.head_dim, self.head_dim)
-            self.k_norm = nn.RMSNorm(self.head_dim, self.head_dim)
+            self.q_norm = nn.RMSNorm(self.head_dim)
+            self.k_norm = nn.RMSNorm(self.head_dim)
 
         if init_weights:
             self.reset_parameters(init_weights)

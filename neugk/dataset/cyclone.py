@@ -373,7 +373,10 @@ class CycloneDataset(Dataset):
             if key in ["df", "phi"]
             else list(range(self.length))
         )
-        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        config_keys = ["cond_filters", "subsample", "separate_zf"]
+        config_str = "".join(str(getattr(self, k, "")) for k in config_keys)
+        hash_str = "".join(sorted(self.files)) + config_str
+        file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
         tmu = "mu" if self.decouple_mu else ""
         segments = [prefix, key, f"offset{offset}", tmu, suffix, file_hash, "stats"]
         stats_filename = "_".join(filter(None, (str(s) for s in segments))) + ".pkl"

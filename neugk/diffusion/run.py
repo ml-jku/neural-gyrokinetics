@@ -17,10 +17,11 @@ from torch.distributions import Normal, StudentT, Laplace
 import scipy.optimize
 
 from neugk.diffusion.models import get_diffusion_model, DummyAE
-from neugk.diffusion.evaluate import evaluate as diff_evaluate
+from neugk.diffusion.evaluate import DiffusionEvaluator
 from neugk.dataset import CycloneAESample
 from neugk.utils import exclude_from_weight_decay, memory_cleanup
 from neugk.runner import BaseRunner
+from neugk.losses import LossWrapper
 from neugk.pinc.autoencoders.ae_utils import load_autoencoder
 
 
@@ -91,6 +92,20 @@ class DDPMRunner(BaseRunner):
 
         self.input_fields = set(self.cfg.dataset.input_fields)
         self.idx_keys = ["file_index", "timestep_index"]
+
+        # setup loss wrapper and evaluator
+        self.loss_wrap = LossWrapper(
+            denormalize_fn=self.valsets[0].denormalize,
+            separate_zf=self.cfg.dataset.separate_zf,
+            real_potens=self.cfg.dataset.real_potens,
+        )
+
+        self.evaluator = DiffusionEvaluator(
+            cfg=self.cfg,
+            valsets=self.valsets,
+            valloaders=self.valloaders,
+            loss_wrap=self.loss_wrap,
+        )
 
     def _load_checkpoints(self):
         """Restore diffusion model state from the latest checkpoint."""
@@ -248,21 +263,17 @@ class DDPMRunner(BaseRunner):
 
     def evaluate(self, epoch):
         """Execute evaluation pipeline and log results."""
-        log_metric_dict, val_plots, self.loss_val_min = diff_evaluate(
+        return self.evaluator(
             rank=self.rank,
             world_size=self.world_size,
             model=self.model,
-            sample_fn=self.sample,
-            valsets=self.valsets,
-            valloaders=self.valloaders,
             opt=self.opt,
-            lr_scheduler=self.scheduler,
+            scheduler=self.scheduler,
             epoch=epoch,
-            cfg=self.cfg,
             device=self.device,
             loss_val_min=self.loss_val_min,
+            sample_fn=self.sample,
         )
-        return log_metric_dict, val_plots
 
 
 class StudentTRunner(DDPMRunner):

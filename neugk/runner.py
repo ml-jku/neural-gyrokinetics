@@ -55,10 +55,17 @@ class BaseRunner:
             self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
         )
         self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
+        # # scaler not needed for bf16 (same dynamic range)
+        # use_scaler = self.use_amp and not self.use_bf16
         self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
 
         self.setup_data()
         self.setup_components()
+
+        # # cast model to target precision if bf16 (normalization fused kernels)
+        # if self.use_bf16 and getattr(self, "model", None) is not None:
+        #     self.model.to(self.amp_dtype)
+
         self.setup_scheduler()
 
     def setup_data(self):
@@ -189,7 +196,7 @@ class BaseRunner:
             # evaluate
             log_metric_dict, val_plots = {}, {}
             if not skip_eval:
-                log_metric_dict, val_plots = self.evaluate(epoch)
+                log_metric_dict, val_plots, self.loss_val_min = self.evaluate(epoch)
 
             # finalize logs
             epoch_logs = train_losses_dict | log_metric_dict

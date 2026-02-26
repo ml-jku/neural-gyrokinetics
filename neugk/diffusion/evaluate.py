@@ -1,98 +1,62 @@
 """Evaluation utilities for diffusion models."""
 
-from typing import List, Callable
-
-from functools import partial
-from collections import defaultdict
 import re
-import warnings
+from typing import Callable, Optional, Dict, Tuple, Any
+from collections import defaultdict
+from functools import partial
 
 import torch
 import numpy as np
-from torch.utils.data import DataLoader, Dataset
 import torch.distributed as dist
 
-from tqdm import tqdm
-from omegaconf import DictConfig
-
-from neugk.utils import save_model_and_config
-from neugk.dataset import CycloneAESample
-from neugk.eval import validation_metrics
+from neugk.eval import BaseEvaluator, validation_metrics
 from neugk.plot_utils import generate_val_plots, avg_flux_confidence
-from neugk.losses import LossWrapper
 
 
-def denormalize_single(preds, idx_data, denormalize_fn):
-    """Denormalize physics data keys in predictions."""
-    # denormalize physics data keys
-    physics_keys = {"df", "phi", "flux"}
-    for k in preds:
-        if k in physics_keys:
-            preds[k] = torch.stack(
-                [
-                    denormalize_fn(f, **{k: preds[k][b]})
-                    for b, f in enumerate(idx_data["file_index"].tolist())
-                ]
-            )
-    return preds
+class DiffusionEvaluator(BaseEvaluator):
+    """Evaluator for diffusion models."""
 
+    @torch.no_grad()
+    def __call__(
+        self,
+        rank: int,
+        world_size: int,
+        model: torch.nn.Module,
+        opt: torch.optim.Optimizer,
+        scheduler: Any,
+        epoch: int,
+        device: torch.device,
+        loss_val_min: float,
+        sample_fn: Optional[Callable] = None,
+        **kwargs
+    ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
+        """Run evaluation on multiple validation sets and log metrics."""
+        if not self._is_eval_epoch(epoch):
+            return {}, {}, loss_val_min
 
-@torch.no_grad
-def evaluate(
-    rank: int,
-    world_size: int,
-    model: torch.nn.Module,
-    sample_fn: Callable,
-    valsets: List[Dataset],
-    valloaders: List[DataLoader],
-    opt: torch.optim.Optimizer,
-    lr_scheduler: torch.optim.lr_scheduler,
-    epoch: int,
-    cfg: DictConfig,
-    device: torch.device,
-    loss_val_min: float,
-):
-    """Run evaluation on multiple validation sets and log metrics."""
-    # validate loop parameters
-    eval_integrals = cfg.validation.eval_integrals
-    idx_keys = ["file_index", "timestep_index"]
-    log_metric_dict = {}
-    val_plots = {}
-    val_freq = cfg.validation.validate_every_n_epochs
+        assert sample_fn is not None, "Diffusion evaluation requires a sample_fn"
 
-    # setup loss wrapper
-    loss_wrap = LossWrapper(
-        denormalize_fn=valsets[0].denormalize,
-        separate_zf=cfg.dataset.separate_zf,
-        real_potens=cfg.dataset.real_potens,
-    )
-    loss_wrap.eval()
+        # validate loop parameters
+        eval_integrals = self.cfg.validation.eval_integrals
+        idx_keys = ["file_index", "timestep_index"]
+        log_metric_dict: Dict[str, float] = {}
+        val_plots: Dict[str, Any] = {}
 
-    # run validation
-    if (epoch % val_freq) == 0 or epoch == 1:
-        for val_idx, (valset, valloader) in enumerate(zip(valsets, valloaders)):
+        if self.loss_wrap:
+            self.loss_wrap.eval().cpu()
 
+        for val_idx, (valset, valloader) in enumerate(zip(self.valsets, self.valloaders)):
             valname = "val_traj" if val_idx == 0 else "val_samples"
-            metrics = {}
-            for key in loss_wrap.all_losses:
-                metrics[key] = torch.tensor(0.0)
+            metrics = {key: torch.tensor(0.0) for key in self.loss_wrap.all_losses}
             n_timesteps_acc = torch.tensor(0.0)
-            if cfg.logging.tqdm and (not dist.is_initialized() or rank == 0):
-                valloader = tqdm(
-                    valloader,
-                    desc=(
-                        "Validation holdout trajectories"
-                        if val_idx == 0
-                        else "Validation holdout samples"
-                    ),
-                )
+
+            valloader = self.get_iterator(valloader, val_idx, rank)
 
             # collect stats
             all_preds_flux = []
             all_tgts_flux = []
 
             for idx, sample in enumerate(valloader):
-                sample: CycloneAESample
                 # prepare targets
                 tgts = {
                     k: getattr(sample, k).to(device, non_blocking=True)
@@ -100,43 +64,32 @@ def evaluate(
                     if getattr(sample, k) is not None
                 }
                 condition = sample.conditioning.to(device)
-                geometry = sample.geometry
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
                 # compute predictions
                 preds = sample_fn(condition)
 
                 # denormalize
-                preds = denormalize_single(
+                preds = self._denormalize_batch(
                     preds, idx_data, partial(valset.denormalize, condition=condition)
                 )
-                tgts = denormalize_single(tgts, idx_data, valset.denormalize)
+                tgts = self._denormalize_batch(tgts, idx_data, valset.denormalize)
 
                 tgts = {k: v.cpu() for k, v in tgts.items()}
                 preds = {k: v.cpu() for k, v in preds.items()}
 
                 # combine zonal flow
-                if cfg.dataset.separate_zf:
-
-                    def _recombine_zf(x):
-                        x = torch.cat(
-                            [x[:, 0::2].sum(1, True), x[:, 1::2].sum(1, True)], dim=1
-                        )
-                        return x
-
-                    for k in preds:
-                        if preds[k].dim() > 2 and preds[k].shape[1] % 2 == 0:
-                            preds[k] = _recombine_zf(preds[k])
-                    for k in tgts:
-                        if tgts[k].dim() > 2 and tgts[k].shape[1] % 2 == 0:
-                            tgts[k] = _recombine_zf(tgts[k])
+                if self.cfg.dataset.separate_zf:
+                    for d in [preds, tgts]:
+                        for k in d:
+                            d[k] = self._recombine_zf(d[k])
 
                 # validation metrics
                 metrics_i, integrated_i = validation_metrics(
                     tgts=tgts,
                     preds=preds,
-                    geometry=geometry,
-                    loss_wrap=loss_wrap,
+                    geometry=sample.geometry,
+                    loss_wrap=self.loss_wrap,
                     eval_integrals=eval_integrals,
                 )
 
@@ -145,7 +98,7 @@ def evaluate(
                 preds["flux_int"] = integrated_i["eflux"]
 
                 # flux analysis
-                if "flux_int" in preds and "avg_flux" in tgts:
+                if preds["flux_int"] is not None and "avg_flux" in tgts:
                     all_preds_flux.append(
                         {
                             "val": preds["flux_int"].cpu(),
@@ -159,82 +112,37 @@ def evaluate(
                         }
                     )
 
-                # accumulate metrics
-                for key in metrics_i.keys():
-                    if key not in metrics:
-                        metrics[key] = torch.tensor(0.0)
-                    if metrics_i[key].dim() == 0:
-                        metrics[key] += metrics_i[key]
-                    elif metrics_i[key].dim() == 1:
-                        metrics[key] += metrics_i[key].mean()
-                n_timesteps_acc += 1
+                # accumulate
+                metrics, n_timesteps_acc = self._accumulate_metrics(
+                    metrics, metrics_i, n_timesteps_acc
+                )
 
                 # generate plots
                 if len(val_plots) == 0:
-                    t_idx = idx_data["timestep_index"].tolist()
-                    batch_idx = torch.randint(0, len(t_idx), (1,)).item()
+                    batch_idx = torch.randint(0, len(idx_data["file_index"]), (1,)).item()
                     preds_plots = {
-                        "df": preds["df"] if "df" in preds else None,
-                        "phi": preds["phi_int"] if "phi_int" in preds else None,
-                        "flux": preds["flux_int"] if "flux_int" in preds else None,
-                    }
-
-                    preds_plots = {
-                        k: (
-                            preds_plots[k][batch_idx]
-                            if "flux" not in k
-                            else preds_plots[k]
-                        )
-                        for k in preds_plots
+                        "df": preds["df"][batch_idx] if "df" in preds else None,
+                        "phi": preds["phi_int"][batch_idx] if preds["phi_int"] is not None else None,
+                        "flux": preds["flux_int"],
                     }
                     tgts_plot = {k: tgts[k][batch_idx] for k in tgts}
-                    if val_idx == 0:
-                        plots = generate_val_plots(
+                    
+                    val_plots.update(
+                        generate_val_plots(
                             rollout=preds_plots,
                             gt=tgts_plot,
                             ts=sample.timestep,
-                            phase="Random draw",
+                            phase="Random draw" if val_idx == 0 else "Holdout samples",
                         )
-                        val_plots.update(plots)
-                    else:
-                        if idx == 0:
-                            plots = generate_val_plots(
-                                rollout=preds_plots,
-                                gt=tgts_plot,
-                                timestep=sample.timestep,
-                                phase="Holdout samples",
-                            )
-                            val_plots.update(plots)
+                    )
 
-            # sync ddp metrics
-            if dist.is_initialized():
-                cur_ts = n_timesteps_acc.reshape(1, -1).to(device)
-                gathered_ts = [
-                    torch.zeros_like(cur_ts, dtype=cur_ts.dtype, device=cur_ts.device)
-                    for _ in range(world_size)
-                ]
-                dist.all_gather(gathered_ts, cur_ts)
-                n_timesteps_acc = torch.cat(gathered_ts).sum(0).cpu()
-
-                for m in metrics.keys():
-                    cur_metric = metrics[m].reshape(1, -1).to(device)
-                    gathered_ms = [
-                        torch.zeros_like(
-                            cur_metric,
-                            dtype=cur_metric.dtype,
-                            device=cur_metric.device,
-                        )
-                        for _ in range(world_size)
-                    ]
-                    dist.all_gather(gathered_ms, cur_metric)
-                    gathered_ms = torch.cat(gathered_ms)
-                    metrics[m] = gathered_ms.sum(0).cpu()
-
-            # finalize logs
-            for m in metrics.keys():
-                if metrics[m].sum() != 0.0:
-                    metrics[m] = metrics[m] / n_timesteps_acc
-                    log_metric_dict[f"{valname}/{m}"] = metrics[m].item()
+            # sync and finalize
+            metrics, n_timesteps_acc = self._sync_metrics(
+                metrics, n_timesteps_acc, device, world_size
+            )
+            log_metric_dict = self._finalize_logs(
+                log_metric_dict, metrics, n_timesteps_acc, valname
+            )
 
             # flux per trajectory averaging
             if len(all_preds_flux) > 0 and (not dist.is_initialized() or rank == 0):
@@ -246,35 +154,29 @@ def evaluate(
                 grouped_tgts = {}
 
                 for p, t, i in zip(fpreds, ftgts, fidxs):
-                    idx = re.search(r"iteration_\d+", valset.files[i.item()]).group()
-                    grouped_preds[idx].append(p.item())
-                    grouped_tgts[idx] = t.item()
+                    match = re.search(r"iteration_\d+", valset.files[i.item()])
+                    if match:
+                        idx = match.group()
+                        grouped_preds[idx].append(p.item())
+                        grouped_tgts[idx] = t.item()
 
-                traj_ids = sorted(list(grouped_preds.keys()))
-                pred_means = np.array([np.mean(grouped_preds[i]) for i in traj_ids])
-                pred_stds = np.array([np.std(grouped_preds[i]) for i in traj_ids])
-                tgt_vals = np.array([grouped_tgts[i] for i in traj_ids])
+                if grouped_preds:
+                    traj_ids = sorted(list(grouped_preds.keys()))
+                    pred_means = np.array([np.mean(grouped_preds[i]) for i in traj_ids])
+                    pred_stds = np.array([np.std(grouped_preds[i]) for i in traj_ids])
+                    tgt_vals = np.array([grouped_tgts[i] for i in traj_ids])
 
-                avg_flux_rmse = np.sqrt(((pred_means - tgt_vals) ** 2).mean())
-                log_metric_dict[f"{valname}/avg_flux_rmse"] = avg_flux_rmse.item()
+                    avg_flux_rmse = np.sqrt(((pred_means - tgt_vals) ** 2).mean())
+                    log_metric_dict[f"{valname}/avg_flux_rmse"] = avg_flux_rmse.item()
 
-                val_plots["avg_flux_UQ"] = avg_flux_confidence(
-                    pred_means, pred_stds, tgt_vals, traj_ids
-                )
+                    val_plots["avg_flux_UQ"] = avg_flux_confidence(
+                        pred_means, pred_stds, tgt_vals, traj_ids
+                    )
 
         # store checkpoints
-        if not rank:
-            val_loss = log_metric_dict["val_traj/avg_flux_rmse"]
-            loss_val_min = save_model_and_config(
-                model,
-                optimizer=opt,
-                scheduler=lr_scheduler,
-                cfg=cfg,
-                epoch=epoch,
-                val_loss=val_loss,
-                loss_val_min=loss_val_min,
-            )
-        else:
-            warnings.warn(f"checkpoints will not be stored for rank {rank}")
+        val_loss = log_metric_dict.get("val_traj/avg_flux_rmse", 0.0)
+        loss_val_min = self._save_checkpoint(
+            rank, model, opt, scheduler, epoch, val_loss, loss_val_min
+        )
 
-    return log_metric_dict, val_plots, loss_val_min
+        return log_metric_dict, val_plots, loss_val_min

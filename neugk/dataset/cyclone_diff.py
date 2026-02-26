@@ -249,7 +249,11 @@ class CycloneAEDataset(CycloneDataset):
         latent_stats: Optional[RunningMeanStd] = None,
     ):
         self.autoencoder = autoencoder
-        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        ae_config_str = str(
+            [(k, tuple(v.shape)) for k, v in autoencoder.state_dict().items()]
+        )
+        hash_str = "".join(sorted(self.files)) + ae_config_str
+        file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
         latents_dump_pkl = os.path.join(
             self.dir, f"diff_{self.split}_latents_{file_hash}.pkl"
         )

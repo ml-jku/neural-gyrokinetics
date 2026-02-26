@@ -21,7 +21,7 @@ from neugk.runner import BaseRunner
 
 from neugk.gyroswin.models import get_model
 from neugk.losses import get_pushforward_fn
-from neugk.gyroswin.eval.evaluate import evaluate as gyroswin_evaluate
+from neugk.gyroswin.eval.evaluate import GyroSwinEvaluator
 
 
 class GyroSwinRunner(BaseRunner):
@@ -130,6 +130,14 @@ class GyroSwinRunner(BaseRunner):
         )
         self.idx_keys = ["file_index", "timestep_index"]
 
+        # setup evaluator
+        self.evaluator = GyroSwinEvaluator(
+            cfg=self.cfg,
+            valsets=self.valsets,
+            valloaders=self.valloaders,
+            loss_wrap=self.loss_wrap,
+        )
+
     def train_epoch(self, epoch):
         """Run one training epoch with multitasking and pushforward updates."""
         loss_logs = defaultdict(float)
@@ -235,18 +243,13 @@ class GyroSwinRunner(BaseRunner):
 
     def evaluate(self, epoch):
         """Call evaluation pipeline for current epoch."""
-        log_metric_dict, val_plots, self.loss_val_min = gyroswin_evaluate(
+        return self.evaluator(
             self.rank,
             self.world_size,
             self.model,
-            self.loss_wrap,
-            self.valsets,
-            self.valloaders,
             self.opt,
             self.scheduler,
             epoch,
-            self.cfg,
             self.device,
             self.loss_val_min,
         )
-        return log_metric_dict, val_plots

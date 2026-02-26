@@ -590,7 +590,9 @@ class PINCLossWrapper(LossWrapper):
             {
                 k: {
                     "value": (v.item() if isinstance(v, torch.Tensor) else v),
-                    "log10": float(torch.log10(torch.tensor(v)).item()) if v > 0 else 0,
+                    "log10": (
+                        float(torch.log10(torch.as_tensor(v)).item()) if v > 0 else 0
+                    ),
                 }
                 for k, v in losses.items()
             },

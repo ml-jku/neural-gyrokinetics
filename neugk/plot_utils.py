@@ -5,7 +5,6 @@ from typing import Dict, Optional
 import io
 from PIL import Image as PILImage
 import wandb
-import warnings
 
 import matplotlib
 import matplotlib.ticker as tkr

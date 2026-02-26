@@ -13,8 +13,8 @@ from neugk.utils import remainig_progress, exclude_from_weight_decay, memory_cle
 from neugk.runner import BaseRunner
 from neugk.pinc.autoencoders import get_autoencoder
 from neugk.pinc.losses import PINCLossWrapper, PINCGradientBalancer
-from neugk.pinc.autoencoders.evaluate import evaluate as pinc_evaluate
-from neugk.pinc.autoencoders.evaluate_simsiam import evaluate_linear_probe
+from neugk.pinc.autoencoders.evaluate import AutoencoderEvaluator
+from neugk.pinc.autoencoders.evaluate_simsiam import SimSiamEvaluator
 from neugk.pinc.autoencoders.ae_utils import (
     aggregate_dataset_stats,
     MuonWithAuxAdam,
@@ -113,6 +113,18 @@ class PINCRunner(BaseRunner):
             scaler=self.scaler,
             clip_grad=self.cfg.training.clip_grad,
             n_tasks=len(self.loss_wrap.active_losses),
+        )
+
+        # setup evaluator
+        if self.cfg.stage == "simsiam":
+            eval_cls = SimSiamEvaluator
+        else:
+            eval_cls = AutoencoderEvaluator
+        self.evaluator = eval_cls(
+            cfg=self.cfg,
+            valsets=self.valsets,
+            valloaders=self.valloaders,
+            loss_wrap=self.loss_wrap,
         )
 
     def _load_checkpoints(self):
@@ -249,7 +261,7 @@ class PINCRunner(BaseRunner):
             train_losses_dict.update(formatted_logs)
 
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
-            log_metric_dict, val_plots = self.evaluate(epoch)
+            log_metric_dict, val_plots, self.loss_val_min = self.evaluate(epoch)
             self._log_epoch(
                 epoch, train_losses_dict | log_metric_dict, info_dict, val_plots
             )
@@ -345,32 +357,14 @@ class PINCRunner(BaseRunner):
         return {k: sum(v) / max(len(v), 1) for k, v in loss_logs.items()}, info_dict
 
     def evaluate(self, epoch):
-        log_metric_dict, val_plots = {}, {}
-        if getattr(self.model, "use_simae_decoder", True):
-            log_metric_dict, val_plots, self.loss_val_min = pinc_evaluate(
-                rank=self.rank,
-                world_size=self.world_size,
-                model=self.model,
-                loss_wrap=self.loss_wrap,
-                valsets=self.valsets,
-                valloaders=self.valloaders,
-                opt=self.opt,
-                lr_scheduler=self.scheduler,
-                epoch=epoch,
-                cfg=self.cfg,
-                device=self.device,
-                loss_val_min=self.loss_val_min,
-            )
-        if self.cfg.stage == "simsiam":
-            probe_log, _ = evaluate_linear_probe(
-                rank=self.rank,
-                model=self.model,
-                trainloader=self.trainloader,
-                valloaders=self.valloaders,
-                epoch=epoch,
-                cfg=self.cfg,
-                device=self.device,
-                loss_val_min=self.loss_val_min,
-            )
-            log_metric_dict.update(probe_log)
-        return log_metric_dict, val_plots
+        return self.evaluator(
+            rank=self.rank,
+            world_size=self.world_size,
+            model=self.model,
+            opt=self.opt,
+            scheduler=self.scheduler,
+            epoch=epoch,
+            device=self.device,
+            loss_val_min=self.loss_val_min,
+            trainloader=self.trainloader if self.cfg.stage == "simsiam" else None,
+        )
