@@ -406,158 +406,6 @@ class RunningMeanStd:
         return channel_means, channel_stds
 
 
-def pev_flux_df_phi(
-    df: torch.Tensor,
-    phi: torch.Tensor,
-    geometry,
-    aggregate: bool = True,
-    magnitude: bool = False,
-):
-    """
-    Computes particle, heat and momentum fluxes based on the distribution function (df)
-    and electrostatic potential (phi).
-
-    Args:
-        df (torch.Tensor): 5D density function. Shape: (b, c, vpar, vmu, s, x, y).
-        phi (torch.Tensor): 3D electrostatic potential. Shape: (b, 1, x, s, y).
-        geometry (Dict): Dictionary containing geometry parameters and settings.
-        aggregate (bool, optional): Whether to return the summed fluxes. Default: True.
-        magnitude (bool, optional): Whether to use df and phi absolutes. Default: False.
-    """
-    # expand geometry constants for broadcasting
-    # grids
-    krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
-    kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
-    ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
-    intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
-    intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
-    vpgr = rearrange(geometry["vpgr"], "par -> par 1 1 1 1")
-    mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
-    # settings
-    little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
-    bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
-    efun = rearrange(geometry["efun"], "s -> 1 1 s 1 1")
-    rfun = rearrange(geometry["rfun"], "s -> 1 1 s 1 1")
-    bt_frac = rearrange(geometry["bt_frac"], "s -> 1 1 s 1 1")
-    parseval = rearrange(geometry["parseval"], "y -> 1 1 1 1 y")
-    mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
-    # gyroaveraged phi
-    krloc = torch.sqrt(
-        krho**2 * little_g[0] + 2 * krho * kxrh * little_g[1] + kxrh**2 * little_g[2]
-    )
-    bessel = torch.special.bessel_j0(
-        mas * vthrat * krloc * torch.sqrt(2.0 * mugr / bn) / signz
-    )
-
-    phi_gyro = bessel * rearrange(phi, "x s y -> 1 1 s x y")
-    # absolute values of df and phi
-    if magnitude:
-        df = -1j * torch.abs(df)
-        phi_gyro = torch.abs(phi_gyro)
-    # grid derivatives
-    dum = parseval * ints * (efun * krho) * df
-    dum1 = dum * torch.conj(phi_gyro)
-    dum2 = dum1 * bn
-    d3X = ints * geometry["d2X"]
-    d3v = intmu * bn * intvp
-    signB = geometry["signB"]
-    # flux fields
-    pflux_det = d3X * d3v * torch.imag(dum1)
-    eflux_det = d3X * d3v * (vpgr**2 * torch.imag(dum1) + 2 * mugr * torch.imag(dum2))
-    vflux_det = d3X * d3v * (torch.imag(dum1) * vpgr * rfun * bt_frac * signB)
-    # sum total fluxes
-    if aggregate:
-        pflux_det = pflux_det.sum()
-        eflux_det = eflux_det.sum()
-        vflux_det = vflux_det.sum()
-    return pflux_det, eflux_det, vflux_det
-
-
-def phi_integral(df: torch.Tensor, geometry: Dict):
-    ns, nx, ny = df.shape[3:]
-    # df to fourier
-    df = df.movedim(0, -1).contiguous()
-    df = torch.view_as_complex(df)
-    # phi tensor
-    bufphi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
-    # expand geometry constants for broadcasting
-    # grids
-    krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
-    kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
-    ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
-    intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
-    intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
-    mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
-    # settings
-    little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
-    bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
-    mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
-    tmp = geometry["tmp"]
-    # gyroaveraged phi
-    krloc = torch.sqrt(
-        krho**2 * little_g[0] + 2 * krho * kxrh * little_g[1] + kxrh**2 * little_g[2]
-    )
-    bessel = torch.special.bessel_j0(
-        mas * vthrat * krloc * torch.sqrt(2.0 * mugr / bn) / signz
-    )
-    # exponentially scaled bessel i0 function
-    gamma = 0.5 * ((mas * vthrat * krloc) / (signz * bn)) ** 2
-    gamma = torch.special.i0(gamma) * torch.exp(-gamma)
-
-    # poisson terms
-    # density of the species
-    de = 1.0
-    cfen = torch.zeros_like(ints)
-    poisson_int = signz * de * intmu * intvp * bessel * bn
-    poisson_int = torch.where(torch.abs(intvp) < 1e-9, 0.0, poisson_int)
-
-    diagz = (
-        signz
-        * de
-        * (signz * (gamma - 1.0) * torch.exp(-cfen) / tmp - torch.exp(-cfen) / tmp)
-    )
-    matz = -ints / diagz
-    matz[..., 1:] = 0.0  # only keep y=0 (turb)
-
-    maty = (-matz * torch.exp(-cfen)).sum((2,), keepdim=True)
-    maty = tmp / (de * torch.exp(-cfen)) + maty / torch.exp(-cfen)
-    maty[..., 0, :] = 1 + 0j
-    maty = torch.where(maty == 0, 1.0, maty)  # avoid infs
-    maty = 1 / maty
-    maty[..., 1:] = 0.0  # only keep y=0 (turb)
-
-    poisson_diag = torch.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
-    poisson_diag[..., 0, 0] = 0.0
-    poisson_diag = poisson_diag - signz * torch.exp(-cfen) * de / tmp
-    poisson_diag = -1 / poisson_diag
-
-    # first usmv
-    phi = (1 + 0j) * poisson_int * df
-
-    #  finish the species sum and the velspace integral
-    phi = phi.sum((0, 1), keepdim=True)
-
-    # second usmv
-    bufphi = bufphi + (1 + 0j) * matz * phi
-
-    # surface average
-    bufphi = bufphi.sum(
-        (
-            2,
-            4,
-        ),
-        keepdim=True,
-    )
-
-    # third usmv
-    phi = phi + (1 + 0j) * maty * bufphi
-
-    # normalize
-    phi = phi * poisson_diag
-    phi = rearrange(phi.squeeze(), "s x y -> x s y")
-    return phi
-
-
 def load_geom(file_path):
     data = {}
     with open(file_path, "r") as f:
@@ -600,12 +448,12 @@ def load_geometry(directory, dtype=torch.float64):
     geometry = {}
 
     geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=dtype)
-    geometry["signz"] = 1.0
-    geometry["vthrat"] = 1.0
-    geometry["tmp"] = 1.0
-    geometry["mas"] = 1.0
-    geometry["d2X"] = 1.0
-    geometry["signB"] = 1.0
+    geometry["signz"] = torch.tensor(1.0, dtype=dtype)
+    geometry["vthrat"] = torch.tensor(1.0, dtype=dtype)
+    geometry["tmp"] = torch.tensor(1.0, dtype=dtype)
+    geometry["mas"] = torch.tensor(1.0, dtype=dtype)
+    geometry["d2X"] = torch.tensor(1.0, dtype=dtype)
+    geometry["signB"] = torch.tensor(1.0, dtype=dtype)
 
     geom = load_geom(os.path.join(directory, "geom.dat"))  # bn CHECK
 

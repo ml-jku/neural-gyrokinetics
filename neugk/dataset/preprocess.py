@@ -14,13 +14,12 @@ from argparse import ArgumentParser
 
 from neugk.utils import (
     RunningMeanStd,
-    pev_flux_df_phi,
     load_geometry,
     K_files,
     poten_files,
     parse_input_dat,
 )
-from neugk.integrals import FluxIntegral
+from neugk.integrals import get_integrals
 
 parser = ArgumentParser()
 parser.add_argument("--debug", action="store_true")
@@ -374,20 +373,16 @@ def preprocess(
             phi_fft_unpadded = phi_to_spc(phi, out_shape=(nkx, ns, nky), gt_spc=gt_spc)
             phi = phi_fft_to_real(phi_fft_unpadded, out_shape=phi_fft_unpadded.shape)
 
-            df = np.moveaxis(orig_knth, 0, -1).copy()
-            df = df.view(dtype=np.complex64).squeeze()
-            df = torch.tensor(df)
-            
             if not "Lin" in h5_filename:
                 # do not compute integral for linear sims => it will fail!
-                phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
-                
-                _, eflux, _ = pev_flux_df_phi(df, phi_fft_unpadded, geometry, aggregate=False)
+                # phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
+                df = torch.tensor(knth)
+                _, (_, eflux, _) = get_integrals(df, geometry)
                 if not np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-4):
                     warnings.warn(
                         f"Flux integral does not match original flux! Computed: {eflux.sum().item()}, Original: {orig_fluxes[idx]}"
                     )
-                # assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1.0), "Strong deviation for flux!!"
+                assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-2), "Strong deviation for flux!!"
 
             # update running averages
             df_stats.update(knth, np.zeros_like(knth), knth, knth)
@@ -441,7 +436,6 @@ datasets = [f"iteration_{i}" for i in range(301)]
 #     "ood/iteration_4",
 # ]
 # datasets = [f"{name}_Lin" for name in originals]
-
 if not args.debug:
     # if we don't debug, we launch multiprocessing
     preprocess_fns = partial(
