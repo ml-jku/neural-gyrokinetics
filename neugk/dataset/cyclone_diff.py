@@ -299,9 +299,9 @@ class CycloneAEDataset(CycloneDataset):
 
                     # convert torch/numpy fields cleanly
                     if isinstance(sample["phi"], torch.Tensor):
-                        sample["phi"] = sample["phi"].numpy()
+                        sample["phi"] = sample["phi"].cpu().numpy()
                     if isinstance(sample["flux"], torch.Tensor):
-                        sample["flux"] = sample["flux"].numpy()
+                        sample["flux"] = sample["flux"].cpu().numpy()
 
                     latents_dict[(f_idx, t_idx)] = sample
 

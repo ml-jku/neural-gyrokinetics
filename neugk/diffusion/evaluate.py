@@ -1,3 +1,5 @@
+"""Evaluation utilities for diffusion models."""
+
 from typing import List, Callable
 
 from functools import partial
@@ -21,6 +23,7 @@ from neugk.losses import LossWrapper
 
 
 def denormalize_single(preds, idx_data, denormalize_fn):
+    """Denormalize physics data keys in predictions."""
     # denormalize physics data keys
     physics_keys = {"df", "phi", "flux"}
     for k in preds:
@@ -49,14 +52,15 @@ def evaluate(
     device: torch.device,
     loss_val_min: float,
 ):
-    # Validation loop
+    """Run evaluation on multiple validation sets and log metrics."""
+    # validate loop parameters
     eval_integrals = cfg.validation.eval_integrals
     idx_keys = ["file_index", "timestep_index"]
     log_metric_dict = {}
     val_plots = {}
     val_freq = cfg.validation.validate_every_n_epochs
 
-    # loss wrapper in evaluation mode (no weights / schedule)
+    # setup loss wrapper
     loss_wrap = LossWrapper(
         denormalize_fn=valsets[0].denormalize,
         separate_zf=cfg.dataset.separate_zf,
@@ -64,7 +68,7 @@ def evaluate(
     )
     loss_wrap.eval()
 
-    # Validation loop
+    # run validation
     if (epoch % val_freq) == 0 or epoch == 1:
         for val_idx, (valset, valloader) in enumerate(zip(valsets, valloaders)):
 
@@ -83,14 +87,13 @@ def evaluate(
                     ),
                 )
 
-            # lists to collect flux across all batches for the two TODOs
+            # collect stats
             all_preds_flux = []
             all_tgts_flux = []
 
             for idx, sample in enumerate(valloader):
                 sample: CycloneAESample
-                # for integral evaluation, etc
-                # NOTE: validation target are not latent
+                # prepare targets
                 tgts = {
                     k: getattr(sample, k).to(device, non_blocking=True)
                     for k in ["df", "phi", "flux", "avg_flux"]
@@ -100,10 +103,10 @@ def evaluate(
                 geometry = sample.geometry
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
-                # get the rolled out validation trajectories
+                # compute predictions
                 preds = sample_fn(condition)
 
-                # NOTE denormalize always true for integrals if denormalize:
+                # denormalize
                 preds = denormalize_single(
                     preds, idx_data, partial(valset.denormalize, condition=condition)
                 )
@@ -112,6 +115,7 @@ def evaluate(
                 tgts = {k: v.cpu() for k, v in tgts.items()}
                 preds = {k: v.cpu() for k, v in preds.items()}
 
+                # combine zonal flow
                 if cfg.dataset.separate_zf:
 
                     def _recombine_zf(x):
@@ -120,7 +124,6 @@ def evaluate(
                         )
                         return x
 
-                    # apply recombine_zf to preds and tgts
                     for k in preds:
                         if preds[k].dim() > 2 and preds[k].shape[1] % 2 == 0:
                             preds[k] = _recombine_zf(preds[k])
@@ -128,6 +131,7 @@ def evaluate(
                         if tgts[k].dim() > 2 and tgts[k].shape[1] % 2 == 0:
                             tgts[k] = _recombine_zf(tgts[k])
 
+                # validation metrics
                 metrics_i, integrated_i = validation_metrics(
                     tgts=tgts,
                     preds=preds,
@@ -136,11 +140,11 @@ def evaluate(
                     eval_integrals=eval_integrals,
                 )
 
-                # add integrated quantities to rollout for comparison
+                # store integrals
                 preds["phi_int"] = integrated_i["phi"]
                 preds["flux_int"] = integrated_i["eflux"]
 
-                # collect avg_flux and file_index for plotting and rmse
+                # flux analysis
                 if "flux_int" in preds and "avg_flux" in tgts:
                     all_preds_flux.append(
                         {
@@ -155,6 +159,7 @@ def evaluate(
                         }
                     )
 
+                # accumulate metrics
                 for key in metrics_i.keys():
                     if key not in metrics:
                         metrics[key] = torch.tensor(0.0)
@@ -164,14 +169,10 @@ def evaluate(
                         metrics[key] += metrics_i[key].mean()
                 n_timesteps_acc += 1
 
-                # temporary dicts for plotting
-                # TODO(gg) for now limit number of plots
+                # generate plots
                 if len(val_plots) == 0:
                     t_idx = idx_data["timestep_index"].tolist()
                     batch_idx = torch.randint(0, len(t_idx), (1,)).item()
-                    # TODO(diff) batch_idx only used for df/phi, flux needs the batch
-                    #            with more trajectories need to ensure sample within one
-                    # use df, phi_int, flux_int for plotting
                     preds_plots = {
                         "df": preds["df"] if "df" in preds else None,
                         "phi": preds["phi_int"] if "phi_int" in preds else None,
@@ -186,29 +187,27 @@ def evaluate(
                         )
                         for k in preds_plots
                     }
-                    tgts = {k: tgts[k][batch_idx] for k in tgts}
+                    tgts_plot = {k: tgts[k][batch_idx] for k in tgts}
                     if val_idx == 0:
-                        # holdout trajectories valset
                         plots = generate_val_plots(
                             rollout=preds_plots,
-                            gt=tgts,
+                            gt=tgts_plot,
                             ts=sample.timestep,
                             phase="Random draw",
                         )
                         val_plots.update(plots)
                     else:
-                        # holdout samples valset
                         if idx == 0:
                             plots = generate_val_plots(
                                 rollout=preds_plots,
-                                gt=tgts,
+                                gt=tgts_plot,
                                 timestep=sample.timestep,
                                 phase="Holdout samples",
                             )
                             val_plots.update(plots)
 
+            # sync ddp metrics
             if dist.is_initialized():
-                # for phase in metrics.keys():
                 cur_ts = n_timesteps_acc.reshape(1, -1).to(device)
                 gathered_ts = [
                     torch.zeros_like(cur_ts, dtype=cur_ts.dtype, device=cur_ts.device)
@@ -231,18 +230,18 @@ def evaluate(
                     gathered_ms = torch.cat(gathered_ms)
                     metrics[m] = gathered_ms.sum(0).cpu()
 
+            # finalize logs
             for m in metrics.keys():
                 if metrics[m].sum() != 0.0:
                     metrics[m] = metrics[m] / n_timesteps_acc
                     log_metric_dict[f"{valname}/{m}"] = metrics[m].item()
 
-            # fluxes averaged per trajetory
+            # flux per trajectory averaging
             if len(all_preds_flux) > 0 and (not dist.is_initialized() or rank == 0):
                 fpreds = torch.cat([b["val"].flatten() for b in all_preds_flux])
                 ftgts = torch.cat([b["val"].flatten() for b in all_tgts_flux])
                 fidxs = torch.cat([b["file_index"].flatten() for b in all_preds_flux])
 
-                # group by trajectory to calculate actual avg_flux
                 grouped_preds = defaultdict(list)
                 grouped_tgts = {}
 
@@ -256,7 +255,6 @@ def evaluate(
                 pred_stds = np.array([np.std(grouped_preds[i]) for i in traj_ids])
                 tgt_vals = np.array([grouped_tgts[i] for i in traj_ids])
 
-                # compute rmse on the trajectory averages
                 avg_flux_rmse = np.sqrt(((pred_means - tgt_vals) ** 2).mean())
                 log_metric_dict[f"{valname}/avg_flux_rmse"] = avg_flux_rmse.item()
 
@@ -264,6 +262,7 @@ def evaluate(
                     pred_means, pred_stds, tgt_vals, traj_ids
                 )
 
+        # store checkpoints
         if not rank:
             val_loss = log_metric_dict["val_traj/avg_flux_rmse"]
             loss_val_min = save_model_and_config(
@@ -272,7 +271,6 @@ def evaluate(
                 scheduler=lr_scheduler,
                 cfg=cfg,
                 epoch=epoch,
-                # TODO decide target metric
                 val_loss=val_loss,
                 loss_val_min=loss_val_min,
             )

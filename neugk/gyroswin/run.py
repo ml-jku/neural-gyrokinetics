@@ -1,3 +1,5 @@
+"""Workflow execution for the GyroSwin model."""
+
 import os
 
 from collections import defaultdict
@@ -23,20 +25,24 @@ from neugk.gyroswin.eval.evaluate import evaluate as gyroswin_evaluate
 
 
 class GyroSwinRunner(BaseRunner):
+    """Workflow runner for GyroSwin models supporting multitasking and pushforward losses."""
+
     def setup_components(self):
-        # model
+        """Initialize GyroSwin model, optimizer, loss functions, and gradient balancer."""
+        # model setup
         self.model = get_model(self.cfg, dataset=self.trainset).to(self.device)
         if self.use_ddp:
             self.model = DDP(
                 self.model, device_ids=[self.local_rank], find_unused_parameters=True
             )
 
-        # load ckpt
+        # load checkpoints
         if self.cfg.load_ckpt:
             ckpt_path = os.path.join(self.cfg.output_path, "ckp.pth")
             self.model, ckpt_dict = load_model_and_config(
                 ckpt_path, self.model, self.device, for_ddp=self.use_ddp
             )
+            # handle parameter freezing
             if self.cfg.training.params_to_include:
                 for n, p in self.model.named_parameters():
                     for key in self.cfg.training.params_to_include:
@@ -48,7 +54,7 @@ class GyroSwinRunner(BaseRunner):
             # optimizer state loading happens after opt init
             self._ckpt_dict = ckpt_dict  # temp store
 
-        # optimizer
+        # setup parameters for optimizer
         if self.cfg.training.exclude_from_wd is not None:
             params = exclude_from_weight_decay(
                 self.model,
@@ -58,6 +64,7 @@ class GyroSwinRunner(BaseRunner):
         else:
             params = self.model.parameters()
 
+        # optimizer setup
         self.opt = torch.optim.Adam(
             params,
             lr=self.cfg.training.learning_rate,
@@ -65,6 +72,7 @@ class GyroSwinRunner(BaseRunner):
             betas=(0.9, 0.95),
         )
 
+        # restore optimizer state
         if hasattr(self, "_ckpt_dict"):
             try:
                 self.opt.load_state_dict(self._ckpt_dict["optimizer_state_dict"])
@@ -72,7 +80,7 @@ class GyroSwinRunner(BaseRunner):
                 print(f"Failed to load optimizer state: {e}")
             del self._ckpt_dict
 
-        # losses
+        # losses setup
         weights = self.setup_common_losses(self.cfg.model)
         self.loss_wrap = LossWrapper(
             weights=weights,
@@ -82,7 +90,7 @@ class GyroSwinRunner(BaseRunner):
             real_potens=self.cfg.dataset.real_potens,
         )
 
-        # grad balancer
+        # grad balancer setup
         n_tasks = len(self.loss_wrap.active_losses)
         self.grad_balancer = GradientBalancer(
             self.opt,
@@ -92,7 +100,7 @@ class GyroSwinRunner(BaseRunner):
             n_tasks=n_tasks,
         )
 
-        # pushforward
+        # pushforward logic setup
         pf_cfg = self.cfg.training.pushforward
         self.pushforward_fn = None
         if sum(pf_cfg.unrolls) > 0:
@@ -108,7 +116,7 @@ class GyroSwinRunner(BaseRunner):
                 device=self.device,
             )
 
-        # cache fields
+        # fields configuration
         self.input_fields = set(self.cfg.dataset.input_fields)
         if self.cfg.model.name in ["pointnet", "transolver", "transformer"]:
             self.input_fields.add("position")
@@ -123,6 +131,7 @@ class GyroSwinRunner(BaseRunner):
         self.idx_keys = ["file_index", "timestep_index"]
 
     def train_epoch(self, epoch):
+        """Run one training epoch with multitasking and pushforward updates."""
         loss_logs = defaultdict(float)
         info_dict = defaultdict(list)
         t_start_data = perf_counter_ns()
@@ -134,6 +143,7 @@ class GyroSwinRunner(BaseRunner):
                 pass
 
             sample: CycloneSample
+            # gather inputs
             inputs = {
                 k: getattr(sample, k).to(self.device, non_blocking=True)
                 for k in self.input_fields
@@ -152,12 +162,14 @@ class GyroSwinRunner(BaseRunner):
             idx_data = {k: getattr(sample, k).to(self.device) for k in self.idx_keys}
             geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
 
+            # augmentations
             if self.augmentations:
                 for aug_fn in self.augmentations:
                     inputs = {k: aug_fn(v) for k, v in inputs.items()}
 
             info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
 
+            # pushforward unroll
             if self.pushforward_fn:
                 start_pf = perf_counter_ns()
                 inputs, gts, conds = self.pushforward_fn(
@@ -167,6 +179,7 @@ class GyroSwinRunner(BaseRunner):
             else:
                 info_dict["pf_ms"].append(0.0)
 
+            # forward pass and loss
             t_start_fwd = perf_counter_ns()
             with torch.autocast(
                 str(self.device), dtype=self.amp_dtype, enabled=self.use_amp
@@ -195,13 +208,14 @@ class GyroSwinRunner(BaseRunner):
             info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
             t_start_bkd = perf_counter_ns()
 
+            # optimize
             self.model = self.grad_balancer(self.model, loss, list(losses.values()))
             if self.scheduler:
                 self.scheduler.step()
 
             self.cur_update_step += 1.0
 
-            # log accumulation
+            # record logs
             for k, v in losses.items():
                 loss_logs[k] += v.item()
             loss_logs["relative_norm"] += loss.item()
@@ -212,7 +226,7 @@ class GyroSwinRunner(BaseRunner):
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)
             t_start_data = perf_counter_ns()
 
-        # average logs
+        # finalize epoch statistics
         n_batches = len(self.trainloader)
         loss_logs = {k: v / n_batches for k, v in loss_logs.items()}
         loss_logs = edit_tag(loss_logs, prefix="train", postfix="mse")
@@ -220,6 +234,7 @@ class GyroSwinRunner(BaseRunner):
         return loss_logs, info_dict
 
     def evaluate(self, epoch):
+        """Call evaluation pipeline for current epoch."""
         log_metric_dict, val_plots, self.loss_val_min = gyroswin_evaluate(
             self.rank,
             self.world_size,

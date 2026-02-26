@@ -1,5 +1,3 @@
-"""General utils."""
-
 from typing import Dict, Tuple, Optional, Sequence
 from datetime import timedelta
 import glob
@@ -20,7 +18,8 @@ from einops import rearrange
 
 
 def wandb_available():
-    # any value of WANDB_DISABLED disables wandb
+    """Check if wandb is available and not explicitly disabled."""
+    # check environment
     if os.getenv("WANDB_DISABLED", "").upper():
         print(
             "Not using wandb for logging, if this is not intended, unset WANDB_DISABLED env var"
@@ -36,14 +35,18 @@ import wandb  # noqa
 
 
 class WandbManager:
+    """Wrapper for weights and biases logging initialization and updates."""
+
     def __init__(self) -> None:
         self._initialized = False
 
     def setup(self, args, **kwargs):
+        """Initialize the wandb run."""
         if not isinstance(args, dict):
             args = args.__dict__
         project_name = args["logging"].get("project", "debug")
 
+        # build run name
         name_parts = []
         name_suffix = args["logging"].get("name_suffix", None)
         if (
@@ -57,6 +60,7 @@ class WandbManager:
 
         tags = args["logging"].get("tags", [])
 
+        # initialize
         combined_dict = {**args, **kwargs}
         wandb.init(
             # set the wandb project where this run will be logged
@@ -73,32 +77,39 @@ class WandbManager:
         self._initialized = True
 
     def log(self, logs, commit: bool = True, step: Optional[int] = None):
+        """Log metrics to the current wandb run."""
         wandb.log(logs, step=step, commit=commit)
 
     def close(self):
+        """No-op for compatibility."""
         pass
 
     def summarize(self, outputs):
+        """Add summary values to the wandb run."""
         # add values to the wandb summary => only works for scalars
         for k, v in outputs.items():
             self._wandb.run.summary[k] = v.item()
 
     def finish(self):
+        """End the current wandb run."""
         # End the W&B run
         wandb.finish()
 
 
 def ddp_setup(rank, world_size):
+    """Initialize distributed data parallel environment."""
     dist.init_process_group(
         backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20)
     )
 
 
 def edit_tag(dict, prefix, postfix):
+    """Update dictionary keys with prefix and postfix tags."""
     return {f"{prefix}/{k}_{postfix}": v for k, v in dict.items()}
 
 
 def setup_logging(config):
+    """Configure and return the selected logging writer."""
     if config.logging.writer == "tensorboard":
         from torch.utils.tensorboard import SummaryWriter
 
@@ -125,6 +136,7 @@ def save_model_and_config(
     val_loss: float,
     loss_val_min: float,
 ) -> float:
+    """Save model checkpoint and its configuration to disk."""
     # create directory if it s not there
     os.makedirs(cfg.output_path, exist_ok=True)
 
@@ -137,6 +149,7 @@ def save_model_and_config(
         # using DDP wrapper
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
 
+    # persist checkpoint
     torch.save(
         {
             "epoch": epoch,
@@ -148,6 +161,7 @@ def save_model_and_config(
         f"{cfg.output_path}/ckp.pth",
     )
 
+    # persist best
     if val_loss < loss_val_min:
         loss_val_min = val_loss
         torch.save(
@@ -170,6 +184,7 @@ def load_model_and_config(
     device: torch.DeviceObjType,
     for_ddp=False,
 ) -> Tuple[nn.Module, Dict, int]:
+    """Load model state and checkpoint info from disk."""
     loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
     if for_ddp:
         loaded_ckpt["model_state_dict"] = {
@@ -187,6 +202,7 @@ def load_model_and_config(
 
 
 def compress_src(path):
+    """Zip source code files into a specified directory."""
     files = glob.glob("**", recursive=True)
     # Read all directory, subdirectories and list files
     zf = zipfile.ZipFile(
@@ -208,6 +224,7 @@ def compress_src(path):
 
 
 def set_seed(seed):
+    """Set global random seeds for reproducibility."""
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(seed)
     random.seed(seed)
@@ -215,16 +232,19 @@ def set_seed(seed):
 
 
 def find_free_port():
+    """Find and return a free network port."""
     with socket.socket() as s:
         s.bind(("", 0))  # Bind to a free port provided by the host.
         return s.getsockname()[1]  # Return the port number assigned.
 
 
 def expand_as(src: np.ndarray, tgt: np.ndarray):
+    """Expand dimensions of src to match tgt, assuming squeeze-expanded compatibility."""
     if src.ndim == tgt.ndim and all(
         ss == 1 or ss == st for ss, st in zip(src.shape, tgt.shape)
     ):
         return src
+    # expand manually
     src = src.squeeze()
     while src.ndim < tgt.ndim:
         if isinstance(src, np.ndarray):
@@ -236,50 +256,14 @@ def expand_as(src: np.ndarray, tgt: np.ndarray):
     return src
 
 
-def split_in_two(dictionary, idx):
-    first = {k: v[:idx] for k, v in dictionary.items()}
-    second = {k: v[idx:] for k, v in dictionary.items()}
-    dictionary = [first, second]
-    return dictionary
-
-
-def split_batch_into_phases(phase_change, inputs, gts, conds, idx_data):
-    split_idx = torch.searchsorted(conds["timestep"], phase_change, right=False)
-    if split_idx == conds["timestep"].shape[0]:
-        # whole batch in linear
-        inputs = [inputs]
-        gts = [gts]
-        conds = [conds]
-        idx_data = [idx_data]
-        phase_list = ["linear"]
-    elif split_idx == 0:
-        # whole batch in saturated phase
-        inputs = [inputs]
-        gts = [gts]
-        conds = [conds]
-        idx_data = [idx_data]
-        phase_list = ["saturated"]
-    else:
-        inputs = split_in_two(inputs, split_idx)
-        gts = split_in_two(gts, split_idx)
-        conds = split_in_two(conds, split_idx)
-        idx_data = split_in_two(idx_data, split_idx)
-        phase_list = ["linear", "saturated"]
-    return (
-        inputs,
-        gts,
-        conds,
-        idx_data,
-        phase_list,
-    )
-
-
 def is_number(string):
+    """Regex check if string represents a number."""
     pattern = r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$"
     return bool(re.fullmatch(pattern, string.strip()))
 
 
 def filter_config_subset(superset: DictConfig, subset: DictConfig):
+    """Recursively remove keys from subset if they are not in superset."""
     for k in list(subset.keys()):
         if k not in superset:
             del subset[k]
@@ -288,6 +272,7 @@ def filter_config_subset(superset: DictConfig, subset: DictConfig):
 
 
 def filter_cli_priority(cli: Sequence, source: DictConfig, key: str = ""):
+    """Remove keys from source config if they were overridden via CLI."""
     for k in list(source.keys()):
         subkey = k
         if key is not None and len(key) > 0:
@@ -299,6 +284,8 @@ def filter_cli_priority(cli: Sequence, source: DictConfig, key: str = ""):
 
 
 class RunningMeanStd:
+    """Calculates online statistics for a data stream."""
+
     def __init__(self, shape: Sequence[int], epsilon: float = 1e-4):
         """
         Calculates the running mean and std of a data stream
@@ -334,6 +321,7 @@ class RunningMeanStd:
         )
 
     def update(self, mean, var, min, max, count=1.0) -> None:
+        """Update current moments with batch statistics."""
         self.update_from_moments(mean, var, min, max, count)
 
     def update_from_moments(
@@ -344,9 +332,11 @@ class RunningMeanStd:
         batch_max: np.ndarray,
         batch_count: float = 1.0,
     ) -> None:
+        """Parallel variance algorithm implementation."""
         delta = batch_mean - self.mean
         tot_count = self.count + batch_count
 
+        # compute new mean
         new_mean = self.mean + delta * batch_count / tot_count
         m_a = self.var * self.count
         m_b = batch_var * batch_count
@@ -359,6 +349,7 @@ class RunningMeanStd:
 
         new_count = batch_count + self.count
 
+        # persist updates
         self.min = np.minimum(self.min, batch_min)
         self.max = np.maximum(self.max, batch_max)
         self.mean = new_mean
@@ -434,43 +425,43 @@ def pev_flux_df_phi(
 
 
 def phi_integral(df: torch.Tensor, geometry: Dict):
+    """Compute the electrostatic potential integral from the distribution function."""
     ns, nx, ny = df.shape[3:]
     # df to fourier
     df = df.movedim(0, -1).contiguous()
     df = torch.view_as_complex(df)
     # phi tensor
     bufphi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
-    # expand geometry constants for broadcasting
-    # grids
+    # expand grids
     krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
     kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
     ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
     intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
     intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
     mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
-    # settings
+    # expand settings
     little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
     bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
     mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
     tmp = geometry["tmp"]
-    # gyroaveraged phi
+    # compute bessel
     krloc = torch.sqrt(
         krho**2 * little_g[0] + 2 * krho * kxrh * little_g[1] + kxrh**2 * little_g[2]
     )
     bessel = torch.special.bessel_j0(
         mas * vthrat * krloc * torch.sqrt(2.0 * mugr / bn) / signz
     )
-    # exponentially scaled bessel i0 function
+    # compute gamma
     gamma = 0.5 * ((mas * vthrat * krloc) / (signz * bn)) ** 2
     gamma = torch.special.i0(gamma) * torch.exp(-gamma)
 
-    # poisson terms
-    # density of the species
+    # poisson solver terms
     de = 1.0
     cfen = torch.zeros_like(ints)
     poisson_int = signz * de * intmu * intvp * bessel * bn
     poisson_int = torch.where(torch.abs(intvp) < 1e-9, 0.0, poisson_int)
 
+    # diagonal corrections
     diagz = (
         signz
         * de
@@ -491,16 +482,12 @@ def phi_integral(df: torch.Tensor, geometry: Dict):
     poisson_diag = poisson_diag - signz * torch.exp(-cfen) * de / tmp
     poisson_diag = -1 / poisson_diag
 
-    # first usmv
+    # integrate velocity space
     phi = (1 + 0j) * poisson_int * df
-
-    #  finish the species sum and the velspace integral
     phi = phi.sum((0, 1), keepdim=True)
 
-    # second usmv
+    # apply zonal flow corrections
     bufphi = bufphi + (1 + 0j) * matz * phi
-
-    # surface average
     bufphi = bufphi.sum(
         (
             2,
@@ -508,17 +495,16 @@ def phi_integral(df: torch.Tensor, geometry: Dict):
         ),
         keepdim=True,
     )
-
-    # third usmv
     phi = phi + (1 + 0j) * maty * bufphi
 
-    # normalize
+    # finalize normalization
     phi = phi * poisson_diag
     phi = rearrange(phi.squeeze(), "s x y -> x s y")
     return phi
 
 
 def load_geom(file_path):
+    """Load geometric parameters from a .dat file."""
     data = {}
     with open(file_path, "r") as f:
         lines = f.readlines()
@@ -526,6 +512,7 @@ def load_geom(file_path):
     key = None
     values = []
 
+    # parse lines
     for line in lines:
         line = line.strip()
         if not line:
@@ -550,6 +537,7 @@ def load_geom(file_path):
         else:
             values.extend(map(float, parts))
 
+    # final commit
     if key is not None:
         data[key] = np.array(values, dtype=np.float64)
 
@@ -557,8 +545,10 @@ def load_geom(file_path):
 
 
 def load_geometry(directory):
+    """Initialize geometry tensors from raw simulation files."""
     geometry = {}
 
+    # set defaults
     geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=torch.float32)
     geometry["signz"] = 1.0
     geometry["vthrat"] = 1.0
@@ -567,6 +557,7 @@ def load_geometry(directory):
     geometry["d2X"] = 1.0
     geometry["signB"] = 1.0
 
+    # load data
     geom = load_geom(os.path.join(directory, "geom.dat"))  # bn CHECK
 
     geometry["kxrh"] = torch.tensor(
@@ -577,7 +568,7 @@ def load_geometry(directory):
         dtype=torch.float32,
     )  # CHECK
 
-    # mugr and intmu
+    # compute mugr and intmu
     mugr = np.zeros(8 + 1)
     intmu = np.zeros(8 + 1)
     mumax = 4.5
@@ -621,6 +612,7 @@ def load_geometry(directory):
 def get_linear_burn_in_fn(
     start: float, end: float, end_fraction: float, start_fraction: float
 ):
+    """Return a linear scheduler function for progress-based weighting."""
 
     def func(progress_remaining: float) -> float:
         if (1 - progress_remaining) > end_fraction:
@@ -636,23 +628,25 @@ def get_linear_burn_in_fn(
 
 
 def remainig_progress(cur_step, total_steps):
+    """Compute remaining progress fraction."""
     return 1.0 - (cur_step / total_steps)
 
 
 def parse_input_dat(file_path):
+    """Parse GKW input.dat configuration file."""
     parsed_data = {}
     with open(file_path, "r") as file:
         content = file.read()
-    # split the content by section headers (e.g., &SPECIES, &SPCGENERAL, etc.)
+    # split sections
     sections = re.split(r"&\w+", content)
-    # get all the headers by finding the section names
     section_headers = re.findall(r"&(\w+)", content)
-    # remove comments
+    # clean comments
     sections = [
         section.strip()
         for section in sections
         if len(section) and section[0] != "!" and section.strip()
     ]
+    # iterate over sections
     for header, section in zip(section_headers, sections):
         section_dict = {}
         params = re.findall(r"(\w+)\s*=\s*([-\d\.e\w]+)", section)
@@ -671,6 +665,7 @@ def parse_input_dat(file_path):
 
 
 def K_files(directory):
+    """List distribution function files in a directory."""
     files = os.listdir(directory)
     digit_files = sorted(
         [file for file in files if file.isdigit()], key=lambda x: int(x)
@@ -682,6 +677,7 @@ def K_files(directory):
 
 
 def poten_files(directory):
+    """List potential field files in a directory."""
     files = os.listdir(directory)
     poten_files = sorted([file for file in files if file.startswith("Poten")])
     timestep_slices = [int(f.replace("Poten", "")) for f in poten_files]
@@ -689,8 +685,8 @@ def poten_files(directory):
 
 
 def exclude_from_weight_decay(model, param_names, weight_decay):
+    """Split model parameters into groups with and without weight decay."""
     decay, no_decay = [], []
-    no_decay_names, decay_names = [], []
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
@@ -701,10 +697,8 @@ def exclude_from_weight_decay(model, param_names, weight_decay):
 
         if add_to_no_decay:
             no_decay.append(param)
-            no_decay_names.append(name)
         else:
             decay.append(param)
-            decay_names.append(name)
 
     return [
         {"params": decay, "weight_decay": weight_decay},
@@ -713,17 +707,18 @@ def exclude_from_weight_decay(model, param_names, weight_decay):
 
 
 def memory_cleanup(device=None, aggressive=False):
+    """Perform garbage collection and clear GPU cache."""
     if device is None and torch.cuda.is_available():
         device = torch.cuda.current_device()
 
-    # Standard cleanup
+    # clear cache
     if torch.cuda.is_available() and device is not None:
         torch.cuda.empty_cache()
 
+    # aggressive cleanup
     if aggressive:
-        # More aggressive cleanup
         gc.collect()
         if torch.cuda.is_available() and device is not None:
-            # Force synchronization to ensure all operations are complete
+            # force sync
             torch.cuda.synchronize(device)
             torch.cuda.empty_cache()

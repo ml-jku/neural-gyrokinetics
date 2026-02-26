@@ -1,3 +1,5 @@
+"""Diffusion runners and utilities."""
+
 from neugk.diffusion.run import (
     DDPMRunner,
     StudentTRunner,
@@ -7,6 +9,7 @@ from neugk.diffusion.run import (
 
 
 def get_diffusion_runner(rank: int, cfg, world_size: int):
+    """Factory function to get the appropriate diffusion runner based on configuration."""
     noise_dist = getattr(cfg.model.diffusion, "noise_distribution", "gaussian").lower()
     formulation = getattr(cfg.model.diffusion, "formulation", "ddpm").lower()
 

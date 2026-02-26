@@ -346,7 +346,7 @@ if __name__ == "__main__":
     split_into_bands = None
     norm_axes = (1, 2, 3, 4, 5)
 
-    originals = [f"iteration_{i}" for i in range(0, 150)]
+    originals = [f"iteration_{i}" for i in range(0, 300)]
 
     datasets = originals
 

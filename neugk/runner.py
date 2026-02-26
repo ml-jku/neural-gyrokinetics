@@ -1,3 +1,5 @@
+"""Standard training and evaluation loop runners."""
+
 import os
 from abc import abstractmethod
 from tqdm import tqdm
@@ -16,6 +18,8 @@ from neugk.dataset import get_data
 
 
 class BaseRunner:
+    """Base class for implementing workflow-specific training runners."""
+
     def __init__(self, rank, cfg, world_size):
         self.rank = rank
         self.cfg = cfg
@@ -27,11 +31,9 @@ class BaseRunner:
         else:
             self.local_rank = rank
 
-        self.device = (
-            torch.device(f"cuda:{self.local_rank}")
-            if torch.cuda.is_available()
-            else "cpu"
-        )
+        # device detection
+        is_cuda = torch.cuda.is_available()
+        self.device = torch.device(f"cuda:{self.local_rank}") if is_cuda else "cpu"
 
         if cfg.ddp.enable and world_size > 1:
             ddp_setup(rank, world_size)
@@ -60,6 +62,7 @@ class BaseRunner:
         self.setup_scheduler()
 
     def setup_data(self):
+        """Initialize datasets and dataloaders."""
         datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.rank)
         if len(datasets) == 3:
             self.trainset, self.valsets = datasets[0], datasets[1:]
@@ -73,6 +76,7 @@ class BaseRunner:
         self.total_steps = self.cfg.training.n_epochs * len(self.trainloader)
 
     def setup_common_losses(self, weights_cfg):
+        """Configure loss weights and their respective schedulers."""
         weights = dict(weights_cfg.loss_weights) | dict(weights_cfg.extra_loss_weights)
         for key in weights.keys():
             if (
@@ -91,6 +95,7 @@ class BaseRunner:
         return weights
 
     def setup_scheduler(self):
+        """Initialize learning rate scheduler."""
         if self.cfg.training.scheduler is not None:
             kwargs = {}
             if hasattr(self.cfg.training, "min_lr"):
@@ -98,19 +103,23 @@ class BaseRunner:
                     "min_lr": self.cfg.training.min_lr
                 }
 
+            # warm up steps
+            is_long_run = self.cfg.training.n_epochs > 150
+            if is_long_run:
+                n_warmup = self.total_steps // 6
+            else:
+                n_warmup = max(self.total_steps // 10, 10 * len(self.trainloader))
+
             self.scheduler = get_scheduler(
                 name=self.cfg.training.scheduler,
                 optimizer=self.opt,
-                num_warmup_steps=(
-                    self.total_steps // 6
-                    if self.cfg.training.n_epochs > 150
-                    else max(self.total_steps // 10, 10 * len(self.trainloader))
-                ),
+                num_warmup_steps=n_warmup,
                 num_training_steps=self.total_steps,
                 **kwargs,
             )
 
     def _log_epoch(self, epoch, epoch_logs, info_dict, val_plots):
+        """Log training and validation statistics."""
         if self.writer and not self.rank:
             wandb_logs = epoch_logs | info_dict
             if not val_plots:
@@ -119,6 +128,7 @@ class BaseRunner:
                 self.writer.log(wandb_logs, commit=False)
                 self.writer.log(val_plots)
 
+        # console output
         if not self.rank:
             total_time = sum(
                 v
@@ -131,17 +141,21 @@ class BaseRunner:
 
     @abstractmethod
     def train_epoch(self, epoch):
+        """Execute one training epoch."""
         raise NotImplementedError
 
     @abstractmethod
     def evaluate(self, epoch):
+        """Execute one evaluation pass."""
         raise NotImplementedError
 
     @abstractmethod
     def setup_components(self):
+        """Initialize model, optimizer, and other workflow-specific components."""
         raise NotImplementedError
 
     def __call__(self, skip_eval: bool = False):
+        """Main training loop execution."""
         use_tqdm = self.cfg.logging.tqdm if not self.use_ddp else False
 
         # main loop
@@ -177,7 +191,7 @@ class BaseRunner:
             if not skip_eval:
                 log_metric_dict, val_plots = self.evaluate(epoch)
 
-            # log
+            # finalize logs
             epoch_logs = train_losses_dict | log_metric_dict
             self._log_epoch(epoch, epoch_logs, info_dict, val_plots)
 
