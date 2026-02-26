@@ -1,0 +1,16 @@
+defaults:
+  - submitit_slurm
+
+_target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
+nodes: 1
+gpus_per_node: 4
+timeout_min: 1440
+cpus_per_task: 32
+submitit_folder: /home/u6eb/fpaische.u6eb/plasmamodelling/slurm/multirun/%j
+
+setup:
+  - "cd $HOME/plasmamodelling/"
+  - "source /projects/u6eb/miniconda3/bin/activate plasmamd"
+  - "which conda"
+  - "which python"
+  - "sleep 20"

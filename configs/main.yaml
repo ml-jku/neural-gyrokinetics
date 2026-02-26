@@ -9,7 +9,7 @@ defaults:
 
 experiment_id: test
 seed: 0
-output_path: /system/user/publicwork/galletti/checkpoints
+output_path: null
 ddp:
   enable: false
   n_nodes: 1

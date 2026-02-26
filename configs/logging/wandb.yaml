@@ -1,7 +1,7 @@
 writer: wandb
 mode: online
-entity: ukaea-mhd
-project: gall2
+entity: jku-ukaea
+project: isambard_mmm
 run_id: null
 tqdm: true
 model_summary: false

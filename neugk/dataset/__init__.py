@@ -10,12 +10,9 @@ from neugk.dataset.cyclone import (
     CoordinateCycloneDataset,
     CycloneSample,
 )
-from neugk.dataset.cyclone_diff import (
-    CycloneAEDataset,
-    CycloneSimSiamDataset,
-    CycloneAESample,
-)
-from neugk.dataset.backend import H5Backend, KvikIOBackend
+from neugk.dataset.cyclone_diff import CycloneAEDataset, CycloneAESample
+from neugk.dataset.cyclone_diff_simsiam import CycloneSimSiamDataset
+from neugk.dataset.augment import mask_modes
 
 
 def check_partial_holdouts(dataset_cfg):
@@ -31,16 +28,6 @@ def check_partial_holdouts(dataset_cfg):
 
 def get_data(cfg, rank: int = 0):
     assert cfg.dataset.name in ["cyclone"]
-
-    augmentations = []
-    if cfg.dataset.augment.noise is True:
-        augmentations.append(
-            noise_transform(
-                std=cfg.dataset.augment.noise_std,
-                window_size=cfg.model.bundle_seq_length,
-            )
-        )
-
     backend = getattr(cfg.dataset, "backend", "h5")
     use_ddp = dist.is_initialized()
     partial_holdouts = {}
@@ -99,6 +86,9 @@ def get_data(cfg, rank: int = 0):
     else:
         raise NotImplementedError
 
+    if not rank:
+        print(f"Loading {train_input_fields} in dataset")
+
     # dataloading backend
     if backend == "h5":
         train_backend = H5Backend(rank)
@@ -111,7 +101,7 @@ def get_data(cfg, rank: int = 0):
     trainset = dataset_class(
         backend=train_backend,
         active_keys=cfg.dataset.active_keys,
-        input_fields=train_input_fields,
+        fields_to_load=train_input_fields,
         path=cfg.dataset.path,
         split="train",
         random_seed=cfg.seed,
@@ -139,7 +129,7 @@ def get_data(cfg, rank: int = 0):
     holdout_trajectories_valset = dataset_class(
         backend=val_backend,
         active_keys=cfg.dataset.active_keys,
-        input_fields=val_input_fields,
+        fields_to_load=val_input_fields,
         path=cfg.dataset.path,
         split="val",
         random_seed=cfg.seed,
@@ -202,7 +192,7 @@ def get_data(cfg, rank: int = 0):
         holdout_samples_valset = dataset_class(
             backend=val_backend,
             active_keys=cfg.dataset.active_keys,
-            input_fields=val_input_fields,
+            fields_to_load=val_input_fields,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
@@ -235,6 +225,32 @@ def get_data(cfg, rank: int = 0):
             pin_memory=pin_memory,
             sampler=(DistributedSampler(holdout_samples_valset) if use_ddp else None),
         )
+
+    augmentations = []
+    for key in cfg.dataset.augment:
+        if cfg.dataset.augment[key].active:
+            if key == "noise":
+                augmentations.append(
+                    noise_transform(
+                        std=cfg.dataset.augment.noise.noise_std,
+                        window_size=cfg.model.bundle_seq_length,
+                    )
+                )
+            elif key == "mask_modes":
+                augmentations.append(
+                    mask_modes(
+                        mask_ratio=cfg.dataset.augment.mask_modes.mask_ratio,
+                        is_fourier=cfg.dataset.augment.mask_modes.is_fourier,
+                        rescale=cfg.dataset.augment.mask_modes.rescale,
+                        zf_separated=cfg.dataset.separate_zf,
+                        weights=cfg.dataset.augment.mask_modes.weights,
+                        mask_zero_mode=cfg.dataset.augment.mask_modes.mask_zero_mode,
+                        denormalize_fn=trainset.denormalize if not cfg.dataset.augment.mask_modes.is_fourier else None,
+                        normalize_fn=trainset.normalize if not cfg.dataset.augment.mask_modes.is_fourier else None,
+                    )
+                )
+            else:
+                raise ValueError(f"Unknown augmentation: {key}")
 
     datasets = (trainset, holdout_trajectories_valset)
     dataloaders = (trainloader, holdout_trajectories_valloader)

@@ -38,16 +38,28 @@ def train_step_autoencoder(
         else False
     )
     model.train()
+
+    if cfg.dataset.augment.mask_modes.active:
+        df_tgt = xs.pop("df_tgt")
+
     # model prediction
     # for ae we only use df
     x_preds = model(xs["df"], condition=condition)
+
+    if cfg.dataset.augment.mask_modes.active:
+        pred_df_delta = x_preds["df"] - xs["df"].detach()
+        gt_df_delta = (df_tgt - xs["df"]).detach()
+        x_preds["df_delta"] = pred_df_delta
+        xs["df_delta"] = gt_df_delta
+        # re-assign target to input for loss
+        xs["df"] = df_tgt.detach()
 
     # compute losses
     # TODO(diff) get rid of loss_wrap?
     # loss = F.mse_loss(x_preds["df"], xs["df"])
     # losses = {"df": loss}
 
-    return loss_wrap(
+    loss, losses = loss_wrap(
         x_preds,
         xs,  # autoencoder
         idx_data,
@@ -55,6 +67,9 @@ def train_step_autoencoder(
         progress_remaining=progress_remaining,
         separate_zf=separate_zf,
     )
+    if cfg.dataset.augment.mask_modes.active:
+        losses["df_delta"] = F.mse_loss(x_preds["df_delta"], xs["df_delta"]).detach()
+    return loss, losses
 
 
 def train_step_peft(

@@ -9,7 +9,6 @@ from tqdm import tqdm
 from math import log10
 
 from neugk.pinc.neural_fields import (
-    get_integrals,
     integral_losses,
     spectra_losses,
     CycloneNFDataset,
@@ -17,6 +16,7 @@ from neugk.pinc.neural_fields import (
     sample_field,
 )
 from neugk.pinc.neural_fields.nf_utils import plotND, plot_diag
+from neugk.integrals import get_integrals
 
 
 @torch.no_grad()
