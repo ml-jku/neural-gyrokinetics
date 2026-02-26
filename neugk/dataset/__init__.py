@@ -10,8 +10,12 @@ from neugk.dataset.cyclone import (
     CoordinateCycloneDataset,
     CycloneSample,
 )
-from neugk.dataset.cyclone_diff import CycloneAEDataset, CycloneAESample
-from neugk.dataset.cyclone_diff_simsiam import CycloneSimSiamDataset
+from neugk.dataset.cyclone_diff import (
+    CycloneAEDataset,
+    CycloneSimSiamDataset,
+    CycloneAESample,
+)
+from neugk.dataset.backend import H5Backend, KvikIOBackend
 from neugk.dataset.augment import mask_modes
 
 

@@ -1,5 +1,6 @@
 import os
 import queue
+import warnings
 
 from tqdm import tqdm
 from argparse import ArgumentParser
@@ -150,13 +151,13 @@ def preprocess(
         # get velocity space resolutions
         nvpar, nmu = vpgr.shape[1], vpgr.shape[0]
 
-            resolution = (nvpar, nmu, ns, nkx, nky)
+        resolution = (nvpar, nmu, ns, nkx, nky)
 
         # always load nonlinear fluxes
         fluxes = np.loadtxt(f"{dir_in.replace('_Lin', '')}/fluxes.dat")[:, 1]
         orig_fluxes = fluxes.copy()
         # print(ks)
-        if not "Lin" in h5_filename:
+        if not "Lin" in out_path:
             orig_times = np.loadtxt(f"{dir_in.replace('_Lin', '')}/time.dat")
             ts_slices = [np.isclose(orig_times, t).nonzero()[0][0] for t in timesteps]
             fluxes = fluxes[ts_slices]
@@ -169,13 +170,12 @@ def preprocess(
         density_grad = config["species"]["rln"]
         s_hat = config["geom"]["shat"]
         q = config["geom"]["q"]
-
             
         df_stats = RunningMeanStd()
         phi_stats = RunningMeanStd()
         flux_stats = RunningMeanStd()
 
-        if "Lin" in h5_filename:
+        if "Lin" in out_path:
             # if linear sim, only take last timestep
             ks = ["FDS"]
             potens = [potens[-1]]
@@ -272,40 +272,44 @@ def preprocess(
                     phi_fft_unpadded, out_shape=phi_fft_unpadded.shape
                 )
 
-            if not "Lin" in out_path:
-                # do not compute integral for linear sims => it will fail!
-                # phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
-                df = torch.tensor(knth)
-                _, (_, eflux, _) = get_integrals(df, geometry)
-                if not np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-4):
-                    warnings.warn(
-                        f"Flux integral does not match original flux! Computed: {eflux.sum().item()}, Original: {orig_fluxes[idx]}"
-                    )
-                assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-2), "Strong deviation for flux!!"
+                if not "Lin" in out_path:
+                    # do not compute integral for linear sims => it will fail!
+                    # phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
+                    df = torch.tensor(knth)
+                    _, (_, eflux, _) = get_integrals(df, geometry)
+                    if not np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-4):
+                        warnings.warn(
+                            f"Flux integral does not match original flux! Computed: {eflux.sum().item()}, Original: {orig_fluxes[idx]}"
+                        )
+                    assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-2), "Strong deviation for flux!!"
 
-                # update running averages
-                df_stats.update(
-                    np.mean(knth, axis=norm_axes, keepdims=True),
-                    np.var(knth, axis=norm_axes, keepdims=True),
-                    np.min(knth, axis=norm_axes, keepdims=True),
-                    np.max(knth, axis=norm_axes, keepdims=True),
-                )
-                flux_stats.update(fluxes[idx], fluxes[idx], fluxes[idx], fluxes[idx])
-                phi_stats.update(
-                    np.mean(phi, axis=(0, 1, 2), keepdims=True),
-                    np.var(phi, axis=(0, 1, 2), keepdims=True),
-                    np.min(phi, axis=(0, 1, 2), keepdims=True),
-                    np.max(phi, axis=(0, 1, 2), keepdims=True),
-                )
+                # append stats to metadata dictionary
+                df_stats.update(knth, np.zeros_like(knth), knth, knth)
+                flux_stats.update(fluxes[idx], np.zeros_like(fluxes[idx]), fluxes[idx], fluxes[idx])
+                phi_stats.update(phi, np.zeros_like(phi), phi, phi)
 
                 # write to disk
                 backend.write_df(f, str(idx).zfill(5), df=knth)
                 backend.write_phi(f, str(idx).zfill(5), phi=phi)
 
             # append stats to metadata dictionary
-            df_stats.update(knth, np.zeros_like(knth), knth, knth)
-            flux_stats.update(fluxes[idx], np.zeros_like(fluxes[idx]), fluxes[idx], fluxes[idx])
-            phi_stats.update(phi, np.zeros_like(phi), phi, phi)
+            metadata["df_mean"] = df_stats.mean
+            metadata["df_var"] = df_stats.var
+            metadata["df_std"] = np.sqrt(df_stats.var)
+            metadata["df_min"] = df_stats.min
+            metadata["df_max"] = df_stats.max
+
+            metadata["phi_mean"] = phi_stats.mean
+            metadata["phi_var"] = phi_stats.var
+            metadata["phi_std"] = np.sqrt(phi_stats.var)
+            metadata["phi_min"] = phi_stats.min
+            metadata["phi_max"] = phi_stats.max
+
+            metadata["flux_mean"] = flux_stats.mean
+            metadata["flux_var"] = flux_stats.var
+            metadata["flux_std"] = np.sqrt(flux_stats.var)
+            metadata["flux_min"] = flux_stats.min
+            metadata["flux_max"] = flux_stats.max
 
             # dump metadata as last operation
             backend.write_metadata(f, metadata)
@@ -358,7 +362,6 @@ if __name__ == "__main__":
             spatial_ifft=IFFT,
             separate_zf=separate_zf,
             split_into_bands=split_into_bands,
-            norm_axes=norm_axes,
             root=args.root,
             target_dir=args.target_dir,
             position_queue=position_queue,
@@ -392,7 +395,6 @@ if __name__ == "__main__":
                 spatial_ifft=IFFT,
                 separate_zf=separate_zf,
                 split_into_bands=split_into_bands,
-                norm_axes=norm_axes,
                 root=args.root,
                 target_dir=args.target_dir,
                 position_queue=None,
@@ -407,7 +409,7 @@ if __name__ == "__main__":
             if skipped:
                 print(f"Skipped {f}: already exists.")
             else:
-                meta = backend.get_metadata(out_path)
+                meta = backend.read_metadata(out_path)
                 timesteps = len(meta["timesteps"])
                 mean, std = meta["df_mean"][0].mean(), meta["df_std"][0].mean()
                 print(
