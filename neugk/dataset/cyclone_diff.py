@@ -220,7 +220,7 @@ class CycloneAEDataset(CycloneDataset):
     def collate(self, batch: Sequence[CycloneAESample]):
 
         def stack_batch(_b: Sequence[CycloneAESample], key: str):
-            if hasattr(_b[0], key):
+            if getattr(_b[0], key, None) is not None:
                 return torch.stack([getattr(sample, key) for sample in _b])
             return None
 
