@@ -17,7 +17,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from torch.utils._pytree import tree_map
 
-from neugk.utils import RunningMeanStd
+from neugk.utils import RunningMeanStd, expand_as
 from neugk.dataset.backend import DataBackend
 
 

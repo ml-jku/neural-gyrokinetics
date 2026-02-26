@@ -1,6 +1,7 @@
 import torch
 import einops
 from typing import Optional, Callable
+from functools import partial
 
 def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: int = 1):
     def _noise(x: torch.Tensor) -> torch.Tensor:
@@ -115,7 +116,7 @@ def mask_modes(
                 # remove zf again if it was removed originally
                 x_masked = separate_zf(x_masked)
             if normalize_fn is not None:
-                x_masked = de_normalize(x_masked, file_idx, normalize_fn)
+                x_masked = de_normalize(x_masked, file_idx, partial(normalize_fn, return_stats=False))
         return x_masked, x_tgt
 
     return _mask

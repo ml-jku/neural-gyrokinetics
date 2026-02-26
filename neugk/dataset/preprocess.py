@@ -340,9 +340,7 @@ if __name__ == "__main__":
     separate_zf = False
     split_into_bands = None
 
-    originals = [f"iteration_{i}" for i in range(0, 150)]
-
-    datasets = originals
+    datasets = ["iteration_0", "iteration_1", "iteration_13"]
 
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)

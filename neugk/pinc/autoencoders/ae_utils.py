@@ -67,8 +67,6 @@ def train_step_autoencoder(
         progress_remaining=progress_remaining,
         separate_zf=separate_zf,
     )
-    if cfg.dataset.augment.mask_modes.active:
-        losses["df_delta"] = F.mse_loss(x_preds["df_delta"], xs["df_delta"]).detach()
     return loss, losses
 
 
