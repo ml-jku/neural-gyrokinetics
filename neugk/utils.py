@@ -596,10 +596,10 @@ def load_geom(file_path):
     return data
 
 
-def load_geometry(directory):
+def load_geometry(directory, dtype=torch.float64):
     geometry = {}
 
-    geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=torch.float32)
+    geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=dtype)
     geometry["signz"] = 1.0
     geometry["vthrat"] = 1.0
     geometry["tmp"] = 1.0
@@ -610,11 +610,11 @@ def load_geometry(directory):
     geom = load_geom(os.path.join(directory, "geom.dat"))  # bn CHECK
 
     geometry["kxrh"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "kxrh"))[0], dtype=torch.float32
+        np.loadtxt(os.path.join(directory, "kxrh"))[0], dtype=dtype
     )  # CHECK
     geometry["krho"] = torch.tensor(
         np.loadtxt(os.path.join(directory, "krho")).T[0] / geom["kthnorm"],
-        dtype=torch.float32,
+        dtype=dtype,
     )  # CHECK
 
     # mugr and intmu
@@ -629,32 +629,31 @@ def load_geometry(directory):
             np.pi * ((vperp + 0.5 * dvperp) ** 2 - (vperp - 0.5 * dvperp) ** 2)
         )
 
-    geometry["intmu"] = torch.tensor(intmu[1:], dtype=torch.float32)  # CHECK?
-    geometry["mugr"] = torch.tensor(mugr[1:], dtype=torch.float32)  # CHECK?
+    geometry["intmu"] = torch.tensor(intmu[1:], dtype=dtype)  # CHECK?
+    geometry["mugr"] = torch.tensor(mugr[1:], dtype=dtype)  # CHECK?
 
     geometry["intvp"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "intvp.dat"))[0], dtype=torch.float32
+        np.loadtxt(os.path.join(directory, "intvp.dat"))[0], dtype=dtype
     )  # CHECK
     geometry["vpgr"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "vpgr.dat"))[0], dtype=torch.float32
+        np.loadtxt(os.path.join(directory, "vpgr.dat"))[0], dtype=dtype
     )
 
     ints = np.concatenate(
         [np.array([0.0]), np.diff(np.loadtxt(os.path.join(directory, "sgrid")))]
     )
     ints[0] = ints[1]  # CHECK
-    geometry["ints"] = torch.tensor(ints, dtype=torch.float32)
+    geometry["ints"] = torch.tensor(ints, dtype=dtype)
 
-    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=torch.float32)  # CHECK
-
+    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=dtype) 
     geometry["little_g"] = torch.tensor(
         np.stack([geom["g_zeta_zeta"], geom["g_eps_zeta"], geom["g_eps_eps"]], -1),
-        dtype=torch.float32,
+        dtype=dtype,
     )
 
-    geometry["bn"] = torch.tensor(geom["bn"])
-    geometry["bt_frac"] = torch.tensor(geom["Bt_frac"])
-    geometry["rfun"] = torch.tensor(geom["R"])
+    geometry["bn"] = torch.tensor(geom["bn"], dtype=dtype)
+    geometry["bt_frac"] = torch.tensor(geom["Bt_frac"], dtype=dtype)
+    geometry["rfun"] = torch.tensor(geom["R"], dtype=dtype)
     return geometry
 
 
