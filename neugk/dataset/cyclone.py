@@ -178,10 +178,14 @@ class CycloneDataset(Dataset):
         self.files = list(set(self.files))
         existing_files = []
         for f in self.files:
-            assert self.backend.is_valid(f), f"'{f}' not valid for {self.backend}!"
+            if self.backend.is_valid(f):
+                existing_files.append(f)
+        diff = len(self.files) - len(existing_files)
+        if diff:
+            warnings.warn(f"{diff} files not found, training on existing ones...")
+        self.files = existing_files
 
         self.metadata = {}
-
         # apply condition filters before building indices
         if self.cond_filters:
             threshold = offset if offset > 0 else 80

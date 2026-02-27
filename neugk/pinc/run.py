@@ -325,7 +325,6 @@ class PINCRunner(BaseRunner):
                 condition = sample.conditioning.to(self.device)
             idx_data = {k: getattr(sample, k).to(self.device) for k in self.idx_keys}
             geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
-
             if self.augmentations:
                 for aug_fn in self.augmentations:
                     xs = {k: aug_fn(v, idx_data["file_index"]) for k, v in xs.items()}

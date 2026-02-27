@@ -590,6 +590,8 @@ class PINCLossWrapper(LossWrapper):
             all_keys = list(set(self.weights.keys()) | set(losses.keys()))
 
         data_keys = [k for k in all_keys if k not in special_keys]
+        if not self.training:
+            data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
             if k not in preds:
                 preds[k] = torch.zeros_like(tgts[k])

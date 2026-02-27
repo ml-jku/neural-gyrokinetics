@@ -47,7 +47,7 @@ def train_step_autoencoder(
     x_preds = model(xs["df"], condition=condition)
 
     if cfg.dataset.augment.mask_modes.active:
-        pred_df_delta = x_preds["df"] - xs["df"].detach()
+        pred_df_delta = x_preds["df"] - xs["df"]
         gt_df_delta = (df_tgt - xs["df"]).detach()
         x_preds["df_delta"] = pred_df_delta
         xs["df_delta"] = gt_df_delta

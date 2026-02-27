@@ -33,7 +33,7 @@ def reverse_ifft(x, zf_separated=False):
     x = torch.view_as_complex(x)
     x = torch.fft.fftn(x, dim=(-2, -1), norm="forward")
     x = torch.fft.ifftshift(x, dim=(-2,))
-    x = torch.stack([x.real, x.imag], dim=0).squeeze()
+    x = torch.stack([x.real, x.imag], dim=0)
     x = x.permute(1, 0, *range(2, x.ndim))
     return x.to(torch.float32)
 
@@ -41,9 +41,9 @@ def ifft(x):
     x = x.permute(0, *range(2, x.ndim), 1).contiguous()
     x = torch.view_as_complex(x)
     x = torch.fft.ifftn(x, dim=(-2, -1), norm="forward")
-    x = torch.stack([x.real, x.imag]).squeeze().to(torch.float32)
+    x = torch.stack([x.real, x.imag], dim=0)
     x = x.permute(1, 0, *range(2, x.ndim))
-    return x
+    return x.to(torch.float32)
 
 def de_normalize(x, file_idx, denormalize_fn):
     # de/normalize physics data keys

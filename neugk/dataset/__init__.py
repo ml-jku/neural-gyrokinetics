@@ -190,6 +190,7 @@ def get_data(cfg, rank: int = 0):
         sampler=(DistributedSampler(holdout_trajectories_valset) if use_ddp else None),
         persistent_workers=True,
         prefetch_factor=prefetch_factor,
+        **dataloader_kwargs,
     )
 
     if partial_holdouts:

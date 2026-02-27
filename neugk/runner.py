@@ -63,7 +63,7 @@ class BaseRunner:
         self.setup_scheduler()
 
     def setup_data(self):
-        datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.rank)
+        datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.local_rank)
         if len(datasets) == 3:
             self.trainset, self.valsets = datasets[0], datasets[1:]
             self.trainloader, self.valloaders = dataloaders[0], dataloaders[1:]
