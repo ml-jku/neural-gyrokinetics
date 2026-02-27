@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, Optional, Sequence
+from typing import Dict, Tuple, Optional, Sequence, Union
 from datetime import timedelta
 import glob
 import zipfile
@@ -272,22 +272,46 @@ def find_free_port():
         return s.getsockname()[1]  # Return the port number assigned.
 
 
-def expand_as(src: np.ndarray, tgt: np.ndarray):
-    """Expand dimensions of src to match tgt, assuming squeeze-expanded compatibility."""
-    if src.ndim == tgt.ndim and all(
-        ss == 1 or ss == st for ss, st in zip(src.shape, tgt.shape)
-    ):
+def expand_as(src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch.Tensor]):
+    """Expand dimensions of src to match tgt, handling batch, time, and spatial dims."""
+    if src.ndim == tgt.ndim:
         return src
-    # squeeze is causing issues with arbitrary aggregating of dimensions for stats computation
-    # src = src.squeeze()
-    while src.ndim < tgt.ndim:
-        if isinstance(src, np.ndarray):
-            src = np.expand_dims(src, axis=-1)
-        elif isinstance(src, torch.Tensor):
-            src = src.unsqueeze(-1)
-        else:
-            raise NotImplementedError("Unsupported datatype")
-    return src
+
+    # determine where src fits into tgt
+    src_shape = list(src.shape)
+    tgt_shape = list(tgt.shape)
+    
+    # covers casex where src is (C, ...) and tgt is (B, T, C, ...)
+    start_axis = -1
+    for i in range(len(tgt_shape) - len(src_shape) + 1):
+        if tgt_shape[i] == src_shape[0]:
+            match = True
+            for j in range(1, len(src_shape)):
+                if src_shape[j] != 1 and src_shape[j] != tgt_shape[i+j]:
+                    match = False
+                    break
+            if match:
+                start_axis = i
+                break
+    
+    if start_axis == -1:
+        res = src
+        while res.ndim < tgt.ndim:
+            if isinstance(res, np.ndarray):
+                res = np.expand_dims(res, axis=-1)
+            else:
+                res = res.unsqueeze(-1)
+        return res
+
+    # reshape src to have for broadcast
+    new_shape = [1] * len(tgt_shape)
+    for i, s in enumerate(src_shape):
+        new_shape[start_axis + i] = s
+    
+    if isinstance(src, np.ndarray):
+        return src.reshape(new_shape)
+    else:
+        return src.view(new_shape)
 
 
 def is_number(string):

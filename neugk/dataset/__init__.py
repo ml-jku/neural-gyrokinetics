@@ -174,13 +174,11 @@ def get_data(cfg, rank: int = 0):
     if use_gpudirect:
         # increase file descriptor limit for CUDA IPC handles
         os.system("ulimit -n 65536")
-        
-        # mp.set_sharing_strategy("file_system")
-
-        if cfg.ddp.enable:
-            prefetch_factor = 1
-            if cfg.training.num_workers != 0:
-                dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
+        # cannot for context to dataloader workers with gds
+        if cfg.training.num_workers > 0:
+            dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
+        # keep memory requirements low
+        prefetch_factor = 1
 
     trainloader = DataLoader(
         trainset,

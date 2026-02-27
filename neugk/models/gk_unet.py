@@ -636,6 +636,10 @@ class SwinNDUnet(nn.Module):
             x = torch.cat([x, first_res], -1)
         return self.patch_decode(x, pad_axes, **cond)
 
+    def get_pad_axes(self, resolution: Sequence[int]) -> List[int]:
+        _, pad_axes = pad_to_blocks(resolution, self.patch_size)
+        return pad_axes
+
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         x = rearrange(x, "b c ... -> b ... c")
         # pad to patch blocks

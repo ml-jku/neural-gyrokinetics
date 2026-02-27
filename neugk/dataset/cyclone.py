@@ -634,11 +634,11 @@ class CycloneDataset(Dataset):
         else:
             key = "full" if self.normalization_scope == "dataset" else file_index
             if self.normalizers[field]["type"] == "zscore":
-                shift = expand_as(self.stats[field][key][f"mean"], x)
-                scale = expand_as(self.stats[field][key][f"std"], x)
+                shift = expand_as(self.stats[field][key]["mean"], x)
+                scale = expand_as(self.stats[field][key]["std"], x)
             if self.normalizers[field]["type"] == "minmax":
-                x_min = expand_as(self.stats[field][key][f"min"], x)
-                x_max = expand_as(self.stats[field][key][f"max"], x)
+                x_min = expand_as(self.stats[field][key]["min"], x)
+                x_max = expand_as(self.stats[field][key]["max"], x)
                 scale = (x_max - x_min) / self.minmax_beta1
                 shift = x_min + scale * self.minmax_beta2
         if isinstance(x, torch.Tensor):

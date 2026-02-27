@@ -206,6 +206,7 @@ class CycloneAEDataset(CycloneDataset):
     ):
         if df is not None:
             if self.autoencoder is not None:
+                # TODO naive, can improve: pad axes can be precomputed from resolution
                 condition = kwargs["condition"]
                 # handle single sample input from evaluate.py loops
                 if df.ndim == 5:  # (C, Vp, Vm, S, X, Y) -> (1, C, ...)
@@ -213,13 +214,8 @@ class CycloneAEDataset(CycloneDataset):
                 if condition.ndim == 1:  # (N_cond,) -> (1, N_cond)
                     condition = condition.unsqueeze(0)
 
-                ch = 2 + 2 * self.separate_zf
-                dummy = torch.zeros((1, ch, *self.resolution), device=condition.device)
-                dummy_cond = condition[0:1]
-                _, pad_axes = self.autoencoder.encode(dummy, condition=dummy_cond)
-                df = self.autoencoder.decode(df, pad_axes, condition=condition)[
-                    "df"
-                ].squeeze(0)
+                df = self.autoencoder.decode(df, condition=condition)["df"]
+                df = df.squeeze(0)
             field = "df"
             x = df
         elif phi is not None:

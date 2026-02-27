@@ -97,9 +97,12 @@ class Swin5DAE(Swin5DUnet):
     def decode(
         self,
         zdf: torch.Tensor,
-        pad_axes: List,
+        pad_axes: Optional[List] = None,
         condition: Optional[torch.Tensor] = None,
     ):
+        if pad_axes is None:
+            pad_axes = self.get_pad_axes(self.base_resolution)
+
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
         kwcond = {"condition": condition} if condition is not None else {}
@@ -226,9 +229,12 @@ class Swin5DVQVAE(Swin5DAE):
     def decode(
         self,
         zdf: torch.Tensor,
-        pad_axes: List,
+        pad_axes: Optional[List] = None,
         condition: Optional[torch.Tensor] = None,
     ):
+        if pad_axes is None:
+            pad_axes = self.get_pad_axes(self.base_resolution)
+
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
         kwcond = {"condition": condition} if condition is not None else {}

@@ -236,7 +236,6 @@ class DDPMRunner(BaseRunner):
     def sample(
         self,
         condition: torch.Tensor,
-        dummy: torch.Tensor,
     ):
         """Generate samples from noise via iterative denoising."""
         self.model.eval()
@@ -254,10 +253,8 @@ class DDPMRunner(BaseRunner):
             latents = step_output.prev_sample
 
         # decode result
-        dummy = torch.zeros((bs, *dummy.shape[1:])).to(self.device)
-        _, pad_axes = self.autoencoder.encode(dummy, condition=condition)
         latents = latents / self.latent_scale
-        decoded = self.autoencoder.decode(latents, pad_axes, condition=condition)
+        decoded = self.autoencoder.decode(latents, condition=condition)
         self.model.train()
         return decoded
 
@@ -315,7 +312,6 @@ class StudentTRunner(DDPMRunner):
     def sample(
         self,
         condition: torch.Tensor,
-        dummy: torch.Tensor,
         num_inference_steps: int = 100,
     ):
         """Generate samples using iterative denoising with heavy-tailed priors."""
@@ -333,11 +329,8 @@ class StudentTRunner(DDPMRunner):
             latents = step_output.prev_sample
 
         # finalize output
-        dummy = torch.zeros((bs, *dummy.shape[1:])).to(self.device)
-        _, pad_axes = self.autoencoder.encode(dummy, condition=condition)
-
         latents = latents / getattr(self, "latent_scale", 1.0)
-        decoded = self.autoencoder.decode(latents, pad_axes, condition=condition)
+        decoded = self.autoencoder.decode(latents, condition=condition)
         self.model.train()
         return decoded
 
@@ -438,10 +431,7 @@ class EDMRunner(DDPMRunner):
         # decode
         pred = x / getattr(self, "latent_scale", 1.0)
         if not latent_only:
-            ch = 2 + 2 * self.trainset.separate_zf
-            dummy = torch.zeros((1, ch, *self.trainset.resolution), device=self.device)
-            _, pad_axes = self.autoencoder.encode(dummy, condition=condition)
-            pred = self.autoencoder.decode(pred, pad_axes, condition=condition)
+            pred = self.autoencoder.decode(pred, condition=condition)
         self.model.train()
         return pred
 
@@ -550,9 +540,6 @@ class FlowMatchingRunner(DDPMRunner):
         # decode
         pred = x / getattr(self, "latent_scale", 1.0)
         if not latent_only:
-            ch = 2 + 2 * self.trainset.separate_zf
-            dummy = torch.zeros((1, ch, *self.trainset.resolution), device=self.device)
-            _, pad_axes = self.autoencoder.encode(dummy, condition=condition)
-            pred = self.autoencoder.decode(pred, pad_axes, condition=condition)
+            pred = self.autoencoder.decode(pred, condition=condition)
         self.model.train()
         return pred
