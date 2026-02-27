@@ -11,6 +11,7 @@ import torch.distributed as dist
 
 from neugk.evaluate import BaseEvaluator, validation_metrics
 from neugk.plot_utils import generate_val_plots, avg_flux_confidence
+from neugk.utils import recombine_zf
 
 
 class DiffusionEvaluator(BaseEvaluator):
@@ -75,8 +76,9 @@ class DiffusionEvaluator(BaseEvaluator):
                 preds = self._denormalize_batch(
                     preds,
                     idx_data=idx_data,
-                    denormalize_fn=partial(valset.denormalize, condition=condition),
+                    denormalize_fn=valset.denormalize,
                     dataset=valset,
+                    condition=condition,
                 )
                 tgts = self._denormalize_batch(
                     tgts,
@@ -85,14 +87,15 @@ class DiffusionEvaluator(BaseEvaluator):
                     dataset=valset,
                 )
 
-                tgts = {k: v.cpu() for k, v in tgts.items()}
                 preds = {k: v.cpu() for k, v in preds.items()}
+                tgts = {k: v.cpu() for k, v in tgts.items()}
 
                 # combine zonal flow
                 if self.cfg.dataset.separate_zf:
-                    for d in [preds, tgts]:
-                        for k in d:
-                            d[k] = self._recombine_zf(d[k])
+                    if "df" in preds:
+                        preds["df"] = recombine_zf(preds["df"], dim=1)
+                    if "df" in tgts:
+                        tgts["df"] = recombine_zf(tgts["df"], dim=1)
 
                 # validation metrics
                 metrics_i, integrated_i = validation_metrics(

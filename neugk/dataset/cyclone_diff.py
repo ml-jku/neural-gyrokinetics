@@ -1,9 +1,11 @@
 from typing import Optional, Dict, Sequence, Any
+
 import os
 import pickle
 from tqdm import tqdm
 import hashlib
 from dataclasses import dataclass
+import time
 
 import torch
 import numpy as np
@@ -11,7 +13,7 @@ import torch.distributed as dist
 from torch.utils._pytree import tree_map
 from torch.utils.data import DataLoader
 
-from neugk.utils import RunningMeanStd
+from neugk.utils import RunningMeanStd, separate_zf as separate_zf_fn
 from neugk.dataset.cyclone import CycloneDataset
 
 
@@ -49,11 +51,11 @@ class CycloneAEDataset(CycloneDataset):
         self.precomputed_latents = precomputed_latents
         self.autoencoder = autoencoder
 
-    def _recompute_stats(self, key: str, offset: int = 0):
+    def _recompute_stats(self, keys: Sequence[str], offset: int = 0):
         filter_tag = (
             f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         )
-        return super()._recompute_stats(key, offset, prefix="diff", suffix=filter_tag)
+        return super()._recompute_stats(keys, offset, prefix="diff", suffix=filter_tag)
 
     def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneAESample:
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
@@ -66,7 +68,7 @@ class CycloneAEDataset(CycloneDataset):
                 sample = self._load_data(f, file_index, t_index)
             x = sample["x"]
             if x is not None and self.separate_zf:
-                x = self._separate_zf(x)
+                x = separate_zf_fn(x, dim=0)
 
         phi = sample["phi"]
         flux = sample["flux"]
@@ -199,11 +201,17 @@ class CycloneAEDataset(CycloneDataset):
         if df is not None:
             if self.autoencoder is not None:
                 condition = kwargs["condition"]
+                # handle single sample input from evaluate.py loops
+                if df.ndim == 5: # (C, Vp, Vm, S, X, Y) -> (1, C, ...)
+                    df = df.unsqueeze(0)
+                if condition.ndim == 1: # (N_cond,) -> (1, N_cond)
+                    condition = condition.unsqueeze(0)
+                
                 ch = 2 + 2 * self.separate_zf
                 dummy = torch.zeros((1, ch, *self.resolution), device=condition.device)
                 dummy_cond = condition[0:1]
                 _, pad_axes = self.autoencoder.encode(dummy, condition=dummy_cond)
-                df = self.autoencoder.decode(df, pad_axes, condition=condition)["df"]
+                df = self.autoencoder.decode(df, pad_axes, condition=condition)["df"].squeeze(0)
             field = "df"
             x = df
         elif phi is not None:
@@ -237,7 +245,7 @@ class CycloneAEDataset(CycloneDataset):
                 *[s.geometry for s in batch],
             ),
         )
-
+    
     @torch.no_grad()
     def precompute_latents(
         self,
@@ -248,11 +256,7 @@ class CycloneAEDataset(CycloneDataset):
         latent_stats: Optional[RunningMeanStd] = None,
     ):
         self.autoencoder = autoencoder
-        ae_config_str = str(
-            [(k, tuple(v.shape)) for k, v in autoencoder.state_dict().items()]
-        )
-        hash_str = "".join(sorted(self.files)) + ae_config_str
-        file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
+        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
         latents_dump_pkl = os.path.join(
             self.dir, f"diff_{self.split}_latents_{file_hash}.pkl"
         )
@@ -268,7 +272,7 @@ class CycloneAEDataset(CycloneDataset):
             # bypass pin_memory/worker issues for initial pass
             tmp_loader = DataLoader(
                 dataset=dataloader.dataset,
-                batch_size=32,
+                batch_size=128,
                 num_workers=0,  # forced to 0 to prevent deadlocks with gds
                 pin_memory=False,
                 collate_fn=dataloader.collate_fn,
@@ -372,8 +376,8 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         t_index_aug = sample["t_index_aug"]
 
         if x is not None and self.separate_zf:
-            x = self._separate_zf(x)
-            x_aug = self._separate_zf(x_aug)
+            x = separate_zf_fn(x, dim=0)
+            x_aug = separate_zf_fn(x_aug, dim=0)
 
         phi, flux = sample["phi"], sample["flux"]
         avg_flux = self.get_avg_flux(file_index)

@@ -20,39 +20,43 @@ from einops import rearrange
 def recombine_zf(x, dim: int = 1):
     """
     Recombine Zonal Flow (ZF) and non-ZF components by summing even and odd channels.
-    This is used when separate_zf=True during preprocessing/dataloading.
+    Layout: [re_zf, im_zf, re_non, im_non, ...] -> [re_total, im_total, ...]
     """
-    if x.shape[dim] > 2 and x.shape[dim] % 2 == 0:
-        idx_re, idx_im = [slice(None)] * x.ndim, [slice(None)] * x.ndim
-        idx_re[dim] = slice(0, None, 2)
-        idx_im[dim] = slice(1, None, 2)
-        if torch.is_tensor(x):
-            return torch.cat(
-                [x[idx_re].sum(dim, keepdim=True), x[idx_im].sum(dim, keepdim=True)],
-                dim=dim,
-            )
-        else:
-            return np.concatenate(
-                [
-                    x[tuple(idx_re)].sum(axis=dim, keepdims=True),
-                    x[tuple(idx_im)].sum(axis=dim, keepdims=True),
-                ],
-                axis=dim,
-            )
+    if x.shape[dim] <= 2 or x.shape[dim] % 2 != 0:
+        return x
+
+    if torch.is_tensor(x):
+        cat_fn = torch.cat
+        sum_fn = lambda t, dim, keepdim: t.sum(dim, keepdim=keepdim)
+    else:
+        cat_fn = np.concatenate
+        sum_fn = lambda t, axis, keepdims: t.sum(axis=axis, keepdims=keepdims)
+    
+    def _interleaved_sum(tensor, d):
+        # dynamic slicing
+        s_re = [slice(None)] * tensor.ndim
+        s_re[d] = slice(0, None, 2)
+        s_im = [slice(None)] * tensor.ndim
+        s_im[d] = slice(1, None, 2)
+        s_re = sum_fn(tensor[tuple(s_re)], d, True)
+        s_im = sum_fn(tensor[tuple(s_im)], d, True)
+        return cat_fn([s_re, s_im], d)
+
+    if dim in [0, 1, 2]:
+        return _interleaved_sum(x, dim)
+    
     return x
 
 
 def separate_zf(x, dim: int = 1):
     """
     Separate Zonal Flow (ZF) and non-ZF components.
-    ZF is the average over the last dimension (ky).
-    Returns a tensor with twice the channels at dim (ZF channels followed by non-ZF).
+    Returns [re_zf, im_zf, re_non, im_non] layout.
     """
     if torch.is_tensor(x):
-        zf = x.mean(dim=-1, keepdim=True)
-        return torch.cat([zf.expand_as(x), x - zf], dim=dim)
+        zf = x.mean(dim=-1, keepdim=True).expand_as(x)
+        return torch.cat([zf, x - zf], dim=dim)
     else:
-        # numpy
         zf = x.mean(axis=-1, keepdims=True)
         return np.concatenate([np.broadcast_to(zf, x.shape), x - zf], axis=dim)
 
@@ -253,13 +257,15 @@ def compress_src(path):
     )
     for name in files:
         if (
-            name.endswith(".py")
-            or name.endswith(".yaml")
-            or name.endswith(".ipynb")
+            (name.endswith(".py") or name.endswith(".yaml") or name.endswith(".ipynb"))
             and "wandb" not in name
             and "outputs" not in name
+            and os.path.isfile(name)
         ):
-            zf.write(name, arcname=name)
+            try:
+                zf.write(name, arcname=name)
+            except FileNotFoundError:
+                pass
     zf.close()
 
 

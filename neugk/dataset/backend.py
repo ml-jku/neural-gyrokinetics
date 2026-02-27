@@ -215,12 +215,15 @@ class KvikIOBackend(DataBackend):
 
         self.use_kvikio = use_kvikio
 
+    def _strip_h5(self, path: str) -> str:
+        return path.removesuffix("/").removesuffix(".h5")
+
     def is_valid(self, path: str) -> bool:
-        path = path.removesuffix(".h5")
+        path = self._strip_h5(path)
         return os.path.isdir(path)
 
     def exists(self, path: str) -> bool:
-        path = path.removesuffix(".h5")
+        path = self._strip_h5(path)
         return os.path.exists(os.path.join(path, "metadata.pkl"))
 
     def format_path(
@@ -230,7 +233,7 @@ class KvikIOBackend(DataBackend):
         split_into_bands: Optional[int] = None,
         real_potens: bool = True,
     ) -> str:
-        path = path.removesuffix(".h5")
+        path = self._strip_h5(path)
         if spatial_ifft:
             n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
             tag = (
@@ -245,7 +248,7 @@ class KvikIOBackend(DataBackend):
         self, path: str, input_fields: Sequence[str] = ["df"]
     ) -> Dict[str, Any]:
         _ = input_fields
-        path = path.removesuffix(".h5")
+        path = self._strip_h5(path)
         with open(os.path.join(path, "metadata.pkl"), "rb") as mf:
             return pickle.load(mf)
 

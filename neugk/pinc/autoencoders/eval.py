@@ -8,6 +8,7 @@ from tqdm import tqdm
 from neugk.dataset.cyclone_diff import CycloneAESample
 from neugk.evaluate import BaseEvaluator, validation_metrics
 from neugk.plot_utils import generate_val_plots
+from neugk.utils import recombine_zf
 
 
 class AutoencoderEvaluator(BaseEvaluator):
@@ -136,11 +137,12 @@ class AutoencoderEvaluator(BaseEvaluator):
                     tgts = {k: v.cpu() for k, v in tgts.items()}
                     preds = {k: v.cpu() for k, v in preds.items()}
 
-                    # handle zonal flow
-                    if getattr(self.cfg.dataset, "separate_zf", False):
-                        for d in [preds, tgts]:
-                            for k in d:
-                                d[k] = self._recombine_zf(d[k])
+                    # combine zonal flow
+                    if self.cfg.dataset.separate_zf:
+                        if "df" in preds:
+                            preds["df"] = recombine_zf(preds["df"], dim=1)
+                        if "df" in tgts:
+                            tgts["df"] = recombine_zf(tgts["df"], dim=1)
 
                     # compute validation metrics
                     metrics_i, integrated_i = validation_metrics(

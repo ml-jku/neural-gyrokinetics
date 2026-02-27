@@ -125,7 +125,6 @@ class GyroSwinEvaluator(BaseEvaluator):
 
         return {k: p.to(dtype=torch.float32) for k, p in preds.items()}
 
-
     @torch.no_grad()
     def __call__(
         self,

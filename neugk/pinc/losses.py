@@ -253,7 +253,7 @@ class PINCLossWrapper(LossWrapper):
             if "relative" in loss_type:
                 pred, target = pred / (pred.sum() + eps), target / (target.sum() + eps)
             pl = torch.log(torch.abs(pred) + eps)
-            tl =torch.log(torch.abs(target) + eps)
+            tl = torch.log(torch.abs(target) + eps)
             return F.l1_loss(pl, tl) if "l1" in loss_type else F.mse_loss(pl, tl)
 
         raise ValueError(f"unknown spectral loss type: {loss_type}")

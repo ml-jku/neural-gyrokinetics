@@ -164,9 +164,6 @@ class BaseEvaluator:
     def _is_eval_epoch(self, epoch: int) -> bool:
         return epoch % self.cfg.validation.validate_every_n_epochs == 0 or epoch == 1
 
-    def _recombine_zf(self, x: torch.Tensor) -> torch.Tensor:
-        return recombine_zf(x, dim=1)
-
     def _sync_metrics(
         self,
         metrics: Dict[str, torch.Tensor],
@@ -193,24 +190,47 @@ class BaseEvaluator:
         idx_data: Dict[str, torch.Tensor],
         denormalize_fn: Callable,
         dataset: Optional[Any] = None,
+        **kwargs,
     ) -> Dict[str, torch.Tensor]:
         """Standard denormalization for physics fields."""
+        # shallow copy to avoid modifying input dict in-place
+        data = data.copy()
+
+        # determine expected batch size from indices
+        batch_size = len(idx_data["file_index"])
+
         # try vectorization for dataset-wide normalization
         if (
             dataset is not None
             and getattr(dataset, "normalization_scope", None) == "dataset"
         ):
             for k in {"df", "phi", "flux"} & set(data):
-                data[k] = denormalize_fn(0, **{k: data[k]})
+                if data[k] is not None:
+                    data[k] = denormalize_fn(0, **{k: data[k]}, **kwargs)
+                    assert (
+                        data[k].shape[0] == batch_size
+                    ), f"Batch size mismatch after vectorized denorm for {k}"
             return data
 
         for k in {"df", "phi", "flux"} & set(data):
-            data[k] = torch.stack(
-                [
-                    denormalize_fn(f, **{k: data[k][b]})
-                    for b, f in enumerate(idx_data["file_index"].tolist())
-                ]
-            )
+            if data[k] is not None:
+                samples = []
+                for b, f in enumerate(idx_data["file_index"].tolist()):
+                    # extract individual kwargs if they are batched
+                    curr_kwargs = {
+                        kk: (
+                            vv[b]
+                            if (torch.is_tensor(vv) and vv.shape[0] == batch_size)
+                            else vv
+                        )
+                        for kk, vv in kwargs.items()
+                    }
+                    samples.append(denormalize_fn(f, **{k: data[k][b]}, **curr_kwargs))
+
+                data[k] = torch.stack(samples)
+                assert (
+                    data[k].shape[0] == batch_size
+                ), f"Batch size mismatch after loop denorm for {k}"
         return data
 
     def _denormalize_rollout(
@@ -223,17 +243,38 @@ class BaseEvaluator:
         """Denormalization for rollout predictions (with time dimension)."""
         if not rollout:
             return rollout
-        any_v = next(iter(rollout.values()))
+
+        # determine dimensions from any present field that matches standard physics fields
+        fields_to_denorm = {"df", "phi", "flux"} & set(rollout)
+        if not fields_to_denorm:
+            return rollout.copy()
+
+        any_k = next(iter(fields_to_denorm))
+        any_v = rollout[any_k]
         T, B = any_v.shape[:2]
+
         # reshape time into batch
-        flattened_rollout = {k: v.flatten(0, 1) for k, v in rollout.items()}
+        flattened_rollout = {
+            k: v.flatten(0, 1) if k in fields_to_denorm else v
+            for k, v in rollout.items()
+        }
+
         # match indices to flattened rollout
         flattened_idx_data = {"file_index": idx_data["file_index"].repeat(T)}
+
         # full batch denormalization
         denorm_data = self._denormalize_batch(
             flattened_rollout, flattened_idx_data, denormalize_fn, dataset
         )
-        return {k: v.view(T, B, *v.shape[1:]) for k, v in denorm_data.items()}
+
+        # Reshape back to (T, B, ...)
+        res = {}
+        for k, v in denorm_data.items():
+            if k in fields_to_denorm:
+                res[k] = v.view(T, B, *v.shape[1:])
+            else:
+                res[k] = v
+        return res
 
     def _accumulate_metrics(
         self,

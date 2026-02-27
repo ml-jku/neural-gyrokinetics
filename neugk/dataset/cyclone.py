@@ -5,19 +5,21 @@ import os
 import tqdm
 import pickle
 import hashlib
+import time
 
 import random
 from functools import partial
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import torch.distributed as dist
 
 import torch
 import numpy as np
 from torch.utils.data import Dataset
 from torch.utils._pytree import tree_map
 
-from neugk.utils import RunningMeanStd
+from neugk.utils import RunningMeanStd, separate_zf as separate_zf_fn
 from neugk.dataset.backend import DataBackend
 
 
@@ -303,11 +305,10 @@ class CycloneDataset(Dataset):
 
         norm_dataset = normalization is not None and normalization_scope == "dataset"
         if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
-            if separate_zf and not offset:
-                stats["df"] = self._recompute_stats(key="df")
-            else:
-                for key in self.input_fields:
-                    stats[key] = self._recompute_stats(key=key, offset=self.offsets[0])
+            # recompute for all fields in a single pass
+            stats_recomputed = self._recompute_stats(keys=self.input_fields, offset=self.offsets[0])
+            for k, k_stat in stats_recomputed.items():
+                stats[k] = k_stat
 
         if normalization_scope == "dataset" and normalization_stats is None:
             for k in input_fields:
@@ -316,60 +317,51 @@ class CycloneDataset(Dataset):
                 self.stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
                 self.stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
 
-    def _separate_zf(self, x):
-        if isinstance(x, np.ndarray):
-            nky = x.shape[-1]
-            zf = np.repeat(x.mean(axis=-1, keepdims=True), repeats=nky, axis=-1)
-            return np.concatenate([zf, x - zf], axis=0)
-        else:
-            nky = x.shape[-1]
-            zf = x.mean(dim=-1, keepdim=True).expand(*x.shape[:-1], nky)
-            return torch.cat([zf, x - zf], dim=0)
-
     def _recompute_stats(
-        self, key: str, offset: int = 0, prefix: str = "", suffix: str = ""
-    ):
-        def process_t_idx(t_idx, key):
+        self, keys: List[str], offset: int = 0, prefix: str = "", suffix: str = ""
+    ) -> Dict[str, RunningMeanStd]:
+        def process_t_idx(t_idx, target_keys):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
             with self.backend.open(self.files[file_index]) as f:
                 sample = self._load_data(f, file_index, t_index)
 
-            # force to numpy for math
-            if isinstance(sample.get("x"), torch.Tensor):
-                sample["x"] = sample["x"].cpu().numpy()
-            if isinstance(sample.get("phi"), torch.Tensor):
-                sample["phi"] = sample["phi"].cpu().numpy()
+            results = {}
+            for key in target_keys:
+                if key == "df":
+                    x = sample["x"]
+                    if isinstance(x, torch.Tensor):
+                        x = x.cpu().numpy()
+                    norm_axes = (1, 3, 4, 5) if self.decouple_mu else (1, 2, 3, 4, 5)
+                    if self.separate_zf:
+                        x = separate_zf_fn(x, dim=0)
+                elif key == "phi":
+                    x = sample["phi"]
+                    if isinstance(x, torch.Tensor):
+                        x = x.cpu().numpy()
+                    if x.ndim == 3:
+                        x = np.expand_dims(x, 0)
+                    norm_axes = (1, 2, 3)
+                else:
+                    flux_val = (
+                        sample.get("flux") if "flux" in sample else sample.get("gt_flux")
+                    )
+                    if isinstance(flux_val, torch.Tensor):
+                        flux_val = flux_val.cpu().numpy()
+                    x = np.array([flux_val], dtype=np.float32)
+                    norm_axes = (0,)
 
-            # handle both ae and base dataset flux naming
-            flux_val = sample.get("flux") if "flux" in sample else sample.get("gt_flux")
-            if isinstance(flux_val, torch.Tensor):
-                flux_val = flux_val.cpu().numpy()
-
-            if key == "df":
-                x = sample["x"]
-                norm_axes = (1, 3, 4, 5) if self.decouple_mu else (1, 2, 3, 4, 5)
-                if self.separate_zf:
-                    x = self._separate_zf(x)
-            elif key == "phi":
-                x = sample["phi"]
-                if x.ndim == 3:
-                    x = np.expand_dims(x, 0)
-                norm_axes = (1, 2, 3)
-            else:
-                x = np.array([flux_val], dtype=np.float32)
-                norm_axes = (0,)
-
-            x_mean = np.mean(x, norm_axes, keepdims=True)
-            x_var = np.var(x, norm_axes, keepdims=True)
-            x_min = np.min(x, norm_axes, keepdims=True)
-            x_max = np.max(x, norm_axes, keepdims=True)
-
-            return x_mean, x_var, x_min, x_max
+                results[key] = (
+                    np.mean(x, norm_axes, keepdims=True),
+                    np.var(x, norm_axes, keepdims=True),
+                    np.min(x, norm_axes, keepdims=True),
+                    np.max(x, norm_axes, keepdims=True),
+                )
+            return results
 
         # subsample by two for normalization stats
         t_indices = (
             list(range(0, self.length, 2))
-            if key in ["df", "phi"]
+            if any(k in ["df", "phi"] for k in keys)
             else list(range(self.length))
         )
         config_keys = ["cond_filters", "subsample", "separate_zf"]
@@ -377,32 +369,48 @@ class CycloneDataset(Dataset):
         hash_str = "".join(sorted(self.files)) + config_str
         file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
         tmu = "mu" if self.decouple_mu else ""
-        segments = [prefix, key, f"offset{offset}", tmu, suffix, file_hash, "stats"]
+        
+        # stable key sorting for filename
+        key_tag = "_".join(sorted(keys))
+        segments = [prefix, key_tag, f"offset{offset}", tmu, suffix, file_hash, "stats"]
         stats_filename = "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
         stats_path = os.path.join(self.dir, stats_filename)
 
         if os.path.exists(stats_path):
-            stats = pickle.load(open(stats_path, "rb"))
+            with open(stats_path, "rb") as f:
+                stats_dict = pickle.load(f)
         else:
-            process_inds = partial(process_t_idx, key=key)
-            stats = None
-            with ThreadPoolExecutor(self.num_workers) as executor:
-                metrics_gen = tqdm.tqdm(
-                    executor.map(process_inds, t_indices),
-                    total=len(t_indices),
-                    desc=f"re-computing normalization stats for {key}",
-                )
+            global_rank = dist.get_rank() if dist.is_initialized() else self.rank
+            if dist.is_initialized() and global_rank != 0:
+                while not os.path.exists(stats_path):
+                    time.sleep(1)
+                with open(stats_path, "rb") as f:
+                    stats_dict = pickle.load(f)
+                print(f"rank {global_rank}: loaded stats from {stats_path}")
+            else:
+                process_inds = partial(process_t_idx, target_keys=keys)
+                stats_dict = {}
+                with ThreadPoolExecutor(self.num_workers) as executor:
+                    metrics_gen = tqdm.tqdm(
+                        executor.map(process_inds, t_indices),
+                        total=len(t_indices),
+                        desc=f"re-computing stats for {keys} (rank {global_rank})",
+                    )
 
-                for metrics in metrics_gen:
-                    x_mean, x_var, x_min, x_max = metrics
-                    if stats is None:
-                        stats = RunningMeanStd(shape=x_mean.shape)
-                    stats.update(x_mean, x_var, x_min, x_max)
+                    for batch_results in metrics_gen:
+                        for key, metrics in batch_results.items():
+                            x_mean, x_var, x_min, x_max = metrics
+                            if key not in stats_dict:
+                                stats_dict[key] = RunningMeanStd(shape=x_mean.shape)
+                            stats_dict[key].update(x_mean, x_var, x_min, x_max)
 
-            pickle.dump(stats, open(stats_path, "wb"))
-            print(f"saved recomputed stats to {stats_path}")
+                # atomic write
+                with open(stats_path + ".tmp", "wb") as f:
+                    pickle.dump(stats_dict, f)
+                os.replace(stats_path + ".tmp", stats_path)
+                print(f"rank {global_rank}: saved stats to {stats_path}")
 
-        return stats
+        return stats_dict
 
     def __getitem__(
         self, index: Union[int, Tuple[int, int]], get_normalized: bool = True
@@ -417,8 +425,8 @@ class CycloneDataset(Dataset):
 
         x, gt = sample["x"], sample["gt"]
         if self.separate_zf:
-            x = self._separate_zf(x)
-            gt = self._separate_zf(gt)
+            x = separate_zf_fn(x, dim=0)
+            gt = separate_zf_fn(gt, dim=0)
 
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         timestep = sample["timestep"]
@@ -803,7 +811,8 @@ class CycloneDataset(Dataset):
 class LinearCycloneDataset(CycloneDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, linear_sims=True, **kwargs)
-        temp_stats = self._recompute_stats_linear()
+        stats_dict = self._recompute_stats_linear()
+        temp_stats = stats_dict["df"]
 
         self.stats["df"]["full"]["mean"] = temp_stats.mean.astype(np.float32)
         self.stats["df"]["full"]["std"] = (temp_stats.var ** (1 / 2)).astype(np.float32)
@@ -819,7 +828,7 @@ class LinearCycloneDataset(CycloneDataset):
 
         x = sample["x"]
         if self.separate_zf:
-            x = self._separate_zf(x)
+            x = separate_zf_fn(x, dim=0)
         gt = None
 
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
@@ -959,45 +968,75 @@ class LinearCycloneDataset(CycloneDataset):
 
         return timesteps_tensor
 
-    def _recompute_stats_linear(self):
+    def _recompute_stats_linear(self) -> Dict[str, RunningMeanStd]:
         t_indices = list(range(0, len(self.files)))
         stats_path = os.path.join(
             self.dir, f"df_linear_{len(self.files)}sims_stats.pkl"
         )
 
         if os.path.exists(stats_path):
-            stats = pickle.load(open(stats_path, "rb"))
+            with open(stats_path, "rb") as f:
+                stats_dict = pickle.load(f)
         else:
-            stats = None
-            for index in tqdm.tqdm(
-                t_indices, desc="re-computing normalization stats for df"
-            ):
-                file_index = index
+            global_rank = dist.get_rank() if dist.is_initialized() else self.rank
+            if dist.is_initialized() and global_rank != 0:
+                print(f"rank {global_rank}: waiting for stats from rank 0 at {stats_path}")
+                while not os.path.exists(stats_path):
+                    time.sleep(1)
+                time.sleep(0.5)
+                with open(stats_path, "rb") as f:
+                    stats_dict = pickle.load(f)
+            else:
+                stats_dict = {}
+                for index in tqdm.tqdm(
+                    t_indices, desc=f"re-computing normalization stats for linear (rank {global_rank})"
+                ):
+                    file_index = index
 
-                with self.backend.open(self.files[file_index]) as f:
-                    t_index = len(self.metadata[file_index]["timesteps"]) - 1
-                    sample = self._load_data(f, file_index, t_index)
+                    with self.backend.open(self.files[file_index]) as f:
+                        t_index = len(self.metadata[file_index]["timesteps"]) - 1
+                        sample = self._load_data(f, file_index, t_index)
 
-                x = sample["x"]
-                if isinstance(x, torch.Tensor):
-                    x = x.cpu().numpy()
+                    for key in ["df", "phi", "flux"]:
+                        if key not in sample and key == "flux" and "gt_flux" in sample:
+                            target_val = sample["gt_flux"]
+                        elif key in sample:
+                            target_val = sample[key]
+                        elif key == "df" and "x" in sample:
+                            target_val = sample["x"]
+                        else:
+                            continue
 
-                norm_axes = (1, 2, 3, 4, 5)
-                if self.separate_zf:
-                    x = self._separate_zf(x)
+                        if isinstance(target_val, torch.Tensor):
+                            target_val = target_val.cpu().numpy()
 
-                x_mean = np.mean(x, norm_axes, keepdims=True)
-                x_var = np.var(x, norm_axes, keepdims=True)
-                x_min = np.min(x, norm_axes, keepdims=True)
-                x_max = np.max(x, norm_axes, keepdims=True)
+                        if key == "df":
+                            norm_axes = (1, 2, 3, 4, 5)
+                            if self.separate_zf:
+                                target_val = separate_zf_fn(target_val, dim=0)
+                        elif key == "phi":
+                            if target_val.ndim == 3:
+                                target_val = np.expand_dims(target_val, 0)
+                            norm_axes = (1, 2, 3)
+                        else:
+                            target_val = np.array([target_val], dtype=np.float32)
+                            norm_axes = (0,)
 
-                if stats is None:
-                    stats = RunningMeanStd(shape=x_mean.shape)
-                stats.update(x_mean, x_var, x_min, x_max)
+                        x_mean = np.mean(target_val, norm_axes, keepdims=True)
+                        x_var = np.var(target_val, norm_axes, keepdims=True)
+                        x_min = np.min(target_val, norm_axes, keepdims=True)
+                        x_max = np.max(target_val, norm_axes, keepdims=True)
 
-            pickle.dump(stats, open(stats_path, "wb"))
+                        if key not in stats_dict:
+                            stats_dict[key] = RunningMeanStd(shape=x_mean.shape)
+                        stats_dict[key].update(x_mean, x_var, x_min, x_max)
 
-        return stats
+                # atomic write
+                with open(stats_path + ".tmp", "wb") as f:
+                    pickle.dump(stats_dict, f)
+                os.replace(stats_path + ".tmp", stats_path)
+
+        return stats_dict
 
     def get_at_time(
         self,
@@ -1097,8 +1136,8 @@ class CoordinateCycloneDataset(CycloneDataset):
 
         x, gt = sample["x"], sample["gt"]
         if self.separate_zf:
-            x = self._separate_zf(x)
-            gt = self._separate_zf(gt)
+            x = separate_zf_fn(x, dim=0)
+            gt = separate_zf_fn(gt, dim=0)
 
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         timestep = sample["timestep"]
