@@ -55,11 +55,15 @@ class LossWrapper(nn.Module):
         denormalize_fn: Optional[Callable] = None,
         separate_zf: bool = False,
         real_potens: bool = False,
+        masked_mode_modeling: bool = False,
     ):
         super().__init__()
         self.weights = weights if weights is not None else {}
         self.schedulers = schedulers if weights is not None else {}
         self._data_losses = ["df", "phi", "flux"]
+        if masked_mode_modeling:
+            self._data_losses += ["df_delta"]
+            self.weights["df_delta"] = self.weights.get("df_delta", 1.0)
         self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
         self.integrator = FluxIntegral(real_potens=real_potens)
         self.denormalize_fn = denormalize_fn

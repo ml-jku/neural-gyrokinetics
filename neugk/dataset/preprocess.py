@@ -1,5 +1,6 @@
 import os
 import queue
+import warnings
 
 from tqdm import tqdm
 from argparse import ArgumentParser
@@ -11,12 +12,12 @@ import torch
 
 from neugk.utils import (
     RunningMeanStd,
-    pev_flux_df_phi,
     load_geometry,
     K_files,
     poten_files,
     parse_input_dat,
 )
+from neugk.integrals import get_integrals
 
 from neugk.dataset.backend import H5Backend, KvikIOBackend, DataBackend
 
@@ -83,7 +84,6 @@ def preprocess(
     spatial_ifft: bool = False,
     separate_zf: bool = False,
     split_into_bands=None,
-    norm_axes=(1, 2, 3, 4, 5),
     root: str = "/restricteddata/ukaea/gyrokinetics",
     target_dir: str = "/local00/bioinf/galletti",
     position_queue: queue.Queue = None,
@@ -118,10 +118,17 @@ def preprocess(
 
         ks = K_files(dir_in.replace("_Lin", ""))
         potens, _ = poten_files(dir_in.replace("_Lin", ""))
-
+        k_dir = dir_in.replace("_Lin", "")
+        if not len(ks):
+            # load k dump files of other sim, they are sampled the same anyways
+            # this is only for extracting the correct flux timesteps
+            ks = K_files("/restricteddata/ukaea/gyrokinetics/raw/iteration_0")
+            potens, _ = poten_files("/restricteddata/ukaea/gyrokinetics/raw/iteration_0")
+            k_dir = "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
         # get timestamps
         ts = []
         for k in ks:
+            # load corresponding timestep
             with open(f"{dir_in.replace('_Lin', '')}/{k}.dat", "r") as file:
                 for line in file:
                     line_split = line.split("=")
@@ -135,46 +142,46 @@ def preprocess(
         xphi = np.loadtxt(f"{dir_in}/xphi")
         krho = np.loadtxt(f"{dir_in}/krho")
         vpgr = np.loadtxt(f"{dir_in}/vpgr.dat")
+        # number of parallel direction grid points
         ns = sgrid.shape[1] if len(sgrid.shape) > 1 else sgrid.shape[0]
+        # number of x, y grid points (in real space)
         nx, ny = xphi.shape[1], xphi.shape[0]
+        # number of modes in x and y direction
         nkx, nky = krho.shape[1], krho.shape[0]
+        # get velocity space resolutions
         nvpar, nmu = vpgr.shape[1], vpgr.shape[0]
 
         resolution = (nvpar, nmu, ns, nkx, nky)
 
+        # always load nonlinear fluxes
         fluxes = np.loadtxt(f"{dir_in.replace('_Lin', '')}/fluxes.dat")[:, 1]
-        orig_times = np.loadtxt(f"{dir_in.replace('_Lin', '')}/time.dat")
-        ts_slices = [np.isclose(orig_times, t).nonzero()[0][0] for t in timesteps]
-        fluxes = fluxes[ts_slices]
         orig_fluxes = fluxes.copy()
-        fluxes = np.clip(fluxes, a_min=0.0, a_max=None)
-
+        # print(ks)
+        if not "Lin" in out_path:
+            orig_times = np.loadtxt(f"{dir_in.replace('_Lin', '')}/time.dat")
+            ts_slices = [np.isclose(orig_times, t).nonzero()[0][0] for t in timesteps]
+            fluxes = fluxes[ts_slices]
+            orig_fluxes = fluxes.copy()
+        
+        fluxes = np.clip(fluxes, a_min=0., a_max=None)
+        # load parameters
         config = parse_input_dat(f"{dir_in}/input.dat")
         ion_temp_grad = config["species"]["rlt"]
         density_grad = config["species"]["rln"]
         s_hat = config["geom"]["shat"]
         q = config["geom"]["q"]
-
-        shape = tuple(
-            [
-                1 if ax in norm_axes else resolution[ax - 1]
-                for ax in np.arange(1, len(resolution) + 1)
-            ]
-        )
-        if separate_zf:
-            if split_into_bands:
-                df_stats = RunningMeanStd(shape=((split_into_bands + 1) * 2,) + shape)
-            else:
-                df_stats = RunningMeanStd(shape=(4,) + shape)
-        else:
-            df_stats = RunningMeanStd(shape=(2,) + shape)
-            phi_stats = RunningMeanStd((1, 1, 1))
-            flux_stats = RunningMeanStd((1,))
+            
+        df_stats = RunningMeanStd()
+        phi_stats = RunningMeanStd()
+        flux_stats = RunningMeanStd()
 
         if "Lin" in out_path:
             # if linear sim, only take last timestep
-            ks = [ks[-1]]
+            ks = ["FDS"]
             potens = [potens[-1]]
+            kyspec = np.loadtxt(dir_in.replace("_Lin", "/kyspec"))
+            growth_rate = np.loadtxt(os.path.join(dir_in, "growth.dat"))[-1, :]
+            ky_frequencies = np.loadtxt(os.path.join(dir_in, "frequencies.dat"))[-1, :]
 
         geometry = load_geometry(dir_in)
         np_geom = {
@@ -254,44 +261,32 @@ def preprocess(
                 # load the potential field
                 a = np.loadtxt(f"{dir_in}/{pot}")
                 phi = np.reshape(a, (nx, ns, ny), order="F").astype("float32").copy()
-                spc_file = pot.replace("Poten", "Spc3d")
-                b = np.loadtxt(f"{dir_in}/{spc_file}")
-                gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
+                if not "Lin" in out_path:
+                    spc_file = pot.replace("Poten", "Spc3d")
+                    b = np.loadtxt(f"{dir_in}/{spc_file}")
+                    gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
+                else:
+                    gt_spc = None
                 phi_fft_unpadded = phi_to_spc(phi, gt_spc, out_shape=(nkx, ns, nky))
                 phi = phi_fft_to_real(
                     phi_fft_unpadded, out_shape=phi_fft_unpadded.shape
                 )
 
-                df = np.moveaxis(orig_knth, 0, -1).copy()
-                df = df.view(dtype=np.complex64).squeeze()
-                df = torch.tensor(df)
+                if not "Lin" in out_path:
+                    # do not compute integral for linear sims => it will fail!
+                    # phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
+                    df = torch.tensor(knth)
+                    _, (_, eflux, _) = get_integrals(df, geometry)
+                    if not np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-4):
+                        warnings.warn(
+                            f"Flux integral does not match original flux! Computed: {eflux.sum().item()}, Original: {orig_fluxes[idx]}"
+                        )
+                    assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-2), "Strong deviation for flux!!"
 
-                if "Lin" not in out_path:
-                    phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
-                    _, eflux, _ = pev_flux_df_phi(
-                        df, phi_fft_unpadded, geometry, aggregate=False
-                    )
-                    try:
-                        assert np.isclose(
-                            eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1e-4
-                        ), "Flux integral failed..."
-                    except Exception:
-                        pass
-
-                # update running averages
-                df_stats.update(
-                    np.mean(knth, axis=norm_axes, keepdims=True),
-                    np.var(knth, axis=norm_axes, keepdims=True),
-                    np.min(knth, axis=norm_axes, keepdims=True),
-                    np.max(knth, axis=norm_axes, keepdims=True),
-                )
-                flux_stats.update(fluxes[idx], fluxes[idx], fluxes[idx], fluxes[idx])
-                phi_stats.update(
-                    np.mean(phi, axis=(0, 1, 2), keepdims=True),
-                    np.var(phi, axis=(0, 1, 2), keepdims=True),
-                    np.min(phi, axis=(0, 1, 2), keepdims=True),
-                    np.max(phi, axis=(0, 1, 2), keepdims=True),
-                )
+                # append stats to metadata dictionary
+                df_stats.update(knth, np.zeros_like(knth), knth, knth)
+                flux_stats.update(fluxes[idx], np.zeros_like(fluxes[idx]), fluxes[idx], fluxes[idx])
+                phi_stats.update(phi, np.zeros_like(phi), phi, phi)
 
                 # write to disk
                 backend.write_df(f, str(idx).zfill(5), df=knth)
@@ -344,11 +339,8 @@ if __name__ == "__main__":
     IFFT = True
     separate_zf = False
     split_into_bands = None
-    norm_axes = (1, 2, 3, 4, 5)
 
-    originals = [f"iteration_{i}" for i in range(0, 300)]
-
-    datasets = originals
+    datasets = ["iteration_0", "iteration_1", "iteration_13"]
 
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)
@@ -368,7 +360,6 @@ if __name__ == "__main__":
             spatial_ifft=IFFT,
             separate_zf=separate_zf,
             split_into_bands=split_into_bands,
-            norm_axes=norm_axes,
             root=args.root,
             target_dir=args.target_dir,
             position_queue=position_queue,
@@ -402,7 +393,6 @@ if __name__ == "__main__":
                 spatial_ifft=IFFT,
                 separate_zf=separate_zf,
                 split_into_bands=split_into_bands,
-                norm_axes=norm_axes,
                 root=args.root,
                 target_dir=args.target_dir,
                 position_queue=None,
@@ -417,7 +407,7 @@ if __name__ == "__main__":
             if skipped:
                 print(f"Skipped {f}: already exists.")
             else:
-                meta = backend.get_metadata(out_path)
+                meta = backend.read_metadata(out_path)
                 timesteps = len(meta["timesteps"])
                 mean, std = meta["df_mean"][0].mean(), meta["df_std"][0].mean()
                 print(

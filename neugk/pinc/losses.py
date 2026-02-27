@@ -52,6 +52,7 @@ class PINCLossWrapper(LossWrapper):
         eval_integral_loss_type: str = "mse",
         eval_spectral_loss_type: str = "l1",
         dataset: Optional[Any] = None,
+        masked_mode_modeling: bool = False,
     ):
         super().__init__(
             weights=weights,
@@ -59,6 +60,7 @@ class PINCLossWrapper(LossWrapper):
             denormalize_fn=denormalize_fn,
             separate_zf=separate_zf,
             real_potens=real_potens,
+            masked_mode_modeling=masked_mode_modeling,
         )
 
         self._vae_losses = ["kl_div"]
@@ -538,17 +540,20 @@ class PINCLossWrapper(LossWrapper):
             + self._spectral_losses
             + self._simsiam_losses
         )
-        all_keys = (
-            [
-                k
-                for k, w in self.weights.items()
-                if w > 0.0 and k in (set(tgts) | set(preds) | special_keys)
-            ]
-            if self.training
-            else list(set(self.weights) | set(losses))
-        )
-        data_keys = [k for k in all_keys if k not in special_keys]
+        
+        available_keys = list(set(tgts.keys()) | set(preds.keys()) | special_keys)
+        nonzero_keys = [k for k, w in self.weights.items() if w > 0.0]
+        if any((n not in available_keys) for n in nonzero_keys):
+            nonzero_keys = [n for n in nonzero_keys if n in available_keys]
 
+        if self.training:
+            all_keys = nonzero_keys
+        else:
+            all_keys = list(set(self.weights.keys()) | set(losses.keys()))
+
+        data_keys = [k for k in all_keys if k not in special_keys]
+        if not self.training:
+            data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
             p, t = preds.get(k, torch.zeros_like(tgts[k])), tgts[k]
             if p.shape != t.shape and k == "phi":

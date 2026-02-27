@@ -278,8 +278,8 @@ def expand_as(src: np.ndarray, tgt: np.ndarray):
         ss == 1 or ss == st for ss, st in zip(src.shape, tgt.shape)
     ):
         return src
-    # expand manually
-    src = src.squeeze()
+    # squeeze is causing issues with arbitrary aggregating of dimensions for stats computation
+    # src = src.squeeze()
     while src.ndim < tgt.ndim:
         if isinstance(src, np.ndarray):
             src = np.expand_dims(src, axis=-1)
@@ -320,7 +320,7 @@ def filter_cli_priority(cli: Sequence, source: DictConfig, key: str = ""):
 class RunningMeanStd:
     """Calculates online statistics for a data stream."""
 
-    def __init__(self, shape: Sequence[int], epsilon: float = 1e-4):
+    def __init__(self, shape: Optional[Sequence[int]] = None, epsilon: float = 1e-4):
         """
         Calculates the running mean and std of a data stream
         https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
@@ -328,16 +328,20 @@ class RunningMeanStd:
         :param epsilon: helps with arithmetic issues
         :param shape: the shape of the data stream's output
         """
-        self.mean = np.zeros(shape, np.float32)
-        self.min = np.zeros(shape, np.float32)
-        self.max = np.zeros(shape, np.float32)
-        self.var = np.ones(shape, np.float32)
+        if shape is not None:
+            self.mean = np.zeros(shape, np.float32)
+            self.min = np.full_like(self.mean, fill_value=np.inf, dtype=np.float32)
+            self.max = np.zeros(shape, np.float32)
+            self.var = np.ones(shape, np.float32)
+        else:
+            self.mean = self.var = self.min = self.max = None
         self.count = epsilon
 
     def copy(self) -> "RunningMeanStd":
         """
         :return: Return a copy of the current object.
         """
+        assert self.mean is not None, "Cannot copy an uninitialized RunningMeanStd object"
         new_object = RunningMeanStd(shape=self.mean.shape)
         new_object.mean = self.mean.copy()
         new_object.var = self.var.copy()
@@ -366,6 +370,12 @@ class RunningMeanStd:
 
     def update(self, mean, var, min, max, count=1.0) -> None:
         """Update current moments with batch statistics."""
+        if self.mean is None:
+            # initialize with shape that we receive
+            self.mean = np.zeros_like(mean, np.float32)
+            self.min = np.full_like(self.mean, fill_value=np.inf, dtype=np.float32)
+            self.max = np.zeros_like(mean, np.float32)
+            self.var = np.ones_like(mean, np.float32)
         self.update_from_moments(mean, var, min, max, count)
 
     def update_from_moments(
@@ -405,151 +415,33 @@ class RunningMeanStd:
         self.var = new_var
         self.count = new_count
 
-
-def pev_flux_df_phi(
-    df: torch.Tensor,
-    phi: torch.Tensor,
-    geometry,
-    aggregate: bool = True,
-    magnitude: bool = False,
-):
-    """
-    Computes particle, heat and momentum fluxes based on the distribution function (df)
-    and electrostatic potential (phi).
-
-    Args:
-        df (torch.Tensor): 5D density function. Shape: (b, c, vpar, vmu, s, x, y).
-        phi (torch.Tensor): 3D electrostatic potential. Shape: (b, 1, x, s, y).
-        geometry (Dict): Dictionary containing geometry parameters and settings.
-        aggregate (bool, optional): Whether to return the summed fluxes. Default: True.
-        magnitude (bool, optional): Whether to use df and phi absolutes. Default: False.
-    """
-    # expand geometry constants for broadcasting
-    # grids
-    krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
-    kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
-    ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
-    intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
-    intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
-    vpgr = rearrange(geometry["vpgr"], "par -> par 1 1 1 1")
-    mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
-    # settings
-    little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
-    bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
-    efun = rearrange(geometry["efun"], "s -> 1 1 s 1 1")
-    rfun = rearrange(geometry["rfun"], "s -> 1 1 s 1 1")
-    bt_frac = rearrange(geometry["bt_frac"], "s -> 1 1 s 1 1")
-    parseval = rearrange(geometry["parseval"], "y -> 1 1 1 1 y")
-    mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
-    # gyroaveraged phi
-    krloc = torch.sqrt(
-        krho**2 * little_g[0] + 2 * krho * kxrh * little_g[1] + kxrh**2 * little_g[2]
-    )
-    bessel = torch.special.bessel_j0(
-        mas * vthrat * krloc * torch.sqrt(2.0 * mugr / bn) / signz
-    )
-
-    phi_gyro = bessel * rearrange(phi, "x s y -> 1 1 s x y")
-    # absolute values of df and phi
-    if magnitude:
-        df = -1j * torch.abs(df)
-        phi_gyro = torch.abs(phi_gyro)
-    # grid derivatives
-    dum = parseval * ints * (efun * krho) * df
-    dum1 = dum * torch.conj(phi_gyro)
-    dum2 = dum1 * bn
-    d3X = ints * geometry["d2X"]
-    d3v = intmu * bn * intvp
-    signB = geometry["signB"]
-    # flux fields
-    pflux_det = d3X * d3v * torch.imag(dum1)
-    eflux_det = d3X * d3v * (vpgr**2 * torch.imag(dum1) + 2 * mugr * torch.imag(dum2))
-    vflux_det = d3X * d3v * (torch.imag(dum1) * vpgr * rfun * bt_frac * signB)
-    # sum total fluxes
-    if aggregate:
-        pflux_det = pflux_det.sum()
-        eflux_det = eflux_det.sum()
-        vflux_det = vflux_det.sum()
-    return pflux_det, eflux_det, vflux_det
-
-
-def phi_integral(df: torch.Tensor, geometry: Dict):
-    """Compute the electrostatic potential integral from the distribution function."""
-    ns, nx, ny = df.shape[3:]
-    # df to fourier
-    df = df.movedim(0, -1).contiguous()
-    df = torch.view_as_complex(df)
-    # phi tensor
-    bufphi = torch.zeros((ns, nx, ny), dtype=df.dtype, device=df.device)
-    # expand grids
-    krho = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
-    kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
-    ints = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
-    intmu = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
-    intvp = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
-    mugr = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
-    # expand settings
-    little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
-    bn = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
-    mas, vthrat, signz = geometry["mas"], geometry["vthrat"], geometry["signz"]
-    tmp = geometry["tmp"]
-    # compute bessel
-    krloc = torch.sqrt(
-        krho**2 * little_g[0] + 2 * krho * kxrh * little_g[1] + kxrh**2 * little_g[2]
-    )
-    bessel = torch.special.bessel_j0(
-        mas * vthrat * krloc * torch.sqrt(2.0 * mugr / bn) / signz
-    )
-    # compute gamma
-    gamma = 0.5 * ((mas * vthrat * krloc) / (signz * bn)) ** 2
-    gamma = torch.special.i0(gamma) * torch.exp(-gamma)
-
-    # poisson solver terms
-    de = 1.0
-    cfen = torch.zeros_like(ints)
-    poisson_int = signz * de * intmu * intvp * bessel * bn
-    poisson_int = torch.where(torch.abs(intvp) < 1e-9, 0.0, poisson_int)
-
-    # diagonal corrections
-    diagz = (
-        signz
-        * de
-        * (signz * (gamma - 1.0) * torch.exp(-cfen) / tmp - torch.exp(-cfen) / tmp)
-    )
-    matz = -ints / diagz
-    matz[..., 1:] = 0.0  # only keep y=0 (turb)
-
-    maty = (-matz * torch.exp(-cfen)).sum((2,), keepdim=True)
-    maty = tmp / (de * torch.exp(-cfen)) + maty / torch.exp(-cfen)
-    maty[..., 0, :] = 1 + 0j
-    maty = torch.where(maty == 0, 1.0, maty)  # avoid infs
-    maty = 1 / maty
-    maty[..., 1:] = 0.0  # only keep y=0 (turb)
-
-    poisson_diag = torch.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
-    poisson_diag[..., 0, 0] = 0.0
-    poisson_diag = poisson_diag - signz * torch.exp(-cfen) * de / tmp
-    poisson_diag = -1 / poisson_diag
-
-    # integrate velocity space
-    phi = (1 + 0j) * poisson_int * df
-    phi = phi.sum((0, 1), keepdim=True)
-
-    # apply zonal flow corrections
-    bufphi = bufphi + (1 + 0j) * matz * phi
-    bufphi = bufphi.sum(
-        (
-            2,
-            4,
-        ),
-        keepdim=True,
-    )
-    phi = phi + (1 + 0j) * maty * bufphi
-
-    # finalize normalization
-    phi = phi * poisson_diag
-    phi = rearrange(phi.squeeze(), "s x y -> x s y")
-    return phi
+    @staticmethod
+    def aggregate_stats(means, stds, agg_axes=(1,2,3,4,5)) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Reduces coordinate-wise stats to channel-wise stats.
+        
+        Args:
+            coord_means: Array of shape (C, D, H, W)
+            coord_stds:  Array of shape (C, D, H, W)
+        """
+        # The mean of means is the global mean.
+        channel_means = np.mean(means, axis=agg_axes, keepdims=True)
+        
+        # Convert stds to variance first
+        coord_vars = stds ** 2
+        
+        # average of the local variances
+        avg_of_vars = np.mean(coord_vars, axis=agg_axes, keepdims=True)
+        
+        # variance of the local means 
+        diff_sq = (means - channel_means) ** 2
+        var_of_means = np.mean(diff_sq, axis=agg_axes, keepdims=True)
+        
+        # Total Variance = Average of Variances + Variance of Means
+        channel_vars = avg_of_vars + var_of_means
+        channel_stds = np.sqrt(channel_vars)
+        
+        return channel_means, channel_stds
 
 
 def load_geom(file_path):
@@ -593,28 +485,28 @@ def load_geom(file_path):
     return data
 
 
-def load_geometry(directory):
+def load_geometry(directory, dtype=torch.float64):
     """Initialize geometry tensors from raw simulation files."""
     geometry = {}
 
     # set defaults
-    geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=torch.float32)
-    geometry["signz"] = 1.0
-    geometry["vthrat"] = 1.0
-    geometry["tmp"] = 1.0
-    geometry["mas"] = 1.0
-    geometry["d2X"] = 1.0
-    geometry["signB"] = 1.0
+    geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=dtype)
+    geometry["signz"] = torch.tensor(1.0, dtype=dtype)
+    geometry["vthrat"] = torch.tensor(1.0, dtype=dtype)
+    geometry["tmp"] = torch.tensor(1.0, dtype=dtype)
+    geometry["mas"] = torch.tensor(1.0, dtype=dtype)
+    geometry["d2X"] = torch.tensor(1.0, dtype=dtype)
+    geometry["signB"] = torch.tensor(1.0, dtype=dtype)
 
     # load data
     geom = load_geom(os.path.join(directory, "geom.dat"))  # bn CHECK
 
     geometry["kxrh"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "kxrh"))[0], dtype=torch.float32
+        np.loadtxt(os.path.join(directory, "kxrh"))[0], dtype=dtype
     )  # CHECK
     geometry["krho"] = torch.tensor(
         np.loadtxt(os.path.join(directory, "krho")).T[0] / geom["kthnorm"],
-        dtype=torch.float32,
+        dtype=dtype,
     )  # CHECK
 
     # compute mugr and intmu
@@ -629,32 +521,31 @@ def load_geometry(directory):
             np.pi * ((vperp + 0.5 * dvperp) ** 2 - (vperp - 0.5 * dvperp) ** 2)
         )
 
-    geometry["intmu"] = torch.tensor(intmu[1:], dtype=torch.float32)  # CHECK?
-    geometry["mugr"] = torch.tensor(mugr[1:], dtype=torch.float32)  # CHECK?
+    geometry["intmu"] = torch.tensor(intmu[1:], dtype=dtype)  # CHECK?
+    geometry["mugr"] = torch.tensor(mugr[1:], dtype=dtype)  # CHECK?
 
     geometry["intvp"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "intvp.dat"))[0], dtype=torch.float32
+        np.loadtxt(os.path.join(directory, "intvp.dat"))[0], dtype=dtype
     )  # CHECK
     geometry["vpgr"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "vpgr.dat"))[0], dtype=torch.float32
+        np.loadtxt(os.path.join(directory, "vpgr.dat"))[0], dtype=dtype
     )
 
     ints = np.concatenate(
         [np.array([0.0]), np.diff(np.loadtxt(os.path.join(directory, "sgrid")))]
     )
     ints[0] = ints[1]  # CHECK
-    geometry["ints"] = torch.tensor(ints, dtype=torch.float32)
+    geometry["ints"] = torch.tensor(ints, dtype=dtype)
 
-    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=torch.float32)  # CHECK
-
+    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=dtype) 
     geometry["little_g"] = torch.tensor(
         np.stack([geom["g_zeta_zeta"], geom["g_eps_zeta"], geom["g_eps_eps"]], -1),
-        dtype=torch.float32,
+        dtype=dtype,
     )
 
-    geometry["bn"] = torch.tensor(geom["bn"])
-    geometry["bt_frac"] = torch.tensor(geom["Bt_frac"])
-    geometry["rfun"] = torch.tensor(geom["R"])
+    geometry["bn"] = torch.tensor(geom["bn"], dtype=dtype)
+    geometry["bt_frac"] = torch.tensor(geom["Bt_frac"], dtype=dtype)
+    geometry["rfun"] = torch.tensor(geom["R"], dtype=dtype)
     return geometry
 
 

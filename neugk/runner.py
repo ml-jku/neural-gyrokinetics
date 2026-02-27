@@ -13,6 +13,7 @@ from neugk.utils import (
     setup_logging,
     get_linear_burn_in_fn,
     remainig_progress,
+    set_seed,
 )
 from neugk.dataset import get_data
 
@@ -24,6 +25,7 @@ class BaseRunner:
         self.rank = rank
         self.cfg = cfg
         self.world_size = world_size
+        set_seed(cfg.seed)
 
         # ddp setup
         if cfg.ddp.enable and cfg.ddp.n_nodes > 1 and world_size > 1:
@@ -31,11 +33,11 @@ class BaseRunner:
         else:
             self.local_rank = rank
 
-        # device detection
-        is_cuda = torch.cuda.is_available()
-        self.device = torch.device(f"cuda:{self.local_rank}") if is_cuda else "cpu"
-        if is_cuda:
-            torch.cuda.set_device(self.device)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(self.local_rank)
+            self.device = torch.device(f"cuda:{self.local_rank}")
+        else:
+            self.device = torch.device("cpu")
 
         if cfg.ddp.enable and world_size > 1:
             ddp_setup(rank, world_size)
@@ -57,22 +59,15 @@ class BaseRunner:
             self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
         )
         self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
-        # # scaler not needed for bf16 (same dynamic range)
-        # use_scaler = self.use_amp and not self.use_bf16
         self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
 
         self.setup_data()
         self.setup_components()
-
-        # # cast model to target precision if bf16 (normalization fused kernels)
-        # if self.use_bf16 and getattr(self, "model", None) is not None:
-        #     self.model.to(self.amp_dtype)
-
         self.setup_scheduler()
 
     def setup_data(self):
         """Initialize datasets and dataloaders."""
-        datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.rank)
+        datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.local_rank)
         if len(datasets) == 3:
             self.trainset, self.valsets = datasets[0], datasets[1:]
             self.trainloader, self.valloaders = dataloaders[0], dataloaders[1:]
@@ -101,6 +96,8 @@ class BaseRunner:
                     start_fraction=sp.start_fraction,
                     end_fraction=sp.end_fraction,
                 )
+        if self.cfg.dataset.augment.mask_modes.active:
+            weights["df_delta"] = self.cfg.dataset.augment.mask_modes.df_delta_weight
         return weights
 
     def setup_scheduler(self):

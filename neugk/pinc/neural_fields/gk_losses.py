@@ -3,32 +3,8 @@ from typing import Optional, Dict
 import torch
 import torch.nn.functional as F
 
-from neugk.utils import recombine_zf
-from neugk.integrals import FluxIntegral
 from neugk.pinc.neural_fields.nf_utils import phi_fft
-
-
-def get_integrals(
-    pred: torch.Tensor,
-    geom: torch.Tensor,
-    phi: Optional[torch.Tensor] = None,
-    flux_fields: bool = False,
-    spectral_df: bool = False,
-    spectral_potens: bool = False,
-):
-    if pred.shape[0] > 2:
-        pred = recombine_zf(pred, dim=0)
-    geom = {k: g.unsqueeze(0).to(pred.device) for k, g in geom.items()}
-    integrator = FluxIntegral(
-        real_potens=False,
-        flux_fields=flux_fields,
-        spectral_df=spectral_df,
-        spectral_potens=spectral_potens,
-    )
-    integrator.to(pred.device)
-    phi, (pflux, eflux, vflux) = integrator(geom, df=pred.unsqueeze(0))
-    phi = phi.squeeze()
-    return phi, (pflux, eflux, vflux)
+from neugk.integrals import get_integrals
 
 
 def diagnostics(

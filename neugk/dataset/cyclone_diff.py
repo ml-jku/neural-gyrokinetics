@@ -46,10 +46,10 @@ class CycloneAEDataset(CycloneDataset):
         autoencoder: Optional[torch.nn.Module] = None,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
         self.conditions = conditions
         self.precomputed_latents = precomputed_latents
         self.autoencoder = autoencoder
+        super().__init__(*args, **kwargs)
 
     def _recompute_stats(self, keys: Sequence[str], offset: int = 0):
         filter_tag = (
@@ -93,7 +93,8 @@ class CycloneAEDataset(CycloneDataset):
                     cond_list.append(torch.tensor(val, dtype=self.dtype))
             conditioning = torch.stack(cond_list, dim=-1)
 
-        if self.normalization is not None and get_normalized:
+        if get_normalized:
+            # skip normalization if latents are precomputed
             if x is not None and self.precomputed_latents is None:
                 x, _, _ = self.normalize(file_index, df=x)
             if phi is not None:
@@ -143,11 +144,11 @@ class CycloneAEDataset(CycloneDataset):
         for i in range(self.bundle_seq_length):
             t_str = str(original_t_index + i).zfill(5)
 
-            if "df" in self.input_fields:
+            if "df" in self.fields_to_load:
                 k = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
                 xs.append(k)
 
-            if "phi" in self.input_fields:
+            if "phi" in self.fields_to_load:
                 phi = self.backend.read_phi(f, t_str, self.phi_resolution)
                 phis.append(phi)
 
@@ -155,7 +156,7 @@ class CycloneAEDataset(CycloneDataset):
             fluxes.append(flux)
 
         sample = {}
-        if "df" in self.input_fields:
+        if "df" in self.fields_to_load:
             if self.bundle_seq_length == 1:
                 xs = xs[0]
             else:
@@ -167,7 +168,7 @@ class CycloneAEDataset(CycloneDataset):
         else:
             xs = None
 
-        if "phi" in self.input_fields:
+        if "phi" in self.fields_to_load:
             if self.bundle_seq_length == 1:
                 phis = phis[0]
             else:
