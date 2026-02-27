@@ -9,6 +9,7 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from neugk.utils import recombine_zf
 from zipnn import ZipNN
 import zfpy
 from scipy.ndimage import convolve
@@ -38,8 +39,8 @@ def to_real(x: torch.Tensor) -> torch.Tensor:
 
 
 def df_fft(df: torch.Tensor, norm: str = "forward"):
-    if df.shape[0] == 4:
-        df = df[[0, 1]] + df[[2, 3]]
+    if df.shape[0] > 2:
+        df = recombine_zf(df, dim=0)
     df = to_complex(df)
     df = torch.fft.fftn(df, dim=(-2, -1), norm=norm)
     df = torch.fft.fftshift(df, dim=(-2,))
@@ -47,8 +48,8 @@ def df_fft(df: torch.Tensor, norm: str = "forward"):
 
 
 def df_ifft(df: torch.Tensor, norm: str = "forward"):
-    if df.shape[0] == 4:
-        df = df[[0, 1]] + df[[2, 3]]
+    if df.shape[0] > 2:
+        df = recombine_zf(df, dim=0)
     df = to_complex(df)
     df = torch.fft.ifftshift(df, dim=(-2,))
     df = torch.fft.ifftn(df, dim=(-2, -1), norm=norm)

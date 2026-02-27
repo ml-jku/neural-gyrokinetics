@@ -170,7 +170,7 @@ def jpeg2000_recon(df: torch.Tensor, quality: float = 0.2):
         # NOTE: does not work with tempfile or io buffer for some reason
         try:
             os.remove("/tmp/df.jp2")
-        except:
+        except OSError:
             pass
         glymur.Jp2k("/tmp/df.jp2", data=img_uint16, cratios=[100.0 / quality])
         compressed_data.append({"bytes": None, "min": mn, "max": mx})
@@ -181,7 +181,7 @@ def jpeg2000_recon(df: torch.Tensor, quality: float = 0.2):
         recon_flat[ch] = recon_norm * (mx - mn) + mn
         try:
             os.remove("/tmp/df.jp2")
-        except:
+        except OSError:
             pass
 
     recon_np = rearrange(

@@ -150,7 +150,7 @@ def load_autoencoder(
 
         class DummyDataset:
             def __init__(self, problem_dim):
-                self.active_keys = [0] * problem_dim
+                self.active_keys = list(range(problem_dim))
                 self.resolution = (32, 8, 16, 85, 32)
 
         model = get_autoencoder(config, DummyDataset(problem_dim), rank=None)
@@ -161,9 +161,7 @@ def load_autoencoder(
 
     if checkpoint_has_module and not model_is_ddp:
         # Checkpoint has module prefix but model doesn't - remove prefix
-        state_dict = {
-            k[7:]: v for k, v in state_dict.items() if k.startswith("module.")
-        }
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     elif not checkpoint_has_module and model_is_ddp:
         # Checkpoint doesn't have module prefix but model does - add prefix
         state_dict = {"module." + k: v for k, v in state_dict.items()}
@@ -207,10 +205,7 @@ def load_autoencoder(
             else:
                 print(f"Warning: Could not find config file at {config_path}")
         else:
-            # Loading PEFT checkpoint into base model - filter out PEFT parameters
-            print(
-                "Found PEFT checkpoint. Filtering out PEFT parameters to load the base model."
-            )
+            print("Found PEFT checkpoint. Filtering out parameters to load base model.")
             base_state_dict = {}
             for k, v in state_dict.items():
                 # Skip PEFT-specific parameters
@@ -221,7 +216,8 @@ def load_autoencoder(
                     base_state_dict[k] = v
             state_dict = base_state_dict
             print(
-                f"Filtered state dict: {len(state_dict)} parameters (removed PEFT parameters)"
+                "Filtered state dict: "
+                f"{len(state_dict)} parameters (removed PEFT parameters)"
             )
 
     model.load_state_dict(
@@ -536,7 +532,6 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None):
-
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -620,7 +615,6 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None):
-
         loss = None
         if closure is not None:
             with torch.enable_grad():

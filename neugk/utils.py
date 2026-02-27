@@ -17,6 +17,46 @@ from omegaconf import DictConfig, OmegaConf
 from einops import rearrange
 
 
+def recombine_zf(x, dim: int = 1):
+    """
+    Recombine Zonal Flow (ZF) and non-ZF components by summing even and odd channels.
+    This is used when separate_zf=True during preprocessing/dataloading.
+    """
+    if x.shape[dim] > 2 and x.shape[dim] % 2 == 0:
+        idx_re, idx_im = [slice(None)] * x.ndim, [slice(None)] * x.ndim
+        idx_re[dim] = slice(0, None, 2)
+        idx_im[dim] = slice(1, None, 2)
+        if torch.is_tensor(x):
+            return torch.cat(
+                [x[idx_re].sum(dim, keepdim=True), x[idx_im].sum(dim, keepdim=True)],
+                dim=dim,
+            )
+        else:
+            return np.concatenate(
+                [
+                    x[tuple(idx_re)].sum(axis=dim, keepdims=True),
+                    x[tuple(idx_im)].sum(axis=dim, keepdims=True),
+                ],
+                axis=dim,
+            )
+    return x
+
+
+def separate_zf(x, dim: int = 1):
+    """
+    Separate Zonal Flow (ZF) and non-ZF components.
+    ZF is the average over the last dimension (ky).
+    Returns a tensor with twice the channels at dim (ZF channels followed by non-ZF).
+    """
+    if torch.is_tensor(x):
+        zf = x.mean(dim=-1, keepdim=True)
+        return torch.cat([zf.expand_as(x), x - zf], dim=dim)
+    else:
+        # numpy
+        zf = x.mean(axis=-1, keepdims=True)
+        return np.concatenate([np.broadcast_to(zf, x.shape), x - zf], axis=dim)
+
+
 def wandb_available():
     """Check if wandb is available and not explicitly disabled."""
     # check environment
@@ -529,7 +569,7 @@ def load_geom(file_path):
                     continue
                 else:
                     raise ValueError
-            except:
+            except Exception:
                 if key is not None:
                     data[key] = np.array(values, dtype=np.float64)
                 key = parts[0]

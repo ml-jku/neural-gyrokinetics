@@ -329,7 +329,6 @@ class CycloneDataset(Dataset):
     def _recompute_stats(
         self, key: str, offset: int = 0, prefix: str = "", suffix: str = ""
     ):
-
         def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
             with self.backend.open(self.files[file_index]) as f:
@@ -775,7 +774,6 @@ class CycloneDataset(Dataset):
         return self.file_num_timesteps[file_idx]
 
     def collate(self, batch: Sequence[CycloneSample]):
-
         def stack_batch(_b: Sequence[CycloneSample], key: str):
             if hasattr(_b[0], key) is not None:
                 return torch.stack([getattr(sample, key) for sample in _b])

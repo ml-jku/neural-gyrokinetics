@@ -24,7 +24,7 @@ class Swin5DAE(Swin5DUnet):
         bottleneck_dim: Optional[int] = None,
         bottleneck_num_heads: int = 2,
         bottleneck_depth: int = 2,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(*args, conditioning=[] if conditioning else None, **kwargs)
 
@@ -277,7 +277,7 @@ class Swin5DSimSiam(Swin5DAE):
         *args,
         use_simae_decoder: bool = False,
         vit_predictor: bool = True,
-        **kwargs
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
 

@@ -1,14 +1,15 @@
 """
 PINC-specific loss wrappers and gradient balancers.
-Extends base_losses to add support for Spectral, VAE, and VQVAE losses, 
+Extends base_losses to add support for Spectral, VAE, and VQVAE losses,
 plus EMA normalization and custom Conflict-Free Gradient Descent (ConFIG) patching.
 """
 
-from typing import List, Callable, Dict, Optional
+from typing import List, Callable, Dict, Optional, Any
 
 import torch
 import torch.nn.functional as F
 
+from neugk.utils import recombine_zf
 from neugk.integrals import FluxIntegral
 from neugk.losses import LossWrapper, GradientBalancer
 
@@ -50,6 +51,7 @@ class PINCLossWrapper(LossWrapper):
         eval_loss_type: str = "mse",
         eval_integral_loss_type: str = "mse",
         eval_spectral_loss_type: str = "l1",
+        dataset: Optional[Any] = None,
     ):
         super().__init__(
             weights=weights,
@@ -89,6 +91,7 @@ class PINCLossWrapper(LossWrapper):
 
         self.dataset_stats = dataset_stats or {}
         self.ds = ds
+        self.dataset = dataset
         self.loss_normalizer = {}
         self.normalize_losses = getattr(loss_type, "normalize_losses", False)
 
@@ -187,9 +190,10 @@ class PINCLossWrapper(LossWrapper):
         if loss_type == "log_cosh":
             return torch.log(torch.cosh(pred - target)).mean()
         if "complex" in loss_type and self.complex_metrics:
-            p_c, t_c = self.complex_metrics.to_complex(
-                pred
-            ), self.complex_metrics.to_complex(target)
+            p_c, t_c = (
+                self.complex_metrics.to_complex(pred),
+                self.complex_metrics.to_complex(target),
+            )
             return (
                 self.complex_metrics.complex_mse(p_c, t_c).mean()
                 if "mse" in loss_type
@@ -248,9 +252,8 @@ class PINCLossWrapper(LossWrapper):
         if "log" in loss_type:
             if "relative" in loss_type:
                 pred, target = pred / (pred.sum() + eps), target / (target.sum() + eps)
-            pl, tl = torch.log(torch.abs(pred) + eps), torch.log(
-                torch.abs(target) + eps
-            )
+            pl = torch.log(torch.abs(pred) + eps)
+            tl =torch.log(torch.abs(target) + eps)
             return F.l1_loss(pl, tl) if "l1" in loss_type else F.mse_loss(pl, tl)
 
         raise ValueError(f"unknown spectral loss type: {loss_type}")
@@ -272,9 +275,8 @@ class PINCLossWrapper(LossWrapper):
         self, preds: Dict[str, torch.Tensor]
     ) -> Dict[str, torch.Tensor]:
         def dist(p, z):
-            p, z = F.normalize(p.flatten(1), dim=1), F.normalize(
-                z.flatten(1).detach(), dim=1
-            )
+            p = F.normalize(p.flatten(1), dim=1)
+            z = F.normalize(z.flatten(1).detach(), dim=1)
             return 2 - 2 * torch.mean(torch.sum(p * z, dim=1))
 
         assert "z" in preds and "p" in preds, "simsiam requires z and p"
@@ -284,30 +286,42 @@ class PINCLossWrapper(LossWrapper):
 
     def integral_loss(self, geometry, preds, tgts, idx_data, integral_loss_type="mse"):
         if self.training:
-            pred_df, pred_phi, tgt_phi, tgt_eflux = [], [], [], []
-            for b, f in enumerate(idx_data["file_index"].tolist()):
-                pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
-                if "phi" in preds:
-                    p_phi = (
-                        preds["phi"][b].unsqueeze(0)
-                        if preds["phi"][b].ndim == 2
-                        else preds["phi"][b]
-                    )
-                    pred_phi.append(self.denormalize_fn(f, phi=p_phi))
-                t_phi = (
-                    tgts["phi"][b].unsqueeze(0)
-                    if tgts["phi"][b].ndim == 2
-                    else tgts["phi"][b]
+            # try vectorization for dataset-wide normalization
+            if (
+                self.dataset is not None
+                and getattr(self.dataset, "normalization_scope", None) == "dataset"
+            ):
+                pred_df = self.denormalize_fn(0, df=preds["df"])
+                pred_phi = (
+                    self.denormalize_fn(0, phi=preds["phi"]) if "phi" in preds else None
                 )
-                tgt_phi.append(self.denormalize_fn(f, phi=t_phi))
-                tgt_eflux.append(self.denormalize_fn(f, flux=tgts["flux"][b]))
+                tgt_phi = self.denormalize_fn(0, phi=tgts["phi"])
+                tgt_eflux = self.denormalize_fn(0, flux=tgts["flux"])
+            else:
+                pred_df, pred_phi, tgt_phi, tgt_eflux = [], [], [], []
+                for b, f in enumerate(idx_data["file_index"].tolist()):
+                    pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
+                    if "phi" in preds:
+                        p_phi = (
+                            preds["phi"][b].unsqueeze(0)
+                            if preds["phi"][b].ndim == 2
+                            else preds["phi"][b]
+                        )
+                        pred_phi.append(self.denormalize_fn(f, phi=p_phi))
+                    t_phi = (
+                        tgts["phi"][b].unsqueeze(0)
+                        if tgts["phi"][b].ndim == 2
+                        else tgts["phi"][b]
+                    )
+                    tgt_phi.append(self.denormalize_fn(f, phi=t_phi))
+                    tgt_eflux.append(self.denormalize_fn(f, flux=tgts["flux"][b]))
 
-            pred_df, tgt_phi, tgt_eflux = (
-                torch.stack(pred_df),
-                torch.stack(tgt_phi),
-                torch.stack(tgt_eflux),
-            )
-            pred_phi = torch.stack(pred_phi) if pred_phi else None
+                pred_df, tgt_phi, tgt_eflux = (
+                    torch.stack(pred_df),
+                    torch.stack(tgt_phi),
+                    torch.stack(tgt_eflux),
+                )
+                pred_phi = torch.stack(pred_phi) if pred_phi else None
         else:
             pred_df, pred_phi, tgt_phi, tgt_eflux = (
                 preds["df"],
@@ -319,14 +333,7 @@ class PINCLossWrapper(LossWrapper):
                 tgt_phi = tgt_phi.squeeze(1)
 
         if self.separate_zf and pred_df.shape[1] > 2:
-            pred_df = (
-                pred_df[:, [0, 1]] + pred_df[:, [2, 3]]
-                if pred_df.shape[1] == 4
-                else torch.cat(
-                    [pred_df[:, 0::2].sum(1, True), pred_df[:, 1::2].sum(1, True)],
-                    dim=1,
-                )
-            )
+            pred_df = recombine_zf(pred_df, dim=1)
 
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
 
@@ -411,9 +418,10 @@ class PINCLossWrapper(LossWrapper):
 
         def prep(d):
             x = d["df"]
-            return (
-                x[:, [0, 1]] + x[:, [2, 3]] if x.shape[1] == 4 else x
-            ).float(), d.get("phi")
+            if self.separate_zf and x.shape[1] > 2:
+                # generalized separate_zf recombination
+                x = torch.cat([x[:, 0::2].sum(1, True), x[:, 1::2].sum(1, True)], dim=1)
+            return x.float(), d.get("phi")
 
         p_df, p_phi_raw = prep(preds)
         t_df, t_phi_raw = prep(tgts)
@@ -421,11 +429,13 @@ class PINCLossWrapper(LossWrapper):
         p_phi, (_, p_ef, _) = self.integrator_spec(geometry, p_df, p_phi_raw)
         t_phi, (_, t_ef, _) = self.integrator_spec(geometry, t_df, t_phi_raw)
 
-        p_fft, t_fft = self.phi_fft(preds.get("phi", p_phi)), self.phi_fft(
-            tgts.get("phi", t_phi)
+        p_fft, t_fft = (
+            self.phi_fft(preds.get("phi", p_phi)),
+            self.phi_fft(tgts.get("phi", t_phi)),
         )
-        p_diag, t_diag = self.diagnostics(p_fft, p_ef, self.ds), self.diagnostics(
-            t_fft, t_ef, self.ds
+        p_diag, t_diag = (
+            self.diagnostics(p_fft, p_ef, self.ds),
+            self.diagnostics(t_fft, t_ef, self.ds),
         )
 
         for k in ["kxspec", "kyspec", "qspec", "phi_zf"]:
@@ -434,16 +444,16 @@ class PINCLossWrapper(LossWrapper):
                     p_diag[k], t_diag[k], loss_type
                 )
 
-        p_diag_f, t_diag_f = self.diagnostics(
-            p_fft, p_ef, self.ds, aggregate="none"
-        ), self.diagnostics(t_fft, t_ef, self.ds, aggregate="none")
+        p_diag_f, t_diag_f = (
+            self.diagnostics(p_fft, p_ef, self.ds, aggregate="none"),
+            self.diagnostics(t_fft, t_ef, self.ds, aggregate="none"),
+        )
 
         for k in ["qspec", "kyspec"]:
             if k in p_diag_f and k in t_diag_f:
                 try:
-                    p_s, t_s = torch.nan_to_num(
-                        torch.log1p(p_diag_f[k])
-                    ), torch.nan_to_num(torch.log1p(t_diag_f[k]))
+                    p_s = torch.nan_to_num(torch.log1p(p_diag_f[k]))
+                    t_s = torch.nan_to_num(torch.log1p(t_diag_f[k]))
                     losses = [
                         torch.mean(
                             torch.clamp(

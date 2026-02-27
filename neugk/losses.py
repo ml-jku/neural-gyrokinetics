@@ -14,6 +14,7 @@ from conflictfree.momentum_operator import PseudoMomentumOperator
 from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
 
 from neugk.dataset.cyclone import CycloneDataset, CycloneSample
+from neugk.utils import recombine_zf
 from neugk.integrals import FluxIntegral
 
 
@@ -105,13 +106,7 @@ class LossWrapper(nn.Module):
 
         # recombine zonal flow
         if self.separate_zf and pred_df.shape[1] > 2:
-            if pred_df.shape[1] == 4:
-                pred_df = pred_df[:, [0, 1]] + pred_df[:, [2, 3]]
-            else:
-                pred_df = torch.cat(
-                    [pred_df[:, 0::2].sum(1, True), pred_df[:, 1::2].sum(1, True)],
-                    dim=1,
-                )
+            pred_df = recombine_zf(pred_df, dim=1)
 
         # compute integrals
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)

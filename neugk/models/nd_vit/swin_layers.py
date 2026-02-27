@@ -1,5 +1,5 @@
 """
-based on: Liu et al., 
+based on: Liu et al.,
 Swin Transformer: Hierarchical Vision Transformer using Shifted Windows
 https://arxiv.org/abs/2103.14030
 """
@@ -182,7 +182,6 @@ class WindowAttention(nn.Module):
         cosine_attn: bool = False,
         gated_attention: bool = False,
     ):
-
         super().__init__()
         self.dim = dim
         self.dim_out = dim_out if dim_out else dim
@@ -356,7 +355,6 @@ class SwinTransformerBlock(nn.Module):
         use_rope: bool = False,
         gated_attention: bool = False,
     ):
-
         super().__init__()
         self.space = space
         self.dim = dim
@@ -502,7 +500,6 @@ class DiTSwinTransformerBlock(SwinTransformerBlock):
     """DiT conditioned Swin Transformer block."""
 
     def __init__(self, *args, cond_dim: int = 2, **kwargs):
-
         super().__init__(*args, **kwargs)
 
         # applied before attention projection, needs input dims

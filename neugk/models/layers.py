@@ -65,7 +65,6 @@ class AttentionDecoder(nn.Module):
         proj_drop: float = 0.0,
         init_weights: Optional[str] = None,
     ):
-
         super().__init__()
         self.q_dim = q_dim
         self.kv_dim = kv_dim if kv_dim else q_dim

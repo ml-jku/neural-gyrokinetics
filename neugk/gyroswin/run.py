@@ -147,7 +147,7 @@ class GyroSwinRunner(BaseRunner):
         for _, sample in enumerate(self.pbar):
             try:
                 reset_peak_memory_stats(self.device)
-            except:
+            except Exception:
                 pass
 
             sample: CycloneSample

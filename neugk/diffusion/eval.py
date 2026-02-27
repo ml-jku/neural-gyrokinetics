@@ -73,9 +73,17 @@ class DiffusionEvaluator(BaseEvaluator):
 
                 # denormalize
                 preds = self._denormalize_batch(
-                    preds, idx_data, partial(valset.denormalize, condition=condition)
+                    preds,
+                    idx_data=idx_data,
+                    denormalize_fn=partial(valset.denormalize, condition=condition),
+                    dataset=valset,
                 )
-                tgts = self._denormalize_batch(tgts, idx_data, valset.denormalize)
+                tgts = self._denormalize_batch(
+                    tgts,
+                    idx_data=idx_data,
+                    denormalize_fn=valset.denormalize,
+                    dataset=valset,
+                )
 
                 tgts = {k: v.cpu() for k, v in tgts.items()}
                 preds = {k: v.cpu() for k, v in preds.items()}

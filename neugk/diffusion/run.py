@@ -168,7 +168,7 @@ class DDPMRunner(BaseRunner):
         for sample in self.pbar:
             try:
                 reset_peak_memory_stats(self.device)
-            except:
+            except Exception:
                 pass
 
             sample: CycloneAESample

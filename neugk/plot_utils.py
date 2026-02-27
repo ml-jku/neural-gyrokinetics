@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
+from neugk.utils import recombine_zf
+
 
 def force_aspect(ax, aspect=1):
     """Adjust axis aspect ratio based on image extent."""
@@ -183,22 +185,10 @@ def generate_val_plots(
 
         # process zonal flow
         if y.shape[0] != 2 and key == "df":
-            y = torch.cat(
-                [
-                    y[0::2].sum(axis=0, keepdims=True),
-                    y[1::2].sum(axis=0, keepdims=True),
-                ],
-                dim=0,
-            )
+            y = recombine_zf(y, dim=0)
 
         if x.shape[1] != 2 and key == "df":
-            x = torch.cat(
-                [
-                    x[:, 0::2].sum(axis=1, keepdims=True),
-                    x[:, 1::2].sum(axis=1, keepdims=True),
-                ],
-                dim=1,
-            )
+            x = recombine_zf(x, dim=1)
 
         # execute plot functions
         for name, plot_fn in val_plots_dict[key].items():

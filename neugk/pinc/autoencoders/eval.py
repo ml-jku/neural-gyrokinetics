@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.distributed as dist
 from tqdm import tqdm
 
-from neugk.dataset.cyclone_diff import CycloneAESample, CycloneSimSiamSample
+from neugk.dataset.cyclone_diff import CycloneAESample
 from neugk.evaluate import BaseEvaluator, validation_metrics
 from neugk.plot_utils import generate_val_plots
 
@@ -125,8 +125,12 @@ class AutoencoderEvaluator(BaseEvaluator):
                     preds = model(xs["df"], condition=condition)
 
                     # denormalize
-                    preds = self._denormalize_batch(preds, idx_data, valset.denormalize)
-                    tgts = self._denormalize_batch(tgts, idx_data, valset.denormalize)
+                    preds = self._denormalize_batch(
+                        preds, idx_data, valset.denormalize, dataset=valset
+                    )
+                    tgts = self._denormalize_batch(
+                        tgts, idx_data, valset.denormalize, dataset=valset
+                    )
 
                     # cpu transfer for metric calculation
                     tgts = {k: v.cpu() for k, v in tgts.items()}

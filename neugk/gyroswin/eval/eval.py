@@ -9,6 +9,7 @@ from einops import rearrange
 from collections import defaultdict
 
 from neugk.evaluate import BaseEvaluator, validation_metrics
+from neugk.utils import recombine_zf
 from neugk.plot_utils import generate_val_plots
 
 
@@ -124,10 +125,6 @@ class GyroSwinEvaluator(BaseEvaluator):
 
         return {k: p.to(dtype=torch.float32) for k, p in preds.items()}
 
-    def _recombine_zf(self, x: torch.Tensor):
-        if x.shape[2] % 2 == 0:
-            x = torch.cat([x[:, :, 0::2].sum(2, True), x[:, :, 1::2].sum(2, True)], 2)
-        return x
 
     @torch.no_grad()
     def __call__(
@@ -224,15 +221,15 @@ class GyroSwinEvaluator(BaseEvaluator):
 
                 # denormalize
                 rollout = self._denormalize_rollout(
-                    rollout, idx_data, valset.denormalize
+                    rollout, idx_data, valset.denormalize, dataset=valset
                 )
                 tgts = {k: v.cpu() for k, v in tgts.items()}
                 rollout = {k: v.cpu() for k, v in rollout.items()}
 
                 # handle zonal flow
                 if self.cfg.dataset.separate_zf:
-                    rollout["df"] = self._recombine_zf(rollout["df"])
-                    tgts["df"] = self._recombine_zf(tgts["df"])
+                    rollout["df"] = recombine_zf(rollout["df"], dim=2)
+                    tgts["df"] = recombine_zf(tgts["df"], dim=2)
 
                 # compute validation metrics
                 metrics_i, integrated_i = validation_metrics(

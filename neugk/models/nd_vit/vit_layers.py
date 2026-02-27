@@ -34,7 +34,6 @@ class PatchAttention(nn.Module):
         use_rope: bool = False,
         gated_attention: bool = False,
     ):
-
         super().__init__()
         self.dim = dim
         self.dim_out = dim_out if dim_out else dim
@@ -159,7 +158,6 @@ class VisionTransformerBlock(nn.Module):
         use_rope: bool = False,
         gated_attention: bool = False,
     ):
-
         super().__init__()
         self.space = space
         self.dim = dim
@@ -259,7 +257,6 @@ class DiTVisionTransformerBlock(VisionTransformerBlock):
     """DiT conditioned Vision Transformer block."""
 
     def __init__(self, *args, cond_dim: int = 2, **kwargs):
-
         super().__init__(*args, **kwargs)
 
         self.dit = DiT(self.dim, dim2=self.dim_out, cond_dim=cond_dim)
@@ -349,7 +346,6 @@ class ViTLayer(nn.Module):
         gated_attention: bool = False,
         TransformerBlockType: Type[nn.Module] = VisionTransformerBlock,
     ):
-
         super().__init__()
 
         if isinstance(drop_path, float):

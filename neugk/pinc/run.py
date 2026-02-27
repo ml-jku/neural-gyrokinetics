@@ -63,6 +63,7 @@ class PINCRunner(BaseRunner):
             eval_spectral_loss_type=getattr(
                 self.cfg.training, "eval_spectral_loss_type", "l1"
             ),
+            dataset=self.trainset,
         )
 
         self.model = get_autoencoder(
@@ -75,7 +76,7 @@ class PINCRunner(BaseRunner):
         if self.use_ddp:
             self.model = DDP(
                 self.model,
-                device_ids=[self.rank],
+                device_ids=[self.local_rank],
                 find_unused_parameters=(self.cfg.stage == "simsiam"),
             )
 

@@ -3,6 +3,7 @@ from typing import Optional, Dict
 import torch
 import torch.nn.functional as F
 
+from neugk.utils import recombine_zf
 from neugk.integrals import FluxIntegral
 from neugk.pinc.neural_fields.nf_utils import phi_fft
 
@@ -15,8 +16,8 @@ def get_integrals(
     spectral_df: bool = False,
     spectral_potens: bool = False,
 ):
-    if pred.shape[0] != 2:
-        pred = pred[[0, 1]] + pred[[2, 3]]
+    if pred.shape[0] > 2:
+        pred = recombine_zf(pred, dim=0)
     geom = {k: g.unsqueeze(0).to(pred.device) for k, g in geom.items()}
     integrator = FluxIntegral(
         real_potens=False,

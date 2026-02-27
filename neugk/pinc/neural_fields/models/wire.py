@@ -100,7 +100,7 @@ class ComplexGaborLayer(nn.Module):
 
         freq_term = torch.exp(1j * scale_x)
         gauss_term = torch.exp(
-            -self.sigma0**2 * (scale_x.abs() ** 2 + scale_y.abs() ** 2)
+            -(self.sigma0**2) * (scale_x.abs() ** 2 + scale_y.abs() ** 2)
         )
         x = freq_term * gauss_term
 

@@ -17,7 +17,7 @@ from huggingface_hub import login, hf_hub_download
 
 sys.path.append("../../..")
 from neugk.gyroswin.models import get_model
-from neugk.utils import expand_as
+from neugk.utils import expand_as, recombine_zf, separate_zf
 
 
 def create_parser():
@@ -57,7 +57,7 @@ def invert_ifft(x):
 def invert_df(b_xt, cfg, parser):
     """Undo dataframe transformations and scaling."""
     if cfg.dataset.separate_zf:
-        b_xt = b_xt[:, :2] + b_xt[:, 2:]
+        b_xt = recombine_zf(b_xt, dim=1)
     b_xt = b_xt.squeeze(0).cpu().numpy()
     if cfg.dataset.spatial_ifft:
         b_xt = invert_ifft(b_xt)
@@ -131,8 +131,7 @@ def main():
     with h5py.File(snapshot_dir, "r") as infile:
         k = infile["data/timestep_00000"][:]
         if cfg.dataset.separate_zf:
-            zf = np.repeat(k.mean(axis=-1, keepdims=True), repeats=k.shape[-1], axis=-1)
-            k = np.concatenate([zf, k - zf], axis=0)
+            k = separate_zf(k, dim=0)
 
         params["itg"] = infile["metadata/ion_temp_grad"][:]
         params["dg"] = infile["metadata/density_grad"][:]
