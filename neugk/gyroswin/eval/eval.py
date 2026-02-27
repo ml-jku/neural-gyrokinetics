@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 from einops import rearrange
 from collections import defaultdict
 
-from neugk.eval import BaseEvaluator, validation_metrics
+from neugk.evaluate import BaseEvaluator, validation_metrics
 from neugk.plot_utils import generate_val_plots
 
 
@@ -124,6 +124,11 @@ class GyroSwinEvaluator(BaseEvaluator):
 
         return {k: p.to(dtype=torch.float32) for k, p in preds.items()}
 
+    def _recombine_zf(self, x: torch.Tensor):
+        if x.shape[2] % 2 == 0:
+            x = torch.cat([x[:, :, 0::2].sum(2, True), x[:, :, 1::2].sum(2, True)], 2)
+        return x
+
     @torch.no_grad()
     def __call__(
         self,
@@ -135,7 +140,7 @@ class GyroSwinEvaluator(BaseEvaluator):
         epoch: int,
         device: torch.device,
         loss_val_min: float,
-        **kwargs
+        **kwargs,
     ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
         """Run rollout evaluation on all validation sets and compute physics metrics."""
         if not self._is_eval_epoch(epoch):
@@ -173,9 +178,13 @@ class GyroSwinEvaluator(BaseEvaluator):
         val_plots: Dict[str, Any] = {}
 
         # validation loop
-        for val_idx, (valset, valloader) in enumerate(zip(self.valsets, self.valloaders)):
+        for val_idx, (valset, valloader) in enumerate(
+            zip(self.valsets, self.valloaders)
+        ):
             valname = "val_traj" if val_idx == 0 else "val_samples"
-            metrics = {k: torch.zeros([tot_eval_steps]) for k in self.loss_wrap.all_losses}
+            metrics = {
+                k: torch.zeros([tot_eval_steps]) for k in self.loss_wrap.all_losses
+            }
             n_timesteps_acc = torch.zeros([tot_eval_steps])
 
             valloader = self.get_iterator(valloader, val_idx, rank)
@@ -202,22 +211,28 @@ class GyroSwinEvaluator(BaseEvaluator):
                     output_fields, valset, idx_data, n_eval_steps, bundle_seq_length
                 )
                 rollout = self._rollout(
-                    model, inputs, idx_data, conds, valset, 
-                    n_eval_steps, bundle_seq_length, predict_delta, 
-                    device
+                    model,
+                    inputs,
+                    idx_data,
+                    conds,
+                    valset,
+                    n_eval_steps,
+                    bundle_seq_length,
+                    predict_delta,
+                    device,
                 )
 
                 # denormalize
-                rollout = self._denormalize_rollout(rollout, idx_data, valset.denormalize)
+                rollout = self._denormalize_rollout(
+                    rollout, idx_data, valset.denormalize
+                )
                 tgts = {k: v.cpu() for k, v in tgts.items()}
                 rollout = {k: v.cpu() for k, v in rollout.items()}
 
                 # handle zonal flow
                 if self.cfg.dataset.separate_zf:
-                    if rollout["df"].shape[2] % 2 == 0:
-                        rollout["df"] = self._recombine_zf(rollout["df"], channel_dim=2)
-                    if tgts["df"].shape[2] % 2 == 0:
-                        tgts["df"] = self._recombine_zf(tgts["df"], channel_dim=2)
+                    rollout["df"] = self._recombine_zf(rollout["df"])
+                    tgts["df"] = self._recombine_zf(tgts["df"])
 
                 # compute validation metrics
                 metrics_i, integrated_i = validation_metrics(
@@ -245,8 +260,10 @@ class GyroSwinEvaluator(BaseEvaluator):
                     plot_gt = {k: v[0][batch_idx] for k, v in tgts.items()}
                     val_plots.update(
                         generate_val_plots(
-                            rollout_plot, plot_gt, conds["timestep"], 
-                            "random draw" if val_idx == 0 else "holdout samples"
+                            rollout_plot,
+                            plot_gt,
+                            conds["timestep"],
+                            "random draw" if val_idx == 0 else "holdout samples",
                         )
                     )
 

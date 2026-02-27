@@ -21,7 +21,7 @@ from neugk.runner import BaseRunner
 
 from neugk.gyroswin.models import get_model
 from neugk.losses import get_pushforward_fn
-from neugk.gyroswin.eval.evaluate import GyroSwinEvaluator
+from neugk.gyroswin.eval.eval import GyroSwinEvaluator
 
 
 class GyroSwinRunner(BaseRunner):

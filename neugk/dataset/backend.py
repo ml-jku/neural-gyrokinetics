@@ -10,12 +10,13 @@ import pickle
 
 import numpy as np
 import torch
-import cupy as cp
-import kvikio
 
 
 def read_cupy_bin(file: str, shape: tuple, rank: int = 0, use_kvikio: bool = True):
     if use_kvikio:
+        import cupy as cp
+        import kvikio
+
         n_elements = np.prod(shape)
         with cp.cuda.Device(rank):
             gpu_array = cp.empty(n_elements, dtype=cp.float32)
@@ -215,9 +216,11 @@ class KvikIOBackend(DataBackend):
         self.use_kvikio = use_kvikio
 
     def is_valid(self, path: str) -> bool:
+        path = path.removesuffix(".h5")
         return os.path.isdir(path)
 
     def exists(self, path: str) -> bool:
+        path = path.removesuffix(".h5")
         return os.path.exists(os.path.join(path, "metadata.pkl"))
 
     def format_path(
@@ -227,7 +230,7 @@ class KvikIOBackend(DataBackend):
         split_into_bands: Optional[int] = None,
         real_potens: bool = True,
     ) -> str:
-        path = path.replace(".h5", "")
+        path = path.removesuffix(".h5")
         if spatial_ifft:
             n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
             tag = (
@@ -242,6 +245,7 @@ class KvikIOBackend(DataBackend):
         self, path: str, input_fields: Sequence[str] = ["df"]
     ) -> Dict[str, Any]:
         _ = input_fields
+        path = path.removesuffix(".h5")
         with open(os.path.join(path, "metadata.pkl"), "rb") as mf:
             return pickle.load(mf)
 
@@ -262,16 +266,7 @@ class KvikIOBackend(DataBackend):
         active_keys: Optional[Sequence[str]] = None,
     ):
         filepath = os.path.join(f_dir, "data", f"timestep_{timestamp}.bin")
-        if self.use_kvikio:
-            n_elements = np.prod(shape)
-            with cp.cuda.Device(self.rank):
-                gpu_array = cp.empty(n_elements, dtype=cp.float32)
-                with kvikio.CuFile(filepath, "r") as f:
-                    f.read(gpu_array)
-            k = torch.from_dlpack(gpu_array.reshape(shape))
-        else:
-            cpu_array = np.fromfile(filepath, dtype=np.float32)
-            k = torch.from_numpy(cpu_array.reshape(shape))
+        k = read_cupy_bin(filepath, shape, self.rank, self.use_kvikio)
 
         if all(active_keys == np.array([0, 1])):
             return k
@@ -279,16 +274,7 @@ class KvikIOBackend(DataBackend):
 
     def read_phi(self, f_dir: str, timestamp: str, shape: Sequence[int]):
         filepath = os.path.join(f_dir, "data", f"poten_{timestamp}.bin")
-        if self.use_kvikio:
-            n_elements = np.prod(shape)
-            with cp.cuda.Device(self.rank):
-                gpu_array = cp.empty(n_elements, dtype=cp.float32)
-                with kvikio.CuFile(filepath, "r") as f:
-                    f.read(gpu_array)
-            return torch.from_dlpack(gpu_array.reshape(shape))
-        else:
-            cpu_array = np.fromfile(filepath, dtype=np.float32)
-            return torch.from_numpy(cpu_array.reshape(shape))
+        return read_cupy_bin(filepath, shape, self.rank, self.use_kvikio)
 
     def write_df(self, f_dir: str, timestamp: str, df: np.ndarray):
         data_dir = os.path.join(f_dir, "data")

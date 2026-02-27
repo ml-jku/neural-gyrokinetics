@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from neugk.utils import save_model_and_config
 
+
 class ComplexMetrics:
     """Computes various metrics for complex-valued tensors."""
 
@@ -137,7 +138,10 @@ class ComplexMetrics:
         return torch.fft.fftshift(z_fft, dim=spatial_dims)
 
     def magnitude_weighted_phase_coherence(
-        self, z1: torch.Tensor, z2: torch.Tensor, spatial_dims: Tuple[int, int] = (-2, -1)
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        spatial_dims: Tuple[int, int] = (-2, -1),
     ) -> torch.Tensor:
         """Magnitude-weighted phase coherence (mwpc)"""
         z1_fft = self._to_spectral_domain(z1, spatial_dims)
@@ -155,7 +159,10 @@ class ComplexMetrics:
         return (num.abs() / (den + self.epsilon)).mean()
 
     def complex_psnr(
-        self, z1: torch.Tensor, z2: torch.Tensor, spatial_dims: Tuple[int, int] = (-2, -1)
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        spatial_dims: Tuple[int, int] = (-2, -1),
     ) -> torch.Tensor:
         """Peak signal-to-noise ratio for complex-valued data"""
         peak_value = z1.abs().flatten(start_dim=1).max(dim=1)[0]
@@ -163,7 +170,10 @@ class ComplexMetrics:
         return (20 * torch.log10(peak_value / (torch.sqrt(mse) + self.epsilon))).mean()
 
     def kx_ky_analysis(
-        self, z1: torch.Tensor, z2: torch.Tensor, spatial_dims: Tuple[int, int] = (-2, -1)
+        self,
+        z1: torch.Tensor,
+        z2: torch.Tensor,
+        spatial_dims: Tuple[int, int] = (-2, -1),
     ) -> Dict[str, float]:
         """Compute kx and ky directional spectral analysis"""
         # transform to spectral
@@ -265,7 +275,10 @@ def validation_metrics(
     geometry: Dict[str, torch.Tensor],
     loss_wrap: nn.Module,
     eval_integrals: bool = True,
-) -> Tuple[Dict[str, torch.Tensor], Optional[Union[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]]]]:
+) -> Tuple[
+    Dict[str, torch.Tensor],
+    Optional[Union[Dict[str, torch.Tensor], List[Dict[str, torch.Tensor]]]],
+]:
     """Compute validation metrics across sequences if applicable"""
     # detect sequence
     is_sequence = False
@@ -347,16 +360,17 @@ class BaseEvaluator:
     def _is_eval_epoch(self, epoch: int) -> bool:
         return epoch % self.cfg.validation.validate_every_n_epochs == 0 or epoch == 1
 
-    def _recombine_zf(self, x: torch.Tensor, channel_dim: int = 1) -> torch.Tensor:
-        if x.dim() > channel_dim and x.shape[channel_dim] % 2 == 0:
-            if channel_dim == 1:
-                return torch.cat([x[:, 0::2].sum(1, True), x[:, 1::2].sum(1, True)], dim=1)
-            elif channel_dim == 2:
-                return torch.cat([x[:, :, 0::2].sum(2, True), x[:, :, 1::2].sum(2, True)], dim=2)
+    def _recombine_zf(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[1] % 2 == 0:
+            return torch.cat([x[:, 0::2].sum(1, True), x[:, 1::2].sum(1, True)], dim=1)
         return x
 
     def _sync_metrics(
-        self, metrics: Dict[str, torch.Tensor], n_timesteps_acc: torch.Tensor, device: torch.device, world_size: int
+        self,
+        metrics: Dict[str, torch.Tensor],
+        n_timesteps_acc: torch.Tensor,
+        device: torch.device,
+        world_size: int,
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         if dist.is_initialized() and world_size > 1:
             cur_ts = n_timesteps_acc.reshape(1, -1).to(device)
@@ -372,7 +386,10 @@ class BaseEvaluator:
         return metrics, n_timesteps_acc
 
     def _denormalize_batch(
-        self, data: Dict[str, torch.Tensor], idx_data: Dict[str, torch.Tensor], denormalize_fn: Callable
+        self,
+        data: Dict[str, torch.Tensor],
+        idx_data: Dict[str, torch.Tensor],
+        denormalize_fn: Callable,
     ) -> Dict[str, torch.Tensor]:
         """Standard denormalization for physics fields."""
         for k in {"df", "phi", "flux"} & set(data):
@@ -385,7 +402,10 @@ class BaseEvaluator:
         return data
 
     def _denormalize_rollout(
-        self, rollout: Dict[str, torch.Tensor], idx_data: Dict[str, torch.Tensor], denormalize_fn: Callable
+        self,
+        rollout: Dict[str, torch.Tensor],
+        idx_data: Dict[str, torch.Tensor],
+        denormalize_fn: Callable,
     ) -> Dict[str, torch.Tensor]:
         """Denormalization for rollout predictions (with time dimension)."""
         for k in rollout:
@@ -411,8 +431,12 @@ class BaseEvaluator:
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
         for k, v in metrics_i.items():
             if k not in metrics:
-                metrics[k] = torch.zeros_like(v) if isinstance(v, torch.Tensor) else torch.tensor(0.0)
-            
+                metrics[k] = (
+                    torch.zeros_like(v)
+                    if isinstance(v, torch.Tensor)
+                    else torch.tensor(0.0)
+                )
+
             val = v.detach().cpu() if isinstance(v, torch.Tensor) else torch.tensor(v)
             if metrics[k].ndim == 0:
                 metrics[k] += (val if val.ndim == 0 else val.mean()) * weight
@@ -425,12 +449,16 @@ class BaseEvaluator:
                     metrics[k] += torch.cat([val, padding], dim=-1) * weight
                 else:
                     metrics[k] += val[:tot_len] * weight
-        
+
         n_timesteps_acc += weight
         return metrics, n_timesteps_acc
 
     def _finalize_logs(
-        self, log_metric_dict: Dict[str, float], metrics: Dict[str, torch.Tensor], n_timesteps_acc: torch.Tensor, valname: str
+        self,
+        log_metric_dict: Dict[str, float],
+        metrics: Dict[str, torch.Tensor],
+        n_timesteps_acc: torch.Tensor,
+        valname: str,
     ) -> Dict[str, float]:
         for m, v in metrics.items():
             if v.sum() != 0.0:
@@ -457,14 +485,16 @@ class BaseEvaluator:
             loss_val_min = save_model_and_config(
                 model, opt, scheduler, self.cfg, epoch, val_loss, loss_val_min
             )
-        else:
-            warnings.warn(f"checkpoints will not be stored for rank {rank}")
         return loss_val_min
 
-    def get_iterator(self, valloader: Any, val_idx: int, rank: int, desc: Optional[str] = None) -> Any:
+    def get_iterator(
+        self, valloader: Any, val_idx: int, rank: int, desc: Optional[str] = None
+    ) -> Any:
         if self.cfg.logging.tqdm and (not dist.is_initialized() or rank == 0):
             if desc is None:
-                desc = "validation holdout " + ("trajectories" if val_idx == 0 else "samples")
+                desc = "validation holdout " + (
+                    "trajectories" if val_idx == 0 else "samples"
+                )
             return tqdm(valloader, desc=desc)
         return valloader
 

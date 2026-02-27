@@ -34,6 +34,8 @@ class BaseRunner:
         # device detection
         is_cuda = torch.cuda.is_available()
         self.device = torch.device(f"cuda:{self.local_rank}") if is_cuda else "cpu"
+        if is_cuda:
+            torch.cuda.set_device(self.device)
 
         if cfg.ddp.enable and world_size > 1:
             ddp_setup(rank, world_size)

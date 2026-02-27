@@ -13,8 +13,7 @@ from neugk.utils import remainig_progress, exclude_from_weight_decay, memory_cle
 from neugk.runner import BaseRunner
 from neugk.pinc.autoencoders import get_autoencoder
 from neugk.pinc.losses import PINCLossWrapper, PINCGradientBalancer
-from neugk.pinc.autoencoders.evaluate import AutoencoderEvaluator
-from neugk.pinc.autoencoders.evaluate_simsiam import SimSiamEvaluator
+from neugk.pinc.autoencoders.eval import AutoencoderEvaluator
 from neugk.pinc.autoencoders.ae_utils import (
     aggregate_dataset_stats,
     MuonWithAuxAdam,
@@ -116,11 +115,7 @@ class PINCRunner(BaseRunner):
         )
 
         # setup evaluator
-        if self.cfg.stage == "simsiam":
-            eval_cls = SimSiamEvaluator
-        else:
-            eval_cls = AutoencoderEvaluator
-        self.evaluator = eval_cls(
+        self.evaluator = AutoencoderEvaluator(
             cfg=self.cfg,
             valsets=self.valsets,
             valloaders=self.valloaders,
@@ -357,6 +352,7 @@ class PINCRunner(BaseRunner):
         return {k: sum(v) / max(len(v), 1) for k, v in loss_logs.items()}, info_dict
 
     def evaluate(self, epoch):
+        probing = getattr(self.cfg.validation, "probing", self.cfg.stage == "simsiam")
         return self.evaluator(
             rank=self.rank,
             world_size=self.world_size,
@@ -366,5 +362,5 @@ class PINCRunner(BaseRunner):
             epoch=epoch,
             device=self.device,
             loss_val_min=self.loss_val_min,
-            trainloader=self.trainloader if self.cfg.stage == "simsiam" else None,
+            trainloader=self.trainloader if probing else None,
         )

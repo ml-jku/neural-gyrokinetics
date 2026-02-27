@@ -17,7 +17,7 @@ from torch.distributions import Normal, StudentT, Laplace
 import scipy.optimize
 
 from neugk.diffusion.models import get_diffusion_model, DummyAE
-from neugk.diffusion.evaluate import DiffusionEvaluator
+from neugk.diffusion.eval import DiffusionEvaluator
 from neugk.dataset import CycloneAESample
 from neugk.utils import exclude_from_weight_decay, memory_cleanup
 from neugk.runner import BaseRunner

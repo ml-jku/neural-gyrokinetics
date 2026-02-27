@@ -9,7 +9,7 @@ import torch
 import numpy as np
 import torch.distributed as dist
 
-from neugk.eval import BaseEvaluator, validation_metrics
+from neugk.evaluate import BaseEvaluator, validation_metrics
 from neugk.plot_utils import generate_val_plots, avg_flux_confidence
 
 
@@ -28,7 +28,7 @@ class DiffusionEvaluator(BaseEvaluator):
         device: torch.device,
         loss_val_min: float,
         sample_fn: Optional[Callable] = None,
-        **kwargs
+        **kwargs,
     ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
         """Run evaluation on multiple validation sets and log metrics."""
         if not self._is_eval_epoch(epoch):
@@ -45,7 +45,9 @@ class DiffusionEvaluator(BaseEvaluator):
         if self.loss_wrap:
             self.loss_wrap.eval().cpu()
 
-        for val_idx, (valset, valloader) in enumerate(zip(self.valsets, self.valloaders)):
+        for val_idx, (valset, valloader) in enumerate(
+            zip(self.valsets, self.valloaders)
+        ):
             valname = "val_traj" if val_idx == 0 else "val_samples"
             metrics = {key: torch.tensor(0.0) for key in self.loss_wrap.all_losses}
             n_timesteps_acc = torch.tensor(0.0)
@@ -119,14 +121,20 @@ class DiffusionEvaluator(BaseEvaluator):
 
                 # generate plots
                 if len(val_plots) == 0:
-                    batch_idx = torch.randint(0, len(idx_data["file_index"]), (1,)).item()
+                    batch_idx = torch.randint(
+                        0, len(idx_data["file_index"]), (1,)
+                    ).item()
                     preds_plots = {
                         "df": preds["df"][batch_idx] if "df" in preds else None,
-                        "phi": preds["phi_int"][batch_idx] if preds["phi_int"] is not None else None,
+                        "phi": (
+                            preds["phi_int"][batch_idx]
+                            if preds["phi_int"] is not None
+                            else None
+                        ),
                         "flux": preds["flux_int"],
                     }
                     tgts_plot = {k: tgts[k][batch_idx] for k in tgts}
-                    
+
                     val_plots.update(
                         generate_val_plots(
                             rollout=preds_plots,
