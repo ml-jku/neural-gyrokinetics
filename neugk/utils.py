@@ -19,46 +19,34 @@ from einops import rearrange
 
 def recombine_zf(x, dim: int = 1):
     """
-    Recombine Zonal Flow (ZF) and non-ZF components by summing even and odd channels.
-    Layout: [re_zf, im_zf, re_non, im_non, ...] -> [re_total, im_total, ...]
+    Recombine Zonal Flow (ZF) and non-ZF components by summing.
+    Layout: [zf, x - zf] -> [x]
     """
     if x.shape[dim] <= 2 or x.shape[dim] % 2 != 0:
         return x
 
+    half_c = x.shape[dim] // 2
     if torch.is_tensor(x):
-        cat_fn = torch.cat
-        sum_fn = lambda t, dim, keepdim: t.sum(dim, keepdim=keepdim)
+        zf, non_zf = x.narrow(dim, 0, half_c), x.narrow(dim, half_c, half_c)
     else:
-        cat_fn = np.concatenate
-        sum_fn = lambda t, axis, keepdims: t.sum(axis=axis, keepdims=keepdims)
-    
-    def _interleaved_sum(tensor, d):
-        # dynamic slicing
-        s_re = [slice(None)] * tensor.ndim
-        s_re[d] = slice(0, None, 2)
-        s_im = [slice(None)] * tensor.ndim
-        s_im[d] = slice(1, None, 2)
-        s_re = sum_fn(tensor[tuple(s_re)], d, True)
-        s_im = sum_fn(tensor[tuple(s_im)], d, True)
-        return cat_fn([s_re, s_im], d)
+        zf, non_zf = np.split(x, 2, axis=dim)
 
-    if dim in [0, 1, 2]:
-        return _interleaved_sum(x, dim)
-    
-    return x
+    return zf + non_zf
 
 
 def separate_zf(x, dim: int = 1):
     """
     Separate Zonal Flow (ZF) and non-ZF components.
-    Returns [re_zf, im_zf, re_non, im_non] layout.
+    Returns [zf, x - zf] layout.
     """
     if torch.is_tensor(x):
-        zf = x.mean(dim=-1, keepdim=True).expand_as(x)
+        nky = x.shape[-1]
+        zf = torch.repeat_interleave(x.mean(dim=-1, keepdim=True), repeats=nky, dim=-1)
         return torch.cat([zf, x - zf], dim=dim)
     else:
-        zf = x.mean(axis=-1, keepdims=True)
-        return np.concatenate([np.broadcast_to(zf, x.shape), x - zf], axis=dim)
+        nky = x.shape[-1]
+        zf = np.repeat(x.mean(axis=-1, keepdims=True), repeats=nky, axis=-1)
+        return np.concatenate([zf, x - zf], axis=dim)
 
 
 def wandb_available():
@@ -362,6 +350,16 @@ class RunningMeanStd:
 
         :param other: The other object to combine with.
         """
+        if other.count <= 1e-3:
+            return
+        if self.count <= 1e-3:
+            self.mean = other.mean.copy()
+            self.var = other.var.copy()
+            self.min = other.min.copy()
+            self.max = other.max.copy()
+            self.count = other.count
+            return
+
         self.update_from_moments(
             other.mean, other.var, other.min, other.max, other.count
         )
@@ -395,9 +393,14 @@ class RunningMeanStd:
 
         new_count = batch_count + self.count
 
-        # persist updates
-        self.min = np.minimum(self.min, batch_min)
-        self.max = np.maximum(self.max, batch_max)
+        # update min and max only after first real update (excluding epsilon)
+        if self.count <= 1e-3:
+            self.min = batch_min
+            self.max = batch_max
+        else:
+            self.min = np.minimum(self.min, batch_min)
+            self.max = np.maximum(self.max, batch_max)
+
         self.mean = new_mean
         self.var = new_var
         self.count = new_count

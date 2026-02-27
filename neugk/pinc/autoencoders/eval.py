@@ -92,6 +92,8 @@ class AutoencoderEvaluator(BaseEvaluator):
         device: torch.device,
         loss_val_min: float,
         trainloader: Optional[torch.utils.data.DataLoader] = None,
+        evaluate_recon: bool = False,
+        evaluate_probing: bool = False,
         **kwargs,
     ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
         """Evaluate autoencoder model on validation datasets"""
@@ -102,7 +104,7 @@ class AutoencoderEvaluator(BaseEvaluator):
             return {}, {}, loss_val_min
 
         # standard autoencoder reconstruction evaluation
-        if getattr(model, "use_simae_decoder", True):
+        if evaluate_recon:
             model.eval()
             if self.loss_wrap:
                 self.loss_wrap.eval().cpu()
@@ -167,18 +169,21 @@ class AutoencoderEvaluator(BaseEvaluator):
                         batch_idx = torch.randint(
                             0, len(idx_data["timestep_index"]), (1,)
                         ).item()
-                        preds_plots = {
-                            "df": preds.get("df")[batch_idx],
-                            "phi": (
-                                preds.get("phi_int")[batch_idx]
-                                if preds.get("phi_int") is not None
-                                else None
-                            ),
-                            "flux": preds.get(
-                                "flux_int"
-                            ),  # flux_int is already averaged or a scalar per sample
-                        }
-                        plot_tgts = {k: tgts[k][batch_idx] for k in tgts}
+                        # Prepare single-sample plot dicts
+                        preds_plots = {}
+                        plot_tgts = {}
+
+                        # Handle potentially batched fields (df, phi, flux)
+                        for k in ["df", "phi", "flux"]:
+                            if k in preds and preds[k] is not None:
+                                preds_plots[k] = preds[k][batch_idx]
+                            elif f"{k}_int" in preds and preds[f"{k}_int"] is not None:
+                                # integrated fields might be (B, ...) or already (S, X, Y)
+                                v = preds[f"{k}_int"]
+                                preds_plots[k] = v[batch_idx] if v.ndim > 3 else v
+
+                            if k in tgts and tgts[k] is not None:
+                                plot_tgts[k] = tgts[k][batch_idx]
 
                         val_plots.update(
                             generate_val_plots(
@@ -200,7 +205,7 @@ class AutoencoderEvaluator(BaseEvaluator):
                 )
 
         # linear probing evaluation
-        if trainloader is not None and getattr(self.cfg.validation, "probing", True):
+        if trainloader is not None and evaluate_probing:
             # compute probe weights on trainset
             x_train, y_train = self.collect_xy(rank, trainloader, model, device)
             # column of ones for bias

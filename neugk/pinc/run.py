@@ -262,8 +262,8 @@ class PINCRunner(BaseRunner):
                 epoch, train_losses_dict | log_metric_dict, info_dict, val_plots
             )
 
-            if self.cur_update_step % 100 == 0:
-                memory_cleanup(self.device, aggressive=True)
+            # if self.cur_update_step % 100 == 0:
+            #     memory_cleanup(self.device, aggressive=True)
 
         if self.writer:
             self.writer.finish()
@@ -342,9 +342,9 @@ class PINCRunner(BaseRunner):
             for k, v in losses.items():
                 loss_logs[k].append(v.item())
 
-            if self.cur_update_step % 100 == 0:
-                del xs, condition, idx_data, geometry, loss, losses
-                memory_cleanup(self.device, aggressive=True)
+            # if self.cur_update_step % 100 == 0:
+            #     del xs, condition, idx_data, geometry, loss, losses
+            #     memory_cleanup(self.device, aggressive=True)
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)
@@ -353,7 +353,6 @@ class PINCRunner(BaseRunner):
         return {k: sum(v) / max(len(v), 1) for k, v in loss_logs.items()}, info_dict
 
     def evaluate(self, epoch):
-        probing = getattr(self.cfg.validation, "probing", self.cfg.stage == "simsiam")
         return self.evaluator(
             rank=self.rank,
             world_size=self.world_size,
@@ -363,5 +362,7 @@ class PINCRunner(BaseRunner):
             epoch=epoch,
             device=self.device,
             loss_val_min=self.loss_val_min,
-            trainloader=self.trainloader if probing else None,
+            trainloader=self.trainloader,
+            evaluate_recon=True,  # TODO adapt
+            evaluate_probing=False,
         )

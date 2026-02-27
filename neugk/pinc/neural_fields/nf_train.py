@@ -16,7 +16,7 @@ from neugk.pinc.neural_fields import (
     CycloneNFDataLoader,
     sample_field,
 )
-from neugk.pinc.neural_fields.nf_utils import plotND, plot_diag
+from neugk.plot_utils import plot_nd, plot_diag
 
 
 @torch.no_grad()
@@ -340,12 +340,11 @@ def eval_diagnose(
     )
     # plots
     if not metrics_only:
-        fig_df = plotND(pred_df.cpu().numpy(), gt_df.cpu().numpy())
-        fig_eflux = plotND(pred_eflux.cpu().numpy(), gt_eflux.cpu().numpy())
-        fig_potens = plotND(
+        fig_df = plot_nd(pred_df.cpu().numpy(), gt_df.cpu().numpy())
+        fig_eflux = plot_nd(pred_eflux.cpu().numpy(), gt_eflux.cpu().numpy())
+        fig_potens = plot_nd(
             pred_phi.cpu().numpy(),
             gt_phi.cpu().numpy(),
-            n=3,
             cmap="plasma",
             aspect=2,
             aggregate="slice",

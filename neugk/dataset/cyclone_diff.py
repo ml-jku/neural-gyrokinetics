@@ -5,7 +5,6 @@ import pickle
 from tqdm import tqdm
 import hashlib
 from dataclasses import dataclass
-import time
 
 import torch
 import numpy as np
@@ -15,6 +14,7 @@ from torch.utils.data import DataLoader
 
 from neugk.utils import RunningMeanStd, separate_zf as separate_zf_fn
 from neugk.dataset.cyclone import CycloneDataset
+from neugk.dataset.backend import KvikIOBackend
 
 
 @dataclass
@@ -57,10 +57,15 @@ class CycloneAEDataset(CycloneDataset):
         )
         return super()._recompute_stats(keys, offset, prefix="diff", suffix=filter_tag)
 
-    def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneAESample:
+    def __getitem__(
+        self, index: int, get_normalized: bool = True, override_latens: bool = False
+    ) -> CycloneAESample:
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
-        if getattr(self, "precomputed_latents", None) is not None:
+        if (
+            getattr(self, "precomputed_latents", None) is not None
+            and not override_latens
+        ):
             sample = self.precomputed_latents[(file_index, t_index)]
             x = sample["x"]
         else:
@@ -202,16 +207,18 @@ class CycloneAEDataset(CycloneDataset):
             if self.autoencoder is not None:
                 condition = kwargs["condition"]
                 # handle single sample input from evaluate.py loops
-                if df.ndim == 5: # (C, Vp, Vm, S, X, Y) -> (1, C, ...)
+                if df.ndim == 5:  # (C, Vp, Vm, S, X, Y) -> (1, C, ...)
                     df = df.unsqueeze(0)
-                if condition.ndim == 1: # (N_cond,) -> (1, N_cond)
+                if condition.ndim == 1:  # (N_cond,) -> (1, N_cond)
                     condition = condition.unsqueeze(0)
-                
+
                 ch = 2 + 2 * self.separate_zf
                 dummy = torch.zeros((1, ch, *self.resolution), device=condition.device)
                 dummy_cond = condition[0:1]
                 _, pad_axes = self.autoencoder.encode(dummy, condition=dummy_cond)
-                df = self.autoencoder.decode(df, pad_axes, condition=condition)["df"].squeeze(0)
+                df = self.autoencoder.decode(df, pad_axes, condition=condition)[
+                    "df"
+                ].squeeze(0)
             field = "df"
             x = df
         elif phi is not None:
@@ -245,7 +252,7 @@ class CycloneAEDataset(CycloneDataset):
                 *[s.geometry for s in batch],
             ),
         )
-    
+
     @torch.no_grad()
     def precompute_latents(
         self,
@@ -256,9 +263,30 @@ class CycloneAEDataset(CycloneDataset):
         latent_stats: Optional[RunningMeanStd] = None,
     ):
         self.autoencoder = autoencoder
-        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+
+        config_keys = ["cond_filters", "subsample", "separate_zf"]
+        config_str = "".join(str(getattr(self, k, "")) for k in config_keys)
+        model_str = str({k: v.shape for k, v in autoencoder.state_dict().items()})
+        hash_str = "".join(sorted(self.files)) + config_str + model_str
+        file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
+
+        tmu = "mu" if self.decouple_mu else ""
+        offset = self.offsets[0]
+        filter_tag = (
+            f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
+        )
+
+        segments = [
+            "diff",
+            f"{self.split}_latents",
+            f"offset{offset}",
+            tmu,
+            filter_tag,
+            file_hash,
+            "latents",
+        ]
         latents_dump_pkl = os.path.join(
-            self.dir, f"diff_{self.split}_latents_{file_hash}.pkl"
+            self.dir, "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
         )
 
         if os.path.exists(latents_dump_pkl):
@@ -273,7 +301,8 @@ class CycloneAEDataset(CycloneDataset):
             tmp_loader = DataLoader(
                 dataset=dataloader.dataset,
                 batch_size=128,
-                num_workers=0,  # forced to 0 to prevent deadlocks with gds
+                num_workers=dataloader.num_workers,
+                prefetch_factor=1,
                 pin_memory=False,
                 collate_fn=dataloader.collate_fn,
                 drop_last=dataloader.drop_last,
@@ -354,6 +383,10 @@ class CycloneAEDataset(CycloneDataset):
         else:
             assert latent_stats is not None
             self.latent_stats = latent_stats
+
+        # update backend to not use kvikio, not needed for diffusion beyond this point
+        if isinstance(self.backend, KvikIOBackend):
+            self.backend = KvikIOBackend(self.rank, use_kvikio=False)
 
 
 @dataclass

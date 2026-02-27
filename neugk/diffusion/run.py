@@ -219,10 +219,10 @@ class DDPMRunner(BaseRunner):
             self.cur_update_step += 1.0
             loss_logs["loss"].append(loss.item())
 
-            # memory management
-            if (self.cur_update_step % 100) == 0:
-                del xs, condition, idx_data, geometry, loss
-                memory_cleanup(self.device, aggressive=True)
+            # # memory management
+            # if (self.cur_update_step % 100) == 0:
+            #     del xs, condition, idx_data, geometry, loss
+            #     memory_cleanup(self.device, aggressive=True)
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)

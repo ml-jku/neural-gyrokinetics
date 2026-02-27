@@ -306,7 +306,9 @@ class CycloneDataset(Dataset):
         norm_dataset = normalization is not None and normalization_scope == "dataset"
         if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
             # recompute for all fields in a single pass
-            stats_recomputed = self._recompute_stats(keys=self.input_fields, offset=self.offsets[0])
+            stats_recomputed = self._recompute_stats(
+                keys=self.input_fields, offset=self.offsets[0]
+            )
             for k, k_stat in stats_recomputed.items():
                 stats[k] = k_stat
 
@@ -343,7 +345,9 @@ class CycloneDataset(Dataset):
                     norm_axes = (1, 2, 3)
                 else:
                     flux_val = (
-                        sample.get("flux") if "flux" in sample else sample.get("gt_flux")
+                        sample.get("flux")
+                        if "flux" in sample
+                        else sample.get("gt_flux")
                     )
                     if isinstance(flux_val, torch.Tensor):
                         flux_val = flux_val.cpu().numpy()
@@ -369,7 +373,7 @@ class CycloneDataset(Dataset):
         hash_str = "".join(sorted(self.files)) + config_str
         file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
         tmu = "mu" if self.decouple_mu else ""
-        
+
         # stable key sorting for filename
         key_tag = "_".join(sorted(keys))
         segments = [prefix, key_tag, f"offset{offset}", tmu, suffix, file_hash, "stats"]
@@ -980,7 +984,9 @@ class LinearCycloneDataset(CycloneDataset):
         else:
             global_rank = dist.get_rank() if dist.is_initialized() else self.rank
             if dist.is_initialized() and global_rank != 0:
-                print(f"rank {global_rank}: waiting for stats from rank 0 at {stats_path}")
+                print(
+                    f"rank {global_rank}: waiting for stats from rank 0 at {stats_path}"
+                )
                 while not os.path.exists(stats_path):
                     time.sleep(1)
                 time.sleep(0.5)
@@ -989,7 +995,8 @@ class LinearCycloneDataset(CycloneDataset):
             else:
                 stats_dict = {}
                 for index in tqdm.tqdm(
-                    t_indices, desc=f"re-computing normalization stats for linear (rank {global_rank})"
+                    t_indices,
+                    desc=f"re-computing normalization stats for linear (rank {global_rank})",
                 ):
                     file_index = index
 

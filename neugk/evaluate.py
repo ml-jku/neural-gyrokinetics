@@ -321,8 +321,11 @@ class BaseEvaluator:
                 else:
                     # Sequence metrics
                     avg_v = v / n_timesteps_acc.clamp(min=1)
-                    for t in range(v.shape[0]):
-                        log_metric_dict[f"{valname}/{m}_x{t + 1}"] = avg_v[t].item()
+                    if v.shape[0] > 1:
+                        for t in range(v.shape[0]):
+                            log_metric_dict[f"{valname}/{m}_x{t + 1}"] = avg_v[t].item()
+                    else:
+                        log_metric_dict[f"{valname}/{m}"] = avg_v[0].item()
         return log_metric_dict
 
     def _save_checkpoint(

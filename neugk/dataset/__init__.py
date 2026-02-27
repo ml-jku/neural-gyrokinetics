@@ -54,6 +54,7 @@ def get_data(cfg, rank: int = 0):
             partial_holdouts[file] = last_n
 
     if cfg.workflow == "gyroswin":
+        use_kvikio_train = True
         input_fields = set(
             cfg.dataset.input_fields
             + [
@@ -83,6 +84,7 @@ def get_data(cfg, rank: int = 0):
         else:
             dataset_class = CycloneDataset
     elif cfg.workflow == "pinc":
+        use_kvikio_train = True
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
         train_kwargs = {"conditions": list(cfg.model.conditioning)}
@@ -92,6 +94,8 @@ def get_data(cfg, rank: int = 0):
         else:
             dataset_class = CycloneAEDataset
     elif cfg.workflow == "diffusion":
+        # no need for gds in diffusion
+        use_kvikio_train = False
         train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
         train_kwargs = {"conditions": list(cfg.model.conditioning)}
@@ -105,7 +109,7 @@ def get_data(cfg, rank: int = 0):
         train_backend = H5Backend(rank)
         val_backend = H5Backend(rank)
     elif backend == "gds":
-        train_backend = KvikIOBackend(rank)
+        train_backend = KvikIOBackend(rank, use_kvikio=use_kvikio_train)
         # NOTE: for validation load without gds, save space, slow is acceptable
         val_backend = KvikIOBackend(rank, use_kvikio=False)
 
@@ -166,19 +170,23 @@ def get_data(cfg, rank: int = 0):
         **val_kwargs,
     )
 
+    # gpudirect storage only used if kvikio is required, oterwise raw bins
+    use_gpudirect = backend == "gds" and use_kvikio_train
     # dataloaders
     prefetch_factor = min(2, cfg.training.num_workers // 2)
     # NOTE: must be false when returning gpu data
-    pin_memory = cfg.training.pin_memory and backend != "gds"
+    pin_memory = cfg.training.pin_memory and not use_gpudirect
     dataloader_kwargs = {}
-    if backend == "gds":
+    if use_gpudirect:
+        # increase file descriptor limit for CUDA IPC handles
+        os.system("ulimit -n 2048")
+        # # # use file_system to avoid "too many open files" with large batches
+        # mp.set_sharing_strategy("file_system")
+
         if cfg.ddp.enable:
             prefetch_factor = 1
-            # increase FP limit
-            os.system("ulimit -n 2048")
-            # # defeats GPU loading
-            # mp.set_sharing_strategy("file_system")
-        dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
+            if cfg.training.num_workers != 0:
+                dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
 
     trainloader = DataLoader(
         trainset,
@@ -188,8 +196,8 @@ def get_data(cfg, rank: int = 0):
         collate_fn=trainset.collate,
         pin_memory=pin_memory,
         sampler=DistributedSampler(trainset) if use_ddp else None,
-        persistent_workers=True,
-        prefetch_factor=prefetch_factor,
+        persistent_workers=cfg.training.num_workers > 0,
+        prefetch_factor=prefetch_factor if cfg.training.num_workers > 0 else None,
         **dataloader_kwargs,
     )
 
@@ -201,8 +209,8 @@ def get_data(cfg, rank: int = 0):
         collate_fn=holdout_trajectories_valset.collate,
         pin_memory=pin_memory,
         sampler=(DistributedSampler(holdout_trajectories_valset) if use_ddp else None),
-        persistent_workers=True,
-        prefetch_factor=1,
+        persistent_workers=cfg.training.num_workers > 0,
+        prefetch_factor=1 if cfg.training.num_workers > 0 else None,
     )
 
     if partial_holdouts:
@@ -241,6 +249,8 @@ def get_data(cfg, rank: int = 0):
             collate_fn=holdout_samples_valset.collate,
             pin_memory=pin_memory,
             sampler=(DistributedSampler(holdout_samples_valset) if use_ddp else None),
+            persistent_workers=cfg.training.num_workers > 0,
+            prefetch_factor=1 if cfg.training.num_workers > 0 else None,
         )
 
     datasets = (trainset, holdout_trajectories_valset)
