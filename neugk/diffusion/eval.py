@@ -193,8 +193,14 @@ class DiffusionEvaluator(BaseEvaluator):
 
         # store checkpoints
         loss_val_min = self._save_checkpoint(
-            rank, model, opt, scheduler, epoch, log_metric_dict, loss_val_min,
-            default_metric="avg_flux_rmse"
+            rank,
+            model,
+            opt,
+            scheduler,
+            epoch,
+            log_metric_dict,
+            loss_val_min,
+            default_metric="avg_flux_rmse",
         )
 
         return log_metric_dict, val_plots, loss_val_min

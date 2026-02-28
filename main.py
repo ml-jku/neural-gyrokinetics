@@ -166,21 +166,20 @@ def main(config: DictConfig):
         is_ddp = config.ddp.enable
         is_torchrun = "RANK" in os.environ
         is_slurm = "SLURM_JOB_ID" in os.environ
-        
+
         if is_ddp:
             world_size = config.ddp.n_nodes * torch.cuda.device_count()
             if not is_torchrun and is_slurm:
                 overrides = HydraConfig.get().overrides.task
                 overrides = [
-                    o for o in overrides
-                    if not o.startswith("hydra/launcher=")
+                    o for o in overrides if not o.startswith("hydra/launcher=")
                 ]
                 if config.ddp.n_nodes == 1:
                     # should be run with torchrun
                     cmd = [
                         "torchrun",
                         f"--nproc_per_node={torch.cuda.device_count()}",
-                        "main.py"
+                        "main.py",
                     ] + overrides
                 else:
                     # multinode setup
@@ -191,7 +190,7 @@ def main(config: DictConfig):
                         f"--rdzv_backend={os.environ['RDZV_BACKEND']}",
                         f"--rdzv_id={os.environ['RDZV_ID']}",
                         f"--rdzv_endpoint={os.environ['HEAD_NODE_IP']}:29501",
-                        "main.py"
+                        "main.py",
                     ] + overrides
 
                 print(f"DDP job with command: {' '.join(cmd)}")
