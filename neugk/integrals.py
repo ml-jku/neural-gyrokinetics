@@ -30,6 +30,7 @@ GEOM_KEYS = [
     "gamma",
 ]
 
+
 def get_integrals(
     pred: torch.Tensor,
     geom: torch.Tensor,
@@ -51,6 +52,7 @@ def get_integrals(
     phi, (pflux, eflux, vflux) = integrator(geom, df=pred.unsqueeze(0))
     phi = phi.squeeze()
     return phi, (pflux, eflux, vflux)
+
 
 class FluxIntegral(nn.Module):
     def __init__(

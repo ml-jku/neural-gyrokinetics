@@ -540,7 +540,7 @@ class PINCLossWrapper(LossWrapper):
             + self._spectral_losses
             + self._simsiam_losses
         )
-        
+
         available_keys = list(set(tgts.keys()) | set(preds.keys()) | special_keys)
         nonzero_keys = [k for k, w in self.weights.items() if w > 0.0]
         if any((n not in available_keys) for n in nonzero_keys):

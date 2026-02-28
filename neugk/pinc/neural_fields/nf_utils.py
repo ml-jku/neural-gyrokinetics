@@ -1,4 +1,4 @@
-from typing import Optional, Sequence, List, Tuple, Callable
+from typing import Optional, Sequence, Tuple, Callable
 
 import numpy as np
 import scipy.linalg

@@ -9,13 +9,12 @@ from torch.cuda import reset_peak_memory_stats, max_memory_allocated
 from torch.utils._pytree import tree_map
 from tqdm import tqdm
 
-from neugk.utils import remainig_progress, exclude_from_weight_decay, memory_cleanup
+from neugk.utils import remainig_progress, exclude_from_weight_decay, edit_tag
 from neugk.runner import BaseRunner
 from neugk.pinc.autoencoders import get_autoencoder
 from neugk.pinc.losses import PINCLossWrapper, PINCGradientBalancer
 from neugk.pinc.autoencoders.eval import AutoencoderEvaluator
 from neugk.pinc.autoencoders.ae_utils import (
-    aggregate_dataset_stats,
     MuonWithAuxAdam,
     SingleDeviceMuonWithAuxAdam,
     load_autoencoder,
@@ -249,11 +248,18 @@ class PINCRunner(BaseRunner):
                     if self.scheduler
                     else self.cfg.training.learning_rate
                 ),
-                **{f"{k}_schedule": sched(progress) for k, sched in self.loss_scheduler_dict.items()},
                 **{
-                    k.replace("df", f"df_{loss_type}").replace("total", f"total_{loss_type}")
-                    if "total_mse" not in k
-                    else k: v
+                    f"{k}_schedule": sched(progress)
+                    for k, sched in self.loss_scheduler_dict.items()
+                },
+                **{
+                    (
+                        k.replace("df", f"df_{loss_type}").replace(
+                            "total", f"total_{loss_type}"
+                        )
+                        if "total_mse" not in k
+                        else k
+                    ): v
                     for k, v in loss_logs.items()
                 },
             }

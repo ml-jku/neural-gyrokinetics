@@ -3,7 +3,6 @@
 import re
 from typing import Callable, Optional, Dict, Tuple, Any
 from collections import defaultdict
-from functools import partial
 
 import torch
 import numpy as np

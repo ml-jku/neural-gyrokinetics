@@ -103,9 +103,15 @@ class CycloneDataset(Dataset):
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
         assert normalization_scope in ["sample", "dataset", "trajectory"]
         if normalization is not None:
-            assert set(fields_to_load).issubset(set(normalization.keys())), "Normalization must be specified for all fields to load"
+            assert set(fields_to_load).issubset(
+                set(normalization.keys())
+            ), "Normalization must be specified for all fields to load"
         self.normalizers = normalization
-        self.stats = normalization_stats if normalization_stats is not None else {k: defaultdict(dict) for k in fields_to_load}
+        self.stats = (
+            normalization_stats
+            if normalization_stats is not None
+            else {k: defaultdict(dict) for k in fields_to_load}
+        )
         self.normalization_scope = normalization_scope
         self.cond_filters = cond_filters
         self.subsample = subsample
@@ -148,7 +154,9 @@ class CycloneDataset(Dataset):
                                 traj_numbers.extend(range(start, end + 1))
                             else:
                                 traj_numbers.append(int(part))
-                        trajectories = [f"{prefix}{num}{suffix}" for num in traj_numbers]
+                        trajectories = [
+                            f"{prefix}{num}{suffix}" for num in traj_numbers
+                        ]
 
                 self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
 
@@ -252,7 +260,11 @@ class CycloneDataset(Dataset):
                 self.resolution[4],
             )
 
-            if normalization_stats is None and normalization_scope == "dataset" and normalization is not None:
+            if (
+                normalization_stats is None
+                and normalization_scope == "dataset"
+                and normalization is not None
+            ):
                 assert split == "train", "validation must have normalization_stats"
                 for k in self.fields_to_load:
                     if k not in stats:
@@ -261,13 +273,15 @@ class CycloneDataset(Dataset):
                     std = meta[f"{k}_std"]
                     if self.normalizers[k]["agg_axes"]:
                         # aggregate along specified dimensions
-                        mean, std = stats[k].aggregate_stats(mean, std, agg_axes=tuple(self.normalizers[k]["agg_axes"]))
+                        mean, std = stats[k].aggregate_stats(
+                            mean, std, agg_axes=tuple(self.normalizers[k]["agg_axes"])
+                        )
 
                     self.stats[k][f_id]["mean"] = mean
                     self.stats[k][f_id]["std"] = std
                     self.stats[k][f_id]["min"] = meta[f"{k}_min"]
                     self.stats[k][f_id]["max"] = meta[f"{k}_max"]
-                    
+
                     stats[k].update(
                         self.stats[k][f_id]["mean"],
                         self.stats[k][f_id]["std"] ** 2,
@@ -310,7 +324,11 @@ class CycloneDataset(Dataset):
             for k, k_stat in stats_recomputed.items():
                 stats[k] = k_stat
 
-        if normalization_scope == "dataset" and normalization_stats is None and normalization is not None:
+        if (
+            normalization_scope == "dataset"
+            and normalization_stats is None
+            and normalization is not None
+        ):
             for k in fields_to_load:
                 self.stats[k]["full"]["mean"] = stats[k].mean.astype(np.float32)
                 self.stats[k]["full"]["std"] = (stats[k].var ** 0.5).astype(np.float32)
@@ -331,7 +349,11 @@ class CycloneDataset(Dataset):
                     x = sample["x"]
                     if isinstance(x, torch.Tensor):
                         x = x.cpu().numpy()
-                    norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3, 4, 5)
+                    norm_axes = (
+                        tuple(self.normalizers[key]["agg_axes"])
+                        if self.normalizers[key]["agg_axes"]
+                        else (1, 2, 3, 4, 5)
+                    )
                     if self.separate_zf:
                         x = separate_zf_fn(x, dim=0)
                 elif key == "phi":
@@ -340,9 +362,17 @@ class CycloneDataset(Dataset):
                         x = x.cpu().numpy()
                     if x.ndim == 3:
                         x = np.expand_dims(x, 0)
-                    norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3)
+                    norm_axes = (
+                        tuple(self.normalizers[key]["agg_axes"])
+                        if self.normalizers[key]["agg_axes"]
+                        else (1, 2, 3)
+                    )
                 else:
-                    flux_val = sample.get("flux") if "flux" in sample else sample.get("gt_flux")
+                    flux_val = (
+                        sample.get("flux")
+                        if "flux" in sample
+                        else sample.get("gt_flux")
+                    )
                     if isinstance(flux_val, torch.Tensor):
                         flux_val = flux_val.cpu().numpy()
                     x = np.array([flux_val], dtype=np.float32)
@@ -493,8 +523,16 @@ class CycloneDataset(Dataset):
             if self.bundle_seq_length == 1:
                 x, gt = x[0], gt[0]
             else:
-                x = torch.stack(x, axis=1) if isinstance(x[0], torch.Tensor) else np.stack(x, axis=1)
-                gt = torch.stack(gt, axis=1) if isinstance(gt[0], torch.Tensor) else np.stack(gt, axis=1)
+                x = (
+                    torch.stack(x, axis=1)
+                    if isinstance(x[0], torch.Tensor)
+                    else np.stack(x, axis=1)
+                )
+                gt = (
+                    torch.stack(gt, axis=1)
+                    if isinstance(gt[0], torch.Tensor)
+                    else np.stack(gt, axis=1)
+                )
         else:
             x, gt = None, None
 
@@ -502,8 +540,16 @@ class CycloneDataset(Dataset):
             if self.bundle_seq_length == 1:
                 poten, y_poten = poten[0], y_poten[0]
             else:
-                poten = torch.stack(poten, axis=1) if isinstance(poten[0], torch.Tensor) else np.stack(poten, axis=1)
-                y_poten = torch.stack(y_poten, axis=1) if isinstance(y_poten[0], torch.Tensor) else np.stack(y_poten, axis=1)
+                poten = (
+                    torch.stack(poten, axis=1)
+                    if isinstance(poten[0], torch.Tensor)
+                    else np.stack(poten, axis=1)
+                )
+                y_poten = (
+                    torch.stack(y_poten, axis=1)
+                    if isinstance(y_poten[0], torch.Tensor)
+                    else np.stack(y_poten, axis=1)
+                )
         else:
             poten, y_poten = None, None
 
@@ -511,7 +557,11 @@ class CycloneDataset(Dataset):
         sample["gt"] = gt
         sample["phi"] = poten
         sample["y_phi"] = y_poten
-        sample["gt_flux"] = torch.tensor(gt_flux).squeeze() if isinstance(gt_flux[0], torch.Tensor) else np.array(gt_flux).squeeze()
+        sample["gt_flux"] = (
+            torch.tensor(gt_flux).squeeze()
+            if isinstance(gt_flux[0], torch.Tensor)
+            else np.array(gt_flux).squeeze()
+        )
 
         sample["timestep"] = meta["timesteps"][original_t_index]
         sample["itg"] = meta["ion_temp_grad"].squeeze()
@@ -606,7 +656,10 @@ class CycloneDataset(Dataset):
 
             old_indices = [
                 (flat_idx, file_idx_stored, t_idx)
-                for flat_idx, (file_idx_stored, t_idx) in self.flat_index_to_file_and_tstep.items()
+                for flat_idx, (
+                    file_idx_stored,
+                    t_idx,
+                ) in self.flat_index_to_file_and_tstep.items()
                 if file_idx_stored == file_idx
             ]
 
@@ -658,10 +711,19 @@ class CycloneDataset(Dataset):
 
         if num_workers > 1:
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                samples = list(executor.map(_fetch, list(zip(file_idx.tolist(), timestep_idx.tolist()))))
+                samples = list(
+                    executor.map(
+                        _fetch, list(zip(file_idx.tolist(), timestep_idx.tolist()))
+                    )
+                )
             sample = self.collate(samples)
         else:
-            sample = self.collate([self.__getitem__((f_idx, t_idx), get_normalized) for f_idx, t_idx in zip(file_idx.tolist(), timestep_idx.tolist())])
+            sample = self.collate(
+                [
+                    self.__getitem__((f_idx, t_idx), get_normalized)
+                    for f_idx, t_idx in zip(file_idx.tolist(), timestep_idx.tolist())
+                ]
+            )
         return sample
 
     def get_timesteps(
@@ -675,7 +737,13 @@ class CycloneDataset(Dataset):
         file_idx = file_idx.cpu().long()
 
         if timestep_idx is None:
-            timestep_idx = torch.stack([torch.arange(self.num_ts(file_idx[i]) - 1) for i in range(file_idx.shape[0])], dim=0)
+            timestep_idx = torch.stack(
+                [
+                    torch.arange(self.num_ts(file_idx[i]) - 1)
+                    for i in range(file_idx.shape[0])
+                ],
+                dim=0,
+            )
 
         if isinstance(timestep_idx, int):
             timestep_idx = torch.tensor([timestep_idx])
@@ -780,7 +848,7 @@ class LinearCycloneDataset(CycloneDataset):
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
         geometry = sample["geometry"]
-        
+
         if get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
@@ -794,7 +862,9 @@ class LinearCycloneDataset(CycloneDataset):
             y_df=None,
             phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
             y_phi=None,
-            y_flux=torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None,
+            y_flux=(
+                torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None
+            ),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
@@ -802,7 +872,9 @@ class LinearCycloneDataset(CycloneDataset):
             dg=torch.as_tensor(dg, dtype=self.dtype),
             s_hat=torch.as_tensor(s_hat, dtype=self.dtype),
             q=torch.as_tensor(q, dtype=self.dtype),
-            geometry=tree_map(lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry),
+            geometry=tree_map(
+                lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry
+            ),
         )
 
 
@@ -810,7 +882,9 @@ class LinearCycloneDataset(CycloneDataset):
 class CoordinateCycloneDataset(CycloneDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        assert "position" in self.fields_to_load, "Coordinate dataset needs position field"
+        assert (
+            "position" in self.fields_to_load
+        ), "Coordinate dataset needs position field"
 
     def _load_data(self, f, file_index, t_index, n_subsamples=65536) -> dict:
         original_t_index = t_index + self.offsets[file_index]
@@ -822,21 +896,27 @@ class CoordinateCycloneDataset(CycloneDataset):
 
         sample = {}
         if "df" in self.fields_to_load:
-            k = self.backend.read_df(f, t_str, self.df_shape, self.active_keys, self.rank)
-            k_gt = self.backend.read_df(f, t_str_gt, self.df_shape, self.active_keys, self.rank)
-            
-            if isinstance(k, torch.Tensor): k = k.cpu().numpy()
-            if isinstance(k_gt, torch.Tensor): k_gt = k_gt.cpu().numpy()
+            k = self.backend.read_df(
+                f, t_str, self.df_shape, self.active_keys, self.rank
+            )
+            k_gt = self.backend.read_df(
+                f, t_str_gt, self.df_shape, self.active_keys, self.rank
+            )
+
+            if isinstance(k, torch.Tensor):
+                k = k.cpu().numpy()
+            if isinstance(k_gt, torch.Tensor):
+                k_gt = k_gt.cpu().numpy()
 
             position = np.indices(k.shape[1:]).reshape(5, -1).T
             x = np.concatenate([k[0].ravel()[None], k[1].ravel()[None]])
             y = np.concatenate([k_gt[0].ravel()[None], k_gt[1].ravel()[None]])
-            
+
             rand_inds = np.random.choice(len(position), size=n_subsamples)
             sample["x"] = x[:, rand_inds]
             sample["gt"] = y[:, rand_inds]
             sample["position"] = position[rand_inds]
-        
+
         sample["timestep"] = meta["timesteps"][original_t_index]
         sample["itg"] = meta["ion_temp_grad"].squeeze()
         sample["dg"] = meta["density_grad"].squeeze()

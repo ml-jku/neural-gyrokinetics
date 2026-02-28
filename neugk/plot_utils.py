@@ -5,7 +5,6 @@ from typing import Dict, List, Optional, Sequence, Union
 
 import matplotlib
 import matplotlib.pyplot as plt
-import matplotlib.ticker as tkr
 import numpy as np
 import torch
 from PIL import Image as PILImage

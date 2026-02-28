@@ -123,7 +123,9 @@ def preprocess(
             # load k dump files of other sim, they are sampled the same anyways
             # this is only for extracting the correct flux timesteps
             ks = K_files("/restricteddata/ukaea/gyrokinetics/raw/iteration_0")
-            potens, _ = poten_files("/restricteddata/ukaea/gyrokinetics/raw/iteration_0")
+            potens, _ = poten_files(
+                "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
+            )
             k_dir = "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
         # get timestamps
         ts = []
@@ -157,20 +159,20 @@ def preprocess(
         fluxes = np.loadtxt(f"{dir_in.replace('_Lin', '')}/fluxes.dat")[:, 1]
         orig_fluxes = fluxes.copy()
         # print(ks)
-        if not "Lin" in out_path:
+        if "Lin" not in out_path:
             orig_times = np.loadtxt(f"{dir_in.replace('_Lin', '')}/time.dat")
             ts_slices = [np.isclose(orig_times, t).nonzero()[0][0] for t in timesteps]
             fluxes = fluxes[ts_slices]
             orig_fluxes = fluxes.copy()
-        
-        fluxes = np.clip(fluxes, a_min=0., a_max=None)
+
+        fluxes = np.clip(fluxes, a_min=0.0, a_max=None)
         # load parameters
         config = parse_input_dat(f"{dir_in}/input.dat")
         ion_temp_grad = config["species"]["rlt"]
         density_grad = config["species"]["rln"]
         s_hat = config["geom"]["shat"]
         q = config["geom"]["q"]
-            
+
         df_stats = RunningMeanStd()
         phi_stats = RunningMeanStd()
         flux_stats = RunningMeanStd()
@@ -261,7 +263,7 @@ def preprocess(
                 # load the potential field
                 a = np.loadtxt(f"{dir_in}/{pot}")
                 phi = np.reshape(a, (nx, ns, ny), order="F").astype("float32").copy()
-                if not "Lin" in out_path:
+                if "Lin" not in out_path:
                     spc_file = pot.replace("Poten", "Spc3d")
                     b = np.loadtxt(f"{dir_in}/{spc_file}")
                     gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
@@ -272,20 +274,26 @@ def preprocess(
                     phi_fft_unpadded, out_shape=phi_fft_unpadded.shape
                 )
 
-                if not "Lin" in out_path:
+                if "Lin" not in out_path:
                     # do not compute integral for linear sims => it will fail!
                     # phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
                     df = torch.tensor(knth)
                     _, (_, eflux, _) = get_integrals(df, geometry)
-                    if not np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-4):
+                    if not np.isclose(
+                        eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1e-4
+                    ):
                         warnings.warn(
                             f"Flux integral does not match original flux! Computed: {eflux.sum().item()}, Original: {orig_fluxes[idx]}"
                         )
-                    assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-2), "Strong deviation for flux!!"
+                    assert np.isclose(
+                        eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1e-2
+                    ), "Strong deviation for flux!!"
 
                 # append stats to metadata dictionary
                 df_stats.update(knth, np.zeros_like(knth), knth, knth)
-                flux_stats.update(fluxes[idx], np.zeros_like(fluxes[idx]), fluxes[idx], fluxes[idx])
+                flux_stats.update(
+                    fluxes[idx], np.zeros_like(fluxes[idx]), fluxes[idx], fluxes[idx]
+                )
                 phi_stats.update(phi, np.zeros_like(phi), phi, phi)
 
                 # write to disk

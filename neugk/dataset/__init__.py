@@ -266,8 +266,16 @@ def get_data(cfg, rank: int = 0):
                         zf_separated=cfg.dataset.separate_zf,
                         weights=cfg.dataset.augment.mask_modes.weights,
                         mask_zero_mode=cfg.dataset.augment.mask_modes.mask_zero_mode,
-                        denormalize_fn=trainset.denormalize if not cfg.dataset.augment.mask_modes.is_fourier else None,
-                        normalize_fn=trainset.normalize if not cfg.dataset.augment.mask_modes.is_fourier else None,
+                        denormalize_fn=(
+                            trainset.denormalize
+                            if not cfg.dataset.augment.mask_modes.is_fourier
+                            else None
+                        ),
+                        normalize_fn=(
+                            trainset.normalize
+                            if not cfg.dataset.augment.mask_modes.is_fourier
+                            else None
+                        ),
                     )
                 )
             else:

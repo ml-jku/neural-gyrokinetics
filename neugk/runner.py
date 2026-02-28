@@ -9,6 +9,7 @@ import torch.distributed as dist
 from transformers.optimization import get_scheduler
 
 from neugk.utils import (
+    edit_tag,
     ddp_setup,
     setup_logging,
     get_linear_burn_in_fn,
@@ -67,7 +68,9 @@ class BaseRunner:
 
     def setup_data(self):
         """Initialize datasets and dataloaders."""
-        datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.local_rank)
+        datasets, dataloaders, self.augmentations = get_data(
+            self.cfg, rank=self.local_rank
+        )
         if len(datasets) == 3:
             self.trainset, self.valsets = datasets[0], datasets[1:]
             self.trainloader, self.valloaders = dataloaders[0], dataloaders[1:]
@@ -185,8 +188,11 @@ class BaseRunner:
                     if self.scheduler
                     else self.cfg.training.learning_rate
                 ),
-                **{f"{k}_schedule": sched(progress) for k, sched in self.loss_scheduler_dict.items()},
-                **loss_logs
+                **{
+                    f"{k}_schedule": sched(progress)
+                    for k, sched in self.loss_scheduler_dict.items()
+                },
+                **loss_logs,
             }
             train_losses_dict = edit_tag(train_logs, prefix="train")
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}

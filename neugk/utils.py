@@ -14,7 +14,6 @@ import torch.distributed as dist
 from torch import nn
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
-from einops import rearrange
 
 
 def recombine_zf(x, dim: int = 1):
@@ -280,7 +279,9 @@ def find_free_port():
         return s.getsockname()[1]  # Return the port number assigned.
 
 
-def expand_as(src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch.Tensor]):
+def expand_as(
+    src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch.Tensor]
+):
     """Expand dimensions of src to match tgt, handling batch, time, and spatial dims."""
     if src.ndim == tgt.ndim:
         return src
@@ -288,20 +289,20 @@ def expand_as(src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch
     # determine where src fits into tgt
     src_shape = list(src.shape)
     tgt_shape = list(tgt.shape)
-    
+
     # covers casex where src is (C, ...) and tgt is (B, T, C, ...)
     start_axis = -1
     for i in range(len(tgt_shape) - len(src_shape) + 1):
         if tgt_shape[i] == src_shape[0]:
             match = True
             for j in range(1, len(src_shape)):
-                if src_shape[j] != 1 and src_shape[j] != tgt_shape[i+j]:
+                if src_shape[j] != 1 and src_shape[j] != tgt_shape[i + j]:
                     match = False
                     break
             if match:
                 start_axis = i
                 break
-    
+
     if start_axis == -1:
         res = src
         while res.ndim < tgt.ndim:
@@ -315,7 +316,7 @@ def expand_as(src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch
     new_shape = [1] * len(tgt_shape)
     for i, s in enumerate(src_shape):
         new_shape[start_axis + i] = s
-    
+
     if isinstance(src, np.ndarray):
         return src.reshape(new_shape)
     else:
@@ -373,7 +374,9 @@ class RunningMeanStd:
         """
         :return: Return a copy of the current object.
         """
-        assert self.mean is not None, "Cannot copy an uninitialized RunningMeanStd object"
+        assert (
+            self.mean is not None
+        ), "Cannot copy an uninitialized RunningMeanStd object"
         new_object = RunningMeanStd(shape=self.mean.shape)
         new_object.mean = self.mean.copy()
         new_object.var = self.var.copy()
@@ -448,31 +451,33 @@ class RunningMeanStd:
         self.count = new_count
 
     @staticmethod
-    def aggregate_stats(means, stds, agg_axes=(1,2,3,4,5)) -> Tuple[np.ndarray, np.ndarray]:
+    def aggregate_stats(
+        means, stds, agg_axes=(1, 2, 3, 4, 5)
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Reduces coordinate-wise stats to channel-wise stats.
-        
+
         Args:
             coord_means: Array of shape (C, D, H, W)
             coord_stds:  Array of shape (C, D, H, W)
         """
         # The mean of means is the global mean.
         channel_means = np.mean(means, axis=agg_axes, keepdims=True)
-        
+
         # Convert stds to variance first
-        coord_vars = stds ** 2
-        
+        coord_vars = stds**2
+
         # average of the local variances
         avg_of_vars = np.mean(coord_vars, axis=agg_axes, keepdims=True)
-        
-        # variance of the local means 
+
+        # variance of the local means
         diff_sq = (means - channel_means) ** 2
         var_of_means = np.mean(diff_sq, axis=agg_axes, keepdims=True)
-        
+
         # Total Variance = Average of Variances + Variance of Means
         channel_vars = avg_of_vars + var_of_means
         channel_stds = np.sqrt(channel_vars)
-        
+
         return channel_means, channel_stds
 
 
@@ -569,7 +574,7 @@ def load_geometry(directory, dtype=torch.float64):
     ints[0] = ints[1]  # CHECK
     geometry["ints"] = torch.tensor(ints, dtype=dtype)
 
-    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=dtype) 
+    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=dtype)
     geometry["little_g"] = torch.tensor(
         np.stack([geom["g_zeta_zeta"], geom["g_eps_zeta"], geom["g_eps_eps"]], -1),
         dtype=dtype,

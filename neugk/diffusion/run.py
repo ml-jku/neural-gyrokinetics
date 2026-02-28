@@ -19,7 +19,7 @@ import scipy.optimize
 from neugk.diffusion.models import get_diffusion_model, DummyAE
 from neugk.diffusion.eval import DiffusionEvaluator
 from neugk.dataset import CycloneAESample
-from neugk.utils import exclude_from_weight_decay, memory_cleanup
+from neugk.utils import exclude_from_weight_decay
 from neugk.runner import BaseRunner
 from neugk.losses import LossWrapper
 from neugk.pinc.autoencoders.ae_utils import load_autoencoder

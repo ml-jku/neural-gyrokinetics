@@ -10,7 +10,7 @@ from tqdm import tqdm
 import torch
 from torch import nn
 
-from neugk.utils import save_model_and_config, recombine_zf
+from neugk.utils import save_model_and_config
 
 
 class ComplexMetrics:

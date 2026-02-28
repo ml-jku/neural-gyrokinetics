@@ -3,6 +3,7 @@ import einops
 from typing import Optional, Callable
 from functools import partial
 
+
 def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: int = 1):
     def _noise(x: torch.Tensor) -> torch.Tensor:
         # this assumes channels normalized uniformly
@@ -15,6 +16,7 @@ def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: in
             return x + torch.normal(0, std, size=(x.shape), device=x.device)
 
     return _noise
+
 
 def reverse_ifft(x, zf_separated=False):
     # Ensure input is a torch.Tensor
@@ -37,6 +39,7 @@ def reverse_ifft(x, zf_separated=False):
     x = x.permute(1, 0, *range(2, x.ndim))
     return x.to(torch.float32)
 
+
 def ifft(x):
     x = x.permute(0, *range(2, x.ndim), 1).contiguous()
     x = torch.view_as_complex(x)
@@ -45,15 +48,12 @@ def ifft(x):
     x = x.permute(1, 0, *range(2, x.ndim))
     return x.to(torch.float32)
 
+
 def de_normalize(x, file_idx, denormalize_fn):
     # de/normalize physics data keys
-    x = torch.stack(
-        [
-            denormalize_fn(f, x[b])
-            for b, f in enumerate(file_idx.tolist())
-        ]
-    )
+    x = torch.stack([denormalize_fn(f, x[b]) for b, f in enumerate(file_idx.tolist())])
     return x
+
 
 def separate_zf(x):
     nky = x.shape[-1]
@@ -61,16 +61,17 @@ def separate_zf(x):
     x = torch.cat([zf, x - zf], dim=1)
     return x
 
+
 def mask_modes(
-        mask_ratio: float, 
-        is_fourier: bool = False, 
-        zf_separated: bool = False, 
-        weights: Optional[torch.Tensor] = None,
-        rescale: bool = True,
-        mask_zero_mode: bool = True,
-        denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-    ):
+    mask_ratio: float,
+    is_fourier: bool = False,
+    zf_separated: bool = False,
+    weights: Optional[torch.Tensor] = None,
+    rescale: bool = True,
+    mask_zero_mode: bool = True,
+    denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+):
     assert 0.0 <= mask_ratio <= 1.0, "mask_ratio must be in [0, 1]"
     if weights is not None and not isinstance(weights, torch.Tensor):
         weights = torch.from_numpy(weights).to(device)
@@ -83,7 +84,7 @@ def mask_modes(
             if denormalize_fn is not None:
                 x = de_normalize(x, file_idx, denormalize_fn)
             x = reverse_ifft(x, zf_separated=zf_separated)
-        
+
         nky = x.shape[-1]
         if weights is None:
             probs = torch.full((nky,), mask_ratio, device=device)
@@ -102,7 +103,9 @@ def mask_modes(
 
         # Optional rescaling to preserve expected energy
         if rescale:
-            scale = torch.where(keep_prob > 0, 1.0 / keep_prob, torch.zeros_like(keep_prob))
+            scale = torch.where(
+                keep_prob > 0, 1.0 / keep_prob, torch.zeros_like(keep_prob)
+            )
             mask_1d = mask_1d * scale
 
         # Reshape for broadcasting
@@ -116,7 +119,9 @@ def mask_modes(
                 # remove zf again if it was removed originally
                 x_masked = separate_zf(x_masked)
             if normalize_fn is not None:
-                x_masked = de_normalize(x_masked, file_idx, partial(normalize_fn, return_stats=False))
+                x_masked = de_normalize(
+                    x_masked, file_idx, partial(normalize_fn, return_stats=False)
+                )
         return x_masked, x_tgt
 
     return _mask
