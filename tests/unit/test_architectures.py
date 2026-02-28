@@ -1,6 +1,5 @@
 import pytest
 import torch
-import torch.nn as nn
 from neugk.models.gk_unet import SwinNDUnet
 from neugk.models.nd_vit.patching import PatchEmbed, PatchExpand
 

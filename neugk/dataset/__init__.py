@@ -3,7 +3,7 @@ from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import os
+import resource
 
 from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import (
@@ -20,6 +20,22 @@ from neugk.dataset.backend import H5Backend, KvikIOBackend
 from neugk.dataset.augment import mask_modes
 
 
+def set_ulimit(limit: int = 65536):
+    # os.system(f"ulimit -n {limit}")
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft < limit:
+            new_soft = min(limit, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+    except (ValueError, resource.error):
+        pass
+
+
+def _worker_init_fn(worker_id):
+    _ = worker_id
+    set_ulimit()
+
+
 def check_partial_holdouts(dataset_cfg):
     # check that each trajectory in partial holdouts also appears in training
     for entry in dataset_cfg.partial_holdouts:
@@ -32,6 +48,8 @@ def check_partial_holdouts(dataset_cfg):
 
 
 def get_data(cfg, rank: int = 0):
+    # increase file descriptor limit for CUDA IPC and shared memory handles
+    set_ulimit()
     assert cfg.dataset.name in ["cyclone"]
     backend = getattr(cfg.dataset, "backend", "h5")
     use_ddp = dist.is_initialized()
@@ -171,12 +189,13 @@ def get_data(cfg, rank: int = 0):
     # NOTE: must be false when returning gpu data
     pin_memory = cfg.training.pin_memory and not use_gpudirect
     dataloader_kwargs = {}
+    if cfg.training.num_workers > 0:
+        dataloader_kwargs["worker_init_fn"] = _worker_init_fn
+
     if use_gpudirect:
-        # increase file descriptor limit for CUDA IPC handles
-        os.system("ulimit -n 65536")
         # cannot for context to dataloader workers with gds
         if cfg.training.num_workers > 0:
-            dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
+            dataloader_kwargs["multiprocessing_context"] = mp.get_context("spawn")
         # keep memory requirements low
         prefetch_factor = 1
 

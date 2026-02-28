@@ -1,6 +1,4 @@
-import pytest
 import torch
-from neugk.pinc.autoencoders.ae_utils import load_autoencoder
 
 
 def test_dummy_dataset_factory():

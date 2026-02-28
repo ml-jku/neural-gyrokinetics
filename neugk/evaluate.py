@@ -328,6 +328,19 @@ class BaseEvaluator:
                         log_metric_dict[f"{valname}/{m}"] = avg_v[0].item()
         return log_metric_dict
 
+    def _get_val_loss(self, log_metric_dict: Dict[str, float], default_metric: str = "df") -> float:
+        m_name = self.cfg.validation.get("model_selection_metric", default_metric)
+        val_loss = log_metric_dict.get(f"val_traj/{m_name}")
+        
+        if val_loss is None:
+            # handle multi-step keys by averaging across sequence
+            relevant_vals = [
+                v for k, v in log_metric_dict.items()
+                if k.startswith(f"val_traj/{m_name}_x")
+            ]
+            val_loss = sum(relevant_vals) / len(relevant_vals) if relevant_vals else 0.0
+        return val_loss
+
     def _save_checkpoint(
         self,
         rank: int,
@@ -335,9 +348,12 @@ class BaseEvaluator:
         opt: torch.optim.Optimizer,
         scheduler: Any,
         epoch: int,
-        val_loss: float,
+        log_metric_dict: Dict[str, float],
         loss_val_min: float,
+        default_metric: str = "df",
     ) -> float:
+        val_loss = self._get_val_loss(log_metric_dict, default_metric=default_metric)
+        
         if rank == 0:
             loss_val_min = save_model_and_config(
                 model, opt, scheduler, self.cfg, epoch, val_loss, loss_val_min

@@ -272,9 +272,8 @@ class GyroSwinEvaluator(BaseEvaluator):
             )
 
         # persist checkpoints
-        val_loss = metrics[self.cfg.validation.model_selection_metric].mean().item()
         loss_val_min = self._save_checkpoint(
-            rank, model, opt, scheduler, epoch, val_loss, loss_val_min
+            rank, model, opt, scheduler, epoch, log_metric_dict, loss_val_min
         )
 
         return log_metric_dict, val_plots, loss_val_min

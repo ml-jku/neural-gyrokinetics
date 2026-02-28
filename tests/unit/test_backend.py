@@ -1,4 +1,3 @@
-import pytest
 from neugk.dataset.backend import KvikIOBackend, H5Backend
 
 

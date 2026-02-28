@@ -1,4 +1,3 @@
-import pytest
 import torch
 from neugk.pinc.losses import PINCLossWrapper
 

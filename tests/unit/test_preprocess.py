@@ -1,6 +1,5 @@
-import pytest
 import numpy as np
-from neugk.dataset.preprocess import do_ifft, check_ifft
+from neugk.dataset.preprocess import do_ifft
 
 
 def test_do_ifft_roundtrip():

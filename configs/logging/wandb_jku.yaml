@@ -1,0 +1,7 @@
+writer: wandb
+mode: online
+entity: ukaea-mhd
+project: gall2
+run_id: null
+tqdm: true
+model_summary: false

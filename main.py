@@ -17,8 +17,9 @@ import yaml
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
+import torch.multiprocessing as mp
 
-from neugk.utils import compress_src, filter_cli_priority
+from neugk.utils import compress_src, filter_cli_priority, find_free_port
 
 from neugk.gyroswin import GyroSwinRunner
 from neugk.pinc import PINCRunner
@@ -165,6 +166,7 @@ def main(config: DictConfig):
         is_ddp = config.ddp.enable
         is_torchrun = "RANK" in os.environ
         is_slurm = "SLURM_JOB_ID" in os.environ
+        
         if is_ddp:
             world_size = config.ddp.n_nodes * torch.cuda.device_count()
             if not is_torchrun and is_slurm:
@@ -192,15 +194,26 @@ def main(config: DictConfig):
                         "main.py"
                     ] + overrides
 
-                print(f"Launching DDP job with command: {' '.join(cmd)}")
+                print(f"DDP job with command: {' '.join(cmd)}")
                 subprocess.check_call(cmd)
                 return
             elif is_torchrun and not is_slurm or is_torchrun and is_slurm:
                 rank = int(os.environ["RANK"])
                 dispatch_runner(rank, config, world_size=world_size)
             else:
-                # here we could again revert to mp.spawn, but ideally should not be done anymore
-                raise ValueError("Invalid DDP setup: torchrun and SLURM env vars are inconsistent")
+                # here we revert to mp.spawn to allow "normal" DDP startup
+                print(f"Local DDP with mp.spawn (nprocs={torch.cuda.device_count()})")
+                os.environ["MASTER_ADDR"] = "localhost"
+                os.environ["MASTER_PORT"] = str(find_free_port())
+                if "NCCL_SOCKET_IFNAME" in os.environ:
+                    del os.environ["NCCL_SOCKET_IFNAME"]
+
+                mp.spawn(
+                    dispatch_runner,
+                    args=(config, world_size),
+                    nprocs=torch.cuda.device_count(),
+                    join=True,
+                )
         else:
             # single gpu
             rank = 0

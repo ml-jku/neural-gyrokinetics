@@ -201,7 +201,8 @@ def save_model_and_config(
     )
 
     # persist best
-    if val_loss < loss_val_min:
+    best_path = f"{cfg.output_path}/best.pth"
+    if val_loss < loss_val_min or not os.path.exists(best_path):
         loss_val_min = val_loss
         torch.save(
             {
@@ -211,7 +212,7 @@ def save_model_and_config(
                 "scheduler_state_dict": scheduler.state_dict(),
                 "loss": val_loss,
             },
-            f"{cfg.output_path}/best.pth",
+            best_path,
         )
 
     return loss_val_min

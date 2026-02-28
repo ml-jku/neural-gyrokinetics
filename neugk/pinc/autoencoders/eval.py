@@ -228,12 +228,8 @@ class AutoencoderEvaluator(BaseEvaluator):
                 val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val) ** 2))
                 log_metric_dict[f"{valname}/probe_val_rmse"] = val_rmse.item()
         # save checkpoint
-        sel_metric = (
-            f"val_traj/{self.cfg.validation.get('model_selection_metric', 'df')}"
-        )
-        val_loss = log_metric_dict.get(sel_metric, 0.0)
         loss_val_min = self._save_checkpoint(
-            rank, model, opt, scheduler, epoch, val_loss, loss_val_min
+            rank, model, opt, scheduler, epoch, log_metric_dict, loss_val_min
         )
 
         return log_metric_dict, val_plots, loss_val_min
