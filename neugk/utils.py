@@ -135,9 +135,17 @@ def ddp_setup(rank, world_size):
     )
 
 
-def edit_tag(dict, prefix, postfix):
-    """Update dictionary keys with prefix and postfix tags."""
-    return {f"{prefix}/{k}_{postfix}": v for k, v in dict.items()}
+def edit_tag(d, prefix=None, postfix=None):
+    """Update dictionary keys with prefix and postfix tags, avoiding duplicates."""
+    res = {}
+    for k, v in d.items():
+        nk = k
+        if prefix and not k.startswith(f"{prefix}/"):
+            nk = f"{prefix}/{nk}"
+        if postfix and not k.endswith(f"_{postfix}"):
+            nk = f"{nk}_{postfix}"
+        res[nk] = v
+    return res
 
 
 def setup_logging(config):

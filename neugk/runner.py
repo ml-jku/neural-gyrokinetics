@@ -179,17 +179,16 @@ class BaseRunner:
 
             # logging
             progress = remainig_progress(self.cur_update_step, self.total_steps)
-            train_losses_dict = {
-                "train/lr": (
+            train_logs = {
+                "lr": (
                     self.scheduler.get_last_lr()[0]
                     if self.scheduler
                     else self.cfg.training.learning_rate
                 ),
+                **{f"{k}_schedule": sched(progress) for k, sched in self.loss_scheduler_dict.items()},
+                **loss_logs
             }
-            for k, sched in self.loss_scheduler_dict.items():
-                train_losses_dict[f"train/{k}_schedule"] = sched(progress)
-
-            train_losses_dict.update(loss_logs)
+            train_losses_dict = edit_tag(train_logs, prefix="train")
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # evaluate

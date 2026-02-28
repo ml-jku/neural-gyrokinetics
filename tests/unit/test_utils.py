@@ -25,8 +25,20 @@ def test_is_number():
 
 def test_edit_tag():
     test_dict = {"loss": 0.1, "acc": 0.9}
+    
+    # test both prefix and postfix
     result = edit_tag(test_dict, "train", "epoch")
     assert result == {"train/loss_epoch": 0.1, "train/acc_epoch": 0.9}
+
+    # test only prefix
+    result = edit_tag(test_dict, prefix="val")
+    assert result == {"val/loss": 0.1, "val/acc": 0.9}
+
+    # test idempotent behavior
+    tagged_dict = {"train/loss_epoch": 0.1}
+    result = edit_tag(tagged_dict, prefix="train", postfix="epoch")
+    assert result == {"train/loss_epoch": 0.1}
+
 
 
 def test_remainig_progress():
