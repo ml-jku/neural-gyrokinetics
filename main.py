@@ -168,6 +168,10 @@ def main(config: DictConfig):
         is_ddp = config.ddp.enable
         is_torchrun = "RANK" in os.environ
         is_slurm = "SLURM_JOB_ID" in os.environ
+        if is_torchrun and is_slurm:
+            # set wandb directory to prevent distructive symlinks from wandb
+            os.environ["WANDB_DIR"] = f"{dict_config['output_path']}/wandb_{os.environ.get('SLURM_JOB_ID')}"
+    
         if is_ddp:
             world_size = config.ddp.n_nodes * torch.cuda.device_count()
             if not is_torchrun and is_slurm:

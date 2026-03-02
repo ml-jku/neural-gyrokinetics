@@ -378,22 +378,19 @@ class RunningMeanStd:
         self.count = new_count
 
     @staticmethod
-    def aggregate_stats(means, stds, agg_axes=(1,2,3,4,5)) -> Tuple[np.ndarray, np.ndarray]:
+    def aggregate_stats(means, vars, mins, maxs, agg_axes=(1,2,3,4,5)) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Reduces coordinate-wise stats to channel-wise stats.
         
         Args:
-            coord_means: Array of shape (C, D, H, W)
-            coord_stds:  Array of shape (C, D, H, W)
+            means: Array of shape (C, D, H, W)
+            vars:  Array of shape (C, D, H, W)
         """
         # The mean of means is the global mean.
         channel_means = np.mean(means, axis=agg_axes, keepdims=True)
         
-        # Convert stds to variance first
-        coord_vars = stds ** 2
-        
         # average of the local variances
-        avg_of_vars = np.mean(coord_vars, axis=agg_axes, keepdims=True)
+        avg_of_vars = np.mean(vars, axis=agg_axes, keepdims=True)
         
         # variance of the local means 
         diff_sq = (means - channel_means) ** 2
@@ -401,9 +398,10 @@ class RunningMeanStd:
         
         # Total Variance = Average of Variances + Variance of Means
         channel_vars = avg_of_vars + var_of_means
-        channel_stds = np.sqrt(channel_vars)
+        channel_mins = np.min(mins, axis=agg_axes, keepdims=True)
+        channel_maxs = np.max(maxs, axis=agg_axes, keepdims=True)
         
-        return channel_means, channel_stds
+        return channel_means, channel_vars, channel_mins, channel_maxs
 
 
 def load_geom(file_path):

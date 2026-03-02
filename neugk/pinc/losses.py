@@ -174,9 +174,10 @@ class PINCLossWrapper(LossWrapper):
         }
 
     def compute_data_loss(
-        self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8
+        self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8,
+        loss_type: Optional[str] = None
     ) -> torch.Tensor:
-        loss_type = self._get_current_loss_types()["data"]
+        loss_type = loss_type or self._get_current_loss_types()["data"]
 
         if loss_type == "mse":
             return F.mse_loss(pred, target)
@@ -187,7 +188,7 @@ class PINCLossWrapper(LossWrapper):
         if loss_type == "smooth_l1":
             return F.smooth_l1_loss(pred, target)
         if loss_type == "relative_mse":
-            return ((pred - target) / (torch.abs(target) + eps)).pow(2).mean()
+            return torch.sum((pred - target)**2) / torch.sum(target**2 + eps)
         if loss_type == "relative_l1":
             return (torch.abs(pred - target) / (torch.abs(target) + eps)).mean()
         if loss_type == "log_error":
@@ -593,6 +594,8 @@ class PINCLossWrapper(LossWrapper):
         if not self.training:
             data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
+            loss_type = "relative_mse" if k == "df_delta" else None
+
             if k not in preds:
                 preds[k] = torch.zeros_like(tgts[k])
 
@@ -603,9 +606,9 @@ class PINCLossWrapper(LossWrapper):
             if k == "df" and separate_zf:
                 losses[k] = self.compute_data_loss(
                     p[:, :2], t[:, :2]
-                ) + self.compute_data_loss(p[:, 2:], t[:, 2:])
+                ) + self.compute_data_loss(p[:, 2:], t[:, 2:], loss_type=loss_type)
             else:
-                losses[k] = self.compute_data_loss(p, t)
+                losses[k] = self.compute_data_loss(p, t, loss_type=loss_type)
 
         # 4. Final Aggregation & EMA
         if self.training:

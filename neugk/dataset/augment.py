@@ -117,6 +117,6 @@ def mask_modes(
                 x_masked = separate_zf(x_masked)
             if normalize_fn is not None:
                 x_masked = de_normalize(x_masked, file_idx, partial(normalize_fn, return_stats=False))
-        return x_masked, x_tgt
+        return x_masked, x_tgt, mask
 
     return _mask

@@ -9,7 +9,7 @@ import hashlib
 import random
 from functools import partial
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import torch
@@ -257,15 +257,17 @@ class CycloneDataset(Dataset):
                     if k not in stats:
                         stats[k] = RunningMeanStd()
                     mean = meta[f"{k}_mean"]
-                    std = meta[f"{k}_std"]
+                    var = meta[f"{k}_std"]**2
+                    traj_min = meta[f"{k}_min"]
+                    traj_max = meta[f"{k}_max"]
                     if self.normalizers[k]["agg_axes"]:
                         # aggregate along specified dimensions
-                        mean, std = stats[k].aggregate_stats(mean, std, agg_axes=tuple(self.normalizers[k]["agg_axes"]))
+                        mean, var, traj_min, traj_max = stats[k].aggregate_stats(mean, var, traj_min, traj_max, agg_axes=tuple(self.normalizers[k]["agg_axes"]))
 
                     self.stats[k][f_id]["mean"] = mean
-                    self.stats[k][f_id]["std"] = std
-                    self.stats[k][f_id]["min"] = meta[f"{k}_min"]
-                    self.stats[k][f_id]["max"] = meta[f"{k}_max"]
+                    self.stats[k][f_id]["std"] = np.sqrt(var)
+                    self.stats[k][f_id]["min"] = traj_min
+                    self.stats[k][f_id]["max"] = traj_max
                     
                     stats[k].update(
                         self.stats[k][f_id]["mean"],
@@ -333,7 +335,6 @@ class CycloneDataset(Dataset):
     def _recompute_stats(
         self, key: str, offset: int = 0, prefix: str = "", suffix: str = ""
     ):
-
         def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
             with self.backend.open(self.files[file_index]) as f:
@@ -352,24 +353,14 @@ class CycloneDataset(Dataset):
 
             if key == "df":
                 x = sample["x"]
-                norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3, 4, 5)
                 if self.separate_zf:
                     x = self._separate_zf(x)
             elif key == "phi":
                 x = sample["phi"]
-                if x.ndim == 3:
-                    x = np.expand_dims(x, 0)
-                norm_axes = norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3)
             else:
                 x = np.array([flux_val], dtype=np.float32)
-                norm_axes = (0,)
 
-            x_mean = np.mean(x, norm_axes, keepdims=True)
-            x_var = np.var(x, norm_axes, keepdims=True)
-            x_min = np.min(x, norm_axes, keepdims=True)
-            x_max = np.max(x, norm_axes, keepdims=True)
-
-            return x_mean, x_var, x_min, x_max
+            return x
 
         # subsample by two for normalization stats
         t_indices = (
@@ -386,23 +377,38 @@ class CycloneDataset(Dataset):
         if os.path.exists(stats_path):
             stats = pickle.load(open(stats_path, "rb"))
         else:
-            process_inds = partial(process_t_idx, key=key)
             stats = None
             with ThreadPoolExecutor(self.num_workers) as executor:
-                metrics_gen = tqdm.tqdm(
-                    executor.map(process_inds, t_indices),
-                    total=len(t_indices),
-                    desc=f"re-computing normalization stats for {key}",
-                )
+                futures = []
+                for t_idx in t_indices:
+                    futures.append(executor.submit(process_t_idx, t_idx, key))
 
-                for metrics in metrics_gen:
-                    x_mean, x_var, x_min, x_max = metrics
+                for future in tqdm.tqdm(as_completed(futures), total=len(futures),
+                            desc=f"re-computing normalization stats for {key}"):
+                    sample = future.result()
                     if stats is None:
-                        stats = RunningMeanStd(shape=x_mean.shape)
-                    stats.update(x_mean, x_var, x_min, x_max)
+                        stats = RunningMeanStd()
+                    stats.update(sample, np.zeros_like(sample), sample, sample, count=1)
+                    del sample
 
             pickle.dump(stats, open(stats_path, "wb"))
             print(f"saved recomputed stats to {stats_path}")
+
+        if self.normalizers[key]["agg_axes"]:
+            norm_axes = tuple(self.normalizers[key]["agg_axes"])
+            mean, var, traj_min, traj_max = stats.aggregate_stats(stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes)
+            if key == "phi":
+                # unsqueeze phi to add channel dim
+                mean = np.expand_dims(mean, axis=0)
+                var = np.expand_dims(var, axis=0)
+                traj_min = np.expand_dims(traj_min, axis=0)
+                traj_max = np.expand_dims(traj_max, axis=0)
+            stats.mean = mean
+            stats.var = var
+            stats.min = traj_min
+            stats.max = traj_max
+        else:
+            print(f"No aggregations of stats, using stats of shape: {stats.mean.shape}")
 
         return stats
 
@@ -988,20 +994,30 @@ class LinearCycloneDataset(CycloneDataset):
                 if isinstance(x, torch.Tensor):
                     x = x.cpu().numpy()
 
-                norm_axes = (1, 2, 3, 4, 5)
                 if self.separate_zf:
                     x = self._separate_zf(x)
 
-                x_mean = np.mean(x, norm_axes, keepdims=True)
-                x_var = np.var(x, norm_axes, keepdims=True)
-                x_min = np.min(x, norm_axes, keepdims=True)
-                x_max = np.max(x, norm_axes, keepdims=True)
-
                 if stats is None:
-                    stats = RunningMeanStd(shape=x_mean.shape)
-                stats.update(x_mean, x_var, x_min, x_max)
+                    stats = RunningMeanStd()
+                stats.update(x, np.zeros_like(x), x, x, count=1)
 
             pickle.dump(stats, open(stats_path, "wb"))
+
+        if self.normalizers[key]["agg_axes"]:
+            norm_axes = tuple(self.normalizers[key]["agg_axes"])
+            mean, var, traj_min, traj_max = stats.aggregate_stats(stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes)
+            if key == "phi":
+                # unsqueeze phi to add channel dim
+                mean = np.expand_dims(mean, axis=0)
+                var = np.expand_dims(var, axis=0)
+                traj_min = np.expand_dims(traj_min, axis=0)
+                traj_max = np.expand_dims(traj_max, axis=0)
+            stats.mean = mean
+            stats.var = var
+            stats.min = traj_min
+            stats.max = traj_max
+        else:
+            print(f"No aggregations of stats, using stats of shape: {stats.mean.shape}")
 
         return stats
 

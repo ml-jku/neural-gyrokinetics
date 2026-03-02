@@ -1,5 +1,6 @@
 import os
 from tqdm import tqdm
+from functools import partial
 
 from collections import defaultdict
 import torch
@@ -330,7 +331,7 @@ class PINCRunner(BaseRunner):
                     xs = {k: aug_fn(v, idx_data["file_index"]) for k, v in xs.items()}
                     if self.cfg.dataset.augment.mask_modes.active:
                         # separate input and target
-                        xs["df"], xs["df_tgt"] = xs["df"]
+                        xs["df"], xs["df_tgt"], xs["mask"] = xs["df"]
 
             info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
             t_start_fwd = perf_counter_ns()
@@ -340,7 +341,10 @@ class PINCRunner(BaseRunner):
             ):
                 # dispatch to correct step function
                 if self.cfg.stage == "autoencoder":
-                    step_fn = train_step_autoencoder
+                    if self.cfg.dataset.augment.mask_modes.active:
+                        step_fn = partial(train_step_autoencoder, denormalize_fn=self.trainset.denormalize)
+                    else:
+                        step_fn = train_step_autoencoder
                 if self.cfg.stage == "peft":
                     step_fn = train_step_peft
                 if self.cfg.stage == "simsiam":

@@ -160,7 +160,7 @@ def get_data(cfg, rank: int = 0):
     )
 
     # dataloaders
-    prefetch_factor = min(2, cfg.training.num_workers // 2)
+    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
     # NOTE: must be false when returning gpu data
     pin_memory = cfg.training.pin_memory and backend != "gds"
     dataloader_kwargs = {}
