@@ -482,7 +482,7 @@ class RunningMeanStd:
         return channel_means, channel_stds
 
 
-def load_geom(file_path):
+def load_geom_dat_file(file_path):
     """Load geometric parameters from a .dat file."""
     data = {}
     with open(file_path, "r") as f:
@@ -524,71 +524,89 @@ def load_geom(file_path):
 
 
 def load_geometry(directory, dtype=torch.float64):
-    """Initialize geometry tensors from raw simulation files."""
+    # load geom dat file and input data
+    geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
+    input_data = parse_input_dat(os.path.join(directory, "input.dat"))
+
     geometry = {}
+    geometry["signz"] = torch.tensor(1.0, dtype=dtype)
+    geometry["vthrat"] = torch.tensor(1.0, dtype=dtype)
+    geometry["tmp"] = torch.tensor(1.0, dtype=dtype)
+    geometry["mas"] = torch.tensor(1.0, dtype=dtype)
+    geometry["d2X"] = torch.tensor(1.0, dtype=dtype)
+    geometry["signB"] = torch.tensor(1.0, dtype=dtype)
 
-    # load data
-    geom = load_geom(os.path.join(directory, "geom.dat"))  # bn CHECK
+    # load physics switches and beta
+    control = input_data.get("control", {})
 
-    # load species data from input.dat if available
-    input_dat_path = os.path.join(directory, "input.dat")
-    if os.path.exists(input_dat_path):
-        input_data = parse_input_dat(input_dat_path)
-        # Find number of active species, default to 1 if not found
-        num_species = 1
-        for sec in input_data.values():
-            if "number_of_species" in sec:
-                num_species = int(sec["number_of_species"])
-                break
+    def parse_gkw_bool(val):
+        if isinstance(val, str):
+            val = val.lower().strip()
+            if val == ".true.":
+                return 1.0
+            if val == ".false.":
+                return 0.0
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
 
-        # gather species
-        species_keys = [k for k in input_data.keys() if k.startswith("species")][
-            :num_species
-        ]
-        if species_keys:
-            mas, tmp, de, signz = [], [], [], []
-            for k in species_keys:
-                sp = input_data[k]
-                mas.append(sp.get("mass", 1.0))
-                tmp.append(sp.get("temp", 1.0))
-                de.append(sp.get("dens", 1.0))
-                signz.append(sp.get("z", 1.0))
-
-            geom["mas"] = mas if len(mas) > 1 else mas[0]
-            geom["tmp"] = tmp if len(tmp) > 1 else tmp[0]
-            geom["de"] = de if len(de) > 1 else de[0]
-            geom["signz"] = signz if len(signz) > 1 else signz[0]
-
-            # compute vthrat = sqrt(T_s / m_s) normalized to reference species (usually species 1)
-            # wait, vthrat in GKW is strictly sqrt(T_s / m_s) if reference mass/temp is 1.0
-            vthrat = [np.sqrt(t / m) for t, m in zip(tmp, mas)]
-            geom["vthrat"] = vthrat if len(vthrat) > 1 else vthrat[0]
-
-            # if multiple species are found, electrons are kinetic, so not adiabatic
-            geom["adiabatic"] = 0.0 if len(species_keys) > 1 else 1.0
-
-    # set defaults, ensuring scalars are 0D tensors (not 1D arrays of size 1)
-    geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=dtype)
-    geometry["signz"] = torch.tensor(np.squeeze(geom.get("signz", 1.0)), dtype=dtype)
-    geometry["vthrat"] = torch.tensor(np.squeeze(geom.get("vthrat", 1.0)), dtype=dtype)
-    geometry["tmp"] = torch.tensor(np.squeeze(geom.get("tmp", 1.0)), dtype=dtype)
-    geometry["mas"] = torch.tensor(np.squeeze(geom.get("mas", 1.0)), dtype=dtype)
-    geometry["d2X"] = torch.tensor(np.squeeze(geom.get("d2X", 1.0)), dtype=dtype)
-    geometry["signB"] = torch.tensor(np.squeeze(geom.get("signB", 1.0)), dtype=dtype)
-    geometry["de"] = torch.tensor(np.squeeze(geom.get("de", 1.0)), dtype=dtype)
-    geometry["adiabatic"] = torch.tensor(
-        np.squeeze(geom.get("adiabatic", 1.0)), dtype=dtype
+    geometry["nlapar"] = torch.tensor(
+        parse_gkw_bool(control.get("nlapar", 0.0)), dtype=dtype
+    )
+    geometry["nlbpar"] = torch.tensor(
+        parse_gkw_bool(control.get("nlbpar", 0.0)), dtype=dtype
     )
 
-    geometry["kxrh"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "kxrh"))[0], dtype=dtype
-    )  # CHECK
-    geometry["krho"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "krho")).T[0] / geom["kthnorm"],
-        dtype=dtype,
-    )  # CHECK
+    # beta is often in 'parameters' or 'control'
+    parameters = input_data.get("parameters", {})
+    geometry["beta"] = torch.tensor(float(parameters.get("beta", 0.0)), dtype=dtype)
 
-    # compute mugr and intmu
+    # gather active species
+    num_sp = 1
+    for sec in input_data.values():
+        if "number_of_species" in sec:
+            num_sp = int(sec["number_of_species"])
+            break
+    species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
+    if species_keys:
+        mas, tmp, de, signz = [], [], [], []
+        for k in species_keys:
+            sp = input_data[k]
+            mas.append(sp.get("mass", 1.0))
+            tmp.append(sp.get("temp", 1.0))
+            de.append(sp.get("dens", 1.0))
+            signz.append(sp.get("z", 1.0))
+
+        geometry["mas"] = torch.tensor(mas, dtype=dtype)
+        geometry["tmp"] = torch.tensor(tmp, dtype=dtype)
+        geometry["de"] = torch.tensor(de, dtype=dtype)
+        geometry["signz"] = torch.tensor(signz, dtype=dtype)
+
+        # compute vthrat = sqrt(T_s / m_s)
+        vthrat = [np.sqrt(t / m) for t, m in zip(tmp, mas)]
+        geometry["vthrat"] = torch.tensor(vthrat, dtype=dtype)
+        # if multiple species are found, electrons are kinetic, so not adiabatic
+        geometry["adiabatic"] = torch.tensor(
+            0.0 if len(species_keys) > 1 else 1.0, dtype=dtype
+        )
+    else:
+        geometry["mas"] = torch.tensor([1.0], dtype=dtype)
+        geometry["tmp"] = torch.tensor([1.0], dtype=dtype)
+        geometry["de"] = torch.tensor([1.0], dtype=dtype)
+        geometry["signz"] = torch.tensor([1.0], dtype=dtype)
+        geometry["vthrat"] = torch.tensor([1.0], dtype=dtype)
+        geometry["adiabatic"] = torch.tensor(1.0, dtype=dtype)
+
+    kxrh = np.loadtxt(os.path.join(directory, "kxrh"))[0]
+    krho = np.loadtxt(os.path.join(directory, "krho")).T[0] / geom["kthnorm"]
+    geometry["kxrh"] = torch.tensor(kxrh, dtype=dtype)
+    geometry["krho"] = torch.tensor(krho, dtype=dtype)
+    geometry["parseval"] = torch.tensor(
+        [1.0] + [float(len(krho))] * (len(krho) - 1), dtype=dtype
+    )
+
+    # mugr and intmu
     mugr = np.zeros(8 + 1)
     intmu = np.zeros(8 + 1)
     mumax = 4.5
@@ -603,16 +621,13 @@ def load_geometry(directory, dtype=torch.float64):
     geometry["intmu"] = torch.tensor(intmu[1:], dtype=dtype)  # CHECK?
     geometry["mugr"] = torch.tensor(mugr[1:], dtype=dtype)  # CHECK?
 
-    geometry["intvp"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "intvp.dat"))[0], dtype=dtype
-    )  # CHECK
-    geometry["vpgr"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "vpgr.dat"))[0], dtype=dtype
-    )
+    intvp = np.loadtxt(os.path.join(directory, "intvp.dat"))[0]
+    vpgr = np.loadtxt(os.path.join(directory, "vpgr.dat"))[0]
+    geometry["intvp"] = torch.tensor(intvp, dtype=dtype)
+    geometry["vpgr"] = torch.tensor(vpgr, dtype=dtype)
 
-    ints = np.concatenate(
-        [np.array([0.0]), np.diff(np.loadtxt(os.path.join(directory, "sgrid")))]
-    )
+    sgrid = np.loadtxt(os.path.join(directory, "sgrid"))
+    ints = np.concatenate([np.array([0.0]), np.diff(sgrid)])
     ints[0] = ints[1]  # CHECK
     geometry["ints"] = torch.tensor(ints, dtype=dtype)
 
@@ -625,7 +640,22 @@ def load_geometry(directory, dtype=torch.float64):
     geometry["bn"] = torch.tensor(geom["bn"], dtype=dtype)
     geometry["bt_frac"] = torch.tensor(geom["Bt_frac"], dtype=dtype)
     geometry["rfun"] = torch.tensor(geom["R"], dtype=dtype)
-    geometry["adiabatic"] = torch.tensor(geom.get("adiabatic", 1.0), dtype=dtype)
+
+    # if multiple species are present, adiabatic should be 0.0
+    if len(geometry.get("de", [1.0])) > 1:
+        geometry["adiabatic"] = torch.tensor(0.0, dtype=dtype)
+    else:
+        geometry["adiabatic"] = torch.tensor(
+            np.squeeze(geom.get("adiabatic", 1.0)), dtype=dtype
+        )
+
+    # ensure species-specific fields are updated in the returned geometry
+    for k in ["mas", "tmp", "de", "signz", "vthrat"]:
+        if k in geom:
+            geometry[k] = torch.tensor(geom[k], dtype=dtype)
+        elif k not in geometry:
+            geometry[k] = torch.tensor(1.0, dtype=dtype)
+
     return geometry
 
 

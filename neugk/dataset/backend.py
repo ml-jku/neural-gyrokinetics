@@ -133,10 +133,9 @@ class H5Backend(DataBackend):
             meta["q"] = f["metadata/q"][:]
             meta["resolution"] = f["metadata/resolution"][:]
             meta["geometry"] = {k: np.array(v[()]) for k, v in f["geometry"].items()}
-            if "adiabatic" not in meta["geometry"]:
-                meta["geometry"]["adiabatic"] = np.array(1.0, dtype=np.float64)
-            if "de" not in meta["geometry"]:
-                meta["geometry"]["de"] = np.array(1.0, dtype=np.float64)
+            for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
+                if k not in meta["geometry"]:
+                    meta["geometry"][k] = np.array(1.0, dtype=np.float64)
 
             for k in input_fields:
                 if f"metadata/{k}_mean" in f:
@@ -256,10 +255,9 @@ class KvikIOBackend(DataBackend):
         with open(os.path.join(path, "metadata.pkl"), "rb") as mf:
             meta = pickle.load(mf)
             if "geometry" in meta:
-                if "adiabatic" not in meta["geometry"]:
-                    meta["geometry"]["adiabatic"] = np.array(1.0, dtype=np.float64)
-                if "de" not in meta["geometry"]:
-                    meta["geometry"]["de"] = np.array(1.0, dtype=np.float64)
+                for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
+                    if k not in meta["geometry"]:
+                        meta["geometry"][k] = np.array(1.0, dtype=np.float64)
             return meta
 
     @contextlib.contextmanager

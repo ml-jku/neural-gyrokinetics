@@ -543,3 +543,91 @@ class FlowMatchingRunner(DDPMRunner):
             pred = self.autoencoder.decode(pred, condition=condition)
         self.model.train()
         return pred
+
+
+class JiTRunner(DDPMRunner):
+    """Runner for Just Image Transformers (https://arxiv.org/abs/2511.13720, JiT)."""
+
+    def setup_components(self):
+        """Initialize components and setup importance sampling history."""
+        super().setup_components()
+        self.use_importance_sampling = getattr(
+            self.cfg.model.diffusion, "importance_sampling", True
+        )
+        if self.use_importance_sampling:
+            self.n_timesteps = self.noise_scheduler.config.num_train_timesteps
+            self.loss_history = torch.ones(self.n_timesteps, device=self.device)
+
+    def _get_timesteps(self, bs: int):
+        n_train_steps = self.noise_scheduler.config.num_train_timesteps
+        if self.use_importance_sampling:
+            return torch.randint(0, n_train_steps, (bs,), device=self.device).long()
+
+        # importance sampling weights based on historical loss
+        weights = self.loss_history / self.loss_history.sum()
+        return torch.multinomial(weights, bs, replacement=True)
+
+    def forward_step_diffusion(self, sample: dict, condition: torch.Tensor):
+        x0 = sample["df"] * self.latent_scale
+        bs = x0.shape[0]
+
+        # sample noise and timesteps
+        noise = torch.randn_like(x0)
+        tstep = self._get_timesteps(bs)
+
+        # add noise to get xt
+        xt = self.noise_scheduler.add_noise(x0, noise, tstep)
+
+        # model predicts x0 directly
+        pred_x0 = self.model(xt, tstep=tstep, condition=condition)
+
+        # compute loss on x0 prediction
+        loss = F.mse_loss(pred_x0, x0, reduction="none")
+        loss = loss.flatten(1).mean(1)
+
+        # update loss history for importance sampling
+        if getattr(self, "use_importance_sampling", False):
+            with torch.no_grad():
+                # simple moving average update
+                for i in range(bs):
+                    t = tstep[i].item()
+                    self.loss_history[t] = (
+                        0.99 * self.loss_history[t] + 0.01 * loss[i].detach()
+                    )
+
+        return loss.mean()
+
+    @torch.no_grad()
+    def sample(
+        self, condition: torch.Tensor, steps: int = 1, latent_only: bool = False
+    ):
+        self.model.eval()
+        bs = condition.shape[0]
+        n_train_steps = self.noise_scheduler.config.num_train_timesteps
+
+        # start with pure noise
+        xt = torch.randn((bs, *self.model.latent_shape), device=self.device)
+
+        # few-step iterative refinement
+        t_indices = torch.linspace(n_train_steps - 1, 0, steps)
+        for i in range(steps):
+            t_val = int(t_indices[i])
+            t_batch = torch.full((bs,), t_val, device=self.device, dtype=torch.long)
+
+            # predict x0
+            x0_pred = self.model(xt, tstep=t_batch, condition=condition)
+
+            if i < steps - 1:
+                # move to next timestep (re-noise)
+                t_next = int(t_indices[i + 1])
+                noise = torch.randn_like(x0_pred)
+                xt = self.noise_scheduler.add_noise(
+                    x0_pred, noise, torch.tensor([t_next], device=self.device)
+                )
+
+        # decode
+        pred = x0_pred / getattr(self, "latent_scale", 1.0)
+        if not latent_only:
+            pred = self.autoencoder.decode(pred, condition=condition)
+        self.model.train()
+        return pred

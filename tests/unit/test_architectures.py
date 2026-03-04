@@ -110,8 +110,8 @@ def test_swin_nd_unet_conditioning():
     out1 = model(x, ion_temp_grad=cond_val)
     out2 = model(x, ion_temp_grad=cond_val * 2.0)
 
-    assert out1.shape == x.shape
-    assert not torch.allclose(out1, out2)
+    assert out1.shape == x.shape, "Shape mismatch"
+    assert not torch.allclose(out1, out2), "Conditioning is ignored"
 
 
 def test_patch_expand_dims():

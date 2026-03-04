@@ -297,7 +297,7 @@ class CycloneAEDataset(CycloneDataset):
             # bypass pin_memory/worker issues for initial pass
             tmp_loader = DataLoader(
                 dataset=dataloader.dataset,
-                batch_size=128,
+                batch_size=32,
                 num_workers=dataloader.num_workers,
                 prefetch_factor=1,
                 pin_memory=False,
@@ -414,16 +414,18 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         timestep = sample["timestep"]
         geom = sample["geometry"]
 
-        cond_list = []
-        for k in self.conditions:
-            val = sample[k]
-            if isinstance(val, torch.Tensor):
-                cond_list.append(val.to(dtype=self.dtype))
-            else:
-                cond_list.append(torch.tensor(val, dtype=self.dtype))
-        conditioning = torch.stack(cond_list, dim=-1)
+        conditioning = None
+        if self.conditions is not None and len(self.conditions) > 0:
+            cond_list = []
+            for k in self.conditions:
+                val = sample[k]
+                if isinstance(val, torch.Tensor):
+                    cond_list.append(val.to(dtype=self.dtype))
+                else:
+                    cond_list.append(torch.tensor(val, dtype=self.dtype))
+            conditioning = torch.stack(cond_list, dim=-1)
 
-        if self.normalization is not None and get_normalized:
+        if get_normalized:
             if x is not None:
                 x, _, _ = self.normalize(file_index, df=x)
                 x_aug, _, _ = self.normalize(file_index, df=x_aug)
@@ -492,25 +494,21 @@ class CycloneSimSiamDataset(CycloneAEDataset):
             t_str_aug = str(rnd).zfill(5)
             t_aug.append(rnd)
 
-            if "df" in self.input_fields:
-                k = self.backend.read_df(
-                    f, t_str, self.df_shape, self.active_keys, self.rank
-                )
-                k2 = self.backend.read_df(
-                    f, t_str_aug, self.df_shape, self.active_keys, self.rank
-                )
+            if "df" in self.fields_to_load:
+                k = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
+                k2 = self.backend.read_df(f, t_str_aug, self.df_shape, self.active_keys)
                 xs.append(k)
                 xs2.append(k2)
 
-            if "phi" in self.input_fields:
-                phi = self.backend.read_phi(f, t_str, self.phi_resolution, self.rank)
+            if "phi" in self.fields_to_load:
+                phi = self.backend.read_phi(f, t_str, self.phi_resolution)
                 phis.append(phi)
 
             flux = meta["fluxes"][orig_t_index + i]
             fluxes.append(flux)
 
         sample = {}
-        if "df" in self.input_fields:
+        if "df" in self.fields_to_load:
             if self.bundle_seq_length == 1:
                 xs, xs2 = xs[0], xs2[0]
             else:
@@ -527,7 +525,7 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         else:
             xs = xs2 = None
 
-        if "phi" in self.input_fields:
+        if "phi" in self.fields_to_load:
             if self.bundle_seq_length == 1:
                 phis = phis[0]
             else:
@@ -562,7 +560,7 @@ class CycloneSimSiamDataset(CycloneAEDataset):
 
     def collate(self, batch: Sequence[CycloneSimSiamSample]):
         def stack_batch(_b: Sequence[CycloneSimSiamSample], key: str):
-            if hasattr(_b[0], key) is not None:
+            if getattr(_b[0], key, None) is not None:
                 return torch.stack([getattr(sample, key) for sample in _b])
             return None
 

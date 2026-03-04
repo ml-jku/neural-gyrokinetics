@@ -2,7 +2,7 @@
 
 from typing import Dict, Optional, Tuple, Sequence
 import torch
-from torch.special import bessel_j0 as j0, i0
+from torch.special import bessel_j0 as j0, i0, bessel_j1 as j1
 import torch.nn.functional as F
 from torch import nn
 from einops import rearrange
@@ -31,6 +31,11 @@ GEOM_KEYS = [
     "adiabatic",
     "de",
     "vthrat",
+    "beta",
+    "nlapar",
+    "nlbpar",
+    "bessel_bpar",
+    "krloc",
 ]
 
 
@@ -38,6 +43,8 @@ def get_integrals(
     pred: torch.Tensor,
     geom: torch.Tensor,
     phi: Optional[torch.Tensor] = None,
+    apar: Optional[torch.Tensor] = None,
+    bpar: Optional[torch.Tensor] = None,
     flux_fields: bool = False,
     spectral_df: bool = False,
     spectral_potens: bool = False,
@@ -56,7 +63,13 @@ def get_integrals(
     integrator.to(pred.device)
     if phi is not None:
         phi = phi.unsqueeze(0)
-    phi, (pflux, eflux, vflux) = integrator(geom, df=pred.unsqueeze(0), phi=phi)
+    if apar is not None:
+        apar = apar.unsqueeze(0)
+    if bpar is not None:
+        bpar = bpar.unsqueeze(0)
+    phi, (pflux, eflux, vflux) = integrator(
+        geom, df=pred.unsqueeze(0), phi=phi, apar=apar, bpar=bpar
+    )
     phi = phi.squeeze()
     return phi, (pflux, eflux, vflux)
 
@@ -93,7 +106,7 @@ class FluxIntegral(nn.Module):
         )
         self._vmap_fwd_df_phi = torch.vmap(
             self.forward_single,
-            in_dims=({k: 0 for k in sorted(GEOM_KEYS)}, 0, 0),
+            in_dims=({k: 0 for k in sorted(GEOM_KEYS)}, 0, 0, 0, 0),
         )
 
     def _geom_tensors(
@@ -129,6 +142,9 @@ class FluxIntegral(nn.Module):
         geom_["adiabatic"] = expand_scalar(geometry["adiabatic"])
         geom_["de"] = expand_scalar(geometry["de"])
         geom_["vthrat"] = expand_scalar(geometry["vthrat"])
+        geom_["beta"] = expand_scalar(geometry["beta"])
+        geom_["nlapar"] = expand_scalar(geometry["nlapar"])
+        geom_["nlbpar"] = expand_scalar(geometry["nlbpar"])
         vthrat = geom_["vthrat"]
 
         # gyroaverage bessel
@@ -139,9 +155,15 @@ class FluxIntegral(nn.Module):
             + 2 * geom_["krho"] * kxrh * little_g[1]
             + kxrh**2 * little_g[2]
         )
+        geom_["krloc"] = krloc
         bessel = torch.sqrt(2.0 * geom_["mugr"] / geom_["bn"]) / geom_["signz"]
         bessel = geom_["mas"] * vthrat * krloc * bessel
         geom_["bessel"] = j0(bessel)
+        geom_["bessel_bpar"] = torch.where(
+            torch.abs(bessel) < 1e-8,
+            torch.ones_like(bessel),
+            2.0 * j1(bessel) / bessel,
+        )
 
         # scaled i0 for zonal response
         gamma = geom_["mas"] * vthrat * krloc
@@ -213,6 +235,8 @@ class FluxIntegral(nn.Module):
         geom: Dict[str, torch.Tensor],
         df: torch.Tensor,
         phi: torch.Tensor,
+        apar: Optional[torch.Tensor] = None,
+        bpar: Optional[torch.Tensor] = None,
         magnitude: bool = False,
     ):
         """
@@ -225,33 +249,42 @@ class FluxIntegral(nn.Module):
         rfun, efun, d2X, signB = geom["rfun"], geom["efun"], geom["d2X"], geom["signB"]
         ints, intvp, intmu = geom["ints"], geom["intvp"], geom["intmu"]
         vpgr, mugr, krho = geom["vpgr"], geom["mugr"], geom["krho"]
-        bessel = geom["bessel"]
+        bessel, bessel_bpar = geom["bessel"], geom["bessel_bpar"]
 
-        # broadcast phi to match df
-        phi_view = [1] * (df.ndim - 3) + list(phi.squeeze().shape)
-        phi = phi.squeeze().view(*phi_view)
+        # broadcast potentials to match df
+        def broadcast_field(f):
+            if f is None:
+                return 0.0
+            # add leading dims (sp, vpar, vmu) to (s, x, y) field
+            f_view = [1] * (df.ndim - 3) + list(f.squeeze().shape)
+            return f.squeeze().view(*f_view)
 
-        # gyroaverage
-        phi_gyro = bessel * phi
+        phi = broadcast_field(phi)
+        apar = broadcast_field(apar)
+        bpar = broadcast_field(bpar)
+
+        # generalized potential chi
+        # chi_gyro = J0*phi - 2*vth*vpar*J0*apar + 2*mu*T/Z*(2J1/z)*bpar
+        chi_gyro_conj = (
+            bessel * torch.conj(phi)
+            - 2.0 * geom["vthrat"] * vpgr * bessel * torch.conj(apar)
+            + 2.0 * mugr * geom["tmp"] / geom["signz"] * bessel_bpar * torch.conj(bpar)
+        )
+
         if magnitude:
             df = -1j * torch.abs(df)
-            phi_gyro = torch.abs(phi_gyro)
+            chi_gyro_conj = torch.abs(chi_gyro_conj)
+
         dum = parseval * ints * (efun * krho) * df
-        dum1 = dum * torch.conj(phi_gyro)
+        dum1 = dum * chi_gyro_conj
         dum2 = dum1 * bn
         d3v = ints * d2X * intmu * bn * intvp
         dum1 = torch.imag(dum1)
         dum2 = torch.imag(dum2)
 
-        # physical normalizations
-        pflux = d3v * dum1 * geom["de"] * geom["vthrat"]
-        eflux = (
-            d3v
-            * (vpgr**2 * dum1 + 2 * mugr * dum2)
-            * geom["de"]
-            * geom["tmp"]
-            * geom["vthrat"]
-        )
+        # physical normalizations (matched to GKW internal units)
+        pflux = d3v * dum1 * geom["de"]
+        eflux = d3v * (vpgr**2 * dum1 + 2.0 * mugr * dum2) * geom["de"] * geom["tmp"]
         vflux = (
             d3v
             * (dum1 * vpgr * rfun * bt_frac * signB)
@@ -264,7 +297,9 @@ class FluxIntegral(nn.Module):
             return pflux, eflux, vflux
         else:
             sum_dims = (
-                tuple(range(df.ndim)) if df.ndim == 5 else tuple(range(1, df.ndim))
+                tuple(range(pflux.ndim))
+                if df.ndim == 5
+                else tuple(range(1, pflux.ndim))
             )
             return (
                 pflux.sum(dim=sum_dims),
@@ -272,38 +307,37 @@ class FluxIntegral(nn.Module):
                 vflux.sum(dim=sum_dims),
             )
 
-    def phi(self, geom: Dict[str, torch.Tensor], df: torch.Tensor):
+    def solve_fields(self, geom: Dict[str, torch.Tensor], df: torch.Tensor):
         """
-        Solves for the self-consistent electrostatic potential phi.
+        Solves for self-consistent potentials: phi, apar, bpar.
         """
         de, signz, tmp, bn = geom["de"], geom["signz"], geom["tmp"], geom["bn"]
         ints, intvp, intmu = geom["ints"], geom["intvp"], geom["intmu"]
-        bessel, gamma = geom["bessel"], geom["gamma"]
-        adiabatic = geom["adiabatic"]
+        vpgr, mugr, krloc = geom["vpgr"], geom["mugr"], geom["krloc"]
+        bessel, bessel_bpar, gamma = geom["bessel"], geom["bessel_bpar"], geom["gamma"]
+        adiabatic, beta = geom["adiabatic"], geom["beta"]
+        nlapar, nlbpar = geom["nlapar"], geom["nlbpar"]
+
         cfen = torch.zeros_like(ints)
 
+        # --- Solve for phi ---
         poisson_int = signz * de * intmu * intvp * bessel * bn
-        poisson_int = torch.where(torch.abs(intvp) < 1e-9, 0.0, poisson_int)
+        phi_term = (1 + 0j) * poisson_int * df
+        sum_dims = tuple(range(phi_term.ndim - 3))
+        phi = phi_term.sum(sum_dims, keepdim=True)
 
-        # macroscopic response summed over species
         poisson_diag_s = torch.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
-        if poisson_diag_s.ndim == 6 and poisson_diag_s.shape[0] > 1:
-            poisson_diag = poisson_diag_s.sum(dim=0, keepdim=True)
-        else:
-            poisson_diag = poisson_diag_s
-
+        poisson_diag = poisson_diag_s.sum(dim=0, keepdim=True)
         poisson_diag[..., 0, 0] = 0.0
-
         # optional adiabatic background
         adiabatic_correction = -(-1.0) * torch.exp(-cfen) * 1.0 / 1.0 * adiabatic
         poisson_diag = poisson_diag - adiabatic_correction
-        poisson_diag = -1 / poisson_diag
-
-        phi = (1 + 0j) * poisson_int * df
-
-        # integrate velocity and species
-        sum_dims = tuple(range(df.ndim - 3))
-        phi = phi.sum(sum_dims, keepdim=True)
+        poisson_diag = torch.where(
+            poisson_diag == 0.0,
+            torch.tensor(1.0, dtype=poisson_diag.dtype),
+            poisson_diag,
+        )
+        poisson_diag = -1.0 / poisson_diag
 
         # zonal flow correction (ions only)
         s_idx = 0 if signz.shape[0] > 1 else slice(None)
@@ -313,29 +347,58 @@ class FluxIntegral(nn.Module):
             tmp[s_idx],
             de[s_idx],
         )
-
         diagz = ion_signz * (ion_gamma - 1.0) * torch.exp(-cfen) / ion_tmp
         matz = -ints / (ion_signz * ion_de * (diagz - torch.exp(-cfen) / ion_tmp))
         matz[..., 1:] = 0.0
         maty = (-matz * torch.exp(-cfen)).sum((-3,), keepdim=True)
         maty = ion_tmp / (ion_de * torch.exp(-cfen)) + maty / torch.exp(-cfen)
         maty[..., 0, :] = 1 + 0j
-        maty = torch.where(maty == 0, 1.0, maty)
-        maty = 1 / maty
+        maty = torch.where(maty == 0, torch.tensor(1.0, dtype=maty.dtype), maty)
+        maty = 1.0 / maty
         maty[..., 1:] = 0.0
-
         bufphi = (1 + 0j) * matz * phi
         bufphi = bufphi.sum((-3, -1), keepdim=True)
         phi = phi + (1 + 0j) * maty * bufphi * adiabatic
+        phi = (phi * poisson_diag).view(phi.shape[-3:])
 
-        phi = phi * poisson_diag
-        return phi.view(phi.shape[-3:])
+        # solve for apar
+        # S_A = beta * sum Z_s n_s vth_s <vpar J0 f_s>
+        # Denom = k_perp^2 + beta * sum ...
+        apar_int = (
+            beta * signz * de * geom["vthrat"] * intmu * intvp * vpgr * bessel * bn
+        )
+        apar = ((1 + 0j) * apar_int * df).sum(sum_dims, keepdim=True)
+        apar_diag = krloc**2
+        # Add small term for stability if k_perp=0
+        apar_diag = torch.where(
+            apar_diag == 0, torch.tensor(1.0, dtype=apar_diag.dtype), apar_diag
+        )
+        apar = (apar / apar_diag).view(phi.shape) * nlapar.view(-1, 1, 1)
+
+        # solve for bpar
+        # S_B = beta * sum n_s T_s <mu (2J1/z) f_s>
+        # Denom = krloc**2 / beta + sum ... (actually GKW uses bpar normalized differently?)
+        # Simplified bpar solve matched to krloc**2 / beta
+        bpar_int = beta * de * tmp * intmu * intvp * mugr * bessel_bpar * bn
+        bpar = ((1 + 0j) * bpar_int * df).sum(sum_dims, keepdim=True)
+        bpar_diag = krloc**2
+        bpar_diag = torch.where(
+            bpar_diag == 0, torch.tensor(1.0, dtype=bpar_diag.dtype), bpar_diag
+        )
+        # In GKW, the bpar sign or factor 2 might be involved.
+        # Based on diagnos_fluxes_vspace.F90: -2.*conjg(bpar_ga)
+        # So let's use -bpar_int
+        bpar = ((-1.0 + 0j) * bpar).view(phi.shape) / bpar_diag * nlbpar.view(-1, 1, 1)
+
+        return phi, apar, bpar
 
     def forward_single(
         self,
         geom: Dict[str, torch.Tensor],
         df: torch.Tensor,
         phi: Optional[torch.Tensor] = None,
+        apar: Optional[torch.Tensor] = None,
+        bpar: Optional[torch.Tensor] = None,
     ):
         ns, nx, ny = df.shape[-3:]
         if not self.spectral_df:
@@ -344,11 +407,19 @@ class FluxIntegral(nn.Module):
             c_dim = 1 if df.ndim == 7 else 0
             df = df.movedim(c_dim, -1).contiguous()
             df = torch.view_as_complex(df)
-        phi_int = self.phi(geom, df)
-        phi_ = phi_int.clone()
+
+        phi_int, apar_int, bpar_int = self.solve_fields(geom, df)
+        # internal fields for flux calculation
+        phi_f, apar_f, bpar_f = phi_int, apar_int, bpar_int
+        # if external potentials provided, use them for flux
         if phi is not None:
-            phi_ = self._phi_to_spc(phi, out_shape=(nx, ns, ny))
-        pflux, eflux, vflux = self.pev_fluxes(geom, df, phi_)
+            phi_f = self._phi_to_spc(phi, out_shape=(nx, ns, ny))
+        if apar is not None:
+            apar_f = self._phi_to_spc(apar, out_shape=(nx, ns, ny))
+        if bpar is not None:
+            bpar_f = self._phi_to_spc(bpar, out_shape=(nx, ns, ny))
+
+        pflux, eflux, vflux = self.pev_fluxes(geom, df, phi_f, apar_f, bpar_f)
         if not self.spectral_potens:
             phi_int = self._spc_to_phi(phi_int, original_shape=(nx, ns, ny))
         return phi_int, (pflux, eflux, vflux)
@@ -358,11 +429,13 @@ class FluxIntegral(nn.Module):
         geom: Dict[str, torch.Tensor],
         df: torch.Tensor,
         phi: Optional[torch.Tensor] = None,
+        apar: Optional[torch.Tensor] = None,
+        bpar: Optional[torch.Tensor] = None,
     ):
-        """Integrals for physical fluxes and self-consistent potential."""
+        """Integrals for physical fluxes and self-consistent potentials."""
         geom = self._geom_tensors(geom, df.dtype)
         geom = dict(sorted(geom.items()))
-        if phi is None:
+        if phi is None and apar is None and bpar is None:
             return self._vmap_fwd_df(geom, df)
         else:
-            return self._vmap_fwd_df_phi(geom, df, phi)
+            return self._vmap_fwd_df_phi(geom, df, phi, apar, bpar)

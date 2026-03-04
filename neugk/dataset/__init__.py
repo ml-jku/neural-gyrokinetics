@@ -190,6 +190,7 @@ def get_data(cfg, rank: int = 0):
     pin_memory = cfg.training.pin_memory and not use_gpudirect
     dataloader_kwargs = {}
     if cfg.training.num_workers > 0:
+        # increase FP limit on each subprocess (for large batch sizes)
         dataloader_kwargs["worker_init_fn"] = _worker_init_fn
 
     if use_gpudirect:
