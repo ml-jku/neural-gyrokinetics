@@ -1,5 +1,5 @@
 name: cyclone
-path: /local00/bioinf/gyrokinetics/preprocessed
+path: /local00/bioinf/galletti/preprocessed_kvikio
 backend: gds  # gds, h5
 normalization: 
   df: 
@@ -23,12 +23,20 @@ norm_decouple_mu: true
 real_potens: true
 split_into_bands: null
 log_transform: false
-num_workers: 4
+num_workers: 10
 active_keys: ["re", "im"]
 input_fields: ["df"]
+# training_trajectories: "iteration_{0-5,7-12,14-31}.h5"
 training_trajectories: "iteration_{0-5,7-12,14-31,33-64,67-82,84-99}.h5"
-validation_trajectories: ["iteration_13.h5"]
-# validation_trajectories: "ood_iteration_{0-4}.h5"
+validation_trajectories: [
+  # "iteration_13.h5", "iteration_100.h5", "iteration_200.h5",
+  "iteration_262.h5",
+  "iteration_135.h5",
+  "iteration_8.h5",
+  "iteration_232.h5",
+  "iteration_148.h5",
+  "iteration_115.h5",
+]
 partial_holdouts:
 training_cond_filters:
   last_fluxes: [1., .inf]

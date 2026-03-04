@@ -295,16 +295,17 @@ class CycloneAEDataset(CycloneDataset):
                 dist.barrier()
         else:
             # bypass pin_memory/worker issues for initial pass
-            tmp_loader = DataLoader(
-                dataset=dataloader.dataset,
-                batch_size=32,
-                num_workers=dataloader.num_workers,
-                prefetch_factor=1,
-                pin_memory=False,
-                collate_fn=dataloader.collate_fn,
-                drop_last=dataloader.drop_last,
-                shuffle=False,
-            )
+            # tmp_loader = DataLoader(
+            #     dataset=dataloader.dataset,
+            #     batch_size=128,
+            #     num_workers=dataloader.num_workers,
+            #     prefetch_factor=1,
+            #     pin_memory=False,
+            #     collate_fn=dataloader.collate_fn,
+            #     drop_last=dataloader.drop_last,
+            #     shuffle=False,
+            # )
+            tmp_loader = dataloader
             autoencoder.eval()
             autoencoder.to(device)
             latents_dict = {}
