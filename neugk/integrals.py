@@ -76,14 +76,13 @@ def get_integrals(
 
 class FluxIntegral(nn.Module):
     """
-    Computes physical fluxes and self-consistent potential from the distribution function.
+    Integrals for particle, heat and momentum fluxes and self-consistent potentials.
 
-    Physics Context (derived from GKW):
-    - The field solver operates in a local flux-tube geometry (kx, ky, s).
-    - Quasi-neutrality sums the charge density responses of all species.
-    - Potential phi is macroscopic (no species axis).
-    - Fluxes are computed via cross-correlations: Im(f * phi^*).
-    - Standard GKW normalization: length to major radius R, velocity to thermal velocity.
+    This module implements the field equations and phase-space integrals and handles
+    both electrostatic and electromagnetic (finite-beta) regimes.
+    
+    It is based on and aligned to GKW, a FORTRAN codebase for gyrokinetics.
+    Source and docs for GKW: https://bitbucket.org/gkw/workspace/projects/GKW
     """
 
     def __init__(
@@ -251,14 +250,13 @@ class FluxIntegral(nn.Module):
         vpgr, mugr, krho = geom["vpgr"], geom["mugr"], geom["krho"]
         bessel, bessel_bpar = geom["bessel"], geom["bessel_bpar"]
 
-        # broadcast potentials to match df
         def broadcast_field(f):
             if f is None:
                 return 0.0
-            # add leading dims (sp, vpar, vmu) to (s, x, y) field
             f_view = [1] * (df.ndim - 3) + list(f.squeeze().shape)
-            return f.squeeze().view(*f_view)
+            return f.squeeze().view(*f_view)  # (sp, vpar, vmu, s, x, y)
 
+        # broadcast potentials to match df
         phi = broadcast_field(phi)
         apar = broadcast_field(apar)
         bpar = broadcast_field(bpar)
@@ -432,7 +430,29 @@ class FluxIntegral(nn.Module):
         apar: Optional[torch.Tensor] = None,
         bpar: Optional[torch.Tensor] = None,
     ):
-        """Integrals for physical fluxes and self-consistent potentials."""
+        """
+        If potentials (phi, apar, bpar) are passed, they are used to compute the fluxes
+        together with the distribution function (df). If not, the fields are solved
+        self-consistently from df using the appropriate field solvers (Poisson/Ampere).
+
+        Args:
+            geom (Dict): Dictionary containing geometry parameters and settings.
+            df (torch.Tensor): 5D or 6D distribution function.
+                               Shape: (batch, sp, 2, vpar, vmu, s, x, y).
+            phi (torch.Tensor, optional): 3D electrostatic potential.
+                               Shape: (batch, 2, x, s, y).
+            apar (torch.Tensor, optional): 3D parallel magnetic potential.
+                               Shape: (batch, 2, x, s, y).
+            bpar (torch.Tensor, optional): 3D parallel magnetic field perturbation.
+                               Shape: (batch, 2, x, s, y).
+
+        Returns:
+            Tuple containing (phi_int, (pflux, eflux, vflux)), where:
+                - phi_int is the solved/returned electrostatic potential.
+                - pflux is the particle flux per species (batch, sp).
+                - eflux is the heat flux per species (batch, sp).
+                - vflux is the momentum flux per species (batch, sp).
+        """
         geom = self._geom_tensors(geom, df.dtype)
         geom = dict(sorted(geom.items()))
         if phi is None and apar is None and bpar is None:
