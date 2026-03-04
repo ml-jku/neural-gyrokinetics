@@ -11,9 +11,9 @@ from neugk.utils import (
     setup_logging,
     get_linear_burn_in_fn,
     remainig_progress,
+    set_seed,
 )
 from neugk.dataset import get_data
-from neugk.losses import GradientBalancer
 
 
 class BaseRunner:
@@ -21,6 +21,7 @@ class BaseRunner:
         self.rank = rank
         self.cfg = cfg
         self.world_size = world_size
+        set_seed(cfg.seed)
 
         # ddp setup
         if cfg.ddp.enable and cfg.ddp.n_nodes > 1 and world_size > 1:
@@ -28,6 +29,7 @@ class BaseRunner:
         else:
             self.local_rank = rank
 
+        torch.cuda.set_device(self.local_rank)
         self.device = (
             torch.device(f"cuda:{self.local_rank}")
             if torch.cuda.is_available()
@@ -43,22 +45,25 @@ class BaseRunner:
         self.writer = setup_logging(cfg) if not rank else None
 
         # common state
-        self.model = None
-        self.opt = None
-        self.scheduler = None
-        self.loss_wrap = None
-        self.grad_balancer = None
-        self.scaler = None
-        self.trainloader = None
-        self.valsets = None
-        self.valloaders = None
         self.start_epoch = 0
         self.loss_val_min = torch.inf
         self.cur_update_step = 0.0
         self.loss_scheduler_dict = {}
 
+        # amp setup
+        self.use_amp = self.cfg.amp.enable
+        self.use_bf16 = (
+            self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
+        )
+        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
+        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
+
+        self.setup_data()
+        self.setup_components()
+        self.setup_scheduler()
+
     def setup_data(self):
-        datasets, dataloaders, self.augmentations = get_data(self.cfg)
+        datasets, dataloaders, self.augmentations = get_data(self.cfg, rank=self.local_rank)
         if len(datasets) == 3:
             self.trainset, self.valsets = datasets[0], datasets[1:]
             self.trainloader, self.valloaders = dataloaders[0], dataloaders[1:]
@@ -75,6 +80,7 @@ class BaseRunner:
         for key in weights.keys():
             if (
                 hasattr(weights_cfg, "loss_scheduler")
+                and weights_cfg.loss_scheduler is not None
                 and key in weights_cfg.loss_scheduler
                 and weights_cfg.loss_scheduler[key]
             ):
@@ -85,6 +91,8 @@ class BaseRunner:
                     start_fraction=sp.start_fraction,
                     end_fraction=sp.end_fraction,
                 )
+        if self.cfg.dataset.augment.mask_modes.active:
+            weights["df_delta"] = self.cfg.dataset.augment.mask_modes.df_delta_weight
         return weights
 
     def setup_scheduler(self):
@@ -123,9 +131,8 @@ class BaseRunner:
                 if "ms" in k and isinstance(v, (int, float))
             )
             epoch_str = str(epoch).zfill(len(str(int(self.cfg.training.n_epochs))))
-            print(
-                f"Epoch: {epoch_str}, {', '.join([f'{k}: {v:.5f}' for k, v in epoch_logs.items()])}, step time: {total_time:.2f}ms"
-            )
+            logged = ", ".join([f"{k}: {v:.5f}" for k, v in epoch_logs.items()])
+            print(f"Epoch: {epoch_str}, {logged}, step time: {total_time:.2f}ms")
 
     @abstractmethod
     def train_epoch(self, epoch):
@@ -139,29 +146,7 @@ class BaseRunner:
     def setup_components(self):
         raise NotImplementedError
 
-    def __call__(self):
-        self.setup_data()
-        self.setup_components()
-        self.setup_scheduler()
-
-        # amp setup
-        self.use_amp = self.cfg.amp.enable
-        self.use_bf16 = (
-            self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
-        )
-        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
-        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
-
-        # grad balancer
-        n_tasks = len(self.loss_wrap.active_losses)
-        self.grad_balancer = GradientBalancer(
-            self.opt,
-            mode=self.cfg.training.gradnorm_balancer,
-            scaler=self.scaler,
-            clip_grad=self.cfg.training.clip_grad,
-            n_tasks=n_tasks,
-        )
-
+    def __call__(self, skip_eval: bool = False):
         use_tqdm = self.cfg.logging.tqdm if not self.use_ddp else False
 
         # main loop
@@ -173,7 +158,8 @@ class BaseRunner:
 
             # training step
             self.model.train()
-            self.loss_wrap.train().to(self.device)
+            if getattr(self, "loss_wrap", None) is not None:
+                self.loss_wrap.train().to(self.device)
             loss_logs, info_dict = self.train_epoch(epoch)
 
             # logging
@@ -184,7 +170,6 @@ class BaseRunner:
                     if self.scheduler
                     else self.cfg.training.learning_rate
                 ),
-                "train/epoch": epoch,
             }
             for k, sched in self.loss_scheduler_dict.items():
                 train_losses_dict[f"train/{k}_schedule"] = sched(progress)
@@ -193,14 +178,13 @@ class BaseRunner:
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # evaluate
-            log_metric_dict, val_plots = self.evaluate(epoch)
+            log_metric_dict, val_plots = {}, {}
+            if not skip_eval:
+                log_metric_dict, val_plots = self.evaluate(epoch)
 
             # log
             epoch_logs = train_losses_dict | log_metric_dict
             self._log_epoch(epoch, epoch_logs, info_dict, val_plots)
-
-            # TODO need?
-            # memory_cleanup(self.device, aggressive=True)
 
         if self.writer:
             self.writer.finish()

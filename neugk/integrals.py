@@ -30,6 +30,27 @@ GEOM_KEYS = [
     "gamma",
 ]
 
+def get_integrals(
+    pred: torch.Tensor,
+    geom: torch.Tensor,
+    phi: Optional[torch.Tensor] = None,
+    flux_fields: bool = False,
+    spectral_df: bool = False,
+    spectral_potens: bool = False,
+):
+    if pred.shape[0] != 2:
+        pred = pred[[0, 1]] + pred[[2, 3]]
+    geom = {k: g.unsqueeze(0).to(pred.device) for k, g in geom.items()}
+    integrator = FluxIntegral(
+        real_potens=False,
+        flux_fields=flux_fields,
+        spectral_df=spectral_df,
+        spectral_potens=spectral_potens,
+    )
+    integrator.to(pred.device)
+    phi, (pflux, eflux, vflux) = integrator(geom, df=pred.unsqueeze(0))
+    phi = phi.squeeze()
+    return phi, (pflux, eflux, vflux)
 
 class FluxIntegral(nn.Module):
     def __init__(
@@ -58,6 +79,8 @@ class FluxIntegral(nn.Module):
     def _geom_tensors(
         self, geometry: Dict[str, torch.Tensor], dtype: torch.dtype = torch.float32
     ) -> Dict[str, torch.Tensor]:
+        # NOTE: float64 to avoid instabilities
+        geometry = tree_map(lambda g: g.to(dtype=torch.float64), geometry)
         geom_ = {}
         # expand geometry constants for broadcasting
         # grids

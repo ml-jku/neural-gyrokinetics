@@ -210,7 +210,9 @@ class WindowAttention(nn.Module):
             self.logit_scale = nn.Parameter(
                 torch.log(10 * torch.ones((num_heads, 1, 1)))
             )
-            self.register_buffer("max_logits", torch.log(torch.tensor(1.0 / 0.01)))
+            self.register_buffer(
+                "max_logits", torch.log(torch.tensor(1.0 / 0.01)), persistent=False
+            )
             self.attn_drop = nn.Dropout(attn_drop)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
@@ -223,8 +225,6 @@ class WindowAttention(nn.Module):
         if qk_norm:
             self.q_norm = nn.RMSNorm(self.head_dim, self.head_dim)
             self.k_norm = nn.RMSNorm(self.head_dim, self.head_dim)
-            # self.q_norm = nn.LayerNorm(self.head_dim, self.head_dim)
-            # self.k_norm = nn.LayerNorm(self.head_dim, self.head_dim)
 
         if init_weights:
             self.reset_parameters(init_weights)
@@ -344,6 +344,7 @@ class SwinTransformerBlock(nn.Module):
         dim_out: Optional[int] = None,
         mlp_ratio: float = 2.0,
         qkv_bias: bool = True,
+        qk_norm: bool = False,
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
@@ -383,6 +384,7 @@ class SwinTransformerBlock(nn.Module):
             window_size=self.window_size,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
             attn_drop=attn_drop,
             proj_drop=drop,
             use_rpb=use_rpb,
@@ -398,7 +400,6 @@ class SwinTransformerBlock(nn.Module):
         )
         mlp_hidden_dim = int(dim * mlp_ratio)
 
-        # TODO(diff) define behavior
         self.skip = (
             nn.Linear(dim, self.dim_out, bias=False)
             if self.dim_out != dim
@@ -407,6 +408,18 @@ class SwinTransformerBlock(nn.Module):
         self.mlp = MLP(
             [self.dim_out, mlp_hidden_dim, self.dim_out], act_fn, dropout_prob=drop
         )
+
+        # precompute attention mask
+        if any([s > 0 for s in self.shift_size]):
+            window_size, shift_size = get_window_size(
+                grid_size, self.window_size, self.shift_size
+            )
+            mask_dims = [ceil(grid_size[i] / w) * w for i, w in enumerate(window_size)]
+            attn_mask = compute_mask(mask_dims, window_size, shift_size)
+            attn_mask = attn_mask.requires_grad_(False)
+            self.register_buffer("attn_mask", attn_mask, persistent=False)
+        else:
+            self.attn_mask = None
 
         if init_weights:
             self.reset_parameters(init_weights)
@@ -434,39 +447,31 @@ class SwinTransformerBlock(nn.Module):
 
         self.attn.reset_parameters(init_weights)
 
-    def forward_part1(self, x: torch.Tensor, mask: torch.Tensor):
+    def forward_part1(self, x: torch.Tensor):
         grid_size = x.shape[1:-1]
-
-        # TODO check if padding is needed and replace with pad_to_blocks
+        # pad to windows
         x, pad_axes = pad_to_blocks(x, self.window_size)
-
+        # shift roll
         if any(i > 0 for i in self.shift_size):
-            shifted_x = torch.roll(
+            x = torch.roll(
                 x,
                 shifts=[-s for s in self.shift_size],
                 dims=list(range(1, self.space + 1)),
             )
-            attn_mask = mask
-        else:
-            shifted_x = x
-            attn_mask = None
-        x_windows = window_partition(shifted_x, self.window_size)
+        x_windows = window_partition(x, self.window_size)
         # shifted window attention
-        attn_windows = self.attn(x_windows, mask=attn_mask)
+        attn_windows = self.attn(x_windows, mask=self.attn_mask)
         # reshape to window/grid
         attn_windows = attn_windows.view(-1, *(self.window_size + (x.shape[-1],)))
-        shifted_x = window_reverse(attn_windows, self.window_size, x.shape[:-1])
+        x = window_reverse(attn_windows, self.window_size, x.shape[:-1])
+        # invert shift roll
         if any(i > 0 for i in self.shift_size):
             x = torch.roll(
-                shifted_x,
+                x,
                 shifts=[s for s in self.shift_size],
                 dims=list(range(1, self.space + 1)),
             )
-        else:
-            x = shifted_x
-
         x = unpad(x, pad_axes, grid_size)
-
         # NOTE swinv2 attention norm
         if not isinstance(self, DiTSwinTransformerBlock):
             x = self.norm1(x)
@@ -477,12 +482,12 @@ class SwinTransformerBlock(nn.Module):
         x = self.norm2(self.drop_path(self.mlp(x)))
         return x
 
-    def forward(self, x, mask):
+    def forward(self, x):
         shortcut = self.skip(x)
         if self.use_checkpoint:
-            x = checkpoint.checkpoint(self.forward_part1, x, mask, use_reentrant=False)
+            x = checkpoint.checkpoint(self.forward_part1, x, use_reentrant=False)
         else:
-            x = self.forward_part1(x, mask)
+            x = self.forward_part1(x)
         x = shortcut + self.drop_path(x)
         shortcut = x
         if self.use_checkpoint:
@@ -519,12 +524,11 @@ class DiTSwinTransformerBlock(SwinTransformerBlock):
     def forward_part1(
         self,
         x: torch.Tensor,
-        mask: torch.Tensor,
         scale_shift_gate: Sequence[torch.Tensor],
     ):
         scale, shift, gate = scale_shift_gate
         x = self.dit.modulate_scale_shift(self.norm1(x), scale, shift)
-        x = super().forward_part1(x, mask)
+        x = super().forward_part1(x)
         return self.dit.modulate_gate(x, gate)
 
     def forward_part2(self, x: torch.Tensor, scale_shift_gate: Sequence[torch.Tensor]):
@@ -534,18 +538,16 @@ class DiTSwinTransformerBlock(SwinTransformerBlock):
         x = self.drop_path(x)
         return x
 
-    def forward(self, x: torch.Tensor, mask, cond: torch.Tensor):
+    def forward(self, x: torch.Tensor, cond: torch.Tensor):
         scale1, shift1, gate1, scale2, shift2, gate2 = self.dit(cond)
         mod1 = scale1, shift1, gate1
         mod2 = scale2, shift2, gate2
 
         shortcut = self.skip(x)
         if self.use_checkpoint:
-            x = checkpoint.checkpoint(
-                self.forward_part1, x, mask, mod1, use_reentrant=False
-            )
+            x = checkpoint.checkpoint(self.forward_part1, x, mod1, use_reentrant=False)
         else:
-            x = self.forward_part1(x, mask, scale_shift_gate=mod1)
+            x = self.forward_part1(x, scale_shift_gate=mod1)
         x = shortcut + self.drop_path(x)
         shortcut = x
         if self.use_checkpoint:
@@ -590,6 +592,7 @@ class SwinLayer(nn.Module):
         dim_out: Optional[int] = None,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = False,
+        qk_norm: bool = False,
         drop_path: Union[Sequence[float], float] = 0.0,
         drop: float = 0.0,
         attn_drop: float = 0.0,
@@ -600,12 +603,25 @@ class SwinLayer(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         gated_attention: bool = False,
+        depth_shifts: bool = False,
+        TransformerBlockType: Type[nn.Module] = SwinTransformerBlock,
     ):
-
         super().__init__()
+
         self.window_size = window_size
-        self.shift_size = tuple(i // 2 for i in window_size)
-        self.no_shift = (0,) * len(window_size)
+        if depth_shifts:
+            # intermediate values as depth allows
+            shift_sizes = list(
+                zip(
+                    *[
+                        torch.linspace(0, w // 2, depth, dtype=torch.int).tolist()
+                        for w in window_size
+                    ]
+                )
+            )
+        else:
+            # zero shift interleaved with half shifts
+            shift_sizes = [(0,) * space, tuple(i // 2 for i in window_size)] * depth
 
         if isinstance(drop_path, float):
             drop_path = [drop_path] * depth
@@ -618,6 +634,8 @@ class SwinLayer(nn.Module):
         self.grid_size = grid_size
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias
+        self.qk_norm = qk_norm
+        self.shift_sizes = shift_sizes
         self.drop_path = drop_path
         self.drop = drop
         self.attn_drop = attn_drop
@@ -627,47 +645,35 @@ class SwinLayer(nn.Module):
         self.init_weights = init_weights
         self.use_rpb = use_rpb
         self.use_rope = use_rope
-        self.gated_attention = use_rope
+        self.gated_attention = gated_attention
 
         assert dim % num_heads == 0
 
-        self.blocks = nn.ModuleList(
-            [
-                SwinTransformerBlock(
-                    space,
-                    dim=dim,
-                    dim_out=self.dim_out if i == depth - 1 else None,
-                    num_heads=num_heads,
-                    grid_size=grid_size,
-                    window_size=window_size,
-                    shift_size=self.no_shift if (i % 2 == 0) else self.shift_size,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    drop=drop,
-                    attn_drop=attn_drop,
-                    drop_path=drop_path[i],
-                    norm_layer=norm_layer,
-                    use_checkpoint=use_checkpoint,
-                    act_fn=act_fn,
-                    use_rpb=use_rpb,
-                    use_rope=use_rope,
-                    gated_attention=gated_attention,
-                )
-                for i in range(depth)
-            ]
-        )
-
-        # precompute attention mask
-        # TODO can further improve by caching
-        if any([s > 0 for s in self.shift_size]):
-            window_size, shift_size = get_window_size(
-                grid_size, self.window_size, self.shift_size
+        blocks = []
+        for i in range(depth):
+            swin = TransformerBlockType(
+                space,
+                dim=dim,
+                dim_out=self.dim_out if i == depth - 1 else None,
+                num_heads=num_heads,
+                grid_size=grid_size,
+                window_size=window_size,
+                shift_size=self.shift_sizes[i],
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                qk_norm=qk_norm,
+                drop=drop,
+                attn_drop=attn_drop,
+                drop_path=drop_path[i],
+                norm_layer=norm_layer,
+                use_checkpoint=use_checkpoint,
+                act_fn=act_fn,
+                use_rpb=use_rpb,
+                use_rope=use_rope,
+                gated_attention=gated_attention,
             )
-            mask_dims = [ceil(grid_size[i] / w) * w for i, w in enumerate(window_size)]
-            attn_mask = compute_mask(mask_dims, window_size, shift_size)
-            self.register_buffer("attn_mask", attn_mask)
-        else:
-            self.attn_mask = None
+            blocks.append(swin)
+        self.blocks = nn.ModuleList(blocks)
 
         if init_weights:
             self.reset_parameters(init_weights)
@@ -678,7 +684,7 @@ class SwinLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for blk in self.blocks:
-            x = blk(x, self.attn_mask)
+            x = blk(x)
         return x
 
 
@@ -695,7 +701,7 @@ class FilmSwinLayer(SwinLayer):
     def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
         for blk, cond in zip(self.blocks, self.conditioning):
             x = cond(x, cond=condition)
-            x = blk(x, self.attn_mask)
+            x = blk(x)
         return x
 
 
@@ -703,40 +709,13 @@ class DiTSwinLayer(SwinLayer):
     """DiT-conditioned Swin Transformer layer."""
 
     def __init__(self, *args, cond_dim: int, **kwargs):
+        kwargs.pop("TransformerBlockType", None)
+        DiTransformer = partial(DiTSwinTransformerBlock, cond_dim=cond_dim)
 
-        super().__init__(*args, **kwargs)
-
-        self.blocks = nn.ModuleList(
-            [
-                DiTSwinTransformerBlock(
-                    self.space,
-                    dim=self.dim,
-                    dim_out=self.dim_out if i == self.depth - 1 else None,
-                    num_heads=self.num_heads,
-                    grid_size=self.grid_size,
-                    window_size=self.window_size,
-                    shift_size=self.no_shift if (i % 2 == 0) else self.shift_size,
-                    mlp_ratio=self.mlp_ratio,
-                    qkv_bias=self.qkv_bias,
-                    drop=self.drop,
-                    attn_drop=self.attn_drop,
-                    drop_path=self.drop_path[i],
-                    norm_layer=self.norm_layer,
-                    use_checkpoint=self.use_checkpoint,
-                    act_fn=self.act_fn,
-                    cond_dim=cond_dim,
-                    use_rpb=self.use_rpb,
-                    use_rope=self.use_rope,
-                    gated_attention=self.gated_attention,
-                )
-                for i in range(self.depth)
-            ]
-        )
-
-        if self.init_weights:
-            self.reset_parameters(self.init_weights)
+        super().__init__(*args, TransformerBlockType=DiTransformer, **kwargs)
+        self.cond_dim = cond_dim
 
     def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
         for blk in self.blocks:
-            x = blk(x, self.attn_mask, cond=condition)
+            x = blk(x, cond=condition)
         return x

@@ -1,0 +1,70 @@
+name: diffusion
+noise_distribution: gaussian
+# noise_distribution: student_t
+# noise_distribution: laplace
+bundle_seq_length: 1
+model_type: pixel_phi
+# model_type: pixel_fno
+latent_dim: 256
+act_fn: GELU
+decouple_mu: true
+conditioning: ["itg", "dg", "s_hat", "q"]  # "timestep"
+# conditioning: []  # for no conditioning
+extra_zf_loss: false
+init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
+patching_init_weights: "kaiming_uniform"
+cond_init_weights: "kaiming_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
+num_layers: 1
+
+loss_scheduler:
+  df: null
+  phi: null
+  flux: null
+  phi_int: null
+  flux_int: null
+  phi_cross: null
+  flux_cross: null
+  vq_commit: null
+loss_weights:
+  df: 1.0
+extra_loss_weights:
+
+patch:
+  patch_size: null
+  window_size: null
+  merging_hidden_ratio: 1.0
+  unmerging_hidden_ratio: 1.0
+  c_multiplier: 1.0
+
+swin:
+  patch_size: [ 4, 2, 4, 5, 4 ]
+  window_size: [ 4, 2, 2, 9, 4 ]
+  num_heads: [8]
+  depth: [2]
+  gradient_checkpoint: false
+  merging_hidden_ratio: 1.0
+  unmerging_hidden_ratio: 1.0
+  c_multiplier: 2.0
+  norm_output: false
+  use_abs_pe: false
+  act_fn: GELU
+  patch_skip: true
+  modulation: "dit"
+  drop_path: 0.1
+  swin_bottleneck: true
+  use_rpb: true
+  use_rope: false
+  init_weights: "kaiming_uniform"
+  patching_init_weights: "kaiming_uniform"
+  cond_init_weights: "normal_smallvar"
+
+# diffusion specific
+scheduler:
+  num_train_timesteps: 100
+  beta_start: 0.001
+  beta_end: 0.2
+  beta_schedule: "scaled_linear"
+  # beta_schedule: "linear"
+  # beta_schedule: "squaredcos_cap_v2"
+  prediction_type: "v_prediction"
+  # prediction_type: "epsilon"

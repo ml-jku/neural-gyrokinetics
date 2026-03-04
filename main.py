@@ -8,27 +8,37 @@ import os.path as osp
 import sys
 import traceback
 from datetime import datetime
+import subprocess
+import random
 
-import hydra
 import torch
 import torch.multiprocessing as mp
 import yaml
+
+import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
+import submitit
 
 # Project Imports
 from neugk.utils import set_seed, compress_src, find_free_port, filter_cli_priority
-from neugk.pinc.autoencoders.ae_utils import restart_config_autoencoder
 
 from neugk.gyroswin import GyroSwinRunner
 from neugk.pinc import PINCRunner
+from neugk.diffusion import get_diffusion_runner
 
 
 def dispatch_runner(rank, config, world_size):
-    if config.get("workflow", "gyroswin") == "gyroswin":
+    workflow = config.get("workflow", "gyroswin")
+    # get base workflow name (handle pinc_autoencoder, pinc_peft,...)
+    base_workflow = workflow.split("_")[0] if "_" in workflow else workflow
+
+    if base_workflow == "gyroswin":
         GyroSwinRunner(rank, config, world_size=world_size)()
-    elif config.get("workflow", "gyroswin") == "pinc":
+    elif base_workflow == "pinc":
         PINCRunner(rank, config, world_size=world_size)()
+    elif workflow == "diffusion":
+        get_diffusion_runner(rank, config, world_size=world_size)()
     else:
         raise NotImplementedError
 
@@ -41,8 +51,7 @@ def main(config: DictConfig):
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    set_seed(config.seed)
-
+    rand_suffix = random.randint(0, 999)
     print("#" * 88, "\nStarting Cyclone with configs:")
     print(OmegaConf.to_yaml(config))
     print("#" * 88, "\n")
@@ -50,6 +59,7 @@ def main(config: DictConfig):
     workflow = config.get("workflow")
     dict_config = OmegaConf.to_container(config)
     date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
+    date_and_time = f"{date_and_time}_{rand_suffix:03d}"
     if HydraConfig.initialized():
         dict_config["choices"] = HydraConfig.get().runtime.choices
 
@@ -71,6 +81,7 @@ def main(config: DictConfig):
         if config.output_path is None:
             dict_config["output_path"] = osp.join("outputs", date_and_time)
         else:
+            # TODO ignores if there are checkpoints in there
             dict_config["output_path"] = osp.join(
                 dict_config["output_path"], date_and_time
             )
@@ -138,7 +149,7 @@ def main(config: DictConfig):
         else:
             # set training style for pinc
             workflow = config.get("workflow", "unknown")
-            stage = workflow.split("_")[-1] if "_" in workflow else "autoencoder"
+            stage = config.get("stage", "autoencoder")
             config.stage = stage
             if stage == "autoencoder":
                 name = f"{stage}_{config.model.name}"
@@ -146,37 +157,53 @@ def main(config: DictConfig):
                 ae_type = config.get("model", {}).get("name", "unknown")
                 name = f"peft_{ae_type}"
             elif stage == "diffusion":
-                sched = config.diffusion.scheduler.name
-                model = config.diffusion.model.name
-                name = f"{stage}_{sched}_{model}"
+                model = config.model.model_type
+                name = f"{stage}_{model}"
             else:
                 name = "experiment"
 
         config.logging.run_id = f"{name}_{date_and_time}"
 
-    # setup distributed training
-    if torch.cuda.is_available():
-        n_gpus = torch.cuda.device_count()
-        world_size = n_gpus * config.ddp.n_nodes
-    else:
-        world_size = 1
-
     try:
-        if config.ddp.enable and world_size > 1:
-            if config.ddp.n_nodes == 1:
-                # single node, multi gpu
-                os.environ["MASTER_ADDR"] = os.environ.get(
-                    "SLURM_NODELIST", "localhost"
-                )
-                os.environ["MASTER_PORT"] = str(find_free_port())
-                if "NCCL_SOCKET_IFNAME" in os.environ:
-                    del os.environ["NCCL_SOCKET_IFNAME"]
+        is_ddp = config.ddp.enable
+        is_torchrun = "RANK" in os.environ
+        is_slurm = "SLURM_JOB_ID" in os.environ
+        if is_ddp:
+            world_size = config.ddp.n_nodes * torch.cuda.device_count()
+            if not is_torchrun and is_slurm:
+                overrides = HydraConfig.get().overrides.task
+                overrides = [
+                    o for o in overrides
+                    if not o.startswith("hydra/launcher=")
+                ]
+                if config.ddp.n_nodes == 1:
+                    # should be run with torchrun
+                    cmd = [
+                        "torchrun",
+                        f"--nproc_per_node={torch.cuda.device_count()}",
+                        "main.py"
+                    ] + overrides
+                else:
+                    # multinode setup
+                    cmd = [
+                        "torchrun",
+                        f"--nnodes={config.ddp.n_nodes}",
+                        f"--nproc_per_node={torch.cuda.device_count()}",
+                        f"--rdzv_backend={os.environ['RDZV_BACKEND']}",
+                        f"--rdzv_id={os.environ['RDZV_ID']}",
+                        f"--rdzv_endpoint={os.environ['HEAD_NODE_IP']}:29501",
+                        "main.py"
+                    ] + overrides
 
-                mp.spawn(dispatch_runner, args=(config, world_size), nprocs=world_size)
-            else:
-                # multiple nodes (launch via torchrun)
+                print(f"Launching DDP job with command: {' '.join(cmd)}")
+                subprocess.check_call(cmd)
+                return
+            elif is_torchrun and not is_slurm or is_torchrun and is_slurm:
                 rank = int(os.environ["RANK"])
                 dispatch_runner(rank, config, world_size=world_size)
+            else:
+                # here we could again revert to mp.spawn, but ideally should not be done anymore
+                raise ValueError("Invalid DDP setup: torchrun and SLURM env vars are inconsistent")
         else:
             # single gpu
             rank = 0
@@ -192,14 +219,4 @@ def main(config: DictConfig):
 
 
 if __name__ == "__main__":
-    use_manual_load = False
-    for arg in sys.argv:
-        if "ae_checkpoint=" in arg:
-            use_manual_load = True
-            break
-
-    if use_manual_load:
-        with hydra.initialize(version_base=None, config_path="configs"):
-            main(restart_config_autoencoder())
-    else:
-        main()
+    main()

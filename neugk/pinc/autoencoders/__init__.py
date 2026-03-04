@@ -16,7 +16,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
     # Get model type (ae, vae, vqvae)
     model_type = getattr(ae_cfg, "model_type", "ae")
 
-    if ae_cfg.name in ["ae", "vae", "vqvae"]:
+    if ae_cfg.name in ["ae", "vae", "vqvae", "simsiam"]:
         # Import appropriate model class
         if model_type == "ae":
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DAE as AE
@@ -24,6 +24,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVAE as AE
         elif model_type == "vqvae":
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVQVAE as AE
+        elif model_type == "simsiam":
+            from neugk.pinc.autoencoders.gk_autoencoders import Swin5DSimSiam as AE
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
@@ -32,15 +34,20 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         bottleneck_dim = ae_cfg.bottleneck.dim
         bottleneck_num_heads = getattr(ae_cfg.bottleneck, "num_heads", None)
         bottleneck_depth = getattr(ae_cfg.bottleneck, "depth", None)
+        normalized_latent = getattr(ae_cfg.bottleneck, "normalized_latent", True)
+        norm_learnable = getattr(ae_cfg.bottleneck, "norm_learnable", False)
 
         base_resolution = dataset.resolution
         decouple_mu = ae_cfg.decouple_mu
         patch_size = ae_cfg.patch.patch_size
         window_size = ae_cfg.patch.window_size
+        merging_depth = ae_cfg.patch.merging_depth
+        unmerging_depth = ae_cfg.patch.unmerging_depth
         patching_hidden_ratio = ae_cfg.patch.merging_hidden_ratio
         unmerging_hidden_ratio = ae_cfg.patch.unmerging_hidden_ratio
         c_multiplier = ae_cfg.patch.c_multiplier
         act_fn = getattr(torch.nn, ae_cfg.act_fn)
+        norm_fn = getattr(torch.nn, getattr(ae_cfg, "norm_fn", "LayerNorm"))
 
         num_heads = ae_cfg.vit.num_heads
         depth = ae_cfg.vit.depth
@@ -51,6 +58,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         use_abs_pe = ae_cfg.vit.use_abs_pe
         modulation = ae_cfg.vit.modulation
         drop_path = ae_cfg.vit.drop_path
+        qk_norm = getattr(ae_cfg.vit, "qk_norm", True)
         num_layers = len(depth)
         assert num_layers == len(num_heads)
 
@@ -86,6 +94,9 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
                     "threshold_ema_dead_code": 2,
                 }
             model_kwargs["vq_config"] = vq_config
+        elif model_type == "simsiam":
+            model_kwargs["use_simae_decoder"] = ae_cfg.bottleneck.use_simae_decoder
+            model_kwargs["vit_predictor"] = ae_cfg.bottleneck.vit_predictor
 
         ae = AE(
             dim=latent_dim,
@@ -106,24 +117,24 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             conv_patch=False,
             hidden_mlp_ratio=2.0,
             c_multiplier=c_multiplier,
+            merging_depth=merging_depth,
+            unmerging_depth=unmerging_depth,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
             cond_embed=cond_fn,
             init_weights=ae_cfg.init_weights,
             patching_init_weights=ae_cfg.patching_init_weights,
             act_fn=act_fn,
+            use_rpb=use_rpb,
             use_rope=use_rope,
             gated_attention=gated_attention,
-            use_rpb=use_rpb,
+            qk_norm=qk_norm,
+            norm_layer=norm_fn,
             modulation=modulation,
             decouple_mu=decouple_mu,  # make it 4D
             conditioning=True,
-            normalized_latent=True,
-            mid_norm_learnable=(
-                ae_cfg.bottleneck.norm_learnable
-                if hasattr(ae_cfg.bottleneck, "norm_learnable")
-                else True
-            ),
+            normalized_latent=normalized_latent,
+            mid_norm_learnable=norm_learnable,
             **model_kwargs,  # VAE/VQ-VAE configs
         )
 

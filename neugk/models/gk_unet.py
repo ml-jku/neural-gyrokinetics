@@ -16,7 +16,7 @@ from neugk.models.nd_vit import (
     DiTLayer,
     FilmViTLayer,
     LayerModes,
-    PositionalEmbedding,
+    APE,
     PatchEmbed,
     PatchMerge,
     PatchExpand,
@@ -75,7 +75,7 @@ class SwinBlockDown(nn.Module):
         self.grid_size = grid_size
 
         if use_abs_pe:
-            self.pos_embed = PositionalEmbedding(
+            self.pos_embed = APE(
                 dim, grid_size, learnable=learnable_pos_embed, init_weights="sincos"
             )
 
@@ -190,7 +190,7 @@ class SwinBlockUp(nn.Module):
         self.grid_size = grid_size
 
         if use_abs_pe:
-            self.pos_embed = PositionalEmbedding(
+            self.pos_embed = APE(
                 dim, grid_size, learnable=learnable_pos_embed, init_weights="sincos"
             )
 
@@ -354,6 +354,8 @@ class SwinNDUnet(nn.Module):
         use_checkpoint: bool = False,
         merging_hidden_ratio: float = 8.0,
         unmerging_hidden_ratio: float = 8.0,
+        merging_depth: int = 2,
+        unmerging_depth: int = 2,
         conditioning: Optional[List[str]] = None,
         cond_embed: Optional[nn.Module] = None,
         modulation: str = "dit",
@@ -369,6 +371,7 @@ class SwinNDUnet(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         gated_attention: bool = False,
+        qk_norm: bool = False,
         mid_norm_learnable: bool = True,
     ):
         super().__init__()
@@ -388,6 +391,7 @@ class SwinNDUnet(nn.Module):
         self.norm_output = norm_output
         self.patch_skip = patch_skip
         self.problem_dim = in_channels
+        self.act_fn = act_fn
         padded_base_resolution, pad_axes = pad_to_blocks(base_resolution, patch_size)
         self.pad_axes = [int(p) for p in pad_axes]
 
@@ -436,9 +440,13 @@ class SwinNDUnet(nn.Module):
             use_rpb=use_rpb,
             use_rope=use_rope,
             gated_attention=gated_attention,
+            qk_norm=qk_norm,
         )
         self.GlobalLayerType = partial(
-            GlobalLayer, use_rope=use_rope, gated_attention=gated_attention
+            GlobalLayer,
+            use_rope=use_rope,
+            gated_attention=gated_attention,
+            qk_norm=qk_norm,
         )
         if swin_bottleneck:
             self.GlobalLayerType = partial(
@@ -455,6 +463,7 @@ class SwinNDUnet(nn.Module):
             use_conv=conv_patch,
             mlp_ratio=merging_hidden_ratio,
             act_fn=act_fn,
+            mlp_depth=merging_depth,
         )
 
         # down path
@@ -507,7 +516,7 @@ class SwinNDUnet(nn.Module):
         )
 
         if use_abs_pe:
-            self.middle_pe = PositionalEmbedding(down_dims[-1], grid_sizes[-1])
+            self.middle_pe = APE(down_dims[-1], grid_sizes[-1])
 
         self.middle_upscale = PatchExpand(
             space=space,
@@ -583,6 +592,7 @@ class SwinNDUnet(nn.Module):
             act_fn=expand_act_fn,
             patch_skip=self.patch_skip,
             cond_dim=self.cond_embed.cond_dim if self.cond_embed else None,
+            mlp_depth=unmerging_depth,
         )
         self.reset_parameters()
 
@@ -605,39 +615,34 @@ class SwinNDUnet(nn.Module):
         x, pad_axes = self.patch_encode(x)
         if self.patch_skip:
             first_res = x.clone()
-
         # backbone
         cond = self.condition(kwargs)
-
         # down path
         feature_maps = []
         for blk in self.down_blocks:
             x, x_pre = blk(x, **cond)
             feature_maps.append(x_pre)
-
         # middle block
         if hasattr(self, "middle_pe"):
             x = self.middle_pe(x)
         x = self.middle(x, **cond)
         x = self.middle_upscale(x)
-
         # up path
         feature_maps = feature_maps[::-1]
         for i, blk in enumerate(self.up_blocks):
             x = blk(x, s=feature_maps[i], **cond)
-
         # expand to original
         if self.patch_skip:
             x = torch.cat([x, first_res], -1)
-
-        x = self.patch_decode(x, pad_axes, condition=cond["condition"])
-
-        return x
+        return self.patch_decode(x, pad_axes, **cond)
 
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
+        x = rearrange(x, "b c ... -> b ... c")
+        # pad to patch blocks
+        x, pad_axes = pad_to_blocks(x, self.patch_size)
         # linear flat patch embedding
         x = self.patch_embed(x)
-        return x
+        return x, pad_axes
 
     def patch_decode(
         self,
@@ -654,7 +659,6 @@ class SwinNDUnet(nn.Module):
         return x
 
     def condition(self, kwconds: Dict[str, torch.Tensor]) -> Dict:
-        # drop input fields
         kwconds = {k: v for k, v in kwconds.items() if k in self.condition_keys}
         if len(kwconds) == 0:
             return {}
@@ -663,11 +667,13 @@ class SwinNDUnet(nn.Module):
             "Mismatch in conditioning keys "
             f"{self.condition_keys} != {sorted(list(kwconds.keys()))}"
         )
+
         cond = torch.cat(
-            [kwconds[k].unsqueeze(-1) for k in self.condition_keys], dim=-1
+            [kwconds[k].view(kwconds[k].shape[0], -1) for k in self.condition_keys],
+            dim=-1,
         )
+
         if self.cond_embed is not None:
-            # embed conditioning is e.g. sincos
             return {"condition": self.cond_embed(cond)}
         else:
             return {}
@@ -694,22 +700,23 @@ class Swin5DUnet(SwinNDUnet):
 
         super().__init__(**kwargs)
         self.decouple_mu = decouple_mu
+        self.full_resolution = full_resolution
+        self.original_problem_dim = full_in_channels
         if decouple_mu:
             self.decoupled_dim = decoupled_dim
             # positional information for velocity mixing
-            self.vel_pe = PositionalEmbedding(full_in_channels, vel_pe_resolution, True)
+            self.vel_pe = APE(full_in_channels, vel_pe_resolution, True)
 
     def forward(self, x, **kwargs):
         return {"df": super().forward(x, **kwargs)}
 
     def patch_encode(self, df: torch.Tensor):
+        df = rearrange(df, "b c ... -> b ... c")
         # decouple mu and add positional information
         if self.decouple_mu:
-            df = rearrange(df, "b c ... -> b ... c")
             df = self.vel_pe(df)
-            df = rearrange(df, "b vp mu ... c -> b (c mu) vp ...")
+            df = rearrange(df, "b vp mu ... c -> b vp ... (c mu)")
         # pad to patch blocks
-        df = rearrange(df, "b c ... -> b ... c")
         df, pad_axes = pad_to_blocks(df, self.patch_size)
         # linear flat patch embedding
         df = self.patch_embed(df)

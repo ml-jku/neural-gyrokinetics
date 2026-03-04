@@ -2,9 +2,14 @@ from typing import Optional, List, Dict
 
 import torch
 import torch.nn as nn
+import warnings
 
+from neugk.models.layers import MLP
 from neugk.models.gk_unet import Swin5DUnet
 from neugk.pinc.autoencoders.vector_quantize import VectorQuantize
+
+from neugk.models.nd_vit.vit_layers import ViTLayer
+from neugk.models.nd_vit.positional import APE
 
 
 class Swin5DAE(Swin5DUnet):
@@ -18,7 +23,6 @@ class Swin5DAE(Swin5DUnet):
         bottleneck_depth: int = 2,
         **kwargs
     ):
-        # TODO(diff) make conditioning uniform across models
         super().__init__(*args, conditioning=[] if conditioning else None, **kwargs)
 
         self.bottleneck_dim = bottleneck_dim if bottleneck_dim else self.middle.dim
@@ -28,6 +32,7 @@ class Swin5DAE(Swin5DUnet):
         # Store middle dim before deleting (needed for VAE/VQ-VAE subclasses)
         self.middle_dim = self.middle.dim
         if normalized_latent:
+            warnings.warn("LayerNorm on latent might lead to scale problems.")
             self.pre_z_norm = nn.LayerNorm(self.bottleneck_dim)
             self.post_z_norm = nn.LayerNorm(self.bottleneck_dim)
 
@@ -69,27 +74,23 @@ class Swin5DAE(Swin5DUnet):
         del self.middle
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
+            condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
-
-        if condition is not None:
-            condition = self.cond_embed(condition)
         # down path
         for blk in self.down_blocks:
-            zdf = blk(zdf, return_skip=False, condition=condition)
-
+            zdf = blk(zdf, return_skip=False, **kwcond)
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)  # TODO(diff) middle layers always need PE
-
-        zdf = self.middle_pre(zdf, condition=condition)
+        zdf = self.middle_pre(zdf, **kwcond)
         zdf = self.middle_downproj(zdf)
-
         # layer norm on latents
         if self.normalized_latent:
             zdf = self.pre_z_norm(zdf)
-
-        return zdf, condition, pad_axes
+        return zdf, pad_axes
 
     def decode(
         self,
@@ -99,27 +100,25 @@ class Swin5DAE(Swin5DUnet):
     ):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
-
+        kwcond = {} if condition is None else {"condition": condition}
         # re-normalize latents before bottleneck
         if self.normalized_latent:
             zdf = self.post_z_norm(zdf)
-
         # bottleneck up
         zdf = self.middle_upproj(zdf)
-        zdf = self.middle_post(zdf, condition=condition)
+        zdf = self.middle_post(zdf, **kwcond)
         zdf = self.middle_upscale(zdf)
-
         # up path
         for blk in self.up_blocks:
-            zdf = blk(zdf, condition=condition)
-
+            zdf = blk(zdf, **kwcond)
         # expand to original
-        df = self.patch_decode(zdf, pad_axes, condition=condition)
-
+        df = self.patch_decode(zdf, pad_axes, **kwcond)
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        zdf, condition, pad_axes = self.encode(df, condition=condition)
+        if condition is not None:
+            condition = self.cond_embed(condition)
+        zdf, pad_axes = self.encode(df, condition=condition)
         return self.decode(zdf, pad_axes, condition=condition)
 
 
@@ -146,33 +145,27 @@ class Swin5DVAE(Swin5DAE):
         return mu + eps * std
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
+            condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
-
-        if condition is not None:
-            condition = self.cond_embed(condition)
-
         # down path
         for blk in self.down_blocks:
-            zdf = blk(zdf, return_skip=False, condition=condition)
-
+            zdf = blk(zdf, return_skip=False, **kwcond)
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)
-
         # first Transformer, then project to 2x dim and split
-        zdf = self.middle_pre(zdf, condition=condition)
+        zdf = self.middle_pre(zdf, **kwcond)
         mu_logvar = self.middle_vae_downproj(zdf)
         mu, logvar = torch.chunk(mu_logvar, 2, dim=-1)
-
         # sampling via reparameterization trick
         z = self.reparameterize(mu, logvar)
-
         # for loss computation
         self._mu = mu
         self._logvar = logvar
-
-        return z, condition, pad_axes
+        return z, pad_axes
 
     def decode(
         self,
@@ -182,29 +175,26 @@ class Swin5DVAE(Swin5DAE):
     ):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
-
+        kwcond = {} if condition is None else {"condition": condition}
         # bottleneck up
         zdf = self.middle_upproj(zdf)
-        zdf = self.middle_post(zdf, condition=condition)
+        zdf = self.middle_post(zdf, **kwcond)
         zdf = self.middle_upscale(zdf)
-
         # up path
         for blk in self.up_blocks:
-            zdf = blk(zdf, condition=condition)
-
+            zdf = blk(zdf, **kwcond)
         # expand to original
-        df = self.patch_decode(zdf, pad_axes, condition=condition)
-
+        df = self.patch_decode(zdf, pad_axes, **kwcond)
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        zdf, condition, pad_axes = self.encode(df, condition=condition)
+        if condition is not None:
+            condition = self.cond_embed(condition)
+        zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
-
         # for loss computation
         outputs["mu"] = self._mu
         outputs["logvar"] = self._logvar
-
         return outputs
 
     def compute_kl_loss(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -248,47 +238,37 @@ class Swin5DVQVAE(Swin5DAE):
         self.middle_vq_upproj = nn.Linear(embedding_dim, self.middle_dim)
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
+            condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # compress to patch space
         zdf, pad_axes = self.patch_encode(df)
-
-        if condition is not None:
-            condition = self.cond_embed(condition)
-
         # down path
         for blk in self.down_blocks:
-            zdf = blk(zdf, return_skip=False, condition=condition)
-
+            zdf = blk(zdf, return_skip=False, **kwcond)
         # bottleneck
         if hasattr(self, "middle_pe"):
             zdf = self.middle_pe(zdf)
-
-        zdf = self.middle_pre(zdf, condition=condition)
+        zdf = self.middle_pre(zdf, **kwcond)
         z_continuous = self.middle_vq_downproj(zdf)
-
         # set original shape for reshaping after VQ
         original_shape = z_continuous.shape
         batch_size = original_shape[0]
         spatial_shape = original_shape[1:-1]  # All spatial dimensions
         embedding_dim = original_shape[-1]
-
         # reshape for VQ: [B, spatial_dims..., embedding_dim] -> [B, prod(spatial_dims), embedding_dim]
         # codebook lookup is via the embedding dimension (TODO(ae) use 4/5D VQ?)
         z_flat = z_continuous.view(batch_size, -1, embedding_dim)
-
         # VQ lookup
         z_quantized, indices, commit_loss = self.vq(z_flat)
-
         # reshape back to original shape
         z_quantized = z_quantized.view(original_shape)
-
         # handle indices
         indices_shape = (batch_size,) + spatial_shape
         self._vq_indices = indices.view(indices_shape)
-
         # for loss computation
         self._vq_commit_loss = commit_loss
-
-        return z_quantized, condition, pad_axes
+        return z_quantized, pad_axes
 
     def decode(
         self,
@@ -296,27 +276,27 @@ class Swin5DVQVAE(Swin5DAE):
         pad_axes: List,
         condition: Optional[torch.Tensor] = None,
     ):
+        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
+            condition = self.cond_embed(condition)
+        kwcond = {} if condition is None else {"condition": condition}
         # first post-VQ projection
         zdf = self.middle_vq_upproj(zdf)
-        zdf = self.middle_post(zdf, condition=condition)
-
+        zdf = self.middle_post(zdf, **kwcond)
         zdf = self.middle_upscale(zdf)
-
         # up path
         for blk in self.up_blocks:
-            zdf = blk(zdf, condition=condition)
-
+            zdf = blk(zdf, **kwcond)
         # expand to original
-        df = self.patch_decode(zdf, pad_axes, condition=condition)
-
+        df = self.patch_decode(zdf, pad_axes, **kwcond)
         return {"df": df}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        zdf, condition, pad_axes = self.encode(df, condition=condition)
+        if condition is not None:
+            condition = self.cond_embed(condition)
+        zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["vq_commit_loss"] = self._vq_commit_loss
         outputs["vq_indices"] = self._vq_indices
-
         return outputs
 
     def get_codebook_usage(self) -> torch.Tensor:
@@ -342,3 +322,59 @@ class Swin5DVQVAE(Swin5DAE):
             raise RuntimeError(
                 "No VQ indices available. Run encode() or forward() first."
             )
+
+
+class Swin5DSimSiam(Swin5DAE):
+    def __init__(
+        self,
+        *args,
+        use_simae_decoder: bool = False,
+        vit_predictor: bool = True,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+
+        # predictor network
+        predictor_dim = self.bottleneck_dim // 8
+        if vit_predictor:
+            # flat vit
+            ape = APE(predictor_dim, self.bottleneck_grid_size, init_weights="sincos")
+            backbone = ViTLayer(
+                space=len(self.bottleneck_grid_size),
+                dim=predictor_dim,
+                grid_size=self.bottleneck_grid_size,
+                depth=2,
+                num_heads=4,
+                mlp_ratio=2.0,
+                act_fn=self.act_fn,
+            )
+        else:
+            # basic mlp
+            ape = nn.Identity()
+            backbone = nn.Identity()
+        # further 8x bottleneck in prediction
+        encoder = MLP([self.bottleneck_dim, predictor_dim], act_fn=self.act_fn)
+        decoder = MLP([predictor_dim, self.bottleneck_dim], act_fn=self.act_fn)
+        self.predictor = nn.Sequential(encoder, ape, backbone, decoder)
+        # autoencoder + simsiam
+        self.use_simae_decoder = use_simae_decoder
+        if not use_simae_decoder:
+            del self.up_blocks
+            del self.middle_post
+            del self.middle_upproj
+            del self.middle_upscale
+            del self.unpatch
+
+    def forward(
+        self,
+        df: torch.Tensor,
+        condition: Optional[torch.Tensor] = None,
+        decoder: bool = True,
+    ):
+        zdf, pad_axes = self.encode(df, condition=condition)
+        pdf = self.predictor(zdf)
+        if decoder and self.use_simae_decoder:
+            pred = self.decode(zdf, pad_axes, condition)["df"]
+            return {"df": pred, "z": zdf, "p": pdf}
+        else:
+            return {"z": zdf, "p": pdf}

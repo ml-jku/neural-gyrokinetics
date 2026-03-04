@@ -10,7 +10,7 @@ from neugk.models.nd_vit.vit_layers import (
     DiTLayer,
     FilmViTLayer,
 )
-from neugk.models.nd_vit.positional import PositionalEmbedding
+from neugk.models.nd_vit.positional import APE
 from neugk.models.nd_vit.patching import (
     PatchEmbed,
     PatchExpand,
@@ -90,9 +90,7 @@ class ViTFlat(nn.Module):
         )
 
         if abs_pe:
-            self.ape = PositionalEmbedding(
-                dim, self.patch_embed.grid_size, learnable=True
-            )
+            self.ape = APE(dim, self.patch_embed.grid_size, learnable=True)
 
         # unpatch
         self.unpatch = PatchExpand(

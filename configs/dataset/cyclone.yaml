@@ -1,21 +1,34 @@
 name: cyclone
 path: /local00/bioinf/gyrokinetics/preprocessed
-normalization: zscore
+backend: gds  # gds, h5
+normalization: 
+  df: 
+    type: zscore
+    agg_axes: [1, 3, 4, 5]
+  flux: 
+    type: zscore
+    agg_axes: null
+  phi: 
+    type: zscore
+    agg_axes: [0, 1, 2]
 normalization_scope: dataset
 minmax_beta1: 8
 minmax_beta2: 4
 offset: 80
 subsample: 1
+val_subsample: 10
 spatial_ifft: true
 separate_zf: true
+norm_decouple_mu: true
 real_potens: true
 split_into_bands: null
 log_transform: false
 num_workers: 4
 active_keys: ["re", "im"]
 input_fields: ["df"]
-training_trajectories: "iteration_{0-7,9-12,14-99,101-114,116-130,132-147,149-199,201-234,236-261,263-299}.h5"
-validation_trajectories: ["iteration_13.h5", "iteration_100.h5", "iteration_200.h5"]
+training_trajectories: "iteration_{0-5,7-12,14-31,33-64,67-82,84-99}.h5"
+validation_trajectories: ["iteration_13.h5"]
+# validation_trajectories: "ood_iteration_{0-4}.h5"
 partial_holdouts:
 training_cond_filters:
   last_fluxes: [1., .inf]
@@ -25,5 +38,17 @@ eval_cond_filters:
   first_fluxes: [1., .inf]
 
 augment:
-  noise: false
-  noise_std: 1e-4
+  noise: 
+    active: false
+    noise_std: 1e-4
+  mask_modes:
+    active: false
+    mask_ratio: 0.1
+    is_fourier: false
+    weights: null
+    rescale: false
+    mask_zero_mode: true
+    df_delta_weight: 1.0
+
+timestep_std_filter: null  # std-based timestep filtering threshold (null to disable)
+timestep_std_offset: 80

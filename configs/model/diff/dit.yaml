@@ -1,0 +1,44 @@
+name: diffusion
+bundle_seq_length: 1
+model_type: latent_dit
+latent_dim: 512
+act_fn: GELU
+decouple_mu: true
+conditioning: ["itg", "dg", "s_hat", "q"]  # "timestep"
+# conditioning: []  # for no conditioning
+extra_zf_loss: false
+init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
+patching_init_weights: "kaiming_uniform"
+cond_init_weights: "kaiming_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
+
+loss_scheduler: null
+loss_weights:
+  df: 1.0
+extra_loss_weights:
+
+patch:
+  patch_size: null
+  window_size: null
+
+vit:
+  num_heads: 16
+  depth: 4
+  gradient_checkpoint: false
+  use_abs_pe: false
+  use_rpb: true
+  use_rope: false
+  gated_attention: false
+  drop_path: 0.1
+
+# diffusion specific
+diffusion:
+  noise_distribution: gaussian
+  formulation: flow
+  continuous_time: true
+  minibatch_ot: true
+  scheduler:
+    num_train_timesteps: 1000
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: "linear"
+    prediction_type: "epsilon"

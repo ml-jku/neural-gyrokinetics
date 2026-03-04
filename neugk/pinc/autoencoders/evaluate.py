@@ -73,8 +73,7 @@ def evaluate(
             for key in loss_wrap.all_losses:
                 metrics[key] = torch.tensor(0.0)
             n_timesteps_acc = torch.tensor(0.0)
-            use_tqdm = False
-            if use_tqdm or (dist.is_initialized() and not rank):
+            if use_tqdm and (not dist.is_initialized() or rank == 0):
                 valloader = tqdm(
                     valloader,
                     desc=(
@@ -97,7 +96,9 @@ def evaluate(
                     for k in ["df", "phi", "flux", "avg_flux"]
                     if getattr(sample, k) is not None
                 }
-                condition = sample.conditioning.to(device)
+                condition = None
+                if sample.conditioning is not None:
+                    condition = sample.conditioning.to(device)
                 geometry = sample.geometry
                 idx_data = {k: getattr(sample, k).to(device) for k in idx_keys}
 
@@ -148,44 +149,47 @@ def evaluate(
                         metrics[key] += metrics_i[key].mean()
                 n_timesteps_acc += 1
 
-                # temporary dicts for plotting
-                t_idx = idx_data["timestep_index"].tolist()
-                batch_idx = torch.randint(0, len(t_idx), (1,)).item()
-                # TODO(diff) batch_idx only used for df/phi, flux needs the batch
-                #            with more trajectories need to ensure sample within one
-                # use df, phi_int, flux_int for plotting
-                preds_plots = {
-                    "df": preds["df"] if "df" in preds else None,
-                    "phi": preds["phi_int"] if "phi_int" in preds else None,
-                    "flux": preds["flux_int"] if "flux_int" in preds else None,
-                }
+                if len(val_plots) == 0:
+                    # temporary dicts for plotting
+                    t_idx = idx_data["timestep_index"].tolist()
+                    batch_idx = torch.randint(0, len(t_idx), (1,)).item()
+                    # TODO(diff) batch_idx only used for df/phi, flux needs the batch
+                    #            with more trajectories need to ensure sample within one
+                    # use df, phi_int, flux_int for plotting
+                    preds_plots = {
+                        "df": preds["df"] if "df" in preds else None,
+                        "phi": preds["phi_int"] if "phi_int" in preds else None,
+                        "flux": preds["flux_int"] if "flux_int" in preds else None,
+                    }
 
-                preds_plots = {
-                    k: preds_plots[k][batch_idx] if "flux" not in k else preds_plots[k]
-                    for k in preds_plots
-                }
-                tgts = {k: tgts[k][batch_idx] for k in tgts}
-                if val_idx == 0:
-                    # holdout trajectories valset
-                    plots = generate_val_plots(
-                        rollout=preds_plots,
-                        gt=tgts,
-                        ts=sample.timestep,
-                        phase="Random draw",
-                        workflow="autoencoder",
-                    )
-                    val_plots.update(plots)
-                else:
-                    # holdout samples valset
-                    if idx == 0:
+                    preds_plots = {
+                        k: (
+                            preds_plots[k][batch_idx]
+                            if "flux" not in k
+                            else preds_plots[k]
+                        )
+                        for k in preds_plots
+                    }
+                    tgts = {k: tgts[k][batch_idx] for k in tgts}
+                    if val_idx == 0:
+                        # holdout trajectories valset
                         plots = generate_val_plots(
                             rollout=preds_plots,
                             gt=tgts,
-                            timestep=sample.timestep,
-                            phase="Holdout samples",
-                            workflow="autoencoder",
+                            ts=sample.timestep,
+                            phase="Random draw",
                         )
                         val_plots.update(plots)
+                    else:
+                        # holdout samples valset
+                        if idx == 0:
+                            plots = generate_val_plots(
+                                rollout=preds_plots,
+                                gt=tgts,
+                                timestep=sample.timestep,
+                                phase="Holdout samples",
+                            )
+                            val_plots.update(plots)
 
             if dist.is_initialized():
                 # for phase in metrics.keys():

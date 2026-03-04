@@ -16,6 +16,7 @@ from neugk.runner import BaseRunner
 from neugk.pinc.autoencoders import get_autoencoder
 from neugk.pinc.losses import PINCLossWrapper, PINCGradientBalancer
 from neugk.pinc.autoencoders.evaluate import evaluate as pinc_evaluate
+from neugk.pinc.autoencoders.evaluate_simsiam import evaluate_linear_probe
 from neugk.pinc.autoencoders.ae_utils import (
     aggregate_dataset_stats,
     MuonWithAuxAdam,
@@ -23,23 +24,28 @@ from neugk.pinc.autoencoders.ae_utils import (
     load_autoencoder,
     train_step_autoencoder,
     train_step_peft,
+    train_step_simsiam,
 )
 from neugk.pinc.peft_utils import setup_peft_stage
 
 
 class PINCRunner(BaseRunner):
     def setup_components(self):
+        assert self.cfg.stage is not None, "Stage is not set."
+
         model_key = "autoencoder" if hasattr(self.cfg, "autoencoder") else "model"
         model_cfg = getattr(self.cfg, model_key)
 
         # losses
         weights = self.setup_common_losses(model_cfg)
-        dataset_stats = (
-            aggregate_dataset_stats(self.trainset.files)
-            if hasattr(self.trainset, "files")
-            else {}
-        )
+        # dataset_stats = (
+        #     aggregate_dataset_stats(self.trainset.files)
+        #     if hasattr(self.trainset, "files")
+        #     else {}
+        # )
+        dataset_stats = {}
 
+        # pinc specific losses
         self.loss_wrap = PINCLossWrapper(
             weights=weights,
             schedulers=self.loss_scheduler_dict,
@@ -70,8 +76,14 @@ class PINCRunner(BaseRunner):
         # peft setup vs standard setup
         self._load_checkpoints()
 
+        self.simae = len(set(self.loss_wrap.active_losses).difference({"simsiam"})) > 0
         if self.use_ddp:
-            self.model = DDP(self.model, device_ids=[self.rank])
+            self.model = DDP(
+                self.model,
+                device_ids=[self.local_rank],
+                # NOTE unused only if no decode
+                find_unused_parameters=(self.cfg.stage == "simsiam"),
+            )
 
         is_muon = (
             hasattr(self.cfg.training, "optimizer")
@@ -86,6 +98,9 @@ class PINCRunner(BaseRunner):
                 else SingleDeviceMuonWithAuxAdam(param_groups)
             )
             self.opt.defaults = {"lr": self.cfg.training.learning_rate}
+        elif self.cfg.training.gradnorm_balancer == "pseudo":
+            params = [p for p in self.model.parameters() if p.requires_grad]
+            self.opt = torch.optim.SGD(params, lr=self.cfg.training.learning_rate)
         else:
             # Standard Adam
             params = [p for p in self.model.parameters() if p.requires_grad]
@@ -104,24 +119,32 @@ class PINCRunner(BaseRunner):
                     weight_decay=self.cfg.training.weight_decay,
                 )
 
+        # gradient balancer
+        self.grad_balancer = PINCGradientBalancer(
+            self.opt,
+            mode=self.cfg.training.gradnorm_balancer,
+            scaler=self.scaler,
+            clip_grad=self.cfg.training.clip_grad,
+            n_tasks=len(self.loss_wrap.active_losses),
+        )
+
     def _load_checkpoints(self):
-        # ckpt_path = self.cfg.ae_checkpoint
-        ckpt_path = os.path.join(self.cfg.output_path, "ckp.pth")
+        # TODO workaround to load. as of now loading does not work
+        ckpt_path = os.path.join(
+            self.cfg.output_path,
+            "..",
+            (
+                "ckp.pth"
+                if getattr(self.cfg.training, "use_latest_checkpoint", False)
+                else "best.pth"
+            ),
+        )
 
         self.ae_ckpt_dict = {}
 
         if self.cfg.stage == "peft":
             if not ckpt_path and not os.path.exists(ckpt_path):
                 raise ValueError("PEFT requires ae_checkpoint")
-            if os.path.isdir(ckpt_path):
-                ckpt_path = os.path.join(
-                    ckpt_path,
-                    (
-                        "ckp.pth"
-                        if getattr(self.cfg.training, "use_latest_checkpoint", False)
-                        else "best.pth"
-                    ),
-                )
 
             print(f"Loading checkpoint: {ckpt_path}")
             loaded_ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
@@ -211,46 +234,25 @@ class PINCRunner(BaseRunner):
         return groups
 
     def __call__(self):
-        self.setup_data()
-        self.setup_components()
-        self.setup_scheduler()
-
         # load states now that everything is initialized
         if self.ae_ckpt_dict:
             try:
                 if "optimizer_state_dict" in self.ae_ckpt_dict:
                     self.opt.load_state_dict(self.ae_ckpt_dict["optimizer_state_dict"])
                 if "scheduler_state_dict" in self.ae_ckpt_dict and self.scheduler:
-                    self.scheduler.load_state_dict(
-                        self.ae_ckpt_dict["scheduler_state_dict"]
-                    )
+                    # self.scheduler.load_state_dict(
+                    #     self.ae_ckpt_dict["scheduler_state_dict"]
+                    # )
+                    pass
             except Exception as e:
                 print(f"Warning: Could not load optimizer/scheduler state: {e}")
-
-        # Continue with standard run setup
-        self.use_amp = self.cfg.amp.enable
-        self.use_bf16 = (
-            self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
-        )
-        self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
-        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
-
-        self.grad_balancer = PINCGradientBalancer(
-            self.opt,
-            mode=self.cfg.training.gradnorm_balancer,
-            scaler=self.scaler,
-            clip_grad=self.cfg.training.clip_grad,
-            n_tasks=len(self.loss_wrap.active_losses),
-        )
-
-        use_tqdm = self.cfg.logging.tqdm if not self.use_ddp else False
 
         # input fields caching
         self.input_fields = set(self.cfg.dataset.input_fields)
         self.idx_keys = ["file_index", "timestep_index"]
 
         for epoch in range(self.start_epoch + 1, self.cfg.training.n_epochs + 1):
-            if use_tqdm or (self.use_ddp and not self.rank):
+            if self.cfg.logging.tqdm and (not self.use_ddp or not self.rank):
                 self.pbar = tqdm(self.trainloader, "Training")
             else:
                 self.pbar = self.trainloader
@@ -318,13 +320,17 @@ class PINCRunner(BaseRunner):
                 for k in self.input_fields
                 if getattr(sample, k) is not None
             }
-            condition = sample.conditioning.to(self.device)
+            condition = None
+            if sample.conditioning is not None:
+                condition = sample.conditioning.to(self.device)
             idx_data = {k: getattr(sample, k).to(self.device) for k in self.idx_keys}
             geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
-
             if self.augmentations:
                 for aug_fn in self.augmentations:
-                    xs = {k: aug_fn(v) for k, v in xs.items()}
+                    xs = {k: aug_fn(v, idx_data["file_index"]) for k, v in xs.items()}
+                    if self.cfg.dataset.augment.mask_modes.active:
+                        # separate input and target
+                        xs["df"], xs["df_tgt"] = xs["df"]
 
             info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
             t_start_fwd = perf_counter_ns()
@@ -333,11 +339,14 @@ class PINCRunner(BaseRunner):
                 str(self.device), dtype=self.amp_dtype, enabled=self.use_amp
             ):
                 # dispatch to correct step function
-                step_fn = (
-                    train_step_peft
-                    if self.cfg.stage == "peft"
-                    else train_step_autoencoder
-                )
+                if self.cfg.stage == "autoencoder":
+                    step_fn = train_step_autoencoder
+                if self.cfg.stage == "peft":
+                    step_fn = train_step_peft
+                if self.cfg.stage == "simsiam":
+                    step_fn = train_step_simsiam
+                    xs["df_aug"] = getattr(sample, "df_aug").to(self.device)
+
                 loss, losses = step_fn(
                     self.cfg,
                     model=self.model,
@@ -359,7 +368,7 @@ class PINCRunner(BaseRunner):
                 v
                 for k, v in losses.items()
                 if k in self.loss_wrap.active_losses
-                and k not in ["total_mse", "phi_int_mse", "flux_int_mse"]
+                and k not in ["total_mse", "phi_int_mse", "flux_int_mse", "df_delta"]
                 and not k.endswith("_mse")
                 and v.requires_grad
             ]
@@ -388,18 +397,31 @@ class PINCRunner(BaseRunner):
         return loss_logs, info_dict
 
     def evaluate(self, epoch):
-        log_metric_dict, val_plots, self.loss_val_min = pinc_evaluate(
-            rank=self.rank,
-            world_size=self.world_size,
-            model=self.model,
-            loss_wrap=self.loss_wrap,
-            valsets=self.valsets,
-            valloaders=self.valloaders,
-            opt=self.opt,
-            lr_scheduler=self.scheduler,
-            epoch=epoch,
-            cfg=self.cfg,
-            device=self.device,
-            loss_val_min=self.loss_val_min,
-        )
+        if getattr(self.model, "use_simae_decoder", True):
+            log_metric_dict, val_plots, self.loss_val_min = pinc_evaluate(
+                rank=self.rank,
+                world_size=self.world_size,
+                model=self.model,
+                loss_wrap=self.loss_wrap,
+                valsets=self.valsets,
+                valloaders=self.valloaders,
+                opt=self.opt,
+                lr_scheduler=self.scheduler,
+                epoch=epoch,
+                cfg=self.cfg,
+                device=self.device,
+                loss_val_min=self.loss_val_min,
+            )
+        if self.cfg.stage == "simsiam":
+            probe_log_metric_dict, _ = evaluate_linear_probe(
+                rank=self.rank,
+                model=self.model,
+                trainloader=self.trainloader,
+                valloaders=self.valloaders,
+                epoch=epoch,
+                cfg=self.cfg,
+                device=self.device,
+                loss_val_min=self.loss_val_min,
+            )
+            log_metric_dict = log_metric_dict | probe_log_metric_dict
         return log_metric_dict, val_plots

@@ -209,7 +209,7 @@ def evaluate(
             for key in loss_wrap.all_losses:
                 metrics[key] = torch.zeros([tot_eval_steps])
             n_timesteps_acc = torch.zeros([tot_eval_steps])
-            if use_tqdm or (dist.is_initialized() and not rank):
+            if use_tqdm and (not dist.is_initialized() or rank == 0):
                 valloader = tqdm(
                     valloader,
                     desc=(
@@ -309,7 +309,6 @@ def evaluate(
                             gt=plot_gt,
                             ts=conds["timestep"],
                             phase="Random draw",
-                            workflow="gyroswin",
                         )
                         val_plots.update(plots)
                     else:
@@ -320,7 +319,6 @@ def evaluate(
                                 gt=tgts,  # TODO ?
                                 ts=conds["timestep"],
                                 phase="Holdout samples",
-                                workflow="gyroswin",
                             )
                             val_plots.update(plots)
 

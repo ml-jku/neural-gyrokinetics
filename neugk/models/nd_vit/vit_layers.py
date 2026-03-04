@@ -61,8 +61,6 @@ class PatchAttention(nn.Module):
         if qk_norm:
             self.q_norm = nn.RMSNorm(self.head_dim, self.head_dim)
             self.k_norm = nn.RMSNorm(self.head_dim, self.head_dim)
-            # self.q_norm = nn.LayerNorm(self.head_dim, self.head_dim)
-            # self.k_norm = nn.LayerNorm(self.head_dim, self.head_dim)
 
         if init_weights:
             self.reset_parameters(init_weights)
@@ -150,7 +148,7 @@ class VisionTransformerBlock(nn.Module):
         dim_out: Optional[int] = None,
         mlp_ratio: float = 2.0,
         qkv_bias: bool = True,
-        qk_norm: bool = True,
+        qk_norm: bool = False,
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
@@ -349,6 +347,7 @@ class ViTLayer(nn.Module):
         init_weights: Optional[str] = None,
         use_rope: bool = False,
         gated_attention: bool = False,
+        TransformerBlockType: Type[nn.Module] = VisionTransformerBlock,
     ):
 
         super().__init__()
@@ -366,6 +365,7 @@ class ViTLayer(nn.Module):
         self.drop_path = drop_path
         self.mlp_ratio = mlp_ratio
         self.qkv_bias = qkv_bias
+        self.qk_norm = qk_norm
         self.attn_drop = attn_drop
         self.norm_layer = norm_layer
         self.use_checkpoint = use_checkpoint
@@ -378,7 +378,7 @@ class ViTLayer(nn.Module):
 
         self.blocks = nn.ModuleList(
             [
-                VisionTransformerBlock(
+                TransformerBlockType(
                     space,
                     dim=dim,
                     dim_out=dim_out if i == (depth - 1) else dim,
@@ -434,37 +434,11 @@ class DiTLayer(ViTLayer):
     """DiT-conditioned Vision Transformer layer."""
 
     def __init__(self, *args, cond_dim: int, **kwargs):
-        super().__init__(*args, **kwargs)
+        kwargs.pop("TransformerBlockType", None)
+        DiTransformer = partial(DiTVisionTransformerBlock, cond_dim=cond_dim)
 
-        del self.blocks
-
-        self.blocks = nn.ModuleList(
-            [
-                DiTVisionTransformerBlock(
-                    self.space,
-                    dim=self.dim,
-                    dim_out=self.dim_out if i == (self.depth - 1) else self.dim,
-                    num_heads=self.num_heads,
-                    grid_size=self.grid_size,
-                    mlp_ratio=self.mlp_ratio,
-                    qkv_bias=self.qkv_bias,
-                    drop=self.drop,
-                    attn_drop=self.attn_drop,
-                    drop_path=self.drop_path[i],
-                    norm_layer=self.norm_layer,
-                    use_checkpoint=self.use_checkpoint,
-                    act_fn=self.act_fn,
-                    cond_dim=cond_dim,
-                    use_rope=self.use_rope,
-                    gated_attention=self.gated_attention,
-                    init_weights=self.init_weights,
-                )
-                for i in range(self.depth)
-            ]
-        )
-
-        if self.init_weights:
-            self.reset_parameters(self.init_weights)
+        super().__init__(*args, TransformerBlockType=DiTransformer, **kwargs)
+        self.cond_dim = cond_dim
 
     def forward(self, x: torch.Tensor, condition: torch.Tensor) -> torch.Tensor:
         for blk in self.blocks:

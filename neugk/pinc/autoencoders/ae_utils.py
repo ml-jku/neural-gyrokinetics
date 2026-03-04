@@ -1,6 +1,7 @@
 from typing import Dict, Optional, Tuple, List
 
 import os
+import pickle
 import os.path as osp
 import sys
 import hydra
@@ -28,7 +29,7 @@ def train_step_autoencoder(
     geometry: Dict[str, torch.Tensor],
     loss_wrap: nn.Module,
     progress_remaining: float,
-):
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
     separate_zf = (
         cfg.dataset.separate_zf
@@ -37,9 +38,21 @@ def train_step_autoencoder(
         else False
     )
     model.train()
+
+    if cfg.dataset.augment.mask_modes.active:
+        df_tgt = xs.pop("df_tgt")
+
     # model prediction
     # for ae we only use df
     x_preds = model(xs["df"], condition=condition)
+
+    if cfg.dataset.augment.mask_modes.active:
+        pred_df_delta = x_preds["df"] - xs["df"]
+        gt_df_delta = (df_tgt - xs["df"]).detach()
+        x_preds["df_delta"] = pred_df_delta
+        xs["df_delta"] = gt_df_delta
+        # re-assign target to input for loss
+        xs["df"] = df_tgt.detach()
 
     # compute losses
     # TODO(diff) get rid of loss_wrap?
@@ -66,7 +79,7 @@ def train_step_peft(
     geometry: Dict[str, torch.Tensor],
     loss_wrap: nn.Module,
     progress_remaining: float,
-):
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
     separate_zf = (
         cfg.dataset.separate_zf
@@ -77,7 +90,7 @@ def train_step_peft(
     model.train()
     x_preds = model(xs["df"], condition=condition)
 
-    loss, losses = loss_wrap(
+    return loss_wrap(
         x_preds,
         xs,
         idx_data,
@@ -86,7 +99,30 @@ def train_step_peft(
         separate_zf=separate_zf,
     )
 
-    return loss, losses
+
+def train_step_simsiam(
+    cfg: DictConfig,
+    model: nn.Module,
+    xs: Dict[str, torch.Tensor],
+    condition: Dict[str, torch.Tensor],
+    idx_data: Dict[str, torch.Tensor],
+    geometry: Dict[str, torch.Tensor],
+    loss_wrap: nn.Module,
+    progress_remaining: float,
+) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+    model.train()
+    # stack along batch (same trajectory)
+    df_, cond_ = torch.cat([xs["df"], xs["df_aug"]]), torch.cat([condition, condition])
+    preds = model(df_, condition=cond_, decoder=True)
+    xs["df"] = df_  # update target with stacked version (2x batch)
+    return loss_wrap(
+        preds,
+        xs,
+        idx_data,
+        geometry=geometry,
+        progress_remaining=progress_remaining,
+        separate_zf=getattr(cfg.dataset, "separate_zf", False),
+    )
 
 
 def load_autoencoder(
@@ -96,7 +132,8 @@ def load_autoencoder(
     load_peft: bool = False,
 ) -> Tuple[nn.Module, Dict, int]:
     # TODO latest or best?
-
+    if os.path.isdir(ckp_path):
+        ckp_path = os.path.join(ckp_path, "best.pth")
     loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
     state_dict = loaded_ckpt["model_state_dict"]
 
@@ -140,27 +177,35 @@ def load_autoencoder(
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVAE as AE
         elif model_type == "vqvae":
             from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVQVAE as AE
+        elif model_type == "simsiam":
+            from neugk.pinc.autoencoders.gk_autoencoders import Swin5DSimSiam as AE
         else:
             raise ValueError(f"Unknown model_type: {model_type}")
 
         bottleneck_dim = ae_cfg.bottleneck.dim
         bottleneck_num_heads = getattr(ae_cfg.bottleneck, "num_heads", None)
         bottleneck_depth = getattr(ae_cfg.bottleneck, "depth", None)
+        normalized_latent = getattr(ae_cfg.bottleneck, "normalized_latent", True)
+        norm_learnable = getattr(ae_cfg.bottleneck, "norm_learnable", False)
 
         base_resolution = (32, 8, 16, 85, 32)
         decouple_mu = ae_cfg.decouple_mu
         patch_size = ae_cfg.patch.patch_size
         window_size = ae_cfg.patch.window_size
+        merging_depth = getattr(ae_cfg.patch, "merging_depth", 2)
+        unmerging_depth = getattr(ae_cfg.patch, "unmerging_depth", 2)
         patching_hidden_ratio = ae_cfg.patch.merging_hidden_ratio
         unmerging_hidden_ratio = ae_cfg.patch.unmerging_hidden_ratio
         c_multiplier = ae_cfg.patch.c_multiplier
         act_fn = getattr(torch.nn, ae_cfg.act_fn)
+        norm_fn = getattr(torch.nn, getattr(ae_cfg, "norm_fn", "LayerNorm"))
 
         num_heads = ae_cfg.vit.num_heads
         depth = ae_cfg.vit.depth
         use_rpb = getattr(ae_cfg.vit, "use_rpb", None)
         use_rope = getattr(ae_cfg.vit, "use_rope", None)
         gated_attention = getattr(ae_cfg.vit, "gated_attention", None)
+        qk_norm = getattr(ae_cfg.vit, "qk_norm", True)
         gradient_checkpoint = ae_cfg.vit.gradient_checkpoint
         use_abs_pe = ae_cfg.vit.use_abs_pe
         modulation = ae_cfg.vit.modulation
@@ -200,6 +245,13 @@ def load_autoencoder(
                     "threshold_ema_dead_code": 2,
                 }
             model_kwargs["vq_config"] = vq_config
+        elif model_type == "simsiam":
+            model_kwargs["use_simae_decoder"] = getattr(
+                ae_cfg.bottleneck, "use_simae_decoder", True
+            )
+            model_kwargs["vit_predictor"] = getattr(
+                ae_cfg.bottleneck, "vit_predictor", True
+            )
 
         model = AE(
             dim=ae_cfg.latent_dim,
@@ -220,6 +272,8 @@ def load_autoencoder(
             conv_patch=False,
             hidden_mlp_ratio=2.0,
             c_multiplier=c_multiplier,
+            merging_depth=merging_depth,
+            unmerging_depth=unmerging_depth,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
             cond_embed=cond_fn,
@@ -229,15 +283,13 @@ def load_autoencoder(
             use_rope=use_rope,
             gated_attention=gated_attention,
             use_rpb=use_rpb,
+            qk_norm=qk_norm,
+            norm_layer=norm_fn,
             modulation=modulation,
             decouple_mu=decouple_mu,
             conditioning=True,
-            normalized_latent=True,
-            mid_norm_learnable=(
-                ae_cfg.bottleneck.norm_learnable
-                if hasattr(ae_cfg.bottleneck, "norm_learnable")
-                else True
-            ),
+            normalized_latent=normalized_latent,
+            mid_norm_learnable=norm_learnable,
             **model_kwargs,
         )
 
@@ -385,6 +437,11 @@ def aggregate_dataset_stats(file_paths: List[str]) -> Dict[str, float]:
     total_samples = 0
 
     for file_path in file_paths:
+        phi_mean, phi_std = None, None
+        flux_mean, flux_std = None, None
+        n_samples = 0
+
+        # standard h5
         try:
             with h5py.File(file_path, "r") as f:
                 if "metadata" not in f:
@@ -392,7 +449,6 @@ def aggregate_dataset_stats(file_paths: List[str]) -> Dict[str, float]:
 
                 metadata = f["metadata"]
 
-                # Get number of samples in this file
                 if "data" in f:
                     n_samples = len(
                         [k for k in f["data"].keys() if k.startswith("timestep_")]
@@ -400,74 +456,102 @@ def aggregate_dataset_stats(file_paths: List[str]) -> Dict[str, float]:
                 else:
                     n_samples = len(metadata["timesteps"][()])
 
-                # Load per-file statistics
                 if "phi_mean" in metadata and "phi_std" in metadata:
                     phi_mean = metadata["phi_mean"][()]
                     phi_std = metadata["phi_std"][()]
-                    phi_var = phi_std**2
-
-                    # phi has shape (2, 1, 1, 1) for [real, imaginary] channels
-                    # For integral loss normalization, use the magnitude (combined statistics)
-                    if phi_mean.shape[0] == 2:  # separate real/imaginary channels
-                        # Compute magnitude statistics: sqrt(real^2 + imag^2)
-                        # For mean: use RMS of both channels
-                        phi_mean_combined = np.sqrt(np.mean(phi_mean**2))
-                        # For variance: combine variances assuming independence
-                        phi_var_combined = np.mean(
-                            phi_var
-                        )  # average variance across channels
-                    else:
-                        phi_mean_combined = (
-                            float(phi_mean)
-                            if np.isscalar(phi_mean)
-                            else float(phi_mean.item())
-                        )
-                        phi_var_combined = (
-                            float(phi_var)
-                            if np.isscalar(phi_var)
-                            else float(phi_var.item())
-                        )
-
-                    # Update running statistics (weighted by number of samples)
-                    phi_stats.update_from_moments(
-                        batch_mean=np.array([phi_mean_combined]),
-                        batch_var=np.array([phi_var_combined]),
-                        batch_min=np.array(
-                            [phi_mean_combined]
-                        ),  # Using mean as min/max
-                        batch_max=np.array([phi_mean_combined]),
-                        batch_count=float(n_samples),
-                    )
 
                 if "flux_mean" in metadata and "flux_std" in metadata:
                     flux_mean = metadata["flux_mean"][()]
                     flux_std = metadata["flux_std"][()]
-                    flux_var = flux_std**2
 
-                    flux_mean = (
-                        float(flux_mean)
-                        if np.isscalar(flux_mean)
-                        else float(flux_mean.item())
+        except Exception as h5_err:
+            # kvikio pkl fallback
+            try:
+                meta_path = os.path.join(file_path, "metadata.pkl")
+                with open(meta_path, "rb") as mf:
+                    metadata = pickle.load(mf)
+
+                data_dir = os.path.join(file_path, "data")
+                if os.path.exists(data_dir):
+                    n_samples = len(
+                        [
+                            k
+                            for k in os.listdir(data_dir)
+                            if k.startswith("timestep_") and k.endswith(".bin")
+                        ]
                     )
-                    flux_var = (
-                        float(flux_var)
-                        if np.isscalar(flux_var)
-                        else float(flux_var.item())
-                    )
+                else:
+                    n_samples = len(metadata["timesteps"])
 
-                    flux_stats.update_from_moments(
-                        batch_mean=np.array([flux_mean]),
-                        batch_var=np.array([flux_var]),
-                        batch_min=np.array([flux_mean]),  # Using mean as min/max
-                        batch_max=np.array([flux_mean]),
-                        batch_count=float(n_samples),
-                    )
+                if "phi_mean" in metadata and "phi_std" in metadata:
+                    phi_mean = metadata["phi_mean"]
+                    phi_std = metadata["phi_std"]
 
-                total_samples += n_samples
+                if "flux_mean" in metadata and "flux_std" in metadata:
+                    flux_mean = metadata["flux_mean"]
+                    flux_std = metadata["flux_std"]
 
-        except Exception as e:
-            print(f"Warning: Could not process {file_path}: {e}")
+            except Exception as pkl_err:
+                print(
+                    f"Warning: Could not process {file_path}.\n"
+                    f"H5 Error: {h5_err}\n  -> Pickle Error: {pkl_err}"
+                )
+                continue
+
+        if n_samples == 0:
             continue
+
+        total_samples += n_samples
+
+        if phi_mean is not None and phi_std is not None:
+            phi_var = phi_std**2
+
+            # phi has shape (2, 1, 1, 1) for [real, imaginary] channels
+            # For integral loss normalization, use the magnitude (combined statistics)
+            if (
+                hasattr(phi_mean, "shape")
+                and len(phi_mean.shape) > 0
+                and phi_mean.shape[0] == 2
+            ):
+                # Compute magnitude statistics: sqrt(real^2 + imag^2)
+                # For mean: use RMS of both channels
+                phi_mean_combined = np.sqrt(np.mean(phi_mean**2))
+                # For variance: combine variances assuming independence
+                phi_var_combined = np.mean(phi_var)  # average variance across channels
+            else:
+                phi_mean_combined = (
+                    float(phi_mean) if np.isscalar(phi_mean) else float(phi_mean.item())
+                )
+                phi_var_combined = (
+                    float(phi_var) if np.isscalar(phi_var) else float(phi_var.item())
+                )
+
+            # Update running statistics (weighted by number of samples)
+            phi_stats.update_from_moments(
+                batch_mean=np.array([phi_mean_combined]),
+                batch_var=np.array([phi_var_combined]),
+                batch_min=np.array([phi_mean_combined]),  # Using mean as min/max
+                batch_max=np.array([phi_mean_combined]),
+                batch_count=float(n_samples),
+            )
+
+        if flux_mean is not None and flux_std is not None:
+            flux_var = flux_std**2
+
+            flux_mean = (
+                float(flux_mean) if np.isscalar(flux_mean) else float(flux_mean.item())
+            )
+            flux_var = (
+                float(flux_var) if np.isscalar(flux_var) else float(flux_var.item())
+            )
+
+            flux_stats.update_from_moments(
+                batch_mean=np.array([flux_mean]),
+                batch_var=np.array([flux_var]),
+                batch_min=np.array([flux_mean]),  # Using mean as min/max
+                batch_max=np.array([flux_mean]),
+                batch_count=float(n_samples),
+            )
 
     # Extract final aggregated statistics
     aggregated_stats = {}

@@ -14,7 +14,7 @@ from neugk.utils import (
     load_model_and_config,
 )
 from neugk.dataset import CycloneSample
-from neugk.losses import LossWrapper
+from neugk.losses import LossWrapper, GradientBalancer
 from neugk.runner import BaseRunner
 
 from neugk.gyroswin.models import get_model
@@ -80,6 +80,16 @@ class GyroSwinRunner(BaseRunner):
             denormalize_fn=self.trainset.denormalize,
             separate_zf=self.cfg.dataset.separate_zf,
             real_potens=self.cfg.dataset.real_potens,
+        )
+
+        # grad balancer
+        n_tasks = len(self.loss_wrap.active_losses)
+        self.grad_balancer = GradientBalancer(
+            self.opt,
+            mode=self.cfg.training.gradnorm_balancer,
+            scaler=self.scaler,
+            clip_grad=self.cfg.training.clip_grad,
+            n_tasks=n_tasks,
         )
 
         # pushforward

@@ -5,6 +5,7 @@ plus EMA normalization and custom Conflict-Free Gradient Descent (ConFIG) patchi
 """
 
 from typing import List, Callable, Dict, Optional
+
 import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
@@ -57,6 +58,7 @@ class PINCLossWrapper(LossWrapper):
         eval_loss_type: str = "mse",
         eval_integral_loss_type: str = "mse",
         eval_spectral_loss_type: str = "l1",
+        masked_mode_modeling: bool = False,
     ):
         # Initialize base class
         super().__init__(
@@ -65,6 +67,7 @@ class PINCLossWrapper(LossWrapper):
             denormalize_fn=denormalize_fn,
             separate_zf=separate_zf,
             real_potens=real_potens,
+            masked_mode_modeling=masked_mode_modeling,
         )
 
         # Extended loss categories
@@ -80,6 +83,7 @@ class PINCLossWrapper(LossWrapper):
             "qspec_monotonicity",
             "mass",
         ]
+        self._simsiam_losses = ["simsiam"]
 
         self.integrator = FluxIntegral(
             real_potens=real_potens,
@@ -122,6 +126,7 @@ class PINCLossWrapper(LossWrapper):
             + self._vae_losses
             + self._vqvae_losses
             + self._spectral_losses
+            + self._simsiam_losses
         )
 
     def _update_ema_loss_scale(self, loss_name: str, loss_value: torch.Tensor):
@@ -169,9 +174,13 @@ class PINCLossWrapper(LossWrapper):
         }
 
     def compute_data_loss(
-        self, pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-8
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        eps: float = 1e-8,
+        loss_type: Optional[str] = None,
     ) -> torch.Tensor:
-        loss_type = self._get_current_loss_types()["data"]
+        loss_type = loss_type or self._get_current_loss_types()["data"]
 
         if loss_type == "mse":
             return F.mse_loss(pred, target)
@@ -210,36 +219,21 @@ class PINCLossWrapper(LossWrapper):
     def compute_integral_loss(
         self, pred, target, loss_type="mse", eps=1e-8, loss_name="flux_int"
     ):
-        # Specialized logic for integral losses (adaptive, normalized, etc.)
         if loss_type == "mse":
             return F.mse_loss(pred, target)
         if loss_type in ["relative_mse", "relative_l1", "log_error"]:
-            # Reuse logic from data loss for standard relative types
-            # Temporarily force data loss type to match integral request
-            prev_type = self.loss_type if self.training else self.eval_loss_type
-            if self.training:
-                self.loss_type = loss_type
-            else:
-                self.eval_loss_type = loss_type
-            loss = self.compute_data_loss(pred, target, eps)
-            if self.training:
-                self.loss_type = prev_type
-            else:
-                self.eval_loss_type = prev_type
-            return loss
+            return self.compute_data_loss(pred, target, eps, loss_type=loss_type)
 
         if loss_type == "adaptive_relative":
             alpha = 0.01
-            attr = f"_target_ema_{loss_name.split('_')[0]}"  # _target_ema_flux or _target_ema_phi
+            attr = f"_target_ema_{loss_name.split('_')[0]}"
+            curr_mean = torch.abs(target).mean().item()
 
             if not hasattr(self, attr):
-                setattr(self, attr, torch.abs(target).mean().item())
+                setattr(self, attr, curr_mean)
             else:
                 setattr(
-                    self,
-                    attr,
-                    alpha * torch.abs(target).mean().item()
-                    + (1 - alpha) * getattr(self, attr),
+                    self, attr, alpha * curr_mean + (1 - alpha) * getattr(self, attr)
                 )
 
             scale = max(getattr(self, attr), eps)
@@ -253,34 +247,23 @@ class PINCLossWrapper(LossWrapper):
                 return (
                     norm_err.pow(2) if "mse" in loss_type else torch.abs(norm_err)
                 ).mean()
-            # Fallback
-            return self.compute_data_loss(pred, target, eps)
+            return self.compute_data_loss(pred, target, eps, loss_type=loss_type)
 
         raise ValueError(f"Unknown integral loss type: {loss_type}")
 
     def compute_spectral_loss(self, pred, target, loss_type="l1", eps=1e-8):
         if loss_type in ["l1", "mse", "relative_l1", "relative_mse"]:
-            # Reuse data loss logic
-            prev = self.loss_type if self.training else self.eval_loss_type
-            if self.training:
-                self.loss_type = loss_type
-            else:
-                self.eval_loss_type = loss_type
-            loss = self.compute_data_loss(pred, target, eps)
-            if self.training:
-                self.loss_type = prev
-            else:
-                self.eval_loss_type = prev
-            return loss
+            return self.compute_data_loss(pred, target, eps, loss_type=loss_type)
 
         if "normalized" in loss_type:
             scale = torch.mean(torch.abs(target)) + eps
-            if "l1" in loss_type:
-                return F.l1_loss(pred / scale, target / scale)
-            return F.mse_loss(pred / scale, target / scale)
+            return (
+                F.l1_loss(pred / scale, target / scale)
+                if "l1" in loss_type
+                else F.mse_loss(pred / scale, target / scale)
+            )
 
         if "log" in loss_type:
-            # log_l1, log_mse, log_relative_l1
             if "relative" in loss_type:
                 pred = pred / (pred.sum() + eps)
                 target = target / (target.sum() + eps)
@@ -305,13 +288,23 @@ class PINCLossWrapper(LossWrapper):
     def compute_vqvae_loss(self, preds):
         return {"vq_commit": preds.get("vq_commit_loss", None)}
 
-    # --- PINC Specific Logic Overrides ---
+    def compute_simsiam_loss(
+        self, preds: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        def D(p, z):
+            p, z = p.flatten(1), z.flatten(1)
+            z = z.detach()
+            p, z = F.normalize(p, dim=1), F.normalize(z, dim=1)
+            # mse instead of basic similarity
+            return 2 - 2 * torch.mean(torch.sum(p * z, dim=1))
+            # return -torch.mean(torch.sum(p * z, dim=1))
+
+        assert all(k in preds for k in ["z", "p"]), "SimSiam requires z and p in preds."
+        z1, z2 = torch.chunk(preds["z"], 2)
+        p1, p2 = torch.chunk(preds["p"], 2)
+        return {"simsiam": 0.5 * (D(p1, z2) + D(p2, z1))}
 
     def integral_loss(self, geometry, preds, tgts, idx_data, integral_loss_type="mse"):
-        # Note: Override base implementation to return 3-tuple (losses, monitor, integrated)
-        # and support custom loss types
-
-        # 1. Denormalize (reusing base logic manually because base method signature is fixed)
         if self.training:
             pred_df, pred_phi, tgt_phi, tgt_eflux = [], [], [], []
             for b, f in enumerate(idx_data["file_index"].tolist()):
@@ -335,8 +328,9 @@ class PINCLossWrapper(LossWrapper):
         else:
             pred_df, pred_phi = preds["df"], preds.get("phi")
             tgt_phi, tgt_eflux = tgts["phi"], tgts["flux"]
+            if tgt_phi.ndim == 5 and tgt_phi.shape[1] == 1:
+                tgt_phi = tgt_phi.squeeze(1)
 
-        # Merge zonal flows if needed
         if self.separate_zf and pred_df.shape[1] > 2:
             if pred_df.shape[1] == 4:
                 pred_df = pred_df[:, [0, 1]] + pred_df[:, [2, 3]]
@@ -346,18 +340,15 @@ class PINCLossWrapper(LossWrapper):
                     dim=1,
                 )
 
-        # 2. Integrate
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
 
-        # 3. Compute Losses
+        monitor = {
+            "phi_int_mse": F.mse_loss(pphi_int, tgt_phi),
+            "flux_int_mse": torch.abs(pflux).mean()
+            + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze()),
+        }
+
         int_losses = {}
-        monitor = {}
-
-        # Always compute MSE for monitoring
-        monitor["phi_int_mse"] = F.mse_loss(pphi_int, tgt_phi)
-        monitor["flux_int_mse"] = torch.abs(pflux).mean() + F.l1_loss(eflux, tgt_eflux)
-
-        # Compute actual training objective
         if integral_loss_type == "mse":
             int_losses["flux_int"] = monitor["flux_int_mse"]
             int_losses["phi_int"] = monitor["phi_int_mse"]
@@ -443,8 +434,8 @@ class PINCLossWrapper(LossWrapper):
         t_df, t_phi_raw = prep(tgts)
 
         # Integrate & FFT
-        p_phi, (p_pf, p_ef, _) = self.integrator_spec(geometry, p_df, p_phi_raw)
-        t_phi, (t_pf, t_ef, _) = self.integrator_spec(geometry, t_df, t_phi_raw)
+        p_phi, (_, p_ef, _) = self.integrator_spec(geometry, p_df, p_phi_raw)
+        t_phi, (_, t_ef, _) = self.integrator_spec(geometry, t_df, t_phi_raw)
 
         p_fft, t_fft = self.phi_fft(preds.get("phi", p_phi)), self.phi_fft(
             tgts.get("phi", t_phi)
@@ -539,21 +530,35 @@ class PINCLossWrapper(LossWrapper):
         ) and geometry is not None:
             losses.update(self.compute_spectral_losses(preds, tgts, geometry))
 
-        # 3. Compute Data Losses
-        # Identify data keys (those not in int/vae/spec lists)
+        # simsiam only in training
+        if (
+            self.training
+            and sum([self.weights.get(k, 0.0) for k in self._simsiam_losses]) > 0
+        ):
+            losses.update(self.compute_simsiam_loss(preds))
+
         special_keys = set(
             self._int_losses
             + self._vae_losses
             + self._vqvae_losses
             + self._spectral_losses
+            + self._simsiam_losses
         )
-        all_keys = (
-            [k for k, w in self.weights.items() if w > 0.0]
-            if self.training
-            else list(set(self.weights.keys()) | set(losses.keys()))
-        )
-        data_keys = [k for k in all_keys if k not in special_keys]
+        available_keys = list(set(tgts.keys()) | set(preds.keys()) | special_keys)
+        nonzero_keys = [k for k, w in self.weights.items() if w > 0.0]
+        if any((n not in available_keys) for n in nonzero_keys):
+            # TODO communicate weight dict mismatch to the user
+            # warnings.warn(f"keys mitmatch: {available_keys} vs {nonzero_keys}")
+            nonzero_keys = [n for n in nonzero_keys if n in available_keys]
 
+        if self.training:
+            all_keys = nonzero_keys
+        else:
+            all_keys = list(set(self.weights.keys()) | set(losses.keys()))
+
+        data_keys = [k for k in all_keys if k not in special_keys]
+        if not self.training:
+            data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
             if k not in preds:
                 preds[k] = torch.zeros_like(tgts[k])
@@ -638,14 +643,11 @@ class PINCGradientBalancer(GradientBalancer):
         clip_to: float = 1.0,
         n_tasks: Optional[int] = None,
     ):
-        # Initialize with 'none' first to skip standard operator setup if we need custom logic
         init_mode = "none" if mode == "full" else mode
         super().__init__(optimizer, init_mode, scaler, clip_grad, clip_to, n_tasks)
-
-        self.mode = mode  # Restore intended mode
+        self.mode = mode
 
         if mode == "full":
-            # Monkey patch ConFIG for wide matrices
             import conflictfree.grad_operator
             from conflictfree.grad_operator import ConFIGOperator
 
@@ -659,10 +661,8 @@ class PINCGradientBalancer(GradientBalancer):
                 from conflictfree.weight_model import EqualWeight
                 from conflictfree.length_model import ProjectionLength
 
-                if weight_model is None:
-                    weight_model = EqualWeight()
-                if length_model is None:
-                    length_model = ProjectionLength()
+                weight_model = weight_model or EqualWeight()
+                length_model = length_model or ProjectionLength()
                 if not isinstance(grads, torch.Tensor):
                     grads = torch.stack(grads)
 
@@ -683,40 +683,5 @@ class PINCGradientBalancer(GradientBalancer):
                         target_vector=best_dir, gradients=grads, losses=losses
                     )
 
-            # Apply patch and init operator
             conflictfree.grad_operator.ConFIG_update = ConFIG_update
             self.operator = ConFIGOperator()
-
-        elif mode == "pseudo":
-
-            self._debug_step = 0
-            # Operator already init by super()
-
-    def forward(self, model, weighted_loss, losses):
-        # PINC adds debug printing for pseudo momentum
-        if (
-            self.mode == "pseudo"
-            and hasattr(self, "_debug_step")
-            and self._debug_step < 5
-        ):
-            from conflictfree.utils import get_gradient_vector
-
-            self.optimizer.zero_grad(set_to_none=True)
-            idx, loss_i = self.loss_selector.select(1, losses)
-
-            print(
-                f"Pseudo momentum step {self._debug_step}: selected idx={idx}, loss={loss_i.item():.6f}"
-            )
-            self._debug_step += 1
-
-            self.scaler.scale(loss_i).backward()
-            self.operator.update_gradient(model, idx, get_gradient_vector(model))
-
-            if self.clip_grad:
-                self.scaler.unscale_(self.optimizer)
-                clip_grad_norm_(model.parameters(), self.clip_to)
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            return model
-
-        return super().forward(model, weighted_loss, losses)
