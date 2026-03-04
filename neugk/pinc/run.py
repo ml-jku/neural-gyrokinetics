@@ -38,11 +38,12 @@ class PINCRunner(BaseRunner):
 
         # losses
         weights = self.setup_common_losses(model_cfg)
-        dataset_stats = (
-            aggregate_dataset_stats(self.trainset.files)
-            if hasattr(self.trainset, "files")
-            else {}
-        )
+        # dataset_stats = (
+        #     aggregate_dataset_stats(self.trainset.files)
+        #     if hasattr(self.trainset, "files")
+        #     else {}
+        # )
+        dataset_stats = {}
 
         # pinc specific losses
         self.loss_wrap = PINCLossWrapper(
@@ -79,7 +80,7 @@ class PINCRunner(BaseRunner):
         if self.use_ddp:
             self.model = DDP(
                 self.model,
-                device_ids=[self.rank],
+                device_ids=[self.local_rank],
                 # NOTE unused only if no decode
                 find_unused_parameters=(self.cfg.stage == "simsiam"),
             )
@@ -324,10 +325,12 @@ class PINCRunner(BaseRunner):
                 condition = sample.conditioning.to(self.device)
             idx_data = {k: getattr(sample, k).to(self.device) for k in self.idx_keys}
             geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
-
             if self.augmentations:
                 for aug_fn in self.augmentations:
-                    xs = {k: aug_fn(v) for k, v in xs.items()}
+                    xs = {k: aug_fn(v, idx_data["file_index"]) for k, v in xs.items()}
+                    if self.cfg.dataset.augment.mask_modes.active:
+                        # separate input and target
+                        xs["df"], xs["df_tgt"] = xs["df"]
 
             info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
             t_start_fwd = perf_counter_ns()
@@ -365,7 +368,7 @@ class PINCRunner(BaseRunner):
                 v
                 for k, v in losses.items()
                 if k in self.loss_wrap.active_losses
-                and k not in ["total_mse", "phi_int_mse", "flux_int_mse"]
+                and k not in ["total_mse", "phi_int_mse", "flux_int_mse", "df_delta"]
                 and not k.endswith("_mse")
                 and v.requires_grad
             ]

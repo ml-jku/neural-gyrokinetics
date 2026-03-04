@@ -58,6 +58,7 @@ class PINCLossWrapper(LossWrapper):
         eval_loss_type: str = "mse",
         eval_integral_loss_type: str = "mse",
         eval_spectral_loss_type: str = "l1",
+        masked_mode_modeling: bool = False,
     ):
         # Initialize base class
         super().__init__(
@@ -66,6 +67,7 @@ class PINCLossWrapper(LossWrapper):
             denormalize_fn=denormalize_fn,
             separate_zf=separate_zf,
             real_potens=real_potens,
+            masked_mode_modeling=masked_mode_modeling,
         )
 
         # Extended loss categories
@@ -552,11 +554,11 @@ class PINCLossWrapper(LossWrapper):
         if self.training:
             all_keys = nonzero_keys
         else:
-
             all_keys = list(set(self.weights.keys()) | set(losses.keys()))
 
         data_keys = [k for k in all_keys if k not in special_keys]
-
+        if not self.training:
+            data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
             if k not in preds:
                 preds[k] = torch.zeros_like(tgts[k])
