@@ -56,7 +56,8 @@ class DDPMRunner(BaseRunner):
         self.autoencoder.requires_grad_(False)
 
         # setup model
-        self.model = get_diffusion_model(self.cfg, self.autoencoder).to(self.device)
+        self.model = get_diffusion_model(self.cfg, self.autoencoder, self.trainset)
+        self.model.to(self.device)
         self.latents_buffer = {}
 
         # setup noise schedule

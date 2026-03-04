@@ -1,3 +1,5 @@
+from typing import Sequence, Optional
+
 import numpy as np
 import torch
 from torch import nn
@@ -124,6 +126,7 @@ class WIRE(nn.Module):
         complex_out: bool = False,
         skips: bool = False,
         embed_type: str = "linear",
+        grid_size: Optional[Sequence[int]] = None,
     ):
         super().__init__()
 
@@ -144,10 +147,7 @@ class WIRE(nn.Module):
             self.coord_embed = IntegerSincosConditionEmbed(
                 dim,
                 in_dim,
-                # TODO
-                max_size=(
-                    (32, 8, 16, 85, 32) if in_dim == 5 else (50, 32, 8, 16, 85, 32)
-                ),
+                max_size=grid_size,
                 use_mlp=False,
             )
             embed_dim = self.coord_embed.cond_dim
@@ -155,10 +155,7 @@ class WIRE(nn.Module):
             self.coord_embed = IntegerConditionEmbed(
                 dim,
                 in_dim,
-                # TODO
-                max_size=(
-                    (32, 8, 16, 85, 32) if in_dim == 5 else (50, 32, 8, 16, 85, 32)
-                ),
+                max_size=grid_size,
                 use_mlp=False,
             )
             embed_dim = self.coord_embed.cond_dim

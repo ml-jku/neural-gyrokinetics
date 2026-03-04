@@ -30,7 +30,7 @@ class DummyAE(nn.Module):
         return {"df": zdf}
 
 
-def get_diffusion_model(cfg, autoencoder):
+def get_diffusion_model(cfg, autoencoder, dataset=None):
     diff_cfg = cfg.model
 
     # time conditioning
@@ -86,7 +86,7 @@ def get_diffusion_model(cfg, autoencoder):
 
         patch_size = cfg.model.swin.patch_size
         window_size = cfg.model.swin.window_size
-        base_resolution = (32, 8, 16, 85, 32)
+        base_resolution = dataset.resolution if dataset else (32, 8, 16, 85, 32)
         num_heads = cfg.model.swin.num_heads
         depth = cfg.model.swin.depth
         num_layers = cfg.model.num_layers
@@ -157,7 +157,7 @@ def get_diffusion_model(cfg, autoencoder):
             cfg.model.swin.window_size[2],
             cfg.model.swin.window_size[4],
         ]
-        base_resolution = (85, 16, 32)
+        base_resolution = dataset.phi_resolution if dataset else (85, 16, 32)
         num_heads = cfg.model.swin.num_heads
         depth = cfg.model.swin.depth
         num_layers = cfg.model.num_layers
@@ -182,36 +182,6 @@ def get_diffusion_model(cfg, autoencoder):
             base_resolution = (bundle_steps,) + tuple(base_resolution)
 
         model = Swin3DDiffUnet(
-            #     dim=diff_cfg.latent_dim,
-            #     base_resolution=base_resolution,
-            #     patch_size=patch_size,
-            #     window_size=window_size,
-            #     depth=depth,
-            #     num_heads=num_heads,
-            #     in_channels=problem_dim,
-            #     out_channels=problem_dim,
-            #     num_layers=num_layers,
-            #     use_checkpoint=gradient_checkpoint,
-            #     drop_path=0.1,
-            #     use_abs_pe=use_abs_pe,
-            #     conv_patch=False,
-            #     hidden_mlp_ratio=2.0,
-            #     c_multiplier=c_multiplier,
-            #     merging_hidden_ratio=patching_hidden_ratio,
-            #     unmerging_hidden_ratio=unmerging_hidden_ratio,
-            #     merging_depth=1,
-            #     unmerging_depth=1,
-            #     time_embed=time_fn,
-            #     cond_embed=cond_fn,
-            #     norm_output=norm_output,
-            #     act_fn=act_fn,
-            #     patch_skip=patch_skip,
-            #     modulation=modulation,
-            #     swin_bottleneck=swin_bottleneck,
-            #     use_rpb=use_rpb,
-            #     use_rope=use_rope,
-            #     conditioning={},
-            # )
             dim=diff_cfg.latent_dim,
             base_resolution=base_resolution,
             max_tsteps=diff_steps + 1,
@@ -226,7 +196,7 @@ def get_diffusion_model(cfg, autoencoder):
         from neugk.diffusion.models.diff_unet import FNO5DDiff
 
         patch_size = cfg.model.swin.patch_size
-        base_resolution = (32, 8, 16, 85, 32)
+        base_resolution = dataset.resolution if dataset else (32, 8, 16, 85, 32)
         problem_dim = 2 + (2 * int(cfg.dataset.separate_zf))
 
         model = FNO5DDiff(
@@ -244,7 +214,7 @@ def get_diffusion_model(cfg, autoencoder):
         from neugk.diffusion.models.diff_unet import Basic5DDiff
 
         patch_size = cfg.model.swin.patch_size
-        base_resolution = (32, 8, 16, 85, 32)
+        base_resolution = dataset.resolution if dataset else (32, 8, 16, 85, 32)
         problem_dim = 2 + (2 * int(cfg.dataset.separate_zf))
 
         model = Basic5DDiff(

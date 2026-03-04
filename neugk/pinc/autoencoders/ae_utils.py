@@ -159,14 +159,18 @@ def load_autoencoder(
 
         config = dict_to_namespace(cfg_dict)
 
-        problem_dim = 2
+        problem_dim = len(config.dataset.active_keys)
+        # Attempt to get resolution from config if available, otherwise fallback
+        # In this project, resolution is usually fixed by the physics but can be inferred
+        # from other config fields if necessary. For now, we use the one from config.dataset if present
+        res = getattr(config.dataset, "resolution", (32, 8, 16, 85, 32))
 
         class DummyDataset:
-            def __init__(self, problem_dim):
+            def __init__(self, problem_dim, resolution):
                 self.active_keys = list(range(problem_dim))
-                self.resolution = (32, 8, 16, 85, 32)
+                self.resolution = resolution
 
-        model = get_autoencoder(config, DummyDataset(problem_dim), rank=None)
+        model = get_autoencoder(config, DummyDataset(problem_dim, res), rank=None)
 
     # Check if the checkpoint has 'module.' prefix and if the model expects it
     checkpoint_has_module = any(k.startswith("module.") for k in state_dict.keys())

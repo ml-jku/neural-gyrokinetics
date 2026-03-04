@@ -10,7 +10,6 @@ from torch.utils._pytree import tree_map
 from time import perf_counter_ns
 
 from neugk.utils import (
-    edit_tag,
     remainig_progress,
     exclude_from_weight_decay,
     load_model_and_config,
@@ -237,9 +236,15 @@ class GyroSwinRunner(BaseRunner):
         # finalize epoch statistics
         n_batches = len(self.trainloader)
         loss_logs = {k: v / n_batches for k, v in loss_logs.items()}
-        loss_logs = edit_tag(loss_logs, prefix="train", postfix="mse")
-
         return loss_logs, info_dict
+
+    def _log_epoch(self, epoch, epoch_logs, info_dict, val_plots):
+        # gyroswin specific renames
+        gyro_logs = {
+            (k if any(x in k for x in ["lr", "schedule", "val"]) else f"{k}_mse"): v
+            for k, v in epoch_logs.items()
+        }
+        super()._log_epoch(epoch, gyro_logs, info_dict, val_plots)
 
     def evaluate(self, epoch):
         """Call evaluation pipeline for current epoch."""

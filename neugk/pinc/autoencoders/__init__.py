@@ -63,7 +63,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         assert num_layers == len(num_heads)
 
         cond_fn = None
-        n_cond = len(ae_cfg.conditioning)
+        conditioning = ae_cfg.get("conditioning", [])
+        n_cond = len(conditioning)
         if n_cond > 0:
             cond_fn = ContinuousConditionEmbed(32, n_cond)
 

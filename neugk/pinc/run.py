@@ -3,13 +3,11 @@ from collections import defaultdict
 from time import perf_counter_ns
 
 import torch
-import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
 from torch.utils._pytree import tree_map
-from tqdm import tqdm
 
-from neugk.utils import remainig_progress, exclude_from_weight_decay, edit_tag
+from neugk.utils import remainig_progress, exclude_from_weight_decay
 from neugk.runner import BaseRunner
 from neugk.pinc.autoencoders import get_autoencoder
 from neugk.pinc.losses import PINCLossWrapper, PINCGradientBalancer
@@ -123,6 +121,8 @@ class PINCRunner(BaseRunner):
             valloaders=self.valloaders,
             loss_wrap=self.loss_wrap,
         )
+        self.input_fields = set(self.cfg.dataset.input_fields)
+        self.idx_keys = ["file_index", "timestep_index"]
 
     def _load_checkpoints(self):
         # build checkpoint path
@@ -225,64 +225,22 @@ class PINCRunner(BaseRunner):
             except Exception as e:
                 print(f"warning: could not load optimizer state: {e}")
 
-        self.input_fields = set(self.cfg.dataset.input_fields)
-        self.idx_keys = ["file_index", "timestep_index"]
+        super().__call__(skip_eval=skip_eval)
 
-        for epoch in range(self.start_epoch + 1, self.cfg.training.n_epochs + 1):
-            self.pbar = (
-                tqdm(self.trainloader, "training")
-                if self.cfg.logging.tqdm and (not self.use_ddp or not self.rank)
-                else self.trainloader
-            )
-            self.model.train()
-            self.loss_wrap.train().to(self.device)
-
-            loss_logs, info_dict = self.train_epoch(epoch)
-            loss_type = getattr(self.cfg.training, "loss_type", "mse")
-
-            # rename and prefix training logs
-            progress = remainig_progress(self.cur_update_step, self.total_steps)
-            train_logs = {
-                "lr": (
-                    self.scheduler.get_last_lr()[0]
-                    if self.scheduler
-                    else self.cfg.training.learning_rate
-                ),
-                **{
-                    f"{k}_schedule": sched(progress)
-                    for k, sched in self.loss_scheduler_dict.items()
-                },
-                **{
-                    (
-                        k.replace("df", f"df_{loss_type}").replace(
-                            "total", f"total_{loss_type}"
-                        )
-                        if "total_mse" not in k
-                        else k
-                    ): v
-                    for k, v in loss_logs.items()
-                },
-            }
-            train_losses_dict = edit_tag(train_logs, prefix="train")
-
-            info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
-
-            # evaluate
-            log_metric_dict, val_plots = {}, {}
-            if not skip_eval:
-                log_metric_dict, val_plots, self.loss_val_min = self.evaluate(epoch)
-
-            self._log_epoch(
-                epoch, train_losses_dict | log_metric_dict, info_dict, val_plots
-            )
-
-            # if self.cur_update_step % 100 == 0:
-            #     memory_cleanup(self.device, aggressive=True)
-
-        if self.writer:
-            self.writer.finish()
-        if self.use_ddp:
-            dist.destroy_process_group()
+    def _log_epoch(self, epoch, epoch_logs, info_dict, val_plots):
+        loss_type = getattr(self.cfg.training, "loss_type", "mse")
+        # rename keys for PINC specific logging
+        pinc_logs = {
+            (
+                k.replace("df", f"df_{loss_type}").replace(
+                    "total", f"total_{loss_type}"
+                )
+                if "total_mse" not in k
+                else k
+            ): v
+            for k, v in epoch_logs.items()
+        }
+        super()._log_epoch(epoch, pinc_logs, info_dict, val_plots)
 
     def train_epoch(self, epoch):
         loss_logs = defaultdict(list)

@@ -46,6 +46,7 @@ def get_model(cfg: DictConfig, data: CycloneNFDataset):
             skips=cfg.skips,
             embed_type=cfg.embed_type,
             clip_out=False,
+            grid_size=data.grid_size,
         )
     if cfg.name == "wire":
         return WIRE(
@@ -59,6 +60,7 @@ def get_model(cfg: DictConfig, data: CycloneNFDataset):
             complex_out=False,
             skips=cfg.skips,
             learnable_w0_s0=True,
+            grid_size=data.grid_size,
         )
     if cfg.name == "mlp":
         return MLPNF(
@@ -70,6 +72,7 @@ def get_model(cfg: DictConfig, data: CycloneNFDataset):
             use_checkpoint=False,
             skips=cfg.skips,
             embed_type=cfg.embed_type,
+            grid_size=data.grid_size,
         )
     raise ValueError(f"unknown model: {cfg.name}")
 
