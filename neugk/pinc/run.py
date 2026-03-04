@@ -217,7 +217,7 @@ class PINCRunner(BaseRunner):
             )
         return groups
 
-    def __call__(self):
+    def __call__(self, skip_eval: bool = False):
         if self.ae_ckpt_dict:
             try:
                 if "optimizer_state_dict" in self.ae_ckpt_dict:
@@ -266,7 +266,12 @@ class PINCRunner(BaseRunner):
             train_losses_dict = edit_tag(train_logs, prefix="train")
 
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
-            log_metric_dict, val_plots, self.loss_val_min = self.evaluate(epoch)
+
+            # evaluate
+            log_metric_dict, val_plots = {}, {}
+            if not skip_eval:
+                log_metric_dict, val_plots, self.loss_val_min = self.evaluate(epoch)
+
             self._log_epoch(
                 epoch, train_losses_dict | log_metric_dict, info_dict, val_plots
             )

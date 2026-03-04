@@ -498,20 +498,16 @@ class CycloneDataset(Dataset):
             t_str_gt = str(original_t_index + self.bundle_seq_length + i).zfill(5)
 
             if "df" in self.fields_to_load:
-                k = self.backend.read_df(
-                    f, t_str, self.df_shape, self.active_keys, self.rank
-                )
+                k = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
                 k_gt = self.backend.read_df(
-                    f, t_str_gt, self.df_shape, self.active_keys, self.rank
+                    f, t_str_gt, self.df_shape, self.active_keys
                 )
                 x.append(k)
                 gt.append(k_gt)
 
             if "phi" in self.fields_to_load:
-                phi = self.backend.read_phi(f, t_str, self.phi_resolution, self.rank)
-                phi_gt = self.backend.read_phi(
-                    f, t_str_gt, self.phi_resolution, self.rank
-                )
+                phi = self.backend.read_phi(f, t_str, self.phi_resolution)
+                phi_gt = self.backend.read_phi(f, t_str_gt, self.phi_resolution)
                 poten.append(phi)
                 y_poten.append(phi_gt)
 
@@ -896,12 +892,8 @@ class CoordinateCycloneDataset(CycloneDataset):
 
         sample = {}
         if "df" in self.fields_to_load:
-            k = self.backend.read_df(
-                f, t_str, self.df_shape, self.active_keys, self.rank
-            )
-            k_gt = self.backend.read_df(
-                f, t_str_gt, self.df_shape, self.active_keys, self.rank
-            )
+            k = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
+            k_gt = self.backend.read_df(f, t_str_gt, self.df_shape, self.active_keys)
 
             if isinstance(k, torch.Tensor):
                 k = k.cpu().numpy()

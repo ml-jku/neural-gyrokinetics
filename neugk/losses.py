@@ -185,9 +185,9 @@ class LossWrapper(nn.Module):
                     losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
                 if self.training:
-                    losses[k] = F.l1_loss(preds[k], tgts[k])
+                    losses[k] = F.l1_loss(preds[k], tgts[k].view_as(preds[k]))
                 else:
-                    losses[k] = F.mse_loss(preds[k], tgts[k])
+                    losses[k] = F.mse_loss(preds[k], tgts[k].view_as(preds[k]))
         for k in int_keys + cross_keys:
             if k in int_losses:
                 losses[k] = int_losses[k]

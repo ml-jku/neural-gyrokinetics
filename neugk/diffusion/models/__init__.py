@@ -34,8 +34,14 @@ def get_diffusion_model(cfg, autoencoder):
     diff_cfg = cfg.model
 
     # time conditioning
-    diff_steps = diff_cfg.diffusion.scheduler.num_train_timesteps
-    if getattr(diff_cfg.diffusion, "continuous_time", True):
+    diffusion_settings = diff_cfg.get("diffusion", {})
+    if not diffusion_settings:
+        diffusion_settings = diff_cfg  # fallback
+
+    scheduler_cfg = diffusion_settings.get("scheduler", {})
+    diff_steps = scheduler_cfg.get("num_train_timesteps", 1000)
+
+    if diffusion_settings.get("continuous_time", True):
         time_fn = ContinuousConditionEmbed(32, 1)
     else:
         time_fn = IntegerConditionEmbed(128, 1, max_size=diff_steps + 1, use_mlp=False)

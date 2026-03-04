@@ -570,7 +570,7 @@ class GyroSwinMultitask(GyroSwin):
         out = [df]
         if self.use_phi:
             phi = rearrange(phi, "b c s x y -> b c x s y")
-            out += [phi.squeeze()]
+            out += [phi.squeeze(1)]
 
         if self.flux_head is not None:
             flux = self.flux_head(flux_lats)

@@ -53,6 +53,7 @@ class BaseRunner:
         self.loss_val_min = torch.inf
         self.cur_update_step = 0.0
         self.loss_scheduler_dict = {}
+        self.scheduler = None
 
         # amp setup
         self.use_amp = self.cfg.amp.enable

@@ -687,9 +687,9 @@ class Swin5DUnet(SwinNDUnet):
     def __init__(self, decouple_mu: bool = False, **kwargs):
         full_in_channels = kwargs["in_channels"]
         kwargs["space"] = 5
+        full_resolution = list(kwargs["base_resolution"])
         if decouple_mu:
             kwargs["space"] = 4
-            full_resolution = list(kwargs["base_resolution"])
             # adjust patch and window size
             patch_size = kwargs["patch_size"]
             kwargs["patch_size"] = [patch_size[0]] + patch_size[2:]

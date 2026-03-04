@@ -80,7 +80,7 @@ class FluxIntegral(nn.Module):
 
     This module implements the field equations and phase-space integrals and handles
     both electrostatic and electromagnetic (finite-beta) regimes.
-    
+
     It is based on and aligned to GKW, a FORTRAN codebase for gyrokinetics.
     Source and docs for GKW: https://bitbucket.org/gkw/workspace/projects/GKW
     """

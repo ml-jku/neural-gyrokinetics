@@ -11,8 +11,9 @@ from neugk.diffusion.run import (
 
 def get_diffusion_runner(rank: int, cfg, world_size: int):
     """Factory function to get the appropriate diffusion runner based on configuration."""
-    noise_dist = getattr(cfg.model.diffusion, "noise_distribution", "gaussian").lower()
-    formulation = getattr(cfg.model.diffusion, "formulation", "ddpm").lower()
+    diff_cfg = cfg.model.get("diffusion", {})
+    noise_dist = diff_cfg.get("noise_distribution", "gaussian").lower()
+    formulation = diff_cfg.get("formulation", "ddpm").lower()
 
     if "ddpm" in formulation:
         assert noise_dist in ["gaussian", "student_t"]

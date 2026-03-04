@@ -30,12 +30,13 @@ class DDPMRunner(BaseRunner):
 
     def setup_components(self):
         """Initialize autoencoder, diffusion model, noise scheduler, and optimizer."""
+        is_latent = "latent" in self.cfg.model.model_type
         ckp_path = self.cfg.ae_checkpoint
-        if not ckp_path or not os.path.exists(ckp_path):
-            raise ValueError(f"AE not found at {ckp_path}.")
 
         # load autoencoder
-        if "latent" in self.cfg.model.model_type:
+        if is_latent:
+            if not ckp_path or not os.path.exists(ckp_path):
+                raise ValueError(f"AE not found at {ckp_path} (latent diffusion).")
             self.autoencoder, _, _ = load_autoencoder(ckp_path, device=self.device)
             self.trainset.precompute_latents(
                 self.rank,
@@ -48,6 +49,7 @@ class DDPMRunner(BaseRunner):
         else:
             # pixel-space
             self.autoencoder = DummyAE()
+            self.latent_scale = 1.0
 
         self.autoencoder.to(self.device)
         self.autoencoder.eval()
@@ -58,13 +60,17 @@ class DDPMRunner(BaseRunner):
         self.latents_buffer = {}
 
         # setup noise schedule
-        diff_cfg = self.cfg.model.diffusion.scheduler
+        diff_cfg = self.cfg.model.get("diffusion", {}).get("scheduler", {})
+        if not diff_cfg:
+            # fallback for older or pixel-space configs that might have scheduler at top level
+            diff_cfg = self.cfg.model.get("scheduler", {})
+
         self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=diff_cfg.num_train_timesteps,
-            beta_start=diff_cfg.beta_start,
-            beta_end=diff_cfg.beta_end,
-            beta_schedule=diff_cfg.beta_schedule,
-            prediction_type=getattr(diff_cfg, "prediction_type", "epsilon"),
+            num_train_timesteps=diff_cfg.get("num_train_timesteps", 1000),
+            beta_start=diff_cfg.get("beta_start", 0.0001),
+            beta_end=diff_cfg.get("beta_end", 0.02),
+            beta_schedule=diff_cfg.get("beta_schedule", "linear"),
+            prediction_type=diff_cfg.get("prediction_type", "epsilon"),
         )
 
         if self.use_ddp:
