@@ -529,11 +529,17 @@ def load_geometry(directory, dtype=torch.float64):
     input_data = parse_input_dat(os.path.join(directory, "input.dat"))
 
     geometry = {}
+    # charge sign
     geometry["signz"] = torch.tensor(1.0, dtype=dtype)
+    # thermal velocity ratio
     geometry["vthrat"] = torch.tensor(1.0, dtype=dtype)
+    # species temperature
     geometry["tmp"] = torch.tensor(1.0, dtype=dtype)
+    # species mass
     geometry["mas"] = torch.tensor(1.0, dtype=dtype)
+    # metric factor
     geometry["d2X"] = torch.tensor(1.0, dtype=dtype)
+    # magnetic field sign
     geometry["signB"] = torch.tensor(1.0, dtype=dtype)
 
     # load physics switches and beta
@@ -551,15 +557,18 @@ def load_geometry(directory, dtype=torch.float64):
         except (ValueError, TypeError):
             return 0.0
 
+    # parallel vector potential switch
     geometry["nlapar"] = torch.tensor(
         parse_gkw_bool(control.get("nlapar", 0.0)), dtype=dtype
     )
+    # parallel magnetic field switch
     geometry["nlbpar"] = torch.tensor(
         parse_gkw_bool(control.get("nlbpar", 0.0)), dtype=dtype
     )
 
     # beta is often in 'parameters' or 'control'
     parameters = input_data.get("parameters", {})
+    # plasma beta
     geometry["beta"] = torch.tensor(float(parameters.get("beta", 0.0)), dtype=dtype)
 
     # gather active species
@@ -600,45 +609,75 @@ def load_geometry(directory, dtype=torch.float64):
 
     kxrh = np.loadtxt(os.path.join(directory, "kxrh"))[0]
     krho = np.loadtxt(os.path.join(directory, "krho")).T[0] / geom["kthnorm"]
+    # radial wavevectors
     geometry["kxrh"] = torch.tensor(kxrh, dtype=dtype)
+    # binormal wavevectors
     geometry["krho"] = torch.tensor(krho, dtype=dtype)
+    # spectral correction factor
     geometry["parseval"] = torch.tensor(
         [1.0] + [float(len(krho))] * (len(krho) - 1), dtype=dtype
     )
 
     # mugr and intmu
-    mugr = np.zeros(8 + 1)
-    intmu = np.zeros(8 + 1)
-    mumax = 4.5
-    dvperp = np.sqrt(2.0 * mumax) / 8
-    for j in range(8 + 1):
-        vperp = (j - 0.5) * dvperp
-        mugr[j] = vperp**2 / 2.0
-        intmu[j] = abs(
-            np.pi * ((vperp + 0.5 * dvperp) ** 2 - (vperp - 0.5 * dvperp) ** 2)
-        )
+    if os.path.exists(os.path.join(directory, "intmu.dat")):
+        intmu = np.loadtxt(os.path.join(directory, "intmu.dat"))
+        if intmu.ndim == 2:
+            intmu = intmu[:, 0]
+        # magnetic moment integrals
+        geometry["intmu"] = torch.tensor(intmu, dtype=dtype)
+    else:
+        mugr = np.zeros(8 + 1)
+        intmu = np.zeros(8 + 1)
+        mumax = 4.5
+        dvperp = np.sqrt(2.0 * mumax) / 8
+        for j in range(8 + 1):
+            vperp = (j - 0.5) * dvperp
+            mugr[j] = vperp**2 / 2.0
+            intmu[j] = abs(
+                np.pi * ((vperp + 0.5 * dvperp) ** 2 - (vperp - 0.5 * dvperp) ** 2)
+            )
+        geometry["intmu"] = torch.tensor(intmu[1:], dtype=dtype)
 
-    geometry["intmu"] = torch.tensor(intmu[1:], dtype=dtype)  # CHECK?
-    geometry["mugr"] = torch.tensor(mugr[1:], dtype=dtype)  # CHECK?
+    if os.path.exists(os.path.join(directory, "vperp.dat")):
+        vperp = np.loadtxt(os.path.join(directory, "vperp.dat"))
+        if vperp.ndim == 2:
+            vperp = vperp[:, 0]
+        # magnetic moment grid
+        geometry["mugr"] = torch.tensor(vperp**2 / 2.0, dtype=dtype)
+    else:
+        mugr = np.zeros(8 + 1)
+        dvperp = np.sqrt(2.0 * 4.5) / 8
+        for j in range(8 + 1):
+            vperp = (j - 0.5) * dvperp
+            mugr[j] = vperp**2 / 2.0
+        geometry["mugr"] = torch.tensor(mugr[1:], dtype=dtype)
 
     intvp = np.loadtxt(os.path.join(directory, "intvp.dat"))[0]
     vpgr = np.loadtxt(os.path.join(directory, "vpgr.dat"))[0]
+    # parallel velocity integrals
     geometry["intvp"] = torch.tensor(intvp, dtype=dtype)
+    # parallel velocity grid
     geometry["vpgr"] = torch.tensor(vpgr, dtype=dtype)
 
     sgrid = np.loadtxt(os.path.join(directory, "sgrid"))
     ints = np.concatenate([np.array([0.0]), np.diff(sgrid)])
     ints[0] = ints[1]  # CHECK
+    # parallel coordinate integrals
     geometry["ints"] = torch.tensor(ints, dtype=dtype)
 
+    # drift function
     geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=dtype)
+    # metric tensor components
     geometry["little_g"] = torch.tensor(
         np.stack([geom["g_zeta_zeta"], geom["g_eps_zeta"], geom["g_eps_eps"]], -1),
         dtype=dtype,
     )
 
+    # magnetic field strength
     geometry["bn"] = torch.tensor(geom["bn"], dtype=dtype)
+    # toroidal field fraction
     geometry["bt_frac"] = torch.tensor(geom["Bt_frac"], dtype=dtype)
+    # major radius function
     geometry["rfun"] = torch.tensor(geom["R"], dtype=dtype)
 
     # if multiple species are present, adiabatic should be 0.0

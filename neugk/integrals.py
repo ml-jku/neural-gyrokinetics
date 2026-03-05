@@ -99,15 +99,6 @@ class FluxIntegral(nn.Module):
         self.flux_fields = flux_fields
         self.spectral_df = spectral_df
 
-        self._vmap_fwd_df = torch.vmap(
-            self.forward_single,
-            in_dims=({k: 0 for k in sorted(GEOM_KEYS)}, 0),
-        )
-        self._vmap_fwd_df_phi = torch.vmap(
-            self.forward_single,
-            in_dims=({k: 0 for k in sorted(GEOM_KEYS)}, 0, 0, 0, 0),
-        )
-
     def _geom_tensors(
         self, geometry: Dict[str, torch.Tensor], dtype: torch.dtype = torch.float32
     ) -> Dict[str, torch.Tensor]:
@@ -116,22 +107,23 @@ class FluxIntegral(nn.Module):
         geom_ = {}
 
         # grid expansion for broadcasting
-        geom_["krho"] = rearrange(geometry["krho"], "b y -> b 1 1 1 1 y")
-        geom_["ints"] = rearrange(geometry["ints"], "b s -> b 1 1 s 1 1")
-        geom_["intmu"] = rearrange(geometry["intmu"], "b mu -> b 1 mu 1 1 1")
-        geom_["intvp"] = rearrange(geometry["intvp"], "b par -> b par 1 1 1 1")
-        geom_["vpgr"] = rearrange(geometry["vpgr"], "b par -> b par 1 1 1 1")
-        geom_["mugr"] = rearrange(geometry["mugr"], "b mu -> b 1 mu 1 1 1")
+        geom_["krho"] = rearrange(geometry["krho"], "y -> 1 1 1 1 y")
+        geom_["ints"] = rearrange(geometry["ints"], "s -> 1 1 s 1 1")
+        geom_["intmu"] = rearrange(geometry["intmu"], "mu -> 1 mu 1 1 1")
+        geom_["intvp"] = rearrange(geometry["intvp"], "par -> par 1 1 1 1")
+        geom_["vpgr"] = rearrange(geometry["vpgr"], "par -> par 1 1 1 1")
+        geom_["mugr"] = rearrange(geometry["mugr"], "mu -> 1 mu 1 1 1")
 
         # settings expansion
-        geom_["bn"] = rearrange(geometry["bn"], "b s -> b 1 1 s 1 1")
-        geom_["efun"] = rearrange(geometry["efun"], "b s -> b 1 1 s 1 1")
-        geom_["rfun"] = rearrange(geometry["rfun"], "b s -> b 1 1 s 1 1")
-        geom_["bt_frac"] = rearrange(geometry["bt_frac"], "b s -> b 1 1 s 1 1")
-        geom_["parseval"] = rearrange(geometry["parseval"], "b y -> b 1 1 1 1 y")
+        geom_["bn"] = rearrange(geometry["bn"], "s -> 1 1 s 1 1")
+        geom_["efun"] = rearrange(geometry["efun"], "s -> 1 1 s 1 1")
+        geom_["rfun"] = rearrange(geometry["rfun"], "s -> 1 1 s 1 1")
+        geom_["bt_frac"] = rearrange(geometry["bt_frac"], "s -> 1 1 s 1 1")
+        geom_["parseval"] = rearrange(geometry["parseval"], "y -> 1 1 1 1 y")
 
         def expand_scalar(t):
-            return t.view(*t.shape, 1, 1, 1, 1, 1)
+            # first dim for species
+            return t.view(*t.shape, *[1] * 5)
 
         geom_["mas"] = expand_scalar(geometry["mas"])
         geom_["tmp"] = expand_scalar(geometry["tmp"])
@@ -144,11 +136,10 @@ class FluxIntegral(nn.Module):
         geom_["beta"] = expand_scalar(geometry["beta"])
         geom_["nlapar"] = expand_scalar(geometry["nlapar"])
         geom_["nlbpar"] = expand_scalar(geometry["nlbpar"])
-        vthrat = geom_["vthrat"]
 
-        # gyroaverage bessel
-        kxrh = rearrange(geometry["kxrh"], "b x -> b 1 1 1 x 1")
-        little_g = rearrange(geometry["little_g"], "b s three -> three b 1 1 s 1 1")
+        # precompute bessel and gamma functions for gyroaverage
+        kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
+        little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
         krloc = torch.sqrt(
             geom_["krho"] ** 2 * little_g[0]
             + 2 * geom_["krho"] * kxrh * little_g[1]
@@ -156,6 +147,7 @@ class FluxIntegral(nn.Module):
         )
         geom_["krloc"] = krloc
         bessel = torch.sqrt(2.0 * geom_["mugr"] / geom_["bn"]) / geom_["signz"]
+        vthrat = geom_["vthrat"]
         bessel = geom_["mas"] * vthrat * krloc * bessel
         geom_["bessel"] = j0(bessel)
         geom_["bessel_bpar"] = torch.where(
@@ -398,6 +390,8 @@ class FluxIntegral(nn.Module):
         apar: Optional[torch.Tensor] = None,
         bpar: Optional[torch.Tensor] = None,
     ):
+        # extend geometry
+        geom = self._geom_tensors(geom, df.dtype)
         ns, nx, ny = df.shape[-3:]
         if not self.spectral_df:
             df = self._df_fft(df)
@@ -453,9 +447,11 @@ class FluxIntegral(nn.Module):
                 - eflux is the heat flux per species (batch, sp).
                 - vflux is the momentum flux per species (batch, sp).
         """
-        geom = self._geom_tensors(geom, df.dtype)
         geom = dict(sorted(geom.items()))
+        geom_keys = {k: 0 for k in sorted(list(geom.keys()))}
         if phi is None and apar is None and bpar is None:
-            return self._vmap_fwd_df(geom, df)
+            vfwd = torch.vmap(self.forward_single, in_dims=(geom_keys, 0))
+            return vfwd(geom, df)
         else:
-            return self._vmap_fwd_df_phi(geom, df, phi, apar, bpar)
+            vfwd = torch.vmap(self.forward_single, in_dims=(geom_keys, 0, 0, 0, 0))
+            return vfwd(geom, df, phi, apar, bpar)
