@@ -6,8 +6,6 @@ from tqdm import tqdm
 
 import torch
 import torch.distributed as dist
-from transformers.optimization import get_scheduler
-
 from neugk.utils import (
     edit_tag,
     ddp_setup,
@@ -15,6 +13,7 @@ from neugk.utils import (
     get_linear_burn_in_fn,
     remainig_progress,
     set_seed,
+    get_scheduler,
 )
 from neugk.dataset import get_data
 
@@ -108,12 +107,17 @@ class BaseRunner:
         """Initialize learning rate scheduler."""
         if self.cfg.training.scheduler is not None:
             kwargs = {}
+            # scheduler specific parameters
             if hasattr(self.cfg.training, "min_lr"):
-                kwargs["scheduler_specific_kwargs"] = {
-                    "min_lr": self.cfg.training.min_lr
-                }
+                kwargs["min_lr"] = self.cfg.training.min_lr
+            if hasattr(self.cfg.training, "final_learning_rate"):
+                # for OneCycle, final_div_factor = initial_lr / final_lr
+                # but let's just pass it through
+                kwargs["final_div_factor"] = (
+                    self.cfg.training.learning_rate / self.cfg.training.final_learning_rate
+                )
 
-            # warm up steps
+            # warm up steps (not used by OneCycle but needed by others)
             is_long_run = self.cfg.training.n_epochs > 150
             if is_long_run:
                 n_warmup = self.total_steps // 6
@@ -125,7 +129,7 @@ class BaseRunner:
                 optimizer=self.opt,
                 num_warmup_steps=n_warmup,
                 num_training_steps=self.total_steps,
-                **kwargs,
+                scheduler_specific_kwargs=kwargs,
             )
 
     def _log_epoch(self, epoch, epoch_logs, info_dict, val_plots):

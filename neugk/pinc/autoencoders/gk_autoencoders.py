@@ -125,6 +125,19 @@ class Swin5DAE(Swin5DUnet):
         zdf, pad_axes = self.encode(df, condition=condition)
         return self.decode(zdf, pad_axes, condition=condition)
 
+    def get_compression_info(self):
+        """Returns a dictionary with compression-related information."""
+        import numpy as np
+
+        input_elements = np.prod(self.base_resolution) * self.problem_dim
+        latent_elements = np.prod(self.bottleneck_grid_size) * self.bottleneck_dim
+        return {
+            "input_elements": int(input_elements),
+            "latent_elements": int(latent_elements),
+            "rate": input_elements / latent_elements,
+            "type": "ae",
+        }
+
 
 class Swin5DVAE(Swin5DAE):
     def __init__(self, beta_vae: float = 1.0, *args, **kwargs):
@@ -273,6 +286,22 @@ class Swin5DVQVAE(Swin5DAE):
         if hasattr(self, "_vq_indices") and self._vq_indices is not None:
             return self._vq_indices
         raise RuntimeError("no vq indices available. run encode() or forward() first.")
+
+    def get_compression_info(self):
+        """Returns a dictionary with compression-related information."""
+        import numpy as np
+
+        input_elements = np.prod(self.base_resolution) * self.problem_dim
+        latent_elements = np.prod(self.bottleneck_grid_size)
+        bits_per_index = np.ceil(np.log2(self.vq.codebook_size))
+        # depends on bits for indices
+        rate = (input_elements * 8) / (latent_elements * bits_per_index)
+        return {
+            "input_elements": int(input_elements),
+            "latent_elements": int(latent_elements),
+            "rate": rate,
+            "type": "vqvae",
+        }
 
 
 class Swin5DSimSiam(Swin5DAE):

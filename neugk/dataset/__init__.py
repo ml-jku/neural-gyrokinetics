@@ -104,7 +104,7 @@ def get_data(cfg, rank: int = 0):
             dataset_class = CycloneAEDataset
     elif cfg.workflow == "diffusion":
         # no need for gds in diffusion
-        use_kvikio_train = False
+        use_kvikio_train = getattr(cfg.dataset, "gds_override", False)
         train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
         train_kwargs = {"conditions": list(cfg.model.conditioning)}

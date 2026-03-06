@@ -811,3 +811,45 @@ def memory_cleanup(device=None, aggressive=False):
             # force sync
             torch.cuda.synchronize(device)
             torch.cuda.empty_cache()
+
+
+def get_scheduler(
+    name: str,
+    optimizer: torch.optim.Optimizer,
+    num_warmup_steps: Optional[int] = None,
+    num_training_steps: Optional[int] = None,
+    scheduler_specific_kwargs: Optional[Dict] = None,
+):
+    """
+    Unified scheduler getter. Supports standard transformers schedulers and
+    adds support for OneCycleLR.
+    """
+    if name == "one_cycle":
+        from torch.optim.lr_scheduler import OneCycleLR
+
+        # get max_lr from optimizer
+        max_lr = [group["lr"] for group in optimizer.param_groups]
+
+        kwargs = {
+            "max_lr": max_lr,
+            "total_steps": num_training_steps,
+            "pct_start": 0.3,
+            "div_factor": 25.0,
+            "final_div_factor": 10000.0,
+            "anneal_strategy": "cos",
+        }
+        if scheduler_specific_kwargs:
+            kwargs.update(scheduler_specific_kwargs)
+
+        return OneCycleLR(optimizer, **kwargs)
+
+    # fallback to transformers
+    from transformers.optimization import get_scheduler as get_transformers_scheduler
+
+    return get_transformers_scheduler(
+        name=name,
+        optimizer=optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        **scheduler_specific_kwargs if scheduler_specific_kwargs else {},
+    )
