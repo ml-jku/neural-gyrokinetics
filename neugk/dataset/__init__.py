@@ -3,6 +3,7 @@ from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
+import os
 
 from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import (
@@ -165,6 +166,12 @@ def get_data(cfg, rank: int = 0):
     pin_memory = cfg.training.pin_memory and backend != "gds"
     dataloader_kwargs = {}
     if backend == "gds":
+        if cfg.ddp.enable:
+            prefetch_factor = 1
+            # increase FP limit
+            os.system("ulimit -n 2048")
+            # # defeats GPU loading
+            # mp.set_sharing_strategy("file_system")
         dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
 
     trainloader = DataLoader(
