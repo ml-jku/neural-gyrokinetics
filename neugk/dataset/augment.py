@@ -4,14 +4,12 @@ from typing import Optional, Callable, Dict, Tuple
 from enum import Enum
 from functools import partial
 
-
 class MaskStrategy(str, Enum):
     RANDOM = "random"
-    LOW_FROM_HIGH = "low_from_high"  # mask low modes, predict them from high
-    HIGH_FROM_LOW = "high_from_low"  # mask high modes, predict them from low
-    ZONAL_FLOW = "zonal_flow"  # mask zero mode only
-    MIXED = "mixed"  # uniform coin flip over the four above
-
+    LOW_FROM_HIGH = "low_from_high"      # mask low modes, predict them from high
+    HIGH_FROM_LOW = "high_from_low"      # mask high modes, predict them from low
+    ZONAL_FLOW = "zonal_flow"            # mask zero mode only
+    MIXED = "mixed"                      # uniform coin flip over the four above
 
 def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: int = 1):
     def _noise(x: torch.Tensor) -> torch.Tensor:
@@ -69,7 +67,6 @@ def separate_zf(x):
     zf = torch.repeat_interleave(x.mean(dim=-1, keepdim=True), repeats=nky, dim=-1)
     x = torch.cat([zf, x - zf], dim=1)
     return x
-
 
 def _build_mask(
     nky: int,
@@ -152,7 +149,6 @@ def _sample_strategy(
     idx = torch.multinomial(probs, 1).item()
     return strategies[idx]
 
-
 def mask_modes(
     mask_ratio: float,
     strategy: str | MaskStrategy = MaskStrategy.RANDOM,
@@ -218,9 +214,7 @@ def mask_modes(
                 # remove zf again if it was removed originally
                 x_masked = separate_zf(x_masked)
             if normalize_fn is not None:
-                x_masked = de_normalize(
-                    x_masked, file_idx, partial(normalize_fn, return_stats=False)
-                )
+                x_masked = de_normalize(x_masked, file_idx, partial(normalize_fn, return_stats=False))
         return x_masked, x_tgt, mask, chosen
 
     return _mask

@@ -1,5 +1,4 @@
 import os
-from tqdm import tqdm
 from functools import partial
 from collections import defaultdict
 from time import perf_counter_ns
@@ -68,8 +67,8 @@ class PINCRunner(BaseRunner):
             eval_spectral_loss_type=getattr(
                 self.cfg.training, "eval_spectral_loss_type", "l1"
             ),
-            dataset=self.trainset,
             augmentations=augmentations,
+            dataset=self.trainset,
         )
 
         self.model = get_autoencoder(
@@ -304,7 +303,6 @@ class PINCRunner(BaseRunner):
                         step_fn = train_step_autoencoder
                 if self.cfg.stage == "peft":
                     step_fn = train_step_peft
-
                 if self.cfg.stage == "simsiam":
                     xs["df_aug"] = getattr(sample, "df_aug").to(self.device)
                 loss, losses = step_fn(
@@ -339,9 +337,9 @@ class PINCRunner(BaseRunner):
             for k, v in losses.items():
                 loss_logs[k].append(v.item())
 
-            if (self.cur_update_step % 100) == 0 and not self.cfg.ddp.enable:
-                del xs, condition, idx_data, geometry, loss, losses
-                memory_cleanup(self.device, aggressive=True)
+            # if self.cur_update_step % 100 == 0:
+            #     del xs, condition, idx_data, geometry, loss, losses
+            #     memory_cleanup(self.device, aggressive=True)
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)

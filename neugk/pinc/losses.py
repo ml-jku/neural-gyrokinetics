@@ -51,8 +51,8 @@ class PINCLossWrapper(LossWrapper):
         eval_loss_type: str = "mse",
         eval_integral_loss_type: str = "mse",
         eval_spectral_loss_type: str = "l1",
-        dataset: Optional[Any] = None,
         augmentations: Optional[List[str]] = None,
+        dataset: Optional[Any] = None,
     ):
         augmentations = augmentations or []
         masked_mode_modeling = "mask_modes" in augmentations
@@ -665,45 +665,27 @@ class PINCLossWrapper(LossWrapper):
             data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
             loss_type = "relative_mse" if k == "df_delta" else None
-
-            if k not in preds:
-                preds[k] = torch.zeros_like(tgts[k])
-
-            p, t = preds[k], tgts[k]
+            p, t = preds.get(k, torch.zeros_like(tgts[k])), tgts[k]
             if p.shape != t.shape and k == "phi":
                 p = p.unsqueeze(0)
+            losses[k] = (
+                self.compute_data_loss(p[:, :2], t[:, :2], loss_type=loss_type)
+                + self.compute_data_loss(p[:, 2:], t[:, 2:], loss_type=loss_type)
+                if k == "df" and separate_zf
+                else self.compute_data_loss(p, t, loss_type=loss_type)
+            )
 
-            if k == "df" and separate_zf:
-                losses[k] = self.compute_data_loss(
-                    p[:, :2], t[:, :2]
-                ) + self.compute_data_loss(p[:, 2:], t[:, 2:], loss_type=loss_type)
-            else:
-                losses[k] = self.compute_data_loss(p, t, loss_type=loss_type)
-
-        # 4. Final Aggregation & EMA
         if self.training:
-            # Monitoring MSEs
-            monitor_mse = {}
-            with torch.no_grad():
-                for k in data_keys:
-                    if k not in preds:
-                        continue
-                    if k == "df" and separate_zf:
-                        monitor_mse[f"{k}_mse"] = F.mse_loss(
-                            preds[k][:, :2], tgts[k][:, :2]
-                        ) + F.mse_loss(preds[k][:, 2:], tgts[k][:, 2:])
-                    else:
-                        monitor_mse[f"{k}_mse"] = F.mse_loss(preds[k], tgts[k])
-
-            # Per-mode losses for masked mode modeling (training only, monitoring)
-            per_mode_losses = {}
-            if "mask_modes" in self.augmentations:
-                with torch.no_grad():
-                    per_mode_losses = self.compute_per_mode_losses(
-                        preds, tgts, loss_type="relative_mse"
-                    )
-
-            # EMA Normalization
+            monitor_mse = {
+                f"{k}_mse": (
+                    F.mse_loss(preds[k][:, :2], tgts[k][:, :2])
+                    + F.mse_loss(preds[k][:, 2:], tgts[k][:, 2:])
+                    if k == "df" and separate_zf
+                    else F.mse_loss(preds[k], tgts[k])
+                )
+                for k in data_keys
+                if k in preds
+            }
             for k, v in losses.items():
                 self._update_ema_loss_scale(k, v)
             norm_losses = self._apply_ema_normalization(losses)
