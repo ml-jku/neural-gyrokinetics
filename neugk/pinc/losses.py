@@ -620,7 +620,7 @@ class PINCLossWrapper(LossWrapper):
         for name in self._augmentation_losses:
             # TODO: need to pass latent in predictions for VICReg losses
             if "vicreg" in name:
-                losses.update(vicreg_loss(preds))
+                losses.update(getattr(self, f"compute_{name}")(preds))
 
         special_keys = set(
             self._int_losses
@@ -670,6 +670,12 @@ class PINCLossWrapper(LossWrapper):
             for k, v in losses.items():
                 self._update_ema_loss_scale(k, v)
             norm_losses = self._apply_ema_normalization(losses)
+
+            per_mode_losses = {}
+            if "mask_modes" in self.augmentations:
+                with torch.no_grad():
+                    per_mode_losses = self.compute_per_mode_losses(preds, tgts,
+                    loss_type="relative_mse")
 
             total_loss = sum(
                 self.weights.get(k, 0.0) * norm_losses.get(k, 0.0)
