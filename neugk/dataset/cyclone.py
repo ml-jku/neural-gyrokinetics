@@ -274,14 +274,18 @@ class CycloneDataset(Dataset):
                     if self.normalizers[k]["agg_axes"]:
                         # aggregate along specified dimensions
                         mean, var, traj_min, traj_max = stats[k].aggregate_stats(
-                            mean, var, traj_min, traj_max, agg_axes=tuple(self.normalizers[k]["agg_axes"])
+                            mean,
+                            var,
+                            traj_min,
+                            traj_max,
+                            agg_axes=tuple(self.normalizers[k]["agg_axes"]),
                         )
 
                     self.stats[k][f_id]["mean"] = mean
                     self.stats[k][f_id]["std"] = np.sqrt(var)
                     self.stats[k][f_id]["min"] = traj_min
                     self.stats[k][f_id]["max"] = traj_max
-                    
+
                     stats[k].update(
                         self.stats[k][f_id]["mean"],
                         self.stats[k][f_id]["std"] ** 2,
@@ -386,8 +390,7 @@ class CycloneDataset(Dataset):
         else:
             with ThreadPoolExecutor(self.num_workers) as executor:
                 futures = [
-                    executor.submit(process_t_idx, t_idx, key)
-                    for t_idx in t_indices
+                    executor.submit(process_t_idx, t_idx, key) for t_idx in t_indices
                 ]
                 for future in tqdm.tqdm(
                     as_completed(futures),
@@ -402,7 +405,9 @@ class CycloneDataset(Dataset):
 
         if self.normalizers[key]["agg_axes"]:
             norm_axes = tuple(self.normalizers[key]["agg_axes"])
-            mean, var, traj_min, traj_max = stats.aggregate_stats(stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes)
+            mean, var, traj_min, traj_max = stats.aggregate_stats(
+                stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
+            )
             if key == "phi":
                 # unsqueeze phi to add channel dim
                 mean = np.expand_dims(mean, axis=0)

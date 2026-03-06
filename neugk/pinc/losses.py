@@ -693,8 +693,9 @@ class PINCLossWrapper(LossWrapper):
             per_mode_losses = {}
             if "mask_modes" in self.augmentations:
                 with torch.no_grad():
-                    per_mode_losses = self.compute_per_mode_losses(preds, tgts,
-                    loss_type="relative_mse")
+                    per_mode_losses = self.compute_per_mode_losses(
+                        preds, tgts, loss_type="relative_mse"
+                    )
 
             total_loss = sum(
                 self.weights.get(k, 0.0) * norm_losses.get(k, 0.0)

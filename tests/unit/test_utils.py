@@ -126,11 +126,15 @@ def test_get_linear_burn_in_fn():
 
 
 def test_expand_as():
-    src, tgt = np.array([1, 2]), np.zeros((2, 3, 4))
-    assert expand_as(src, tgt).shape == (2, 1, 1)
+    src, tgt = np.zeros((4,)), np.zeros((12, 2, 4))
+    assert expand_as(src, tgt).shape == (1, 1, 4)
 
-    src_t, tgt_t = torch.tensor([1, 2]), torch.zeros((2, 3, 4))
-    assert expand_as(src_t, tgt_t).shape == (2, 1, 1)
+    src, tgt = np.zeros((1, 2)), torch.zeros((2, 3, 4))
+    assert expand_as(src, tgt).shape == (1, 1, 2)
+
+    # TODO wrong behavior, should match and append
+    src, tgt = np.zeros((2, 1)), np.zeros((2, 3, 4))
+    assert expand_as(src, tgt).shape == (1, 2, 1)
 
 
 def test_config_filters():

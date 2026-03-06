@@ -72,9 +72,7 @@ def mock_dataset():
     backend = MockBackend()
     with patch(
         "neugk.dataset.cyclone.os.listdir", return_value=["traj1", "traj2"]
-    ), patch("neugk.dataset.cyclone.os.path.exists", return_value=True), patch(
-        "neugk.dataset.cyclone.dist.is_initialized", return_value=False
-    ):
+    ), patch("neugk.dataset.cyclone.os.path.exists", return_value=True):
 
         ds = CycloneDataset(
             backend=backend,
@@ -108,9 +106,8 @@ def test_recompute_stats(mock_dataset):
     with patch("neugk.dataset.cyclone.os.path.exists", return_value=False), patch(
         "neugk.dataset.cyclone.os.replace"
     ), patch("pickle.dump"), patch("builtins.open", MagicMock()):
-        stats = mock_dataset._recompute_stats(keys=["df"])
-        assert "df" in stats
-        assert stats["df"].mean.shape == (2, 1, 1, 1, 1, 1)
+        stats = mock_dataset._recompute_stats(key="df")
+        assert stats.mean.shape == (2, 8, 4, 4, 4, 4)
 
 
 def test_dataset_separate_zf(mock_dataset):
