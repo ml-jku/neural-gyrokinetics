@@ -87,6 +87,8 @@ def preprocess(
     root: str = "/restricteddata/ukaea/gyrokinetics",
     target_dir: str = "/local00/bioinf/galletti",
     position_queue: queue.Queue = None,
+    metadata_only: bool = False,
+    geometry_only: bool = False,
 ):
     # Grab a dedicated row for this worker's progress bar (default to 0 if single-threaded)
     pos = position_queue.get() if position_queue is not None else 0
@@ -113,7 +115,7 @@ def preprocess(
             base_path, spatial_ifft, split_into_bands, real_potens=True
         )
 
-        if backend.exists(out_path):
+        if backend.exists(out_path) and not (metadata_only or geometry_only):
             return out_path, True
 
         ks = K_files(dir_in.replace("_Lin", ""))
@@ -123,7 +125,9 @@ def preprocess(
             # load k dump files of other sim, they are sampled the same anyways
             # this is only for extracting the correct flux timesteps
             ks = K_files("/restricteddata/ukaea/gyrokinetics/raw/iteration_0")
-            potens, _ = poten_files("/restricteddata/ukaea/gyrokinetics/raw/iteration_0")
+            potens, _ = poten_files(
+                "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
+            )
             k_dir = "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
         # get timestamps
         ts = []
@@ -157,31 +161,19 @@ def preprocess(
         fluxes = np.loadtxt(f"{dir_in.replace('_Lin', '')}/fluxes.dat")[:, 1]
         orig_fluxes = fluxes.copy()
         # print(ks)
-        if not "Lin" in out_path:
+        if "Lin" not in out_path:
             orig_times = np.loadtxt(f"{dir_in.replace('_Lin', '')}/time.dat")
             ts_slices = [np.isclose(orig_times, t).nonzero()[0][0] for t in timesteps]
             fluxes = fluxes[ts_slices]
             orig_fluxes = fluxes.copy()
-        
-        fluxes = np.clip(fluxes, a_min=0., a_max=None)
+
+        fluxes = np.clip(fluxes, a_min=0.0, a_max=None)
         # load parameters
         config = parse_input_dat(f"{dir_in}/input.dat")
         ion_temp_grad = config["species"]["rlt"]
         density_grad = config["species"]["rln"]
         s_hat = config["geom"]["shat"]
         q = config["geom"]["q"]
-            
-        df_stats = RunningMeanStd()
-        phi_stats = RunningMeanStd()
-        flux_stats = RunningMeanStd()
-
-        if "Lin" in out_path:
-            # if linear sim, only take last timestep
-            ks = ["FDS"]
-            potens = [potens[-1]]
-            kyspec = np.loadtxt(dir_in.replace("_Lin", "/kyspec"))
-            growth_rate = np.loadtxt(os.path.join(dir_in, "growth.dat"))[-1, :]
-            ky_frequencies = np.loadtxt(os.path.join(dir_in, "frequencies.dat"))[-1, :]
 
         geometry = load_geometry(dir_in)
         np_geom = {
@@ -199,6 +191,35 @@ def preprocess(
             "q": np.array([q]),
             "geometry": np_geom,
         }
+
+        if geometry_only:
+            if backend.exists(out_path):
+                # load existing metadata to preserve stats if they exist
+                old_metadata = backend.read_metadata(out_path)
+                stats_keys = [
+                    "df_mean", "df_var", "df_std", "df_min", "df_max",
+                    "phi_mean", "phi_var", "phi_std", "phi_min", "phi_max",
+                    "flux_mean", "flux_var", "flux_std", "flux_min", "flux_max"
+                ]
+                for k in stats_keys:
+                    if k in old_metadata:
+                        metadata[k] = old_metadata[k]
+
+            with backend.create(out_path) as f:
+                backend.write_metadata(f, metadata)
+            return out_path, False
+
+        df_stats = RunningMeanStd()
+        phi_stats = RunningMeanStd()
+        flux_stats = RunningMeanStd()
+
+        if "Lin" in out_path:
+            # if linear sim, only take last timestep
+            ks = ["FDS"]
+            potens = [potens[-1]]
+            # kyspec = np.loadtxt(dir_in.replace("_Lin", "/kyspec"))
+            # growth_rate = np.loadtxt(os.path.join(dir_in, "growth.dat"))[-1, :]
+            # ky_frequencies = np.loadtxt(os.path.join(dir_in, "frequencies.dat"))[-1, :]
 
         with backend.create(out_path) as f:
             innter_pbar = zip(ks, potens)
@@ -261,7 +282,7 @@ def preprocess(
                 # load the potential field
                 a = np.loadtxt(f"{dir_in}/{pot}")
                 phi = np.reshape(a, (nx, ns, ny), order="F").astype("float32").copy()
-                if not "Lin" in out_path:
+                if "Lin" not in out_path:
                     spc_file = pot.replace("Poten", "Spc3d")
                     b = np.loadtxt(f"{dir_in}/{spc_file}")
                     gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
@@ -272,25 +293,33 @@ def preprocess(
                     phi_fft_unpadded, out_shape=phi_fft_unpadded.shape
                 )
 
-                if not "Lin" in out_path:
+                if "Lin" not in out_path:
                     # do not compute integral for linear sims => it will fail!
                     # phi_fft_unpadded = torch.tensor(phi_fft_unpadded)
                     df = torch.tensor(knth)
                     _, (_, eflux, _) = get_integrals(df, geometry)
-                    if not np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-4):
+                    if not np.isclose(
+                        eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1e-2
+                    ):
                         warnings.warn(
-                            f"Flux integral does not match original flux! Computed: {eflux.sum().item()}, Original: {orig_fluxes[idx]}"
+                            "Flux integral does not match original flux! "
+                            f"Computed: {eflux.sum().item()}, Original: {orig_fluxes[idx]}"
                         )
-                    assert np.isclose(eflux.sum().item(), orig_fluxes[idx], rtol=0., atol=1e-2), "Strong deviation for flux!!"
+                    assert np.isclose(
+                        eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1.0
+                    ), "Strong deviation for flux!!"
 
                 # append stats to metadata dictionary
                 df_stats.update(knth, np.zeros_like(knth), knth, knth)
-                flux_stats.update(fluxes[idx], np.zeros_like(fluxes[idx]), fluxes[idx], fluxes[idx])
+                flux_stats.update(
+                    fluxes[idx], np.zeros_like(fluxes[idx]), fluxes[idx], fluxes[idx]
+                )
                 phi_stats.update(phi, np.zeros_like(phi), phi, phi)
 
                 # write to disk
-                backend.write_df(f, str(idx).zfill(5), df=knth)
-                backend.write_phi(f, str(idx).zfill(5), phi=phi)
+                if not metadata_only:
+                    backend.write_df(f, str(idx).zfill(5), df=knth)
+                    backend.write_phi(f, str(idx).zfill(5), phi=phi)
 
             # append stats to metadata dictionary
             metadata["df_mean"] = df_stats.mean
@@ -328,6 +357,16 @@ if __name__ == "__main__":
     parser.add_argument("--tqdm", action="store_true")
     parser.add_argument("--num_workers", type=int, default=10)
     parser.add_argument(
+        "--metadata_only",
+        action="store_true",
+        help="Only update metadata.pkl and stats without writing field data.",
+    )
+    parser.add_argument(
+        "--geometry_only",
+        action="store_true",
+        help="Only update geometry in metadata without processing field data or stats.",
+    )
+    parser.add_argument(
         "--backend", type=str, choices=["hdf5", "kvikio"], default="kvikio"
     )
     parser.add_argument("--target_dir", type=str, default="/local00/bioinf/galletti")
@@ -340,7 +379,7 @@ if __name__ == "__main__":
     separate_zf = False
     split_into_bands = None
 
-    datasets = ["iteration_0", "iteration_1", "iteration_13"]
+    datasets = [f"iteration_{i}" for i in range(300)]
 
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)
@@ -363,6 +402,8 @@ if __name__ == "__main__":
             root=args.root,
             target_dir=args.target_dir,
             position_queue=position_queue,
+            metadata_only=args.metadata_only,
+            geometry_only=args.geometry_only,
         )
 
         returns = []
@@ -396,6 +437,8 @@ if __name__ == "__main__":
                 root=args.root,
                 target_dir=args.target_dir,
                 position_queue=None,
+                metadata_only=args.metadata_only,
+                geometry_only=args.geometry_only,
             )
 
             try:

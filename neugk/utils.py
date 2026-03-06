@@ -1,6 +1,4 @@
-"""General utils."""
-
-from typing import Dict, Tuple, Optional, Sequence
+from typing import Dict, Tuple, Optional, Sequence, Union
 from datetime import timedelta
 import glob
 import zipfile
@@ -16,11 +14,43 @@ import torch.distributed as dist
 from torch import nn
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
-from einops import rearrange
+
+
+def recombine_zf(x, dim: int = 1):
+    """
+    Recombine Zonal Flow (ZF) and non-ZF components by summing.
+    Layout: [zf, x - zf] -> [x]
+    """
+    if x.shape[dim] <= 2 or x.shape[dim] % 2 != 0:
+        return x
+
+    half_c = x.shape[dim] // 2
+    if torch.is_tensor(x):
+        zf, non_zf = x.narrow(dim, 0, half_c), x.narrow(dim, half_c, half_c)
+    else:
+        zf, non_zf = np.split(x, 2, axis=dim)
+
+    return zf + non_zf
+
+
+def separate_zf(x, dim: int = 1):
+    """
+    Separate Zonal Flow (ZF) and non-ZF components.
+    Returns [zf, x - zf] layout.
+    """
+    if torch.is_tensor(x):
+        nky = x.shape[-1]
+        zf = torch.repeat_interleave(x.mean(dim=-1, keepdim=True), repeats=nky, dim=-1)
+        return torch.cat([zf, x - zf], dim=dim)
+    else:
+        nky = x.shape[-1]
+        zf = np.repeat(x.mean(axis=-1, keepdims=True), repeats=nky, axis=-1)
+        return np.concatenate([zf, x - zf], axis=dim)
 
 
 def wandb_available():
-    # any value of WANDB_DISABLED disables wandb
+    """Check if wandb is available and not explicitly disabled."""
+    # check environment
     if os.getenv("WANDB_DISABLED", "").upper():
         print(
             "Not using wandb for logging, if this is not intended, unset WANDB_DISABLED env var"
@@ -36,14 +66,18 @@ import wandb  # noqa
 
 
 class WandbManager:
+    """Wrapper for weights and biases logging initialization and updates."""
+
     def __init__(self) -> None:
         self._initialized = False
 
     def setup(self, args, **kwargs):
+        """Initialize the wandb run."""
         if not isinstance(args, dict):
             args = args.__dict__
         project_name = args["logging"].get("project", "debug")
 
+        # build run name
         name_parts = []
         name_suffix = args["logging"].get("name_suffix", None)
         if (
@@ -57,6 +91,7 @@ class WandbManager:
 
         tags = args["logging"].get("tags", [])
 
+        # initialize
         combined_dict = {**args, **kwargs}
         wandb.init(
             # set the wandb project where this run will be logged
@@ -73,32 +108,47 @@ class WandbManager:
         self._initialized = True
 
     def log(self, logs, commit: bool = True, step: Optional[int] = None):
+        """Log metrics to the current wandb run."""
         wandb.log(logs, step=step, commit=commit)
 
     def close(self):
+        """No-op for compatibility."""
         pass
 
     def summarize(self, outputs):
+        """Add summary values to the wandb run."""
         # add values to the wandb summary => only works for scalars
         for k, v in outputs.items():
             self._wandb.run.summary[k] = v.item()
 
     def finish(self):
+        """End the current wandb run."""
         # End the W&B run
         wandb.finish()
 
 
 def ddp_setup(rank, world_size):
+    """Initialize distributed data parallel environment."""
     dist.init_process_group(
         backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20)
     )
 
 
-def edit_tag(dict, prefix, postfix):
-    return {f"{prefix}/{k}_{postfix}": v for k, v in dict.items()}
+def edit_tag(d, prefix=None, postfix=None):
+    """Update dictionary keys with prefix and postfix tags, avoiding duplicates."""
+    res = {}
+    for k, v in d.items():
+        nk = k
+        if prefix and not k.startswith(f"{prefix}/"):
+            nk = f"{prefix}/{nk}"
+        if postfix and not k.endswith(f"_{postfix}"):
+            nk = f"{nk}_{postfix}"
+        res[nk] = v
+    return res
 
 
 def setup_logging(config):
+    """Configure and return the selected logging writer."""
     if config.logging.writer == "tensorboard":
         from torch.utils.tensorboard import SummaryWriter
 
@@ -125,6 +175,7 @@ def save_model_and_config(
     val_loss: float,
     loss_val_min: float,
 ) -> float:
+    """Save model checkpoint and its configuration to disk."""
     # create directory if it s not there
     os.makedirs(cfg.output_path, exist_ok=True)
 
@@ -137,6 +188,7 @@ def save_model_and_config(
         # using DDP wrapper
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
 
+    # persist checkpoint
     torch.save(
         {
             "epoch": epoch,
@@ -148,7 +200,9 @@ def save_model_and_config(
         f"{cfg.output_path}/ckp.pth",
     )
 
-    if val_loss < loss_val_min:
+    # persist best
+    best_path = f"{cfg.output_path}/best.pth"
+    if val_loss < loss_val_min or not os.path.exists(best_path):
         loss_val_min = val_loss
         torch.save(
             {
@@ -158,7 +212,7 @@ def save_model_and_config(
                 "scheduler_state_dict": scheduler.state_dict(),
                 "loss": val_loss,
             },
-            f"{cfg.output_path}/best.pth",
+            best_path,
         )
 
     return loss_val_min
@@ -170,6 +224,7 @@ def load_model_and_config(
     device: torch.DeviceObjType,
     for_ddp=False,
 ) -> Tuple[nn.Module, Dict, int]:
+    """Load model state and checkpoint info from disk."""
     loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
     if for_ddp:
         loaded_ckpt["model_state_dict"] = {
@@ -187,6 +242,7 @@ def load_model_and_config(
 
 
 def compress_src(path):
+    """Zip source code files into a specified directory."""
     files = glob.glob("**", recursive=True)
     # Read all directory, subdirectories and list files
     zf = zipfile.ZipFile(
@@ -197,17 +253,20 @@ def compress_src(path):
     )
     for name in files:
         if (
-            name.endswith(".py")
-            or name.endswith(".yaml")
-            or name.endswith(".ipynb")
+            (name.endswith(".py") or name.endswith(".yaml") or name.endswith(".ipynb"))
             and "wandb" not in name
             and "outputs" not in name
+            and os.path.isfile(name)
         ):
-            zf.write(name, arcname=name)
+            try:
+                zf.write(name, arcname=name)
+            except FileNotFoundError:
+                pass
     zf.close()
 
 
 def set_seed(seed):
+    """Set global random seeds for reproducibility."""
     torch.use_deterministic_algorithms(True)
     torch.manual_seed(seed)
     random.seed(seed)
@@ -215,72 +274,64 @@ def set_seed(seed):
 
 
 def find_free_port():
+    """Find and return a free network port."""
     with socket.socket() as s:
         s.bind(("", 0))  # Bind to a free port provided by the host.
         return s.getsockname()[1]  # Return the port number assigned.
 
 
-def expand_as(src: np.ndarray, tgt: np.ndarray):
-    if src.ndim == tgt.ndim and all(
-        ss == 1 or ss == st for ss, st in zip(src.shape, tgt.shape)
-    ):
+def expand_as(
+    src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch.Tensor]
+):
+    """Expand dimensions of src to match tgt, handling batch, time, and spatial dims."""
+    if src.ndim == tgt.ndim:
         return src
-    # squeeze is causing issues with arbitrary aggregating of dimensions for stats computation
-    # src = src.squeeze()
-    while src.ndim < tgt.ndim:
-        if isinstance(src, np.ndarray):
-            src = np.expand_dims(src, axis=-1)
-        elif isinstance(src, torch.Tensor):
-            src = src.unsqueeze(-1)
-        else:
-            raise NotImplementedError("Unsupported datatype")
-    return src
 
+    # determine where src fits into tgt
+    src_shape = list(src.shape)
+    tgt_shape = list(tgt.shape)
 
-def split_in_two(dictionary, idx):
-    first = {k: v[:idx] for k, v in dictionary.items()}
-    second = {k: v[idx:] for k, v in dictionary.items()}
-    dictionary = [first, second]
-    return dictionary
+    # covers casex where src is (C, ...) and tgt is (B, T, C, ...)
+    start_axis = -1
+    for i in range(len(tgt_shape) - len(src_shape) + 1):
+        if tgt_shape[i] == src_shape[0]:
+            match = True
+            for j in range(1, len(src_shape)):
+                if src_shape[j] != 1 and src_shape[j] != tgt_shape[i + j]:
+                    match = False
+                    break
+            if match:
+                start_axis = i
+                break
 
+    if start_axis == -1:
+        res = src
+        while res.ndim < tgt.ndim:
+            if isinstance(res, np.ndarray):
+                res = np.expand_dims(res, axis=-1)
+            else:
+                res = res.unsqueeze(-1)
+        return res
 
-def split_batch_into_phases(phase_change, inputs, gts, conds, idx_data):
-    split_idx = torch.searchsorted(conds["timestep"], phase_change, right=False)
-    if split_idx == conds["timestep"].shape[0]:
-        # whole batch in linear
-        inputs = [inputs]
-        gts = [gts]
-        conds = [conds]
-        idx_data = [idx_data]
-        phase_list = ["linear"]
-    elif split_idx == 0:
-        # whole batch in saturated phase
-        inputs = [inputs]
-        gts = [gts]
-        conds = [conds]
-        idx_data = [idx_data]
-        phase_list = ["saturated"]
+    # reshape src to have for broadcast
+    new_shape = [1] * len(tgt_shape)
+    for i, s in enumerate(src_shape):
+        new_shape[start_axis + i] = s
+
+    if isinstance(src, np.ndarray):
+        return src.reshape(new_shape)
     else:
-        inputs = split_in_two(inputs, split_idx)
-        gts = split_in_two(gts, split_idx)
-        conds = split_in_two(conds, split_idx)
-        idx_data = split_in_two(idx_data, split_idx)
-        phase_list = ["linear", "saturated"]
-    return (
-        inputs,
-        gts,
-        conds,
-        idx_data,
-        phase_list,
-    )
+        return src.view(new_shape)
 
 
 def is_number(string):
+    """Regex check if string represents a number."""
     pattern = r"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$"
     return bool(re.fullmatch(pattern, string.strip()))
 
 
 def filter_config_subset(superset: DictConfig, subset: DictConfig):
+    """Recursively remove keys from subset if they are not in superset."""
     for k in list(subset.keys()):
         if k not in superset:
             del subset[k]
@@ -289,6 +340,7 @@ def filter_config_subset(superset: DictConfig, subset: DictConfig):
 
 
 def filter_cli_priority(cli: Sequence, source: DictConfig, key: str = ""):
+    """Remove keys from source config if they were overridden via CLI."""
     for k in list(source.keys()):
         subkey = k
         if key is not None and len(key) > 0:
@@ -300,6 +352,8 @@ def filter_cli_priority(cli: Sequence, source: DictConfig, key: str = ""):
 
 
 class RunningMeanStd:
+    """Calculates online statistics for a data stream."""
+
     def __init__(self, shape: Optional[Sequence[int]] = None, epsilon: float = 1e-4):
         """
         Calculates the running mean and std of a data stream
@@ -321,7 +375,9 @@ class RunningMeanStd:
         """
         :return: Return a copy of the current object.
         """
-        assert self.mean is not None, "Cannot copy an uninitialized RunningMeanStd object"
+        assert (
+            self.mean is not None
+        ), "Cannot copy an uninitialized RunningMeanStd object"
         new_object = RunningMeanStd(shape=self.mean.shape)
         new_object.mean = self.mean.copy()
         new_object.var = self.var.copy()
@@ -334,12 +390,22 @@ class RunningMeanStd:
 
         :param other: The other object to combine with.
         """
-        assert self.mean is not None and other.mean is not None, "Cannot combine uninitialized RunningMeanStd objects"
+        if other.count <= 1e-3:
+            return
+        if self.count <= 1e-3:
+            self.mean = other.mean.copy()
+            self.var = other.var.copy()
+            self.min = other.min.copy()
+            self.max = other.max.copy()
+            self.count = other.count
+            return
+
         self.update_from_moments(
             other.mean, other.var, other.min, other.max, other.count
         )
 
-    def update(self, mean, var, min, max, count=1.) -> None:
+    def update(self, mean, var, min, max, count=1.0) -> None:
+        """Update current moments with batch statistics."""
         if self.mean is None:
             # initialize with shape that we receive
             self.mean = np.zeros_like(mean, np.float32)
@@ -356,9 +422,11 @@ class RunningMeanStd:
         batch_max: np.ndarray,
         batch_count: float = 1.0,
     ) -> None:
+        """Parallel variance algorithm implementation."""
         delta = batch_mean - self.mean
         tot_count = self.count + batch_count
 
+        # compute new mean
         new_mean = self.mean + delta * batch_count / tot_count
         m_a = self.var * self.count
         m_b = batch_var * batch_count
@@ -371,17 +439,25 @@ class RunningMeanStd:
 
         new_count = batch_count + self.count
 
-        self.min = np.minimum(self.min, batch_min)
-        self.max = np.maximum(self.max, batch_max)
+        # update min and max only after first real update (excluding epsilon)
+        if self.count <= 1e-3:
+            self.min = batch_min
+            self.max = batch_max
+        else:
+            self.min = np.minimum(self.min, batch_min)
+            self.max = np.maximum(self.max, batch_max)
+
         self.mean = new_mean
         self.var = new_var
         self.count = new_count
 
     @staticmethod
-    def aggregate_stats(means, vars, mins, maxs, agg_axes=(1,2,3,4,5)) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def aggregate_stats(
+        means, vars, mins, maxs, agg_axes=(1,2,3,4,5)
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Reduces coordinate-wise stats to channel-wise stats.
-        
+
         Args:
             means: Array of shape (C, D, H, W)
             vars:  Array of shape (C, D, H, W)
@@ -395,7 +471,7 @@ class RunningMeanStd:
         # variance of the local means 
         diff_sq = (means - channel_means) ** 2
         var_of_means = np.mean(diff_sq, axis=agg_axes, keepdims=True)
-        
+
         # Total Variance = Average of Variances + Variance of Means
         channel_vars = avg_of_vars + var_of_means
         channel_mins = np.min(mins, axis=agg_axes, keepdims=True)
@@ -403,8 +479,8 @@ class RunningMeanStd:
         
         return channel_means, channel_vars, channel_mins, channel_maxs
 
-
-def load_geom(file_path):
+def load_geom_dat_file(file_path):
+    """Load geometric parameters from a .dat file."""
     data = {}
     with open(file_path, "r") as f:
         lines = f.readlines()
@@ -412,6 +488,7 @@ def load_geom(file_path):
     key = None
     values = []
 
+    # parse lines
     for line in lines:
         line = line.strip()
         if not line:
@@ -428,7 +505,7 @@ def load_geom(file_path):
                     continue
                 else:
                     raise ValueError
-            except:
+            except Exception:
                 if key is not None:
                     data[key] = np.array(values, dtype=np.float64)
                 key = parts[0]
@@ -436,6 +513,7 @@ def load_geom(file_path):
         else:
             values.extend(map(float, parts))
 
+    # final commit
     if key is not None:
         data[key] = np.array(values, dtype=np.float64)
 
@@ -443,69 +521,184 @@ def load_geom(file_path):
 
 
 def load_geometry(directory, dtype=torch.float64):
-    geometry = {}
+    # load geom dat file and input data
+    geom = load_geom_dat_file(os.path.join(directory, "geom.dat"))
+    input_data = parse_input_dat(os.path.join(directory, "input.dat"))
 
-    geometry["parseval"] = torch.tensor([1.0] + [32.0] * (32 - 1), dtype=dtype)
+    geometry = {}
+    # charge sign
     geometry["signz"] = torch.tensor(1.0, dtype=dtype)
+    # thermal velocity ratio
     geometry["vthrat"] = torch.tensor(1.0, dtype=dtype)
+    # species temperature
     geometry["tmp"] = torch.tensor(1.0, dtype=dtype)
+    # species mass
     geometry["mas"] = torch.tensor(1.0, dtype=dtype)
+    # metric factor
     geometry["d2X"] = torch.tensor(1.0, dtype=dtype)
+    # magnetic field sign
     geometry["signB"] = torch.tensor(1.0, dtype=dtype)
 
-    geom = load_geom(os.path.join(directory, "geom.dat"))  # bn CHECK
+    # load physics switches and beta
+    control = input_data.get("control", {})
 
-    geometry["kxrh"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "kxrh"))[0], dtype=dtype
-    )  # CHECK
-    geometry["krho"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "krho")).T[0] / geom["kthnorm"],
-        dtype=dtype,
-    )  # CHECK
+    def parse_gkw_bool(val):
+        if isinstance(val, str):
+            val = val.lower().strip()
+            if val == ".true.":
+                return 1.0
+            if val == ".false.":
+                return 0.0
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return 0.0
+
+    # parallel vector potential switch
+    geometry["nlapar"] = torch.tensor(
+        parse_gkw_bool(control.get("nlapar", 0.0)), dtype=dtype
+    )
+    # parallel magnetic field switch
+    geometry["nlbpar"] = torch.tensor(
+        parse_gkw_bool(control.get("nlbpar", 0.0)), dtype=dtype
+    )
+
+    # beta is often in 'parameters' or 'control'
+    parameters = input_data.get("parameters", {})
+    # plasma beta
+    geometry["beta"] = torch.tensor(float(parameters.get("beta", 0.0)), dtype=dtype)
+
+    # gather active species
+    num_sp = 1
+    for sec in input_data.values():
+        if "number_of_species" in sec:
+            num_sp = int(sec["number_of_species"])
+            break
+    species_keys = [k for k in input_data.keys() if k.startswith("species")][:num_sp]
+    if species_keys:
+        mas, tmp, de, signz = [], [], [], []
+        for k in species_keys:
+            sp = input_data[k]
+            mas.append(sp.get("mass", 1.0))
+            tmp.append(sp.get("temp", 1.0))
+            de.append(sp.get("dens", 1.0))
+            signz.append(sp.get("z", 1.0))
+
+        geometry["mas"] = torch.tensor(mas, dtype=dtype)
+        geometry["tmp"] = torch.tensor(tmp, dtype=dtype)
+        geometry["de"] = torch.tensor(de, dtype=dtype)
+        geometry["signz"] = torch.tensor(signz, dtype=dtype)
+
+        # compute vthrat = sqrt(T_s / m_s)
+        vthrat = [np.sqrt(t / m) for t, m in zip(tmp, mas)]
+        geometry["vthrat"] = torch.tensor(vthrat, dtype=dtype)
+        # if multiple species are found, electrons are kinetic, so not adiabatic
+        geometry["adiabatic"] = torch.tensor(
+            0.0 if len(species_keys) > 1 else 1.0, dtype=dtype
+        )
+    else:
+        geometry["mas"] = torch.tensor([1.0], dtype=dtype)
+        geometry["tmp"] = torch.tensor([1.0], dtype=dtype)
+        geometry["de"] = torch.tensor([1.0], dtype=dtype)
+        geometry["signz"] = torch.tensor([1.0], dtype=dtype)
+        geometry["vthrat"] = torch.tensor([1.0], dtype=dtype)
+        geometry["adiabatic"] = torch.tensor(1.0, dtype=dtype)
+
+    kxrh = np.loadtxt(os.path.join(directory, "kxrh"))[0]
+    krho = np.loadtxt(os.path.join(directory, "krho")).T[0] / geom["kthnorm"]
+    # radial wavevectors
+    geometry["kxrh"] = torch.tensor(kxrh, dtype=dtype)
+    # binormal wavevectors
+    geometry["krho"] = torch.tensor(krho, dtype=dtype)
+    # spectral correction factor
+    geometry["parseval"] = torch.tensor(
+        [1.0] + [float(len(krho))] * (len(krho) - 1), dtype=dtype
+    )
 
     # mugr and intmu
-    mugr = np.zeros(8 + 1)
-    intmu = np.zeros(8 + 1)
-    mumax = 4.5
-    dvperp = np.sqrt(2.0 * mumax) / 8
-    for j in range(8 + 1):
-        vperp = (j - 0.5) * dvperp
-        mugr[j] = vperp**2 / 2.0
-        intmu[j] = abs(
-            np.pi * ((vperp + 0.5 * dvperp) ** 2 - (vperp - 0.5 * dvperp) ** 2)
-        )
+    if os.path.exists(os.path.join(directory, "intmu.dat")):
+        intmu = np.loadtxt(os.path.join(directory, "intmu.dat"))
+        if intmu.ndim == 2:
+            intmu = intmu[:, 0]
+        # magnetic moment integrals
+        geometry["intmu"] = torch.tensor(intmu, dtype=dtype)
+    else:
+        mugr = np.zeros(8 + 1)
+        intmu = np.zeros(8 + 1)
+        mumax = 4.5
+        dvperp = np.sqrt(2.0 * mumax) / 8
+        for j in range(8 + 1):
+            vperp = (j - 0.5) * dvperp
+            mugr[j] = vperp**2 / 2.0
+            intmu[j] = abs(
+                np.pi * ((vperp + 0.5 * dvperp) ** 2 - (vperp - 0.5 * dvperp) ** 2)
+            )
+        geometry["intmu"] = torch.tensor(intmu[1:], dtype=dtype)
 
-    geometry["intmu"] = torch.tensor(intmu[1:], dtype=dtype)  # CHECK?
-    geometry["mugr"] = torch.tensor(mugr[1:], dtype=dtype)  # CHECK?
+    if os.path.exists(os.path.join(directory, "vperp.dat")):
+        vperp = np.loadtxt(os.path.join(directory, "vperp.dat"))
+        if vperp.ndim == 2:
+            vperp = vperp[:, 0]
+        # magnetic moment grid
+        geometry["mugr"] = torch.tensor(vperp**2 / 2.0, dtype=dtype)
+    else:
+        mugr = np.zeros(8 + 1)
+        dvperp = np.sqrt(2.0 * 4.5) / 8
+        for j in range(8 + 1):
+            vperp = (j - 0.5) * dvperp
+            mugr[j] = vperp**2 / 2.0
+        geometry["mugr"] = torch.tensor(mugr[1:], dtype=dtype)
 
-    geometry["intvp"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "intvp.dat"))[0], dtype=dtype
-    )  # CHECK
-    geometry["vpgr"] = torch.tensor(
-        np.loadtxt(os.path.join(directory, "vpgr.dat"))[0], dtype=dtype
-    )
+    intvp = np.loadtxt(os.path.join(directory, "intvp.dat"))[0]
+    vpgr = np.loadtxt(os.path.join(directory, "vpgr.dat"))[0]
+    # parallel velocity integrals
+    geometry["intvp"] = torch.tensor(intvp, dtype=dtype)
+    # parallel velocity grid
+    geometry["vpgr"] = torch.tensor(vpgr, dtype=dtype)
 
-    ints = np.concatenate(
-        [np.array([0.0]), np.diff(np.loadtxt(os.path.join(directory, "sgrid")))]
-    )
+    sgrid = np.loadtxt(os.path.join(directory, "sgrid"))
+    ints = np.concatenate([np.array([0.0]), np.diff(sgrid)])
     ints[0] = ints[1]  # CHECK
+    # parallel coordinate integrals
     geometry["ints"] = torch.tensor(ints, dtype=dtype)
 
-    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=dtype) 
+    # drift function
+    geometry["efun"] = torch.tensor(-geom["E_eps_zeta"], dtype=dtype)
+    # metric tensor components
     geometry["little_g"] = torch.tensor(
         np.stack([geom["g_zeta_zeta"], geom["g_eps_zeta"], geom["g_eps_eps"]], -1),
         dtype=dtype,
     )
 
+    # magnetic field strength
     geometry["bn"] = torch.tensor(geom["bn"], dtype=dtype)
+    # toroidal field fraction
     geometry["bt_frac"] = torch.tensor(geom["Bt_frac"], dtype=dtype)
+    # major radius function
     geometry["rfun"] = torch.tensor(geom["R"], dtype=dtype)
+
+    # if multiple species are present, adiabatic should be 0.0
+    if len(geometry.get("de", [1.0])) > 1:
+        geometry["adiabatic"] = torch.tensor(0.0, dtype=dtype)
+    else:
+        geometry["adiabatic"] = torch.tensor(
+            np.squeeze(geom.get("adiabatic", 1.0)), dtype=dtype
+        )
+
+    # ensure species-specific fields are updated in the returned geometry
+    for k in ["mas", "tmp", "de", "signz", "vthrat"]:
+        if k in geom:
+            geometry[k] = torch.tensor(geom[k], dtype=dtype)
+        elif k not in geometry:
+            geometry[k] = torch.tensor(1.0, dtype=dtype)
+
     return geometry
 
 
 def get_linear_burn_in_fn(
     start: float, end: float, end_fraction: float, start_fraction: float
 ):
+    """Return a linear scheduler function for progress-based weighting."""
 
     def func(progress_remaining: float) -> float:
         if (1 - progress_remaining) > end_fraction:
@@ -521,23 +714,25 @@ def get_linear_burn_in_fn(
 
 
 def remainig_progress(cur_step, total_steps):
+    """Compute remaining progress fraction."""
     return 1.0 - (cur_step / total_steps)
 
 
 def parse_input_dat(file_path):
+    """Parse GKW input.dat configuration file."""
     parsed_data = {}
     with open(file_path, "r") as file:
         content = file.read()
-    # split the content by section headers (e.g., &SPECIES, &SPCGENERAL, etc.)
+    # split sections
     sections = re.split(r"&\w+", content)
-    # get all the headers by finding the section names
     section_headers = re.findall(r"&(\w+)", content)
-    # remove comments
+    # clean comments
     sections = [
         section.strip()
         for section in sections
         if len(section) and section[0] != "!" and section.strip()
     ]
+    # iterate over sections
     for header, section in zip(section_headers, sections):
         section_dict = {}
         params = re.findall(r"(\w+)\s*=\s*([-\d\.e\w]+)", section)
@@ -556,6 +751,7 @@ def parse_input_dat(file_path):
 
 
 def K_files(directory):
+    """List distribution function files in a directory."""
     files = os.listdir(directory)
     digit_files = sorted(
         [file for file in files if file.isdigit()], key=lambda x: int(x)
@@ -567,6 +763,7 @@ def K_files(directory):
 
 
 def poten_files(directory):
+    """List potential field files in a directory."""
     files = os.listdir(directory)
     poten_files = sorted([file for file in files if file.startswith("Poten")])
     timestep_slices = [int(f.replace("Poten", "")) for f in poten_files]
@@ -574,6 +771,7 @@ def poten_files(directory):
 
 
 def exclude_from_weight_decay(model, param_names, weight_decay):
+    """Split model parameters into groups with and without weight decay."""
     decay, no_decay = [], []
     no_decay_names, decay_names = [], []
     if param_names == "all":
@@ -590,10 +788,8 @@ def exclude_from_weight_decay(model, param_names, weight_decay):
 
         if add_to_no_decay:
             no_decay.append(param)
-            no_decay_names.append(name)
         else:
             decay.append(param)
-            decay_names.append(name)
 
     return [
         {"params": decay, "weight_decay": weight_decay},
@@ -602,17 +798,60 @@ def exclude_from_weight_decay(model, param_names, weight_decay):
 
 
 def memory_cleanup(device=None, aggressive=False):
+    """Perform garbage collection and clear GPU cache."""
     if device is None and torch.cuda.is_available():
         device = torch.cuda.current_device()
 
-    # Standard cleanup
+    # clear cache
     if torch.cuda.is_available() and device is not None:
         torch.cuda.empty_cache()
 
+    # aggressive cleanup
     if aggressive:
-        # More aggressive cleanup
         gc.collect()
         if torch.cuda.is_available() and device is not None:
-            # Force synchronization to ensure all operations are complete
+            # force sync
             torch.cuda.synchronize(device)
             torch.cuda.empty_cache()
+
+
+def get_scheduler(
+    name: str,
+    optimizer: torch.optim.Optimizer,
+    num_warmup_steps: Optional[int] = None,
+    num_training_steps: Optional[int] = None,
+    scheduler_specific_kwargs: Optional[Dict] = None,
+):
+    """
+    Unified scheduler getter. Supports standard transformers schedulers and
+    adds support for OneCycleLR.
+    """
+    if name == "one_cycle":
+        from torch.optim.lr_scheduler import OneCycleLR
+
+        # get max_lr from optimizer
+        max_lr = [group["lr"] for group in optimizer.param_groups]
+
+        kwargs = {
+            "max_lr": max_lr,
+            "total_steps": num_training_steps,
+            "pct_start": 0.3,
+            "div_factor": 25.0,
+            "final_div_factor": 10000.0,
+            "anneal_strategy": "cos",
+        }
+        if scheduler_specific_kwargs:
+            kwargs.update(scheduler_specific_kwargs)
+
+        return OneCycleLR(optimizer, **kwargs)
+
+    # fallback to transformers
+    from transformers.optimization import get_scheduler as get_transformers_scheduler
+
+    return get_transformers_scheduler(
+        name=name,
+        optimizer=optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+        **scheduler_specific_kwargs if scheduler_specific_kwargs else {},
+    )

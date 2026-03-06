@@ -1,39 +1,32 @@
 name: cyclone
 path: /local00/bioinf/galletti/preprocessed_kvikio
 backend: gds  # gds, h5
-# backend: h5  # gds, h5
-normalization: zscore
+normalization: 
+  df: 
+    type: zscore
+    agg_axes: [1, 3, 4, 5]
+  flux: 
+    type: zscore
+    agg_axes: null
+  phi: 
+    type: zscore
+    agg_axes: [0, 1, 2]
 normalization_scope: dataset
 minmax_beta1: 8
 minmax_beta2: 4
-offset: 100
+offset: 80
 subsample: 1
+val_subsample: 10
 spatial_ifft: true
 separate_zf: true
 norm_decouple_mu: true
 real_potens: true
 split_into_bands: null
 log_transform: false
-num_workers: 4
+num_workers: 10
 active_keys: ["re", "im"]
 input_fields: ["df"]
-training_trajectories: [
-  "iteration_58",
-  "iteration_70",
-  "iteration_54",
-  "iteration_75",
-  "iteration_36",
-  "iteration_49",
-  "iteration_84",
-  "iteration_51",
-  "iteration_7",
-  "iteration_74",
-  "iteration_55",
-  "iteration_97",
-  "iteration_43",
-  "iteration_33",
-  "iteration_93",
-]
+training_trajectories: ["iteration_13"]
 validation_trajectories: ["iteration_13"]
 partial_holdouts:
 training_cond_filters:
@@ -43,9 +36,19 @@ eval_cond_filters:
   last_fluxes: [1., .inf]
   first_fluxes: [1., .inf]
 
+
 augment:
-  noise: false
-  noise_std: 1e-4
+  noise: 
+    active: false
+    noise_std: 1e-4
+  mask_modes:
+    active: false
+    mask_ratio: 0.1
+    is_fourier: false
+    weights: null
+    rescale: false
+    mask_zero_mode: true
+    df_delta_weight: 1.0
 
 timestep_std_filter: null  # std-based timestep filtering threshold (null to disable)
 timestep_std_offset: 80

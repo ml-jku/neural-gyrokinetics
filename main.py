@@ -12,16 +12,14 @@ import subprocess
 import random
 
 import torch
-import torch.multiprocessing as mp
 import yaml
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-import submitit
+import torch.multiprocessing as mp
 
-# Project Imports
-from neugk.utils import set_seed, compress_src, find_free_port, filter_cli_priority
+from neugk.utils import compress_src, filter_cli_priority, find_free_port
 
 from neugk.gyroswin import GyroSwinRunner
 from neugk.pinc import PINCRunner
@@ -179,15 +177,14 @@ def main(config: DictConfig):
             if not is_torchrun and is_slurm:
                 overrides = HydraConfig.get().overrides.task
                 overrides = [
-                    o for o in overrides
-                    if not o.startswith("hydra/launcher=")
+                    o for o in overrides if not o.startswith("hydra/launcher=")
                 ]
                 if config.ddp.n_nodes == 1:
                     # should be run with torchrun
                     cmd = [
                         "torchrun",
                         f"--nproc_per_node={torch.cuda.device_count()}",
-                        "main.py"
+                        "main.py",
                     ] + overrides
                 else:
                     # multinode setup
@@ -198,10 +195,10 @@ def main(config: DictConfig):
                         f"--rdzv_backend={os.environ['RDZV_BACKEND']}",
                         f"--rdzv_id={os.environ['RDZV_ID']}",
                         f"--rdzv_endpoint={os.environ['HEAD_NODE_IP']}:29501",
-                        "main.py"
+                        "main.py",
                     ] + overrides
 
-                print(f"Launching DDP job with command: {' '.join(cmd)}")
+                print(f"DDP job with command: {' '.join(cmd)}")
                 subprocess.check_call(cmd)
                 return
             elif is_torchrun and not is_slurm or is_torchrun and is_slurm:
@@ -211,8 +208,19 @@ def main(config: DictConfig):
                 print(f"Alloc Conf: {torch.cuda.get_allocator_backend()}")
                 dispatch_runner(rank, config, world_size=world_size)
             else:
-                # here we could again revert to mp.spawn, but ideally should not be done anymore
-                raise ValueError("Invalid DDP setup: torchrun and SLURM env vars are inconsistent")
+                # here we revert to mp.spawn to allow "normal" DDP startup
+                print(f"Local DDP with mp.spawn (nprocs={torch.cuda.device_count()})")
+                os.environ["MASTER_ADDR"] = "localhost"
+                os.environ["MASTER_PORT"] = str(find_free_port())
+                if "NCCL_SOCKET_IFNAME" in os.environ:
+                    del os.environ["NCCL_SOCKET_IFNAME"]
+
+                mp.spawn(
+                    dispatch_runner,
+                    args=(config, world_size),
+                    nprocs=torch.cuda.device_count(),
+                    join=True,
+                )
         else:
             # single gpu
             rank = 0

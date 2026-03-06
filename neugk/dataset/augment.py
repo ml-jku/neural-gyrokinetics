@@ -24,6 +24,7 @@ def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: in
 
     return _noise
 
+
 def reverse_ifft(x, zf_separated=False):
     # Ensure input is a torch.Tensor
     if not isinstance(x, torch.Tensor):
@@ -45,6 +46,7 @@ def reverse_ifft(x, zf_separated=False):
     x = x.permute(1, 0, *range(2, x.ndim))
     return x.to(torch.float32)
 
+
 def ifft(x):
     x = x.permute(0, *range(2, x.ndim), 1).contiguous()
     x = torch.view_as_complex(x)
@@ -53,15 +55,12 @@ def ifft(x):
     x = x.permute(1, 0, *range(2, x.ndim))
     return x.to(torch.float32)
 
+
 def de_normalize(x, file_idx, denormalize_fn):
     # de/normalize physics data keys
-    x = torch.stack(
-        [
-            denormalize_fn(f, x[b])
-            for b, f in enumerate(file_idx.tolist())
-        ]
-    )
+    x = torch.stack([denormalize_fn(f, x[b]) for b, f in enumerate(file_idx.tolist())])
     return x
+
 
 def separate_zf(x):
     nky = x.shape[-1]
@@ -187,7 +186,7 @@ def mask_modes(
             if denormalize_fn is not None:
                 x = de_normalize(x, file_idx, denormalize_fn)
             x = reverse_ifft(x, zf_separated=zf_separated)
-        
+
         nky = x.shape[-1]
         # select strategy
         chosen = _sample_strategy(strategy, _mix)

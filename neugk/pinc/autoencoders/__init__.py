@@ -63,7 +63,8 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         assert num_layers == len(num_heads)
 
         cond_fn = None
-        n_cond = len(ae_cfg.conditioning)
+        conditioning = getattr(ae_cfg, "conditioning", [])
+        n_cond = len(conditioning)
         if n_cond > 0:
             cond_fn = ContinuousConditionEmbed(32, n_cond)
 
@@ -144,6 +145,10 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         raise ValueError(f"Unknown autoencoder name: {ae_cfg.name}")
 
     if rank == 0 or rank is None:
-        print(f"AE parameters: {sum(p.numel() for p in ae.parameters()) / 1e6:.1f}M")
+        params_m = sum(p.numel() for p in ae.parameters()) / 1e6
+        print(f"AE parameters: {params_m:.1f}M")
+        if hasattr(ae, "get_compression_info"):
+            c_info = ae.get_compression_info()
+            print(f"Compression: {c_info['rate']:.1f}x (type: {c_info['type']})")
 
     return ae

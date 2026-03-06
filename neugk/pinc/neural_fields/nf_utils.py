@@ -1,4 +1,4 @@
-from typing import Optional, Sequence, List, Tuple, Callable
+from typing import Optional, Sequence, Tuple, Callable
 
 import numpy as np
 import scipy.linalg
@@ -9,13 +9,10 @@ from einops import rearrange
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from neugk.utils import recombine_zf
 from zipnn import ZipNN
 import zfpy
 from scipy.ndimage import convolve
-
-
-import matplotlib
-import matplotlib.pyplot as plt
 
 
 ACTS = {
@@ -38,8 +35,8 @@ def to_real(x: torch.Tensor) -> torch.Tensor:
 
 
 def df_fft(df: torch.Tensor, norm: str = "forward"):
-    if df.shape[0] == 4:
-        df = df[[0, 1]] + df[[2, 3]]
+    if df.shape[0] > 2:
+        df = recombine_zf(df, dim=0)
     df = to_complex(df)
     df = torch.fft.fftn(df, dim=(-2, -1), norm=norm)
     df = torch.fft.fftshift(df, dim=(-2,))
@@ -47,8 +44,8 @@ def df_fft(df: torch.Tensor, norm: str = "forward"):
 
 
 def df_ifft(df: torch.Tensor, norm: str = "forward"):
-    if df.shape[0] == 4:
-        df = df[[0, 1]] + df[[2, 3]]
+    if df.shape[0] > 2:
+        df = recombine_zf(df, dim=0)
     df = to_complex(df)
     df = torch.fft.ifftshift(df, dim=(-2,))
     df = torch.fft.ifftn(df, dim=(-2, -1), norm=norm)
@@ -110,123 +107,6 @@ def sample_field(
         return x
     else:
         return sum(x.chunk(x.shape[0] // 2))
-
-
-def plotND(
-    x: np.ndarray,
-    y: Optional[np.ndarray] = None,
-    n: int = 5,
-    cmap: str = "RdBu_r",
-    aspect: int = 1,
-    aggregate: str = "mean",
-    title: Optional[str] = None,
-):
-    if n == 6:
-        labels = [r"t", r"v_{\parallel}", r"\mu", r"s", r"x", r"y"]
-    if n == 5:
-        labels = [r"v_{\parallel}", r"\mu", r"s", r"x", r"y"]
-    if n == 4:
-        labels = [r"v_{\parallel}", r"s", r"x", r"y"]
-    if n == 3:
-        labels = [r"x", r"s", r"y"]
-    if isinstance(x, torch.Tensor):
-        x = x.cpu().detach().numpy()
-    comb = torch.combinations(torch.arange(n), 2).tolist()
-    fig, ax = plt.subplots(
-        n, n, figsize=(n * (4 if y is not None else 2), n * 2), squeeze=False
-    )
-    if title is not None:
-        fig.suptitle(title)
-    for i in range(n):
-        for j in range(n):
-            if [i, j] not in comb:
-                ax[i, j].remove()
-    c_map = matplotlib.colormaps[cmap]
-    imin = -1
-    if y is not None:
-        aspect = 2 * aspect
-    for i, j in comb:
-        other = tuple([o for o in range(n) if o != i and o != j])
-        if aggregate == "mean":
-            xx = x.mean(0).mean(other)
-        if aggregate == "std":
-            xx = x.mean(0).std(other)
-        if aggregate == "slice":
-            xx = x.mean(0)[*[x.shape[o + 1] // 2 for o in other]]
-        if y is not None:
-            spacer = np.nan * np.ones((xx.shape[0], 1))
-            if aggregate == "mean":
-                yy = y.mean(0).mean(other)
-            if aggregate == "std":
-                yy = y.mean(0).std(other)
-            if aggregate == "slice":
-                yy = y.mean(0)[*[y.shape[o + 1] // 2 for o in other]]
-            xx = np.concat([xx, spacer, yy], -1)
-        ax[i, j].matshow(xx, cmap=c_map)
-        if i > imin:
-            ax[i, j].set_ylabel(rf"${labels[i]}$", fontsize=20)
-            ax[i, j].set_xlabel(rf"${labels[j]}$", fontsize=20)
-            imin = i
-        im = ax[i, j].get_images()
-        extent = im[0].get_extent()
-        ax[i, j].set_aspect(
-            abs((extent[1] - extent[0]) / (extent[3] - extent[2]) / aspect)
-        )
-        ax[i, j].set_xticks([])
-        ax[i, j].set_yticks([])
-    return fig
-
-
-def plot_diag(gt_diag, pred_diag, loglog: bool = True):
-    fig, ax = plt.subplots(
-        3, len(pred_diag), figsize=(4 * len(pred_diag), 9), squeeze=False
-    )
-    plasma = matplotlib.colormaps["plasma"]
-
-    col = 0
-    ax[0, col].set_title("qspec")
-    ax[1, col].set_title("kyspec")
-    ax[2, col].set_title("kxspec")
-    for col, (gtd, pd) in enumerate(zip(gt_diag, pred_diag)):
-        if not isinstance(pd, List):
-            pd = [pd]
-            gtd = [gtd]
-        n_lines = len(pd)
-        for t in range(n_lines):
-            color = plasma((t + 0.1) / max(1, n_lines - 0.5))
-            ax[0, col].plot(pd[t]["qspec"][1:], linewidth=2, color=color, zorder=1)
-            ax[1, col].plot(pd[t]["kyspec"][1:], linewidth=2, color=color, zorder=1)
-            ax[2, col].plot(pd[t]["kxspec"][1:], linewidth=2, color=color, zorder=1)
-            ax[0, col].plot(
-                gtd[t]["qspec"][1:],
-                linewidth=2,
-                color=color,
-                zorder=1,
-                alpha=0.5,
-                ls="--",
-            )
-            ax[1, col].plot(
-                gtd[t]["kyspec"][1:],
-                linewidth=2,
-                color=color,
-                zorder=1,
-                alpha=0.5,
-                ls="--",
-            )
-            ax[2, col].plot(
-                gtd[t]["kxspec"][1:],
-                linewidth=2,
-                color=color,
-                zorder=1,
-                alpha=0.5,
-                ls="--",
-            )
-            if loglog:
-                for i in range(3):
-                    ax[i, col].set_xscale("log")
-                    ax[i, col].set_yscale("log")
-
-    return fig
 
 
 def load_pretrained_lora(

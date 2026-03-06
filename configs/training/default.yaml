@@ -3,7 +3,7 @@ n_epochs: 400
 num_workers: 2
 pin_memory: true
 learning_rate: 3e-4
-use_latest_checkpoint: False
+use_latest_checkpoint: false
 final_learning_rate: 1e-6
 weight_decay: 1e-6
 exclude_from_wd: ["cond"]

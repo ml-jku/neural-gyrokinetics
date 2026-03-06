@@ -49,7 +49,6 @@ class PointNet(nn.Module):
     def forward(
         self, df: torch.Tensor, position: torch.Tensor, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
         x = self.pos_embed(position)
         df = self.last_input_embed(df.transpose(1, 2))
         x = torch.cat([x, df], dim=-1)
