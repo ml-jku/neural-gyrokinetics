@@ -170,7 +170,8 @@ def main(config: DictConfig):
         is_slurm = "SLURM_JOB_ID" in os.environ
         if is_torchrun and is_slurm:
             # set wandb directory to prevent distructive symlinks from wandb
-            os.environ["WANDB_DIR"] = f"{dict_config['output_path']}/wandb_{os.environ.get('SLURM_JOB_ID')}"
+            job_id = os.environ.get('SLURM_JOB_ID')
+            os.environ["WANDB_DIR"] = f"{dict_config['output_path']}/wandb_{job_id}"
     
         if is_ddp:
             world_size = config.ddp.n_nodes * torch.cuda.device_count()

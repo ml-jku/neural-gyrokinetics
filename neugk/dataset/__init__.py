@@ -278,7 +278,9 @@ def get_data(cfg, rank: int = 0):
                     )
                 )
             elif key == "mask_modes":
-                mix_weights = getattr(cfg.dataset.augment.mask_modes, "mix_weights", None)
+                mix_weights = getattr(
+                    cfg.dataset.augment.mask_modes, "mix_weights", None
+                )
                 cutoff = getattr(cfg.dataset.augment.mask_modes, "cutoff", None)
                 augmentations.append(
                     mask_modes(

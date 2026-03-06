@@ -5,16 +5,13 @@ import os
 import tqdm
 import pickle
 import hashlib
-import time
 import warnings
 
 import random
-from functools import partial
 from collections import defaultdict
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-import torch.distributed as dist
 
 import torch
 import numpy as np
@@ -271,20 +268,24 @@ class CycloneDataset(Dataset):
                     if k not in stats:
                         stats[k] = RunningMeanStd()
                     mean = meta[f"{k}_mean"]
-                    var = meta[f"{k}_std"]**2
+                    var = meta[f"{k}_std"] ** 2
                     traj_min = meta[f"{k}_min"]
                     traj_max = meta[f"{k}_max"]
                     if self.normalizers[k]["agg_axes"]:
                         # aggregate along specified dimensions
                         mean, var, traj_min, traj_max = stats[k].aggregate_stats(
-                            mean, var, traj_min, traj_max, agg_axes=tuple(self.normalizers[k]["agg_axes"])
+                            mean,
+                            var,
+                            traj_min,
+                            traj_max,
+                            agg_axes=tuple(self.normalizers[k]["agg_axes"]),
                         )
 
                     self.stats[k][f_id]["mean"] = mean
                     self.stats[k][f_id]["std"] = np.sqrt(var)
                     self.stats[k][f_id]["min"] = traj_min
                     self.stats[k][f_id]["max"] = traj_max
-                    
+
                     stats[k].update(
                         self.stats[k][f_id]["mean"],
                         self.stats[k][f_id]["std"] ** 2,
@@ -387,10 +388,9 @@ class CycloneDataset(Dataset):
         if os.path.exists(stats_path):
             stats = pickle.load(open(stats_path, "rb"))
         else:
-            with ThreadPoolExecutor(10) as executor:
+            with ThreadPoolExecutor(self.num_workers) as executor:
                 futures = [
-                    executor.submit(process_t_idx, t_idx, key)
-                    for t_idx in t_indices
+                    executor.submit(process_t_idx, t_idx, key) for t_idx in t_indices
                 ]
                 for future in tqdm.tqdm(
                     as_completed(futures),
@@ -405,7 +405,9 @@ class CycloneDataset(Dataset):
 
         if self.normalizers[key]["agg_axes"]:
             norm_axes = tuple(self.normalizers[key]["agg_axes"])
-            mean, var, traj_min, traj_max = stats.aggregate_stats(stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes)
+            mean, var, traj_min, traj_max = stats.aggregate_stats(
+                stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
+            )
             if key == "phi":
                 # unsqueeze phi to add channel dim
                 mean = np.expand_dims(mean, axis=0)
@@ -457,19 +459,23 @@ class CycloneDataset(Dataset):
                 flux, *_ = self.normalize(file_index, flux=flux)
 
         return CycloneSample(
-            df=torch.as_tensor(x, self.dtype) if x is not None else None,
-            y_df=torch.as_tensor(gt, self.dtype) if gt is not None else None,
-            phi=torch.as_tensor(phi, self.dtype) if phi is not None else None,
-            y_phi=(torch.as_tensor(y_phi, self.dtype) if y_phi is not None else None),
-            y_flux=(torch.as_tensor(flux, self.dtype) if flux is not None else None),
-            timestep=torch.as_tensor(timestep, self.dtype),
-            file_index=torch.tensor(file_index, torch.long),
-            timestep_index=torch.tensor(t_index, torch.long),
-            geometry=tree_map(lambda g: torch.as_tensor(g, torch.float64), geom),
-            itg=torch.as_tensor(itg, self.dtype),
-            dg=torch.as_tensor(dg, self.dtype),
-            s_hat=torch.as_tensor(s_hat, self.dtype),
-            q=torch.as_tensor(q, self.dtype),
+            df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
+            y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
+            phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
+            y_phi=(
+                torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
+            ),
+            y_flux=(
+                torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None
+            ),
+            timestep=torch.as_tensor(timestep, dtype=self.dtype),
+            file_index=torch.tensor(file_index, dtype=torch.long),
+            timestep_index=torch.tensor(t_index, dtype=torch.long),
+            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
+            itg=torch.as_tensor(itg, dtype=self.dtype),
+            dg=torch.as_tensor(dg, dtype=self.dtype),
+            s_hat=torch.as_tensor(s_hat, dtype=self.dtype),
+            q=torch.as_tensor(q, dtype=self.dtype),
         )
 
     def _load_data(self, f: Any, file_index: int, t_index: int) -> dict:
@@ -984,9 +990,12 @@ class LinearCycloneDataset(CycloneDataset):
 
             pickle.dump(stats, open(stats_path, "wb"))
 
+        key = "df"
         if self.normalizers[key]["agg_axes"]:
             norm_axes = tuple(self.normalizers[key]["agg_axes"])
-            mean, var, traj_min, traj_max = stats.aggregate_stats(stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes)
+            mean, var, traj_min, traj_max = stats.aggregate_stats(
+                stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
+            )
             if key == "phi":
                 # unsqueeze phi to add channel dim
                 mean = np.expand_dims(mean, axis=0)
