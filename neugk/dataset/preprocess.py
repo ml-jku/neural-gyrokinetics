@@ -197,9 +197,21 @@ def preprocess(
                 # load existing metadata to preserve stats if they exist
                 old_metadata = backend.read_metadata(out_path)
                 stats_keys = [
-                    "df_mean", "df_var", "df_std", "df_min", "df_max",
-                    "phi_mean", "phi_var", "phi_std", "phi_min", "phi_max",
-                    "flux_mean", "flux_var", "flux_std", "flux_min", "flux_max"
+                    "df_mean",
+                    "df_var",
+                    "df_std",
+                    "df_min",
+                    "df_max",
+                    "phi_mean",
+                    "phi_var",
+                    "phi_std",
+                    "phi_min",
+                    "phi_max",
+                    "flux_mean",
+                    "flux_var",
+                    "flux_std",
+                    "flux_min",
+                    "flux_max",
                 ]
                 for k in stats_keys:
                     if k in old_metadata:

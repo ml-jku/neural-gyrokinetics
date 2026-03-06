@@ -279,6 +279,7 @@ def find_free_port():
         s.bind(("", 0))  # Bind to a free port provided by the host.
         return s.getsockname()[1]  # Return the port number assigned.
 
+
 def expand_as(
     src: Union[np.ndarray, torch.Tensor],
     tgt: Union[np.ndarray, torch.Tensor],
@@ -290,50 +291,6 @@ def expand_as(
         else:
             src = src.unsqueeze(0)
     return src
-
-# TODO(FP): still needed?
-# def expand_as(
-#     src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch.Tensor]
-# ):
-#     """Expand dimensions of src to match tgt, handling batch, time, and spatial dims."""
-#     if src.ndim == tgt.ndim:
-#         return src
-
-#     # determine where src fits into tgt
-#     src_shape = list(src.shape)
-#     tgt_shape = list(tgt.shape)
-
-#     # covers casex where src is (C, ...) and tgt is (B, T, C, ...)
-#     start_axis = -1
-#     for i in range(len(tgt_shape) - len(src_shape) + 1):
-#         if tgt_shape[i] == src_shape[0]:
-#             match = True
-#             for j in range(1, len(src_shape)):
-#                 if src_shape[j] != 1 and src_shape[j] != tgt_shape[i + j]:
-#                     match = False
-#                     break
-#             if match:
-#                 start_axis = i
-#                 break
-
-#     if start_axis == -1:
-#         res = src
-#         while res.ndim < tgt.ndim:
-#             if isinstance(res, np.ndarray):
-#                 res = np.expand_dims(res, axis=-1)
-#             else:
-#                 res = res.unsqueeze(-1)
-#         return res
-
-#     # reshape src to have for broadcast
-#     new_shape = [1] * len(tgt_shape)
-#     for i, s in enumerate(src_shape):
-#         new_shape[start_axis + i] = s
-
-#     if isinstance(src, np.ndarray):
-#         return src.reshape(new_shape)
-#     else:
-#         return src.view(new_shape)
 
 
 def is_number(string):
@@ -465,7 +422,7 @@ class RunningMeanStd:
 
     @staticmethod
     def aggregate_stats(
-        means, vars, mins, maxs, agg_axes=(1,2,3,4,5)
+        means, vars, mins, maxs, agg_axes=(1, 2, 3, 4, 5)
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Reduces coordinate-wise stats to channel-wise stats.
@@ -476,11 +433,11 @@ class RunningMeanStd:
         """
         # The mean of means is the global mean.
         channel_means = np.mean(means, axis=agg_axes, keepdims=True)
-        
+
         # average of the local variances
         avg_of_vars = np.mean(vars, axis=agg_axes, keepdims=True)
-        
-        # variance of the local means 
+
+        # variance of the local means
         diff_sq = (means - channel_means) ** 2
         var_of_means = np.mean(diff_sq, axis=agg_axes, keepdims=True)
 
@@ -488,8 +445,9 @@ class RunningMeanStd:
         channel_vars = avg_of_vars + var_of_means
         channel_mins = np.min(mins, axis=agg_axes, keepdims=True)
         channel_maxs = np.max(maxs, axis=agg_axes, keepdims=True)
-        
+
         return channel_means, channel_vars, channel_mins, channel_maxs
+
 
 def load_geom_dat_file(file_path):
     """Load geometric parameters from a .dat file."""

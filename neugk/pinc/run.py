@@ -1,7 +1,5 @@
 import os
-from tqdm import tqdm
 from functools import partial
-
 from collections import defaultdict
 from time import perf_counter_ns
 
@@ -42,7 +40,11 @@ class PINCRunner(BaseRunner):
         #     else {}
         # )
         dataset_stats = {}
-        augmentations = [k for k in getattr(self.cfg.dataset, "augment", {}).keys() if getattr(self.cfg.dataset.augment, k).active]
+        augmentations = [
+            k
+            for k in getattr(self.cfg.dataset, "augment", {}).keys()
+            if getattr(self.cfg.dataset.augment, k).active
+        ]
 
         self.loss_wrap = PINCLossWrapper(
             weights=weights,
@@ -293,7 +295,10 @@ class PINCRunner(BaseRunner):
                 # dispatch to correct step function
                 if self.cfg.stage == "autoencoder":
                     if self.cfg.dataset.augment.mask_modes.active:
-                        step_fn = partial(train_step_autoencoder, denormalize_fn=self.trainset.denormalize)
+                        step_fn = partial(
+                            train_step_autoencoder,
+                            denormalize_fn=self.trainset.denormalize,
+                        )
                     else:
                         step_fn = train_step_autoencoder
                 if self.cfg.stage == "peft":

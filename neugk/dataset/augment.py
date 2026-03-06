@@ -4,12 +4,14 @@ from typing import Optional, Callable, Dict, Tuple
 from enum import Enum
 from functools import partial
 
+
 class MaskStrategy(str, Enum):
     RANDOM = "random"
-    LOW_FROM_HIGH = "low_from_high"      # mask low modes, predict them from high
-    HIGH_FROM_LOW = "high_from_low"      # mask high modes, predict them from low
-    ZONAL_FLOW = "zonal_flow"            # mask zero mode only
-    MIXED = "mixed"                      # uniform coin flip over the four above
+    LOW_FROM_HIGH = "low_from_high"  # mask low modes, predict them from high
+    HIGH_FROM_LOW = "high_from_low"  # mask high modes, predict them from low
+    ZONAL_FLOW = "zonal_flow"  # mask zero mode only
+    MIXED = "mixed"  # uniform coin flip over the four above
+
 
 def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: int = 1):
     def _noise(x: torch.Tensor) -> torch.Tensor:
@@ -67,6 +69,7 @@ def separate_zf(x):
     zf = torch.repeat_interleave(x.mean(dim=-1, keepdim=True), repeats=nky, dim=-1)
     x = torch.cat([zf, x - zf], dim=1)
     return x
+
 
 def _build_mask(
     nky: int,
@@ -134,6 +137,7 @@ def _build_mask(
 
     return mask
 
+
 def _sample_strategy(
     strategy: MaskStrategy,
     mix_weights: Dict[MaskStrategy, float],
@@ -148,19 +152,20 @@ def _sample_strategy(
     idx = torch.multinomial(probs, 1).item()
     return strategies[idx]
 
+
 def mask_modes(
-        mask_ratio: float,
-        strategy: str | MaskStrategy = MaskStrategy.RANDOM,
-        is_fourier: bool = False,
-        zf_separated: bool = False,
-        weights: Optional[torch.Tensor] = None,
-        rescale: bool = True,
-        mask_zero_mode: bool = True,
-        cutoff: Optional[int] = None,
-        mix_weights: Optional[Dict[str | MaskStrategy, float]] = None,
-        denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-    ):
+    mask_ratio: float,
+    strategy: str | MaskStrategy = MaskStrategy.RANDOM,
+    is_fourier: bool = False,
+    zf_separated: bool = False,
+    weights: Optional[torch.Tensor] = None,
+    rescale: bool = True,
+    mask_zero_mode: bool = True,
+    cutoff: Optional[int] = None,
+    mix_weights: Optional[Dict[str | MaskStrategy, float]] = None,
+    denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+):
     assert 0.0 <= mask_ratio <= 1.0, "mask_ratio must be in [0, 1]"
     if weights is not None and not isinstance(weights, torch.Tensor):
         weights = torch.from_numpy(weights).to(device)
@@ -174,9 +179,9 @@ def mask_modes(
                 _mix[MaskStrategy(k) if isinstance(k, str) else k] = v
         else:
             _mix = {s: 1.0 / len(_leaf) for s in _leaf}
-        assert all(s in _leaf for s in _mix), (
-            f"mix_weights keys must be leaf strategies, got {list(_mix.keys())}"
-        )
+        assert all(
+            s in _leaf for s in _mix
+        ), f"mix_weights keys must be leaf strategies, got {list(_mix.keys())}"
 
     def _mask(x: torch.Tensor, file_idx: torch.Tensor) -> torch.Tensor:
         device = x.device
@@ -213,7 +218,9 @@ def mask_modes(
                 # remove zf again if it was removed originally
                 x_masked = separate_zf(x_masked)
             if normalize_fn is not None:
-                x_masked = de_normalize(x_masked, file_idx, partial(normalize_fn, return_stats=False))
+                x_masked = de_normalize(
+                    x_masked, file_idx, partial(normalize_fn, return_stats=False)
+                )
         return x_masked, x_tgt, mask, chosen
 
     return _mask
