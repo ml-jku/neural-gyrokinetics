@@ -9,6 +9,7 @@ import warnings
 
 import random
 from collections import defaultdict
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -317,11 +318,11 @@ class CycloneDataset(Dataset):
         norm_dataset = normalization is not None and normalization_scope == "dataset"
         if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
             # recompute for all fields
-            stats_recomputed = self._recompute_stats(
-                keys=self.fields_to_load, offset=self.offsets[0]
-            )
-            for k, k_stat in stats_recomputed.items():
-                stats[k] = k_stat
+            for key in self.fields_to_load:
+                stats_recomputed = self._recompute_stats(
+                    key=key, offset=self.offsets[0]
+                )
+            stats[key] = stats_recomputed
 
         if (
             normalization_scope == "dataset"
@@ -337,6 +338,9 @@ class CycloneDataset(Dataset):
     def _recompute_stats(
         self, key: str, offset: int = 0, prefix: str = "", suffix: str = ""
     ):
+        stats_lock = threading.Lock()
+        shared_stats = RunningMeanStd()
+
         def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
             with self.backend.open(self.files[file_index]) as f:
@@ -356,13 +360,14 @@ class CycloneDataset(Dataset):
             if key == "df":
                 x = sample["x"]
                 if self.separate_zf:
-                    x = self._separate_zf(x)
+                    x = separate_zf_fn(x)
             elif key == "phi":
                 x = sample["phi"]
             else:
                 x = np.array([flux_val], dtype=np.float32)
 
-            return x
+            with stats_lock:
+                shared_stats.update(x, np.zeros_like(x), x, x, count=1)
 
         # subsample by two for normalization stats
         t_indices = (
@@ -379,25 +384,19 @@ class CycloneDataset(Dataset):
         if os.path.exists(stats_path):
             stats = pickle.load(open(stats_path, "rb"))
         else:
-            stats = None
             with ThreadPoolExecutor(self.num_workers) as executor:
-                batch_size = 256
-                for batch_start in range(0, len(t_indices), batch_size):
-                    batch = t_indices[batch_start:batch_start + batch_size]
-                    futures = {
-                        executor.submit(process_t_idx, t_idx, key): t_idx
-                        for t_idx in batch
-                    }
+                futures = [
+                    executor.submit(process_t_idx, t_idx, key)
+                    for t_idx in t_indices
+                ]
+                for future in tqdm.tqdm(
+                    as_completed(futures),
+                    total=len(futures),
+                    desc=f"re-computing normalization stats for {key}",
+                ):
+                    future.result()  # re-raise any worker exception
 
-                    for future in tqdm.tqdm(as_completed(futures), total=len(futures),
-                                desc=f"re-computing normalization stats for {key} "
-                                    f"[{batch_start}:{batch_start+len(batch)}]"):
-                        sample = future.result()
-                        if stats is None:
-                            stats = RunningMeanStd()
-                        stats.update(sample, np.zeros_like(sample), sample, sample, count=1)
-                        del sample
-
+            stats = shared_stats
             pickle.dump(stats, open(stats_path, "wb"))
             print(f"saved recomputed stats to {stats_path}")
 

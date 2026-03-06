@@ -279,49 +279,61 @@ def find_free_port():
         s.bind(("", 0))  # Bind to a free port provided by the host.
         return s.getsockname()[1]  # Return the port number assigned.
 
-
 def expand_as(
-    src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch.Tensor]
-):
-    """Expand dimensions of src to match tgt, handling batch, time, and spatial dims."""
-    if src.ndim == tgt.ndim:
-        return src
+    src: Union[np.ndarray, torch.Tensor],
+    tgt: Union[np.ndarray, torch.Tensor],
+) -> Union[np.ndarray, torch.Tensor]:
+    """Prepend size-1 dimensions to src until it matches tgt's ndim."""
+    while src.ndim < tgt.ndim:
+        if isinstance(src, np.ndarray):
+            src = np.expand_dims(src, axis=0)
+        else:
+            src = src.unsqueeze(0)
+    return src
 
-    # determine where src fits into tgt
-    src_shape = list(src.shape)
-    tgt_shape = list(tgt.shape)
+# TODO(FP): still needed?
+# def expand_as(
+#     src: Union[np.ndarray, torch.Tensor], tgt: Union[np.ndarray, torch.Tensor]
+# ):
+#     """Expand dimensions of src to match tgt, handling batch, time, and spatial dims."""
+#     if src.ndim == tgt.ndim:
+#         return src
 
-    # covers casex where src is (C, ...) and tgt is (B, T, C, ...)
-    start_axis = -1
-    for i in range(len(tgt_shape) - len(src_shape) + 1):
-        if tgt_shape[i] == src_shape[0]:
-            match = True
-            for j in range(1, len(src_shape)):
-                if src_shape[j] != 1 and src_shape[j] != tgt_shape[i + j]:
-                    match = False
-                    break
-            if match:
-                start_axis = i
-                break
+#     # determine where src fits into tgt
+#     src_shape = list(src.shape)
+#     tgt_shape = list(tgt.shape)
 
-    if start_axis == -1:
-        res = src
-        while res.ndim < tgt.ndim:
-            if isinstance(res, np.ndarray):
-                res = np.expand_dims(res, axis=-1)
-            else:
-                res = res.unsqueeze(-1)
-        return res
+#     # covers casex where src is (C, ...) and tgt is (B, T, C, ...)
+#     start_axis = -1
+#     for i in range(len(tgt_shape) - len(src_shape) + 1):
+#         if tgt_shape[i] == src_shape[0]:
+#             match = True
+#             for j in range(1, len(src_shape)):
+#                 if src_shape[j] != 1 and src_shape[j] != tgt_shape[i + j]:
+#                     match = False
+#                     break
+#             if match:
+#                 start_axis = i
+#                 break
 
-    # reshape src to have for broadcast
-    new_shape = [1] * len(tgt_shape)
-    for i, s in enumerate(src_shape):
-        new_shape[start_axis + i] = s
+#     if start_axis == -1:
+#         res = src
+#         while res.ndim < tgt.ndim:
+#             if isinstance(res, np.ndarray):
+#                 res = np.expand_dims(res, axis=-1)
+#             else:
+#                 res = res.unsqueeze(-1)
+#         return res
 
-    if isinstance(src, np.ndarray):
-        return src.reshape(new_shape)
-    else:
-        return src.view(new_shape)
+#     # reshape src to have for broadcast
+#     new_shape = [1] * len(tgt_shape)
+#     for i, s in enumerate(src_shape):
+#         new_shape[start_axis + i] = s
+
+#     if isinstance(src, np.ndarray):
+#         return src.reshape(new_shape)
+#     else:
+#         return src.view(new_shape)
 
 
 def is_number(string):

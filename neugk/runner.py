@@ -110,13 +110,13 @@ class BaseRunner:
             # scheduler specific parameters
             if hasattr(self.cfg.training, "min_lr"):
                 kwargs["min_lr"] = self.cfg.training.min_lr
-            if hasattr(self.cfg.training, "final_learning_rate"):
+            # if hasattr(self.cfg.training, "final_learning_rate"):
                 # for OneCycle, final_div_factor = initial_lr / final_lr
                 # but let's just pass it through
-                kwargs["final_div_factor"] = (
-                    self.cfg.training.learning_rate
-                    / self.cfg.training.final_learning_rate
-                )
+                # does not work for all transformers versions!!!
+                # kwargs["final_div_factor"] = (
+                #     self.cfg.training.learning_rate / self.cfg.training.final_learning_rate
+                # )
 
             # warm up steps (not used by OneCycle but needed by others)
             is_long_run = self.cfg.training.n_epochs > 150
