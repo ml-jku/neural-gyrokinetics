@@ -45,6 +45,7 @@ class PINCRunner(BaseRunner):
         #     else {}
         # )
         dataset_stats = {}
+        augmentations = [k for k in getattr(self.cfg.dataset, "augment", {}).keys() if getattr(self.cfg.dataset.augment, k).active]
 
         # pinc specific losses
         self.loss_wrap = PINCLossWrapper(
@@ -68,6 +69,7 @@ class PINCRunner(BaseRunner):
             eval_spectral_loss_type=getattr(
                 self.cfg.training, "eval_spectral_loss_type", "l1"
             ),
+            augmentations=augmentations,
         )
 
         self.model = get_autoencoder(
@@ -331,7 +333,7 @@ class PINCRunner(BaseRunner):
                     xs = {k: aug_fn(v, idx_data["file_index"]) for k, v in xs.items()}
                     if self.cfg.dataset.augment.mask_modes.active:
                         # separate input and target
-                        xs["df"], xs["df_tgt"], xs["mask"] = xs["df"]
+                        xs["df"], xs["df_tgt"], xs["mask"], mask_strategy = xs["df"]
 
             info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
             t_start_fwd = perf_counter_ns()
@@ -388,7 +390,7 @@ class PINCRunner(BaseRunner):
             for k, v in losses.items():
                 loss_logs[k].append(v.item())
 
-            if (self.cur_update_step % 100) == 0:
+            if (self.cur_update_step % 100) == 0 and not self.cfg.ddp.enable:
                 del xs, condition, idx_data, geometry, loss, losses
                 memory_cleanup(self.device, aggressive=True)
 

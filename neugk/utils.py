@@ -576,6 +576,10 @@ def poten_files(directory):
 def exclude_from_weight_decay(model, param_names, weight_decay):
     decay, no_decay = [], []
     no_decay_names, decay_names = [], []
+    if param_names == "all":
+        return [
+            {"params": model.parameters(), "weight_decay": 0.0},
+        ]
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue

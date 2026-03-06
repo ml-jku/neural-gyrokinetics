@@ -378,18 +378,23 @@ class CycloneDataset(Dataset):
             stats = pickle.load(open(stats_path, "rb"))
         else:
             stats = None
-            with ThreadPoolExecutor(self.num_workers) as executor:
-                futures = []
-                for t_idx in t_indices:
-                    futures.append(executor.submit(process_t_idx, t_idx, key))
+            with ThreadPoolExecutor(10) as executor:
+                batch_size = 256
+                for batch_start in range(0, len(t_indices), batch_size):
+                    batch = t_indices[batch_start:batch_start + batch_size]
+                    futures = {
+                        executor.submit(process_t_idx, t_idx, key): t_idx
+                        for t_idx in batch
+                    }
 
-                for future in tqdm.tqdm(as_completed(futures), total=len(futures),
-                            desc=f"re-computing normalization stats for {key}"):
-                    sample = future.result()
-                    if stats is None:
-                        stats = RunningMeanStd()
-                    stats.update(sample, np.zeros_like(sample), sample, sample, count=1)
-                    del sample
+                    for future in tqdm.tqdm(as_completed(futures), total=len(futures),
+                                desc=f"re-computing normalization stats for {key} "
+                                    f"[{batch_start}:{batch_start+len(batch)}]"):
+                        sample = future.result()
+                        if stats is None:
+                            stats = RunningMeanStd()
+                        stats.update(sample, np.zeros_like(sample), sample, sample, count=1)
+                        del sample
 
             pickle.dump(stats, open(stats_path, "wb"))
             print(f"saved recomputed stats to {stats_path}")

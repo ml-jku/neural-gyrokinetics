@@ -49,7 +49,9 @@ def main(config: DictConfig):
     os.environ["HYDRA_FULL_ERROR"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    # os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+    # os.environ["NCCL_BUFFSIZE"] = "1048576"
+    # os.environ["NCCL_P2P_DISABLE"] = "0"
 
     rand_suffix = random.randint(0, 999)
     print("#" * 88, "\nStarting Cyclone with configs:")
@@ -204,6 +206,9 @@ def main(config: DictConfig):
                 return
             elif is_torchrun and not is_slurm or is_torchrun and is_slurm:
                 rank = int(os.environ["RANK"])
+                conf = torch.cuda.memory_stats()
+                # This will show 'expandable_segments' in the output if supported/active
+                print(f"Alloc Conf: {torch.cuda.get_allocator_backend()}")
                 dispatch_runner(rank, config, world_size=world_size)
             else:
                 # here we could again revert to mp.spawn, but ideally should not be done anymore
@@ -213,9 +218,14 @@ def main(config: DictConfig):
             rank = 0
             dispatch_runner(rank, config, world_size=1)
 
-    except BaseException:
+    except BaseException as e:
         traceback.print_exc(file=sys.stderr)
-        raise
+        if "out of memory" in str(e):
+            print("| WARNING: OUT OF MEMORY |")
+            # This gives a detailed table of blocks, holes, and reserved memory
+            print(torch.cuda.memory_summary(device=None, abbreviated=False))
+            torch.cuda.empty_cache()
+        raise e
     finally:
         sys.stdout.flush()
         sys.stderr.flush()
