@@ -1,4 +1,6 @@
 import os
+from tqdm import tqdm
+from functools import partial
 from collections import defaultdict
 from time import perf_counter_ns
 
@@ -39,6 +41,7 @@ class PINCRunner(BaseRunner):
         #     else {}
         # )
         dataset_stats = {}
+        augmentations = [k for k in getattr(self.cfg.dataset, "augment", {}).keys() if getattr(self.cfg.dataset.augment, k).active]
 
         self.loss_wrap = PINCLossWrapper(
             weights=weights,
@@ -62,6 +65,7 @@ class PINCRunner(BaseRunner):
                 self.cfg.training, "eval_spectral_loss_type", "l1"
             ),
             dataset=self.trainset,
+            augmentations=augmentations,
         )
 
         self.model = get_autoencoder(
@@ -277,7 +281,7 @@ class PINCRunner(BaseRunner):
                     xs = {k: aug_fn(v, idx_data["file_index"]) for k, v in xs.items()}
                     if self.cfg.dataset.augment.mask_modes.active:
                         # separate input and target
-                        xs["df"], xs["df_tgt"] = xs["df"]
+                        xs["df"], xs["df_tgt"], xs["mask"], mask_strategy = xs["df"]
 
             info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
             t_start_fwd = perf_counter_ns()
@@ -285,6 +289,18 @@ class PINCRunner(BaseRunner):
             with torch.autocast(
                 str(self.device), dtype=self.amp_dtype, enabled=self.use_amp
             ):
+                # dispatch to correct step function
+                if self.cfg.stage == "autoencoder":
+                    if self.cfg.dataset.augment.mask_modes.active:
+                        step_fn = partial(
+                            train_step_autoencoder,
+                            denormalize_fn=self.trainset.denormalize,
+                        )
+                    else:
+                        step_fn = train_step_autoencoder
+                if self.cfg.stage == "peft":
+                    step_fn = train_step_peft
+
                 if self.cfg.stage == "simsiam":
                     xs["df_aug"] = getattr(sample, "df_aug").to(self.device)
                 loss, losses = step_fn(
@@ -319,9 +335,9 @@ class PINCRunner(BaseRunner):
             for k, v in losses.items():
                 loss_logs[k].append(v.item())
 
-            # if self.cur_update_step % 100 == 0:
-            #     del xs, condition, idx_data, geometry, loss, losses
-            #     memory_cleanup(self.device, aggressive=True)
+            if (self.cur_update_step % 100) == 0 and not self.cfg.ddp.enable:
+                del xs, condition, idx_data, geometry, loss, losses
+                memory_cleanup(self.device, aggressive=True)
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)

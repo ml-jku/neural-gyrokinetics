@@ -4,7 +4,7 @@ backend: gds  # gds, h5
 normalization: 
   df: 
     type: zscore
-    agg_axes: [1, 3, 4, 5]
+    agg_axes: [0, 1, 3, 4, 5]
   flux: 
     type: zscore
     agg_axes: null
@@ -28,15 +28,8 @@ active_keys: ["re", "im"]
 input_fields: ["df"]
 # training_trajectories: "iteration_{0-5,7-12,14-31}.h5"
 training_trajectories: "iteration_{0-5,7-12,14-31,33-64,67-82,84-99}.h5"
-validation_trajectories: [
-  # "iteration_13.h5", "iteration_100.h5", "iteration_200.h5",
-  "iteration_262.h5",
-  "iteration_135.h5",
-  "iteration_8.h5",
-  "iteration_232.h5",
-  "iteration_148.h5",
-  "iteration_115.h5",
-]
+validation_trajectories: ["iteration_13.h5", "iteration_100.h5", "iteration_200.h5"]
+# validation_trajectories: "ood_iteration_{0-4}.h5"
 partial_holdouts:
 training_cond_filters:
   last_fluxes: [1., .inf]
@@ -57,6 +50,7 @@ augment:
     rescale: false
     mask_zero_mode: true
     df_delta_weight: 1.0
+    strategy: "random" # random, low_from_high, high_from_low, zonal_flow, mixed
 
 timestep_std_filter: null  # std-based timestep filtering threshold (null to disable)
 timestep_std_offset: 80

@@ -185,7 +185,7 @@ def get_data(cfg, rank: int = 0):
     # gpudirect storage only used if kvikio is required, oterwise raw bins
     use_gpudirect = backend == "gds" and use_kvikio_train
     # dataloaders
-    prefetch_factor = min(2, cfg.training.num_workers // 2)
+    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
     # NOTE: must be false when returning gpu data
     pin_memory = cfg.training.pin_memory and not use_gpudirect
     dataloader_kwargs = {}
@@ -278,9 +278,14 @@ def get_data(cfg, rank: int = 0):
                     )
                 )
             elif key == "mask_modes":
+                mix_weights = getattr(cfg.dataset.augment.mask_modes, "mix_weights", None)
+                cutoff = getattr(cfg.dataset.augment.mask_modes, "cutoff", None)
                 augmentations.append(
                     mask_modes(
                         mask_ratio=cfg.dataset.augment.mask_modes.mask_ratio,
+                        strategy=cfg.dataset.augment.mask_modes.strategy,
+                        cutoff=cutoff,
+                        mix_weights=mix_weights,
                         is_fourier=cfg.dataset.augment.mask_modes.is_fourier,
                         rescale=cfg.dataset.augment.mask_modes.rescale,
                         zf_separated=cfg.dataset.separate_zf,

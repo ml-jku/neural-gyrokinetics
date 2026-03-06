@@ -30,7 +30,6 @@ def _wide_min_norm_solution(
     a = torch.linalg.solve(G, w)
     return a @ U
 
-
 class PINCLossWrapper(LossWrapper):
     """PINCLossWrapper class."""
 
@@ -52,8 +51,12 @@ class PINCLossWrapper(LossWrapper):
         eval_integral_loss_type: str = "mse",
         eval_spectral_loss_type: str = "l1",
         dataset: Optional[Any] = None,
-        masked_mode_modeling: bool = False,
+        augmentations: Optional[List[str]] = None,
     ):
+        augmentations = augmentations or []
+        masked_mode_modeling = "mask_modes" in augmentations
+
+        # Initialize base class
         super().__init__(
             weights=weights,
             schedulers=schedulers,
@@ -63,6 +66,11 @@ class PINCLossWrapper(LossWrapper):
             masked_mode_modeling=masked_mode_modeling,
         )
 
+        self._augmentation_losses: List[str] = []
+        self.augmentations = augmentations
+        self._register_augmentation_losses()
+
+        # Extended loss categories
         self._vae_losses = ["kl_div"]
         self._vqvae_losses = ["vq_commit"]
         self._spectral_losses = [
@@ -104,6 +112,29 @@ class PINCLossWrapper(LossWrapper):
 
         self.complex_metrics = None
 
+    def _register_augmentation_losses(self):
+        """Populate _augmentation_losses and default weights based on self.augmentations.
+
+        Only *extra* loss keys (not data-level keys like df_delta that should flow
+        through compute_data_loss) are registered here. Data-level keys are added
+        to self._data_losses in the base class instead.
+        """
+        for name in self.augmentations:
+            if name == "mask_modes":
+                # df_delta is already added to _data_losses by the base class;
+                # no extra loss keys needed here.
+                self.weights.setdefault("df_delta", 1.0)
+            elif name == "vicreg_variance":
+                self.weights.setdefault(name, 1.0)
+            elif name == "vicreg_covariance":
+                self.weights.setdefault(name, 1.0)
+            else:
+                raise ValueError(
+                    f"Unknown augmentation '{name}'. "
+                    f"Supported: mask_modes, vicreg_variance, vicreg_covariance."
+                )
+            self._augmentation_losses.append(name)
+
     @property
     def all_losses(self):
         return (
@@ -112,6 +143,7 @@ class PINCLossWrapper(LossWrapper):
             + self._vqvae_losses
             + self._spectral_losses
             + self._simsiam_losses
+            + self._augmentation_losses
         )
 
     def _update_ema_loss_scale(self, loss_name: str, loss_value: torch.Tensor):
@@ -160,34 +192,96 @@ class PINCLossWrapper(LossWrapper):
             "spec": self.eval_spectral_loss_type,
         }
 
-    def compute_data_loss(
+    def compute_per_mode_losses(
         self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
-        eps: float = 1e-8,
+        preds: Dict[str, torch.Tensor],
+        tgts: Dict[str, torch.Tensor],
         loss_type: Optional[str] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """Return per-mode MSE for df_delta during training.
+
+        Assumes the last dimension of preds['df_delta'] indexes the modes.
+        Returns a dict like {'mode_loss/ky=0': ..., 'mode_loss/ky=1': ..., ...}.
+        """
+        if "df_delta" not in preds or "df_delta" not in tgts:
+            return {}
+
+        p = preds["df_delta"]
+        t = tgts["df_delta"]
+        n_modes = p.shape[-1]
+
+        per_mode = {}
+        for m in range(n_modes):
+            if loss_type == "mse":
+                per_mode[f"mode_loss/ky={m}"] = F.mse_loss(p[..., m], t[..., m])
+            elif loss_type == "relative_mse":
+                per_mode[f"mode_loss/ky={m}"] = (torch.sum((p[..., m] - t[..., m]) ** 2) / (torch.sum(t[..., m]**2) + 1e-8))
+            else:
+                raise NotImplementedError(f"Unsupported per-mode loss type: {loss_type}")
+
+        return per_mode
+
+    def compute_vicreg_variance(
+        self, preds: Dict[str, torch.Tensor], eps: float = 1e-4
+    ) -> Dict[str, torch.Tensor]:
+        z = preds.get("z")
+        if z is None:
+            return {}
+        B, D = z.shape
+
+        z_centered = z - z.mean(dim=0)
+        std = torch.sqrt(z_centered.var(dim=0) + eps)
+        var_loss = F.relu(1.0 - std).mean()
+        return {"vicreg_variance": var_loss}
+
+    def compute_vicreg_covariance(
+        self, preds: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        z = preds.get("z")
+        if z is None:
+            return {}
+        B, D = z.shape
+        z_centered = z - z.mean(dim=0)
+
+        # --- Covariance ---
+        cov = (z_centered.T @ z_centered) / (B - 1)  # (D, D)
+        off_diag = cov - torch.diag(cov.diag())
+        cov_loss = (off_diag**2).sum() / D
+        return {"vicreg_covariance": cov_loss}
+
+    def compute_data_loss(
+        self, pred: torch.Tensor, 
+        target: torch.Tensor, 
+        eps: float = 1e-8,
+        loss_type: Optional[str] = None, 
+        reduction: str = "mean"
     ) -> torch.Tensor:
         loss_type = loss_type or self._get_current_loss_types()["data"]
 
         if loss_type == "mse":
-            return F.mse_loss(pred, target)
+            return F.mse_loss(pred, target, reduction=reduction)
         if loss_type == "l1":
-            return F.l1_loss(pred, target)
+            return F.l1_loss(pred, target, reduction=reduction)
         if loss_type == "huber":
-            return F.huber_loss(pred, target)
+            return F.huber_loss(pred, target, reduction=reduction)
         if loss_type == "smooth_l1":
-            return F.smooth_l1_loss(pred, target)
+            return F.smooth_l1_loss(pred, target, reduction=reduction)
         if loss_type == "relative_mse":
-            return ((pred - target) / (torch.abs(target) + eps)).pow(2).mean()
+            if reduction == "mean":
+                return (torch.sum((pred - target) ** 2) / (torch.sum(target**2) + eps))
+            else:
+                return (pred - target) ** 2 / (target**2 + eps)
         if loss_type == "relative_l1":
             return (torch.abs(pred - target) / (torch.abs(target) + eps)).mean()
         if loss_type == "log_error":
             return F.mse_loss(
-                torch.log(torch.abs(pred) + eps), torch.log(torch.abs(target) + eps)
+                torch.log(torch.abs(pred) + eps), torch.log(torch.abs(target) + eps),
+                reduction=reduction
             )
         if loss_type == "log_l1_error":
             return F.l1_loss(
-                torch.log(torch.abs(pred) + eps), torch.log(torch.abs(target) + eps)
+                torch.log(torch.abs(pred) + eps), torch.log(torch.abs(target) + eps),
+                reduction=reduction
             )
         if loss_type == "log_cosh":
             return torch.log(torch.cosh(pred - target)).mean()
@@ -533,12 +627,19 @@ class PINCLossWrapper(LossWrapper):
         ):
             losses.update(self.compute_simsiam_loss(preds))
 
+        # 3. Augmentation losses (VICReg, etc.)
+        for name in self._augmentation_losses:
+            # TODO: need to pass latent in predictions for VICReg losses
+            if "vicreg" in name:
+                losses.update(vicreg_loss(preds))
+
         special_keys = set(
             self._int_losses
             + self._vae_losses
             + self._vqvae_losses
             + self._spectral_losses
             + self._simsiam_losses
+            + self.augmentations
         )
 
         available_keys = list(set(tgts.keys()) | set(preds.keys()) | special_keys)
@@ -555,27 +656,46 @@ class PINCLossWrapper(LossWrapper):
         if not self.training:
             data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
-            p, t = preds.get(k, torch.zeros_like(tgts[k])), tgts[k]
+            loss_type = "relative_mse" if k == "df_delta" else None
+
+            if k not in preds:
+                preds[k] = torch.zeros_like(tgts[k])
+
+            p, t = preds[k], tgts[k]
             if p.shape != t.shape and k == "phi":
                 p = p.unsqueeze(0)
-            losses[k] = (
-                self.compute_data_loss(p[:, :2], t[:, :2])
-                + self.compute_data_loss(p[:, 2:], t[:, 2:])
-                if k == "df" and separate_zf
-                else self.compute_data_loss(p, t)
-            )
 
+            if k == "df" and separate_zf:
+                losses[k] = self.compute_data_loss(
+                    p[:, :2], t[:, :2]
+                ) + self.compute_data_loss(p[:, 2:], t[:, 2:], loss_type=loss_type)
+            else:
+                losses[k] = self.compute_data_loss(p, t, loss_type=loss_type)
+
+        # 4. Final Aggregation & EMA
         if self.training:
-            monitor_mse = {
-                f"{k}_mse": (
-                    F.mse_loss(preds[k][:, :2], tgts[k][:, :2])
-                    + F.mse_loss(preds[k][:, 2:], tgts[k][:, 2:])
-                    if k == "df" and separate_zf
-                    else F.mse_loss(preds[k], tgts[k])
-                )
-                for k in data_keys
-                if k in preds
-            }
+            # Monitoring MSEs
+            monitor_mse = {}
+            with torch.no_grad():
+                for k in data_keys:
+                    if k not in preds:
+                        continue
+                    if k == "df" and separate_zf:
+                        monitor_mse[f"{k}_mse"] = F.mse_loss(
+                            preds[k][:, :2], tgts[k][:, :2]
+                        ) + F.mse_loss(preds[k][:, 2:], tgts[k][:, 2:])
+                    else:
+                        monitor_mse[f"{k}_mse"] = F.mse_loss(preds[k], tgts[k])
+
+            # Per-mode losses for masked mode modeling (training only, monitoring)
+            per_mode_losses = {}
+            if "mask_modes" in self.augmentations:
+                with torch.no_grad():
+                    per_mode_losses = self.compute_per_mode_losses(
+                        preds, tgts, loss_type="relative_mse"
+                    )
+
+            # EMA Normalization
             for k, v in losses.items():
                 self._update_ema_loss_scale(k, v)
             norm_losses = self._apply_ema_normalization(losses)
@@ -592,6 +712,7 @@ class PINCLossWrapper(LossWrapper):
             }
             log_losses.update({"total_mse": sum(monitor_mse.values())})
             log_losses.update(int_monitor)
+            log_losses.update(per_mode_losses)
             if self.ema_normalization_loss:
                 log_losses.update(self.get_ema_statistics())
             return total_loss, log_losses

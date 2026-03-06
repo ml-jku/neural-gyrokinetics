@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Callable
 
 import os
 import pickle
@@ -16,6 +16,7 @@ import torch.distributed as dist
 from omegaconf import DictConfig
 
 from neugk.utils import RunningMeanStd, filter_config_subset, filter_cli_priority
+from neugk.dataset.augment import reverse_ifft, ifft, de_normalize
 from neugk.pinc.peft_utils import create_lora_model_wrapper
 from neugk.pinc.autoencoders import get_autoencoder
 
@@ -29,35 +30,37 @@ def train_step_autoencoder(
     geometry: Dict[str, torch.Tensor],
     loss_wrap: nn.Module,
     progress_remaining: float,
+    denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
-    separate_zf = (
+    extra_zf_loss = (
         cfg.dataset.separate_zf
         if hasattr(getattr(cfg, model_key), "extra_zf_loss")
         and getattr(cfg, model_key).extra_zf_loss
         else False
     )
+    separated_zf = cfg.dataset.separate_zf
     model.train()
 
     if cfg.dataset.augment.mask_modes.active:
         df_tgt = xs.pop("df_tgt")
+        mask = xs.pop("mask")
 
     # model prediction
     # for ae we only use df
     x_preds = model(xs["df"], condition=condition)
 
     if cfg.dataset.augment.mask_modes.active:
-        pred_df_delta = x_preds["df"] - xs["df"]
-        gt_df_delta = (df_tgt - xs["df"]).detach()
+        assert denormalize_fn is not None, "denormalize_fn must be provided for masked spectral loss"
+        pred_df_delta, gt_df_delta = masked_spectral_loss(
+            x_preds["df"], df_tgt, mask, separated_zf, 
+            de_normalize_fn=denormalize_fn, 
+            file_idx=idx_data["file_index"]
+        )
         x_preds["df_delta"] = pred_df_delta
         xs["df_delta"] = gt_df_delta
         # re-assign target to input for loss
         xs["df"] = df_tgt.detach()
-
-    # compute losses
-    # TODO(diff) get rid of loss_wrap?
-    # loss = F.mse_loss(x_preds["df"], xs["df"])
-    # losses = {"df": loss}
 
     loss, losses = loss_wrap(
         x_preds,
@@ -65,10 +68,30 @@ def train_step_autoencoder(
         idx_data,
         geometry=geometry,
         progress_remaining=progress_remaining,
-        separate_zf=separate_zf,
+        separate_zf=extra_zf_loss,
     )
     return loss, losses
 
+def masked_spectral_loss(y_hat, y, mask, zf_separated, de_normalize_fn, file_idx):
+    """
+    y_hat : predicted field (real space)
+    y     : ground truth field (real space)
+    mask  : binary mask in Fourier space (1=visible, 0=masked)
+    zf_separated : applied channel-wise zonal flow separation
+    """
+
+    # de-normalize fields first
+    y_hat = de_normalize(y_hat, file_idx, de_normalize_fn)
+    y = de_normalize(y, file_idx, de_normalize_fn)
+    # FFT to spectral space
+    y_hat_k = reverse_ifft(y_hat, zf_separated=zf_separated)
+    y_k = reverse_ifft(y, zf_separated=zf_separated)
+
+    # Isolate masked modes
+    masked_pred = (1.0 - mask) * y_hat_k
+    masked_gt   = (1.0 - mask) * y_k
+
+    return masked_pred, masked_gt
 
 def train_step_peft(
     cfg: DictConfig,

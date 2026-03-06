@@ -270,18 +270,18 @@ class CycloneDataset(Dataset):
                     if k not in stats:
                         stats[k] = RunningMeanStd()
                     mean = meta[f"{k}_mean"]
-                    std = meta[f"{k}_std"]
+                    var = meta[f"{k}_std"]**2
+                    traj_min = meta[f"{k}_min"]
+                    traj_max = meta[f"{k}_max"]
                     if self.normalizers[k]["agg_axes"]:
                         # aggregate along specified dimensions
-                        mean, std = stats[k].aggregate_stats(
-                            mean, std, agg_axes=tuple(self.normalizers[k]["agg_axes"])
-                        )
+                        mean, var, traj_min, traj_max = stats[k].aggregate_stats(mean, var, traj_min, traj_max, agg_axes=tuple(self.normalizers[k]["agg_axes"]))
 
                     self.stats[k][f_id]["mean"] = mean
-                    self.stats[k][f_id]["std"] = std
-                    self.stats[k][f_id]["min"] = meta[f"{k}_min"]
-                    self.stats[k][f_id]["max"] = meta[f"{k}_max"]
-
+                    self.stats[k][f_id]["std"] = np.sqrt(var)
+                    self.stats[k][f_id]["min"] = traj_min
+                    self.stats[k][f_id]["max"] = traj_max
+                    
                     stats[k].update(
                         self.stats[k][f_id]["mean"],
                         self.stats[k][f_id]["std"] ** 2,
@@ -473,19 +473,19 @@ class CycloneDataset(Dataset):
                 flux, *_ = self.normalize(file_index, flux=flux)
 
         return CycloneSample(
-            df=torch.as_tensor(x, self.dtype) if x is not None else None,
-            y_df=torch.as_tensor(gt, self.dtype) if gt is not None else None,
-            phi=torch.as_tensor(phi, self.dtype) if phi is not None else None,
-            y_phi=(torch.as_tensor(y_phi, self.dtype) if y_phi is not None else None),
-            y_flux=(torch.as_tensor(flux, self.dtype) if flux is not None else None),
-            timestep=torch.as_tensor(timestep, self.dtype),
-            file_index=torch.tensor(file_index, torch.long),
-            timestep_index=torch.tensor(t_index, torch.long),
-            geometry=tree_map(lambda g: torch.as_tensor(g, torch.float64), geom),
-            itg=torch.as_tensor(itg, self.dtype),
-            dg=torch.as_tensor(dg, self.dtype),
-            s_hat=torch.as_tensor(s_hat, self.dtype),
-            q=torch.as_tensor(q, self.dtype),
+            df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
+            y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
+            phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
+            y_phi=(torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None),
+            y_flux=(torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None),
+            timestep=torch.as_tensor(timestep, dtype=self.dtype),
+            file_index=torch.tensor(file_index, dtype=torch.long),
+            timestep_index=torch.tensor(t_index, dtype=torch.long),
+            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
+            itg=torch.as_tensor(itg, dtype=self.dtype),
+            dg=torch.as_tensor(dg, dtype=self.dtype),
+            s_hat=torch.as_tensor(s_hat, dtype=self.dtype),
+            q=torch.as_tensor(q, dtype=self.dtype),
         )
 
     def _load_data(self, f: Any, file_index: int, t_index: int) -> dict:
@@ -872,6 +872,166 @@ class LinearCycloneDataset(CycloneDataset):
                 lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry
             ),
         )
+
+    def _load_data(self, f, file_index, t_index) -> dict:
+        original_t_index = t_index
+        meta = self.metadata[file_index]
+
+        x, poten, gt_flux = [], [], []
+        for i in range(self.bundle_seq_length):
+            t_str = str(original_t_index + i).zfill(5)
+
+            if "df" in self.fields_to_load:
+                k = self.backend.read_df(
+                    f, t_str, self.df_shape, self.active_keys, self.rank
+                )
+                x.append(k)
+
+            if "phi" in self.fields_to_load:
+                phi = self.backend.read_phi(f, t_str, self.phi_resolution, self.rank)
+                poten.append(phi)
+
+            if "flux" in self.fields_to_load:
+                flux = meta["fluxes"][original_t_index + i]
+                gt_flux.append(flux)
+
+        sample = {}
+        if "df" in self.fields_to_load:
+            if self.bundle_seq_length == 1:
+                x = x[0]
+            else:
+                x = (
+                    torch.stack(x, axis=1)
+                    if isinstance(x[0], torch.Tensor)
+                    else np.stack(x, axis=1)
+                )
+        else:
+            x = None
+
+        if "phi" in self.fields_to_load:
+            if self.bundle_seq_length == 1:
+                poten = poten[0]
+            else:
+                poten = (
+                    torch.stack(poten, axis=1)
+                    if isinstance(poten[0], torch.Tensor)
+                    else np.stack(poten, axis=1)
+                )
+        else:
+            poten = None
+
+        if "flux" in self.fields_to_load:
+            if self.bundle_seq_length == 1:
+                gt_flux = np.array(gt_flux).squeeze()
+            else:
+                gt_flux = np.stack(gt_flux, axis=1)
+        else:
+            gt_flux = None
+
+        sample["x"] = x
+        sample["gt"] = None
+        sample["phi"] = poten
+        sample["y_phi"] = None
+        sample["gt_flux"] = (
+            torch.tensor(gt_flux).squeeze() if gt_flux is not None else None
+        )
+
+        sample["timestep"] = meta["timesteps"][original_t_index]
+        sample["itg"] = meta["ion_temp_grad"].squeeze()
+        sample["dg"] = meta["density_grad"].squeeze()
+        sample["s_hat"] = meta["s_hat"].squeeze()
+        sample["q"] = meta["q"].squeeze()
+        sample["geometry"] = meta["geometry"]
+        sample["fluxavg"] = (
+            self.get_avg_flux(file_index).squeeze()
+            if "fluxavg" in self.fields_to_load
+            else None
+        )
+        sample["position"] = None
+        return sample
+
+    def get_timesteps(
+        self,
+        file_idx: torch.Tensor,
+        timestep_idx: Optional[torch.Tensor] = None,
+        offset: int = 0,
+    ):
+        if isinstance(file_idx, int):
+            file_idx = torch.tensor([file_idx])
+        file_idx = file_idx.cpu().long()
+
+        timesteps_tensor = torch.zeros_like(file_idx)
+        for i, file_index in enumerate(file_idx):
+            # directly use cached metadata to avoid opening files
+            t_index = len(self.metadata[file_index.item()]["timesteps"]) - 1
+            timesteps_tensor[i] = t_index
+
+        return timesteps_tensor
+
+    def _recompute_stats_linear(self):
+        t_indices = list(range(0, len(self.files)))
+        stats_path = os.path.join(
+            self.dir, f"df_linear_{len(self.files)}sims_stats.pkl"
+        )
+
+        if os.path.exists(stats_path):
+            stats = pickle.load(open(stats_path, "rb"))
+        else:
+            stats = None
+            for index in tqdm.tqdm(
+                t_indices, desc="re-computing normalization stats for df"
+            ):
+                file_index = index
+
+                with self.backend.open(self.files[file_index]) as f:
+                    t_index = len(self.metadata[file_index]["timesteps"]) - 1
+                    sample = self._load_data(f, file_index, t_index)
+
+                x = sample["x"]
+                if isinstance(x, torch.Tensor):
+                    x = x.cpu().numpy()
+
+                if self.separate_zf:
+                    x = self._separate_zf(x)
+
+                if stats is None:
+                    stats = RunningMeanStd()
+                stats.update(x, np.zeros_like(x), x, x, count=1)
+
+            pickle.dump(stats, open(stats_path, "wb"))
+
+        key = "df"
+        if self.normalizers[key]["agg_axes"]:
+            norm_axes = tuple(self.normalizers[key]["agg_axes"])
+            mean, var, traj_min, traj_max = stats.aggregate_stats(stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes)
+            if key == "phi":
+                # unsqueeze phi to add channel dim
+                mean = np.expand_dims(mean, axis=0)
+                var = np.expand_dims(var, axis=0)
+                traj_min = np.expand_dims(traj_min, axis=0)
+                traj_max = np.expand_dims(traj_max, axis=0)
+            stats.mean = mean
+            stats.var = var
+            stats.min = traj_min
+            stats.max = traj_max
+        else:
+            print(f"No aggregations of stats, using stats of shape: {stats.mean.shape}")
+
+        return stats
+
+    def get_at_time(
+        self,
+        file_idx: torch.Tensor,
+        timestep_idx: torch.Tensor,
+        get_normalized: bool = True,
+    ):
+        sample = self.collate(
+            [self.__getitem__(idx, get_normalized) for idx in file_idx]
+        )
+        return sample
+
+    def __len__(self):
+        return len(self.files)
 
 
 # TODO(gg did not test)
