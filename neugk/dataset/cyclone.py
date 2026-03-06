@@ -5,11 +5,12 @@ import os
 import tqdm
 import pickle
 import hashlib
+import warnings
 
 import random
-from functools import partial
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 import torch
@@ -17,7 +18,7 @@ import numpy as np
 from torch.utils.data import Dataset
 from torch.utils._pytree import tree_map
 
-from neugk.utils import RunningMeanStd, expand_as
+from neugk.utils import RunningMeanStd, expand_as, separate_zf as separate_zf_fn
 from neugk.dataset.backend import DataBackend
 
 
@@ -38,14 +39,18 @@ class CycloneSample:
     q: torch.Tensor
     # geometric tensors for integrals
     geometry: Optional[Dict[str, torch.Tensor]] = None
+    y_fluxavg: Optional[torch.Tensor] = None
+    position: Optional[torch.Tensor] = None
 
     def pin_memory(self):
         if self.df is not None:
             self.df = self.df.pin_memory()
-            self.y_df = self.y_df.pin_memory()
+            if self.y_df is not None:
+                self.y_df = self.y_df.pin_memory()
         if self.phi is not None:
             self.phi = self.phi.pin_memory()
-            self.y_phi = self.y_phi.pin_memory()
+            if self.y_phi is not None:
+                self.y_phi = self.y_phi.pin_memory()
         return self
 
 
@@ -59,7 +64,7 @@ class CycloneDataset(Dataset):
         fields_to_load: Optional[List[str]] = ["df"],
         trajectories: Optional[List[str]] = None,
         partial_holdouts: Optional[dict] = None,
-        normalization: Optional[str] = "zscore",
+        normalization: Optional[dict] = None,
         normalization_scope: str = "sample",
         normalization_stats: Optional[Dict[str, float]] = None,
         spatial_ifft: bool = True,
@@ -95,10 +100,16 @@ class CycloneDataset(Dataset):
         else:
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
         assert normalization_scope in ["sample", "dataset", "trajectory"]
-        assert set(fields_to_load).issubset(set(normalization.keys())), "Normalization must be specified for all fields to load"
+        if normalization is not None:
+            assert set(fields_to_load).issubset(
+                set(normalization.keys())
+            ), "Normalization must be specified for all fields to load"
         self.normalizers = normalization
-        if normalization_stats is not None:
-            self.stats = normalization_stats
+        self.stats = (
+            normalization_stats
+            if normalization_stats is not None
+            else {k: defaultdict(dict) for k in fields_to_load}
+        )
         self.normalization_scope = normalization_scope
         self.cond_filters = cond_filters
         self.subsample = subsample
@@ -132,16 +143,18 @@ class CycloneDataset(Dataset):
                     match = re.match(r"^(.*?)\{([^}]+)\}(.*?)$", trajectories)
                     if not match:
                         trajectories = [trajectories]
-                    prefix, ranges_str, suffix = match.groups()
-                    traj_numbers = []
-                    for part in ranges_str.split(","):
-                        if "-" in part:
-                            start, end = map(int, part.split("-"))
-                            traj_numbers.extend(range(start, end + 1))
-                        else:
-                            traj_numbers.append(int(part))
-
-                    trajectories = [f"{prefix}{num}{suffix}" for num in traj_numbers]
+                    else:
+                        prefix, ranges_str, suffix = match.groups()
+                        traj_numbers = []
+                        for part in ranges_str.split(","):
+                            if "-" in part:
+                                start, end = map(int, part.split("-"))
+                                traj_numbers.extend(range(start, end + 1))
+                            else:
+                                traj_numbers.append(int(part))
+                        trajectories = [
+                            f"{prefix}{num}{suffix}" for num in traj_numbers
+                        ]
 
                 self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
 
@@ -200,8 +213,6 @@ class CycloneDataset(Dataset):
         self.file_num_samples = []
         self.file_num_timesteps = []
         self.steps_per_file = {}
-        if normalization_stats is None:
-            self.stats = {k: defaultdict(dict) for k in fields_to_load}
         per_file_t_indexes = []
         stats: Dict[str, RunningMeanStd] = {}
 
@@ -224,21 +235,18 @@ class CycloneDataset(Dataset):
             if self.n_tail_holdout:
                 if split == "train":
                     timesteps = meta["timesteps"][offset : -self.n_tail_holdout]
-                    orig_t_index = np.arange(len(timesteps))[offset::subsample]
-                else:
-                    timesteps = meta["timesteps"][offset : -self.n_tail_holdout :]
                     orig_t_index = np.arange(len(timesteps))[::subsample]
-                    self.steps_per_file[f_id] = len(
-                        meta["timesteps"][offset::subsample]
-                    )
+                else:
+                    timesteps = meta["timesteps"][offset : -self.n_tail_holdout]
+                    orig_t_index = np.arange(len(timesteps))[::subsample]
+                    self.steps_per_file[f_id] = len(timesteps)
             else:
                 timesteps = meta["timesteps"][offset:]
                 orig_t_index = np.arange(len(timesteps))[::subsample]
 
-            timesteps = timesteps[orig_t_index]
-            n_samples = len(timesteps) - self.bundle_seq_length * 2 + 1
-            self.file_num_samples.append(n_samples)
-            self.file_num_timesteps.append(len(timesteps))
+            n_samples = len(orig_t_index) - self.bundle_seq_length * 2 + 1
+            self.file_num_samples.append(max(0, n_samples))
+            self.file_num_timesteps.append(len(orig_t_index))
             per_file_t_indexes.append(orig_t_index)
 
             # TODO assume same resolution across all files
@@ -250,23 +258,34 @@ class CycloneDataset(Dataset):
                 self.resolution[4],
             )
 
-            # norm_stats is never None here!
-            if normalization_stats is None and normalization_scope == "dataset":
+            if (
+                normalization_stats is None
+                and normalization_scope == "dataset"
+                and normalization is not None
+            ):
                 assert split == "train", "validation must have normalization_stats"
                 for k in self.fields_to_load:
                     if k not in stats:
                         stats[k] = RunningMeanStd()
                     mean = meta[f"{k}_mean"]
-                    std = meta[f"{k}_std"]
+                    var = meta[f"{k}_std"] ** 2
+                    traj_min = meta[f"{k}_min"]
+                    traj_max = meta[f"{k}_max"]
                     if self.normalizers[k]["agg_axes"]:
                         # aggregate along specified dimensions
-                        mean, std = stats[k].aggregate_stats(mean, std, agg_axes=tuple(self.normalizers[k]["agg_axes"]))
+                        mean, var, traj_min, traj_max = stats[k].aggregate_stats(
+                            mean,
+                            var,
+                            traj_min,
+                            traj_max,
+                            agg_axes=tuple(self.normalizers[k]["agg_axes"]),
+                        )
 
                     self.stats[k][f_id]["mean"] = mean
-                    self.stats[k][f_id]["std"] = std
-                    self.stats[k][f_id]["min"] = meta[f"{k}_min"]
-                    self.stats[k][f_id]["max"] = meta[f"{k}_max"]
-                    
+                    self.stats[k][f_id]["std"] = np.sqrt(var)
+                    self.stats[k][f_id]["min"] = traj_min
+                    self.stats[k][f_id]["max"] = traj_max
+
                     stats[k].update(
                         self.stats[k][f_id]["mean"],
                         self.stats[k][f_id]["std"] ** 2,
@@ -281,11 +300,6 @@ class CycloneDataset(Dataset):
 
         if split == "val" and self.partial_holdouts:
             for file_idx, file in enumerate(self.files):
-                filename = os.path.split(file)[-1]
-                n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
-                filename = filename.replace(f"_ifft_separate_zf{n_bands_tag}", "")
-                real_potens_tag = "_realpotens" if real_potens else ""
-                filename = filename.replace(f"_ifft{real_potens_tag}", "")
                 if self.n_tail_holdout:
                     self.offsets[file_idx] = (
                         self.steps_per_file[file_idx] - self.n_tail_holdout
@@ -307,32 +321,29 @@ class CycloneDataset(Dataset):
 
         norm_dataset = normalization is not None and normalization_scope == "dataset"
         if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
-            if separate_zf and not offset:
-                stats["df"] = self._recompute_stats(key="df")
-            else:
-                for key in self.fields_to_load:
-                    stats[key] = self._recompute_stats(key=key, offset=self.offsets[0])
+            # recompute for all fields
+            for key in self.fields_to_load:
+                stats_recomputed = self._recompute_stats(
+                    key=key, offset=self.offsets[0]
+                )
+            stats[key] = stats_recomputed
 
-        if normalization_scope == "dataset" and normalization_stats is None:
+        if (
+            normalization_scope == "dataset"
+            and normalization_stats is None
+            and normalization is not None
+        ):
             for k in fields_to_load:
                 self.stats[k]["full"]["mean"] = stats[k].mean.astype(np.float32)
                 self.stats[k]["full"]["std"] = (stats[k].var ** 0.5).astype(np.float32)
                 self.stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
                 self.stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
 
-    def _separate_zf(self, x):
-        if isinstance(x, np.ndarray):
-            nky = x.shape[-1]
-            zf = np.repeat(x.mean(axis=-1, keepdims=True), repeats=nky, axis=-1)
-            return np.concatenate([zf, x - zf], axis=0)
-        else:
-            nky = x.shape[-1]
-            zf = x.mean(dim=-1, keepdim=True).expand(*x.shape[:-1], nky)
-            return torch.cat([zf, x - zf], dim=0)
-
     def _recompute_stats(
         self, key: str, offset: int = 0, prefix: str = "", suffix: str = ""
     ):
+        stats_lock = threading.Lock()
+        shared_stats = RunningMeanStd()
 
         def process_t_idx(t_idx, key):
             file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
@@ -352,24 +363,15 @@ class CycloneDataset(Dataset):
 
             if key == "df":
                 x = sample["x"]
-                norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3, 4, 5)
                 if self.separate_zf:
-                    x = self._separate_zf(x)
+                    x = separate_zf_fn(x)
             elif key == "phi":
                 x = sample["phi"]
-                if x.ndim == 3:
-                    x = np.expand_dims(x, 0)
-                norm_axes = norm_axes = tuple(self.normalizers[key]["agg_axes"]) if self.normalizers[key]["agg_axes"] else (1, 2, 3)
             else:
                 x = np.array([flux_val], dtype=np.float32)
-                norm_axes = (0,)
 
-            x_mean = np.mean(x, norm_axes, keepdims=True)
-            x_var = np.var(x, norm_axes, keepdims=True)
-            x_min = np.min(x, norm_axes, keepdims=True)
-            x_max = np.max(x, norm_axes, keepdims=True)
-
-            return x_mean, x_var, x_min, x_max
+            with stats_lock:
+                shared_stats.update(x, np.zeros_like(x), x, x, count=1)
 
         # subsample by two for normalization stats
         t_indices = (
@@ -386,23 +388,38 @@ class CycloneDataset(Dataset):
         if os.path.exists(stats_path):
             stats = pickle.load(open(stats_path, "rb"))
         else:
-            process_inds = partial(process_t_idx, key=key)
-            stats = None
             with ThreadPoolExecutor(self.num_workers) as executor:
-                metrics_gen = tqdm.tqdm(
-                    executor.map(process_inds, t_indices),
-                    total=len(t_indices),
+                futures = [
+                    executor.submit(process_t_idx, t_idx, key) for t_idx in t_indices
+                ]
+                for future in tqdm.tqdm(
+                    as_completed(futures),
+                    total=len(futures),
                     desc=f"re-computing normalization stats for {key}",
-                )
+                ):
+                    future.result()  # re-raise any worker exception
 
-                for metrics in metrics_gen:
-                    x_mean, x_var, x_min, x_max = metrics
-                    if stats is None:
-                        stats = RunningMeanStd(shape=x_mean.shape)
-                    stats.update(x_mean, x_var, x_min, x_max)
-
+            stats = shared_stats
             pickle.dump(stats, open(stats_path, "wb"))
             print(f"saved recomputed stats to {stats_path}")
+
+        if self.normalizers[key]["agg_axes"]:
+            norm_axes = tuple(self.normalizers[key]["agg_axes"])
+            mean, var, traj_min, traj_max = stats.aggregate_stats(
+                stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
+            )
+            if key == "phi":
+                # unsqueeze phi to add channel dim
+                mean = np.expand_dims(mean, axis=0)
+                var = np.expand_dims(var, axis=0)
+                traj_min = np.expand_dims(traj_min, axis=0)
+                traj_max = np.expand_dims(traj_max, axis=0)
+            stats.mean = mean
+            stats.var = var
+            stats.min = traj_min
+            stats.max = traj_max
+        else:
+            print(f"No aggregations of stats, using stats of shape: {stats.mean.shape}")
 
         return stats
 
@@ -419,38 +436,46 @@ class CycloneDataset(Dataset):
 
         x, gt = sample["x"], sample["gt"]
         if self.separate_zf:
-            x = self._separate_zf(x)
-            gt = self._separate_zf(gt)
+            if x is not None:
+                x = separate_zf_fn(x, dim=0)
+            if gt is not None:
+                gt = separate_zf_fn(gt, dim=0)
 
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
         geom = sample["geometry"]
 
-        if get_normalized:
+        if self.normalizers is not None and get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
-                gt = (gt - shift) / scale
+                if gt is not None:
+                    gt = (gt - shift) / scale
             if phi is not None:
                 phi, shift, scale = self.normalize(file_index, phi=phi)
-                y_phi = (y_phi - shift) / scale
+                if y_phi is not None:
+                    y_phi = (y_phi - shift) / scale
             if flux is not None:
                 flux, *_ = self.normalize(file_index, flux=flux)
 
         return CycloneSample(
-            df=torch.as_tensor(x, self.dtype) if x is not None else None,
-            y_df=torch.as_tensor(gt, self.dtype) if gt is not None else None,
-            phi=torch.as_tensor(phi, self.dtype) if phi is not None else None,
-            y_phi=(torch.as_tensor(y_phi, self.dtype) if y_phi is not None else None),
-            y_flux=(torch.as_tensor(flux, self.dtype) if flux is not None else None),
-            timestep=torch.as_tensor(timestep, self.dtype),
-            file_index=torch.tensor(file_index, torch.long),
-            timestep_index=torch.tensor(t_index, torch.long),
-            geometry=tree_map(lambda g: torch.as_tensor(g, torch.float64), geom),
-            itg=torch.as_tensor(itg, self.dtype),
-            dg=torch.as_tensor(dg, self.dtype),
-            s_hat=torch.as_tensor(s_hat, self.dtype),
-            q=torch.as_tensor(q, self.dtype),
+            df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
+            y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
+            phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
+            y_phi=(
+                torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
+            ),
+            y_flux=(
+                torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None
+            ),
+            timestep=torch.as_tensor(timestep, dtype=self.dtype),
+            file_index=torch.tensor(file_index, dtype=torch.long),
+            timestep_index=torch.tensor(t_index, dtype=torch.long),
+            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
+            itg=torch.as_tensor(itg, dtype=self.dtype),
+            dg=torch.as_tensor(dg, dtype=self.dtype),
+            s_hat=torch.as_tensor(s_hat, dtype=self.dtype),
+            q=torch.as_tensor(q, dtype=self.dtype),
         )
 
     def _load_data(self, f: Any, file_index: int, t_index: int) -> dict:
@@ -463,20 +488,16 @@ class CycloneDataset(Dataset):
             t_str_gt = str(original_t_index + self.bundle_seq_length + i).zfill(5)
 
             if "df" in self.fields_to_load:
-                k = self.backend.read_df(
-                    f, t_str, self.df_shape, self.active_keys, self.rank
-                )
+                k = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
                 k_gt = self.backend.read_df(
-                    f, t_str_gt, self.df_shape, self.active_keys, self.rank
+                    f, t_str_gt, self.df_shape, self.active_keys
                 )
                 x.append(k)
                 gt.append(k_gt)
 
             if "phi" in self.fields_to_load:
-                phi = self.backend.read_phi(f, t_str, self.phi_resolution, self.rank)
-                phi_gt = self.backend.read_phi(
-                    f, t_str_gt, self.phi_resolution, self.rank
-                )
+                phi = self.backend.read_phi(f, t_str, self.phi_resolution)
+                phi_gt = self.backend.read_phi(f, t_str_gt, self.phi_resolution)
                 poten.append(phi)
                 y_poten.append(phi_gt)
 
@@ -484,7 +505,6 @@ class CycloneDataset(Dataset):
             gt_flux.append(flux)
 
         sample = {}
-        # stack arrays/tensors
         if "df" in self.fields_to_load:
             if self.bundle_seq_length == 1:
                 x, gt = x[0], gt[0]
@@ -653,11 +673,11 @@ class CycloneDataset(Dataset):
         else:
             key = "full" if self.normalization_scope == "dataset" else file_index
             if self.normalizers[field]["type"] == "zscore":
-                shift = expand_as(self.stats[field][key][f"mean"], x)
-                scale = expand_as(self.stats[field][key][f"std"], x)
+                shift = expand_as(self.stats[field][key]["mean"], x)
+                scale = expand_as(self.stats[field][key]["std"], x)
             if self.normalizers[field]["type"] == "minmax":
-                x_min = expand_as(self.stats[field][key][f"min"], x)
-                x_max = expand_as(self.stats[field][key][f"max"], x)
+                x_min = expand_as(self.stats[field][key]["min"], x)
+                x_max = expand_as(self.stats[field][key]["max"], x)
                 scale = (x_max - x_min) / self.minmax_beta1
                 shift = x_min + scale * self.minmax_beta2
         if isinstance(x, torch.Tensor):
@@ -759,20 +779,6 @@ class CycloneDataset(Dataset):
         else:
             return torch.tensor(avg_fluxes)
 
-    def get_flux_seq(
-        self, timestep_index: List[int], file_index: List[int], window: int = 10
-    ):
-        flux_seq = []
-        for f, t in zip(file_index, timestep_index):
-            fluxes = self.get_fluxes(f)
-            start_idx = max(0, t - window)
-            windowed_flux = fluxes[start_idx:t]
-            if len(windowed_flux) < window:
-                pad_size = window - len(windowed_flux)
-                windowed_flux = torch.cat([torch.zeros(pad_size), windowed_flux])
-            flux_seq.append(windowed_flux)
-        return torch.stack(flux_seq, 0)
-
     def __len__(self):
         return self.length
 
@@ -780,9 +786,8 @@ class CycloneDataset(Dataset):
         return self.file_num_timesteps[file_idx]
 
     def collate(self, batch: Sequence[CycloneSample]):
-
         def stack_batch(_b: Sequence[CycloneSample], key: str):
-            if hasattr(_b[0], key) is not None:
+            if getattr(_b[0], key) is not None:
                 return torch.stack([getattr(sample, key) for sample in _b])
             return None
 
@@ -803,55 +808,49 @@ class CycloneDataset(Dataset):
                 lambda *x: torch.stack([torch.as_tensor(v) for v in x]),
                 *[s.geometry for s in batch],
             ),
+            y_fluxavg=stack_batch(batch, "y_fluxavg"),
+            position=stack_batch(batch, "position"),
         )
 
 
 # TODO(gg did not test)
 class LinearCycloneDataset(CycloneDataset):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, linear_sims=True, **kwargs)
-        temp_stats = self._recompute_stats_linear()
-
-        self.stats["df"]["full"]["mean"] = temp_stats.mean.astype(np.float32)
-        self.stats["df"]["full"]["std"] = (temp_stats.var ** (1 / 2)).astype(np.float32)
-        self.stats["df"]["full"]["min"] = temp_stats.min.astype(np.float32)
-        self.stats["df"]["full"]["max"] = temp_stats.max.astype(np.float32)
+        super().__init__(*args, **kwargs)
+        # linear-specific logic if any
 
     def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneSample:
         file_index = index
-
         with self.backend.open(self.files[file_index]) as f:
             t_index = len(self.metadata[file_index]["timesteps"]) - 1
             sample = self._load_data(f, file_index, t_index)
 
         x = sample["x"]
-        if self.separate_zf:
-            x = self._separate_zf(x)
+        if self.separate_zf and x is not None:
+            x = separate_zf_fn(x, dim=0)
         gt = None
 
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
         geometry = sample["geometry"]
-        fluxavg = sample["fluxavg"]
+
         if get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
             if phi is not None:
                 phi, shift, scale = self.normalize(file_index, phi=phi)
-                y_phi = (y_phi - shift) / scale
             if flux is not None:
                 flux, shift, scale = self.normalize(file_index, flux=flux)
-            # note: fluxavg normalization falls back to pure assignment if unsupported
 
         return CycloneSample(
             df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
-            y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
+            y_df=None,
             phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
-            y_phi=(
-                torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
+            y_phi=None,
+            y_flux=(
+                torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None
             ),
-            y_flux=torch.as_tensor(flux, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
@@ -862,12 +861,6 @@ class LinearCycloneDataset(CycloneDataset):
             geometry=tree_map(
                 lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry
             ),
-            y_fluxavg=(
-                torch.as_tensor(fluxavg, dtype=self.dtype)
-                if fluxavg is not None
-                else None
-            ),
-            position=None,
         )
 
     def _load_data(self, f, file_index, t_index) -> dict:
@@ -988,20 +981,33 @@ class LinearCycloneDataset(CycloneDataset):
                 if isinstance(x, torch.Tensor):
                     x = x.cpu().numpy()
 
-                norm_axes = (1, 2, 3, 4, 5)
                 if self.separate_zf:
                     x = self._separate_zf(x)
 
-                x_mean = np.mean(x, norm_axes, keepdims=True)
-                x_var = np.var(x, norm_axes, keepdims=True)
-                x_min = np.min(x, norm_axes, keepdims=True)
-                x_max = np.max(x, norm_axes, keepdims=True)
-
                 if stats is None:
-                    stats = RunningMeanStd(shape=x_mean.shape)
-                stats.update(x_mean, x_var, x_min, x_max)
+                    stats = RunningMeanStd()
+                stats.update(x, np.zeros_like(x), x, x, count=1)
 
             pickle.dump(stats, open(stats_path, "wb"))
+
+        key = "df"
+        if self.normalizers[key]["agg_axes"]:
+            norm_axes = tuple(self.normalizers[key]["agg_axes"])
+            mean, var, traj_min, traj_max = stats.aggregate_stats(
+                stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
+            )
+            if key == "phi":
+                # unsqueeze phi to add channel dim
+                mean = np.expand_dims(mean, axis=0)
+                var = np.expand_dims(var, axis=0)
+                traj_min = np.expand_dims(traj_min, axis=0)
+                traj_max = np.expand_dims(traj_max, axis=0)
+            stats.mean = mean
+            stats.var = var
+            stats.min = traj_min
+            stats.max = traj_max
+        else:
+            print(f"No aggregations of stats, using stats of shape: {stats.mean.shape}")
 
         return stats
 
@@ -1025,29 +1031,22 @@ class CoordinateCycloneDataset(CycloneDataset):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         assert (
-            len(self.fields_to_load) == 2 and "position" in self.fields_to_load
-        ), "cannot load multiple fields for coordinates"
-        assert "flux" not in self.fields_to_load, "loading flux coordinates not supported"
+            "position" in self.fields_to_load
+        ), "Coordinate dataset needs position field"
 
     def _load_data(self, f, file_index, t_index, n_subsamples=65536) -> dict:
         original_t_index = t_index + self.offsets[file_index]
         meta = self.metadata[file_index]
-        assert (
-            self.bundle_seq_length == 1
-        ), "bundling of >1 steps not supported for coordinates"
+        assert self.bundle_seq_length == 1, "bundling not supported for coordinates"
 
         t_str = str(original_t_index).zfill(5)
         t_str_gt = str(original_t_index + 1).zfill(5)
 
+        sample = {}
         if "df" in self.fields_to_load:
-            k = self.backend.read_df(
-                f, t_str, self.df_shape, self.active_keys, self.rank
-            )
-            k_gt = self.backend.read_df(
-                f, t_str_gt, self.df_shape, self.active_keys, self.rank
-            )
+            k = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
+            k_gt = self.backend.read_df(f, t_str_gt, self.df_shape, self.active_keys)
 
-            # cast to numpy for coordinate extraction
             if isinstance(k, torch.Tensor):
                 k = k.cpu().numpy()
             if isinstance(k_gt, torch.Tensor):
@@ -1056,30 +1055,11 @@ class CoordinateCycloneDataset(CycloneDataset):
             position = np.indices(k.shape[1:]).reshape(5, -1).T
             x = np.concatenate([k[0].ravel()[None], k[1].ravel()[None]])
             y = np.concatenate([k_gt[0].ravel()[None], k_gt[1].ravel()[None]])
-        else:
-            x = None
 
-        if "phi" in self.fields_to_load:
-            phi = self.backend.read_phi(f, t_str_gt, self.phi_resolution, self.rank)
-            if isinstance(phi, torch.Tensor):
-                phi = phi.cpu().numpy()
-
-            poten = phi.ravel()
-            position = np.indices(phi.shape).reshape(5, -1).T
-        else:
-            phi = None
-
-        # subsample positions
-        rand_inds = np.random.choice(len(position), size=n_subsamples)
-        position = position[rand_inds]
-
-        sample = {}
-        sample["x"] = x[:, rand_inds] if x is not None else None
-        sample["gt"] = y[:, rand_inds] if y is not None else None
-        sample["phi"] = poten[:, rand_inds] if phi is not None else None
-        sample["y_phi"] = None
-        sample["gt_flux"] = None
-        sample["position"] = position
+            rand_inds = np.random.choice(len(position), size=n_subsamples)
+            sample["x"] = x[:, rand_inds]
+            sample["gt"] = y[:, rand_inds]
+            sample["position"] = position[rand_inds]
 
         sample["timestep"] = meta["timesteps"][original_t_index]
         sample["itg"] = meta["ion_temp_grad"].squeeze()
@@ -1087,66 +1067,4 @@ class CoordinateCycloneDataset(CycloneDataset):
         sample["s_hat"] = meta["s_hat"].squeeze()
         sample["q"] = meta["q"].squeeze()
         sample["geometry"] = meta["geometry"]
-        sample["fluxavg"] = (
-            self.get_avg_flux(file_index).squeeze()
-            if "fluxavg" in self.fields_to_load
-            else None
-        )
-
         return sample
-
-    def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneSample:
-        file_index, t_index = self.flat_index_to_file_and_tstep[index]
-
-        with self.backend.open(self.files[file_index]) as f:
-            sample = self._load_data(f, file_index, t_index)
-
-        x, gt = sample["x"], sample["gt"]
-        if self.separate_zf:
-            x = self._separate_zf(x)
-            gt = self._separate_zf(gt)
-
-        phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
-        timestep = sample["timestep"]
-        itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
-        geometry = sample["geometry"]
-        fluxavg = sample["fluxavg"]
-        position = sample["position"]
-
-        if get_normalized:
-            if x is not None:
-                x, shift, scale = self.normalize(file_index, df=x)
-                gt = (gt - shift) / scale
-            if phi is not None:
-                phi, shift, scale = self.normalize(file_index, phi=phi)
-                y_phi = (y_phi - shift) / scale
-            if flux is not None:
-                flux, *_ = self.normalize(file_index, flux=flux)
-
-        return CycloneSample(
-            df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
-            y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
-            phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
-            y_phi=(
-                torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
-            ),
-            y_flux=(
-                torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None
-            ),
-            y_fluxavg=(
-                torch.as_tensor(fluxavg, dtype=self.dtype)
-                if fluxavg is not None
-                else None
-            ),
-            position=torch.as_tensor(position, dtype=self.dtype),
-            timestep=torch.as_tensor(timestep, dtype=self.dtype),
-            file_index=torch.tensor(file_index, dtype=torch.long),
-            timestep_index=torch.tensor(t_index, dtype=torch.long),
-            geometry=tree_map(
-                lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry
-            ),
-            itg=torch.as_tensor(itg, dtype=self.dtype),
-            dg=torch.as_tensor(dg, dtype=self.dtype),
-            s_hat=torch.as_tensor(s_hat, dtype=self.dtype),
-            q=torch.as_tensor(q, dtype=self.dtype),
-        )

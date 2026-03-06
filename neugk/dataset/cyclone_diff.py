@@ -1,4 +1,5 @@
 from typing import Optional, Dict, Sequence, Any
+
 import os
 import pickle
 from tqdm import tqdm
@@ -11,8 +12,9 @@ import torch.distributed as dist
 from torch.utils._pytree import tree_map
 from torch.utils.data import DataLoader
 
-from neugk.utils import RunningMeanStd
+from neugk.utils import RunningMeanStd, separate_zf as separate_zf_fn
 from neugk.dataset.cyclone import CycloneDataset
+from neugk.dataset.backend import KvikIOBackend
 
 
 @dataclass
@@ -55,10 +57,15 @@ class CycloneAEDataset(CycloneDataset):
         )
         return super()._recompute_stats(key, offset, prefix="diff", suffix=filter_tag)
 
-    def __getitem__(self, index: int, get_normalized: bool = True) -> CycloneAESample:
+    def __getitem__(
+        self, index: int, get_normalized: bool = True, override_latens: bool = False
+    ) -> CycloneAESample:
         file_index, t_index = self.flat_index_to_file_and_tstep[index]
 
-        if getattr(self, "precomputed_latents", None) is not None:
+        if (
+            getattr(self, "precomputed_latents", None) is not None
+            and not override_latens
+        ):
             sample = self.precomputed_latents[(file_index, t_index)]
             x = sample["x"]
         else:
@@ -66,7 +73,7 @@ class CycloneAEDataset(CycloneDataset):
                 sample = self._load_data(f, file_index, t_index)
             x = sample["x"]
             if x is not None and self.separate_zf:
-                x = self._separate_zf(x)
+                x = separate_zf_fn(x, dim=0)
 
         phi = sample["phi"]
         flux = sample["flux"]
@@ -199,12 +206,16 @@ class CycloneAEDataset(CycloneDataset):
     ):
         if df is not None:
             if self.autoencoder is not None:
+                # TODO naive, can improve: pad axes can be precomputed from resolution
                 condition = kwargs["condition"]
-                ch = 2 + 2 * self.separate_zf
-                dummy = torch.zeros((1, ch, *self.resolution), device=condition.device)
-                dummy_cond = condition[0:1]
-                _, pad_axes = self.autoencoder.encode(dummy, condition=dummy_cond)
-                df = self.autoencoder.decode(df, pad_axes, condition=condition)["df"]
+                # handle single sample input from evaluate.py loops
+                if df.ndim == 5:  # (C, Vp, Vm, S, X, Y) -> (1, C, ...)
+                    df = df.unsqueeze(0)
+                if condition.ndim == 1:  # (N_cond,) -> (1, N_cond)
+                    condition = condition.unsqueeze(0)
+
+                df = self.autoencoder.decode(df, condition=condition)["df"]
+                df = df.squeeze(0)
             field = "df"
             x = df
         elif phi is not None:
@@ -219,7 +230,6 @@ class CycloneAEDataset(CycloneDataset):
         return x * scale + shift
 
     def collate(self, batch: Sequence[CycloneAESample]):
-
         def stack_batch(_b: Sequence[CycloneAESample], key: str):
             if getattr(_b[0], key, None) is not None:
                 return torch.stack([getattr(sample, key) for sample in _b])
@@ -250,9 +260,30 @@ class CycloneAEDataset(CycloneDataset):
         latent_stats: Optional[RunningMeanStd] = None,
     ):
         self.autoencoder = autoencoder
-        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+
+        config_keys = ["cond_filters", "subsample", "separate_zf"]
+        config_str = "".join(str(getattr(self, k, "")) for k in config_keys)
+        model_str = str({k: v.shape for k, v in autoencoder.state_dict().items()})
+        hash_str = "".join(sorted(self.files)) + config_str + model_str
+        file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
+
+        tmu = "mu" if self.decouple_mu else ""
+        offset = self.offsets[0]
+        filter_tag = (
+            f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
+        )
+
+        segments = [
+            "diff",
+            f"{self.split}_latents",
+            f"offset{offset}",
+            tmu,
+            filter_tag,
+            file_hash,
+            "latents",
+        ]
         latents_dump_pkl = os.path.join(
-            self.dir, f"diff_{self.split}_latents_{file_hash}.pkl"
+            self.dir, "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
         )
 
         if os.path.exists(latents_dump_pkl):
@@ -264,15 +295,17 @@ class CycloneAEDataset(CycloneDataset):
                 dist.barrier()
         else:
             # bypass pin_memory/worker issues for initial pass
-            tmp_loader = DataLoader(
-                dataset=dataloader.dataset,
-                batch_size=32,
-                num_workers=0,  # forced to 0 to prevent deadlocks with gds
-                pin_memory=False,
-                collate_fn=dataloader.collate_fn,
-                drop_last=dataloader.drop_last,
-                shuffle=False,
-            )
+            # tmp_loader = DataLoader(
+            #     dataset=dataloader.dataset,
+            #     batch_size=128,
+            #     num_workers=dataloader.num_workers,
+            #     prefetch_factor=1,
+            #     pin_memory=False,
+            #     collate_fn=dataloader.collate_fn,
+            #     drop_last=dataloader.drop_last,
+            #     shuffle=False,
+            # )
+            tmp_loader = dataloader
             autoencoder.eval()
             autoencoder.to(device)
             latents_dict = {}
@@ -300,9 +333,9 @@ class CycloneAEDataset(CycloneDataset):
 
                     # convert torch/numpy fields cleanly
                     if isinstance(sample["phi"], torch.Tensor):
-                        sample["phi"] = sample["phi"].numpy()
+                        sample["phi"] = sample["phi"].cpu().numpy()
                     if isinstance(sample["flux"], torch.Tensor):
-                        sample["flux"] = sample["flux"].numpy()
+                        sample["flux"] = sample["flux"].cpu().numpy()
 
                     latents_dict[(f_idx, t_idx)] = sample
 
@@ -349,6 +382,10 @@ class CycloneAEDataset(CycloneDataset):
             assert latent_stats is not None
             self.latent_stats = latent_stats
 
+        # update backend to not use kvikio, not needed for diffusion beyond this point
+        if isinstance(self.backend, KvikIOBackend):
+            self.backend = KvikIOBackend(self.rank, use_kvikio=False)
+
 
 @dataclass
 class CycloneSimSiamSample(CycloneAESample):
@@ -370,24 +407,26 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         t_index_aug = sample["t_index_aug"]
 
         if x is not None and self.separate_zf:
-            x = self._separate_zf(x)
-            x_aug = self._separate_zf(x_aug)
+            x = separate_zf_fn(x, dim=0)
+            x_aug = separate_zf_fn(x_aug, dim=0)
 
         phi, flux = sample["phi"], sample["flux"]
         avg_flux = self.get_avg_flux(file_index)
         timestep = sample["timestep"]
         geom = sample["geometry"]
 
-        cond_list = []
-        for k in self.conditions:
-            val = sample[k]
-            if isinstance(val, torch.Tensor):
-                cond_list.append(val.to(dtype=self.dtype))
-            else:
-                cond_list.append(torch.tensor(val, dtype=self.dtype))
-        conditioning = torch.stack(cond_list, dim=-1)
+        conditioning = None
+        if self.conditions is not None and len(self.conditions) > 0:
+            cond_list = []
+            for k in self.conditions:
+                val = sample[k]
+                if isinstance(val, torch.Tensor):
+                    cond_list.append(val.to(dtype=self.dtype))
+                else:
+                    cond_list.append(torch.tensor(val, dtype=self.dtype))
+            conditioning = torch.stack(cond_list, dim=-1)
 
-        if self.normalization is not None and get_normalized:
+        if get_normalized:
             if x is not None:
                 x, _, _ = self.normalize(file_index, df=x)
                 x_aug, _, _ = self.normalize(file_index, df=x_aug)
@@ -456,25 +495,21 @@ class CycloneSimSiamDataset(CycloneAEDataset):
             t_str_aug = str(rnd).zfill(5)
             t_aug.append(rnd)
 
-            if "df" in self.input_fields:
-                k = self.backend.read_df(
-                    f, t_str, self.df_shape, self.active_keys, self.rank
-                )
-                k2 = self.backend.read_df(
-                    f, t_str_aug, self.df_shape, self.active_keys, self.rank
-                )
+            if "df" in self.fields_to_load:
+                k = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
+                k2 = self.backend.read_df(f, t_str_aug, self.df_shape, self.active_keys)
                 xs.append(k)
                 xs2.append(k2)
 
-            if "phi" in self.input_fields:
-                phi = self.backend.read_phi(f, t_str, self.phi_resolution, self.rank)
+            if "phi" in self.fields_to_load:
+                phi = self.backend.read_phi(f, t_str, self.phi_resolution)
                 phis.append(phi)
 
             flux = meta["fluxes"][orig_t_index + i]
             fluxes.append(flux)
 
         sample = {}
-        if "df" in self.input_fields:
+        if "df" in self.fields_to_load:
             if self.bundle_seq_length == 1:
                 xs, xs2 = xs[0], xs2[0]
             else:
@@ -491,7 +526,7 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         else:
             xs = xs2 = None
 
-        if "phi" in self.input_fields:
+        if "phi" in self.fields_to_load:
             if self.bundle_seq_length == 1:
                 phis = phis[0]
             else:
@@ -525,9 +560,8 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         return sample
 
     def collate(self, batch: Sequence[CycloneSimSiamSample]):
-
         def stack_batch(_b: Sequence[CycloneSimSiamSample], key: str):
-            if hasattr(_b[0], key) is not None:
+            if getattr(_b[0], key, None) is not None:
                 return torch.stack([getattr(sample, key) for sample in _b])
             return None
 

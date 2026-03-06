@@ -9,3 +9,4 @@ einops
 wandb
 hydra-core
 tqdm
+pytest

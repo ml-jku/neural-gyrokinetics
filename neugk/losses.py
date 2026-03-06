@@ -14,10 +14,12 @@ from conflictfree.momentum_operator import PseudoMomentumOperator
 from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
 
 from neugk.dataset.cyclone import CycloneDataset, CycloneSample
+from neugk.utils import recombine_zf
 from neugk.integrals import FluxIntegral
 
 
 def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
+    """Computes mean squared error relative to the norm of the target."""
     assert x.shape == y.shape, "Mismatch in dimensions for computing loss"
     if x.ndim > 1:
         if dim_to_keep is None:
@@ -27,12 +29,14 @@ def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
             # inference mode
             x = x.flatten(2)
             y = y.flatten(2)
+    # compute norms
     diff = x - y
     diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
     y_norms = torch.linalg.norm(y, ord=2, dim=-1)
     eps = 1e-8
     if squared:
         diff_norms, y_norms = diff_norms**2, y_norms**2
+    # finalize loss
     if dim_to_keep is None:
         # sum over timesteps and mean over examples in batch
         return torch.mean(diff_norms / (y_norms + eps))
@@ -42,6 +46,8 @@ def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
 
 
 class LossWrapper(nn.Module):
+    """Wrapper for combining multiple physics and data losses."""
+
     def __init__(
         self,
         weights: Optional[Dict] = None,
@@ -70,8 +76,10 @@ class LossWrapper(nn.Module):
         tgts: Dict[str, torch.Tensor],
         idx_data: Optional[Dict[str, torch.Tensor]] = None,
     ):
+        """Computes physical integral losses using the FluxIntegral module."""
         assert self.denormalize_fn is not None
         assert geometry is not None
+        # prepare physical fields
         if self.training:
             pred_df, pred_phi, tgt_phi, tgt_eflux = [], [], [], []
             for b, f in enumerate(idx_data["file_index"].tolist()):
@@ -100,15 +108,11 @@ class LossWrapper(nn.Module):
             if tgt_phi.ndim == 5 and tgt_phi.shape[1] == 1:
                 tgt_phi = tgt_phi.squeeze(1)
 
+        # recombine zonal flow
         if self.separate_zf and pred_df.shape[1] > 2:
-            if pred_df.shape[1] == 4:
-                pred_df = pred_df[:, [0, 1]] + pred_df[:, [2, 3]]
-            else:
-                pred_df = torch.cat(
-                    [pred_df[:, 0::2].sum(1, True), pred_df[:, 1::2].sum(1, True)],
-                    dim=1,
-                )
+            pred_df = recombine_zf(pred_df, dim=1)
 
+        # compute integrals
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
 
         int_losses = {
@@ -130,30 +134,35 @@ class LossWrapper(nn.Module):
         progress_remaining: float = 1.0,
         separate_zf: bool = False,
     ):
+        """Forward pass to compute all active losses."""
         losses = {}
         int_losses = {}
-        # reset weight if scheduler is defined
+        # update weights
         if self.schedulers is not None:
             for key in self.schedulers.keys():
                 if key in self.weights:
                     self.weights[key] = self.schedulers[key](progress_remaining)
-        # NOTE: network predicts phi -> weight["phi_int"] = 0 (otherwise summed twice)
-        # only compute integrals if requested by weights or in eval
+
+        # calculate physical quantities
         do_ints = not self.training and compute_integrals
         if sum([self.weights.get(k, 0.0) for k in self._int_losses]) > 0 or do_ints:
             int_losses, integrated = self.integral_loss(geometry, preds, tgts, idx_data)
         else:
             integrated = None
+
+        # setup loss keys
         loss_keys = (
             [k for k, w in self.weights.items() if w > 0.0]
             if self.training
             else list(set(self.weights.keys()).union(set(int_losses.keys())))
         )
+
         int_keys = [k for k in loss_keys if "int" in k]
         cross_keys = [k for k in loss_keys if "cross" in k]
         data_keys = list(set(loss_keys) - set(int_keys) - set(cross_keys))
+
+        # validate inputs
         if not all([k in preds for k in data_keys]):
-            # warnings.warn("Prediction - DATA loss weight key mismatch.")
             missing_keys = [k for k in data_keys if k not in preds]
             for k in missing_keys:
                 if k in tgts:
@@ -162,10 +171,8 @@ class LossWrapper(nn.Module):
                     tmp_key = list(preds.keys())[0]
                     preds[k] = torch.zeros(size=(1, 1)).to(preds[tmp_key].device)
                     tgts[k] = torch.zeros_like(preds[k]).to(preds[k].device)
-        # TODO(diff) are these really needed?
-        # if not all([k.replace("_cross", "") in preds for k in cross_keys]):
-        #     raise ValueError("Prediction - CROSS loss weight key mismatch.")
-        # compute losses
+
+        # compute individual losses
         for k in data_keys:
             if k in ["df", "phi"]:
                 if k == "df" and separate_zf:
@@ -178,20 +185,19 @@ class LossWrapper(nn.Module):
                     losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
                 if self.training:
-                    losses[k] = F.l1_loss(preds[k], tgts[k])
+                    losses[k] = F.l1_loss(preds[k], tgts[k].view_as(preds[k]))
                 else:
-                    losses[k] = F.mse_loss(preds[k], tgts[k])
+                    losses[k] = F.mse_loss(preds[k], tgts[k].view_as(preds[k]))
         for k in int_keys + cross_keys:
             if k in int_losses:
                 losses[k] = int_losses[k]
+
+        # aggregate and return
         if self.training:
-            # reweight and accumulate
             loss = sum([self.weights[k] * losses[k] for k in loss_keys])
-            # filter active losses
             losses = {k: losses[k] for k, w in self.weights.items() if w > 0.0}
             return loss, losses
         else:
-            # no reweight in validation
             loss = sum([losses[k] for k in loss_keys if k in losses])
             return loss, losses, integrated
 
@@ -208,6 +214,8 @@ class LossWrapper(nn.Module):
 
 
 class GradientBalancer(nn.Module):
+    """Balances multitask gradients using conflict-free projection techniques."""
+
     def __init__(
         self,
         optimizer: torch.optim.Optimizer,
@@ -224,7 +232,7 @@ class GradientBalancer(nn.Module):
         self.scaler = scaler
         self.clip_to = clip_to
 
-        # conflict free gradnorm
+        # operator setup
         if mode == "pseudo":
             self.operator = PseudoMomentumOperator(n_tasks)
             self.loss_selector = OrderedSliceSelector()
@@ -252,11 +260,10 @@ class GradientBalancer(nn.Module):
                 grads.append(get_gradient_vector(model, none_grad_mode="zero"))
             # apply conflict-free gradient directions
             self.operator.update_gradient(model, grads)
-        # clipping
+        # update weights
         if self.clip_grad:
             self.scaler.unscale_(self.optimizer)
             clip_grad_norm_(model.parameters(), self.clip_to)
-        # gradient step
         self.scaler.step(self.optimizer)
         self.scaler.update()
         return model

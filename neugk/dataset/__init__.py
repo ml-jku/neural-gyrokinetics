@@ -3,7 +3,7 @@ from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import os
+import resource
 
 from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import (
@@ -20,6 +20,22 @@ from neugk.dataset.backend import H5Backend, KvikIOBackend
 from neugk.dataset.augment import mask_modes
 
 
+def set_ulimit(limit: int = 65536):
+    # os.system(f"ulimit -n {limit}")
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if soft < limit:
+            new_soft = min(limit, hard)
+            resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft, hard))
+    except (ValueError, resource.error):
+        pass
+
+
+def _worker_init_fn(worker_id):
+    _ = worker_id
+    set_ulimit()
+
+
 def check_partial_holdouts(dataset_cfg):
     # check that each trajectory in partial holdouts also appears in training
     for entry in dataset_cfg.partial_holdouts:
@@ -32,6 +48,8 @@ def check_partial_holdouts(dataset_cfg):
 
 
 def get_data(cfg, rank: int = 0):
+    # increase file descriptor limit for CUDA IPC and shared memory handles
+    set_ulimit()
     assert cfg.dataset.name in ["cyclone"]
     backend = getattr(cfg.dataset, "backend", "h5")
     use_ddp = dist.is_initialized()
@@ -45,6 +63,7 @@ def get_data(cfg, rank: int = 0):
             partial_holdouts[file] = last_n
 
     if cfg.workflow == "gyroswin":
+        use_kvikio_train = True
         input_fields = set(
             cfg.dataset.input_fields
             + [
@@ -74,6 +93,7 @@ def get_data(cfg, rank: int = 0):
         else:
             dataset_class = CycloneDataset
     elif cfg.workflow == "pinc":
+        use_kvikio_train = True
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
         train_kwargs = {"conditions": list(cfg.model.conditioning)}
@@ -83,6 +103,8 @@ def get_data(cfg, rank: int = 0):
         else:
             dataset_class = CycloneAEDataset
     elif cfg.workflow == "diffusion":
+        # no need for gds in diffusion
+        use_kvikio_train = getattr(cfg.dataset, "gds_override", False)
         train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
         train_kwargs = {"conditions": list(cfg.model.conditioning)}
@@ -99,7 +121,7 @@ def get_data(cfg, rank: int = 0):
         train_backend = H5Backend(rank)
         val_backend = H5Backend(rank)
     elif backend == "gds":
-        train_backend = KvikIOBackend(rank)
+        train_backend = KvikIOBackend(rank, use_kvikio=use_kvikio_train)
         # NOTE: for validation load without gds, save space, slow is acceptable
         val_backend = KvikIOBackend(rank, use_kvikio=False)
 
@@ -160,19 +182,23 @@ def get_data(cfg, rank: int = 0):
         **val_kwargs,
     )
 
+    # gpudirect storage only used if kvikio is required, oterwise raw bins
+    use_gpudirect = backend == "gds" and use_kvikio_train
     # dataloaders
-    prefetch_factor = min(2, cfg.training.num_workers // 2)
+    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
     # NOTE: must be false when returning gpu data
-    pin_memory = cfg.training.pin_memory and backend != "gds"
+    pin_memory = cfg.training.pin_memory and not use_gpudirect
     dataloader_kwargs = {}
-    if backend == "gds":
-        if cfg.ddp.enable:
-            prefetch_factor = 1
-            # increase FP limit
-            os.system("ulimit -n 2048")
-            # # defeats GPU loading
-            # mp.set_sharing_strategy("file_system")
-        dataloader_kwargs = {"multiprocessing_context": mp.get_context("spawn")}
+    if cfg.training.num_workers > 0:
+        # increase FP limit on each subprocess (for large batch sizes)
+        dataloader_kwargs["worker_init_fn"] = _worker_init_fn
+
+    if use_gpudirect:
+        # cannot for context to dataloader workers with gds
+        if cfg.training.num_workers > 0:
+            dataloader_kwargs["multiprocessing_context"] = mp.get_context("spawn")
+        # keep memory requirements low
+        prefetch_factor = 1
 
     trainloader = DataLoader(
         trainset,
@@ -182,8 +208,8 @@ def get_data(cfg, rank: int = 0):
         collate_fn=trainset.collate,
         pin_memory=pin_memory,
         sampler=DistributedSampler(trainset) if use_ddp else None,
-        persistent_workers=True,
-        prefetch_factor=prefetch_factor,
+        persistent_workers=cfg.training.num_workers > 0,
+        prefetch_factor=prefetch_factor if cfg.training.num_workers > 0 else None,
         **dataloader_kwargs,
     )
 
@@ -195,8 +221,8 @@ def get_data(cfg, rank: int = 0):
         collate_fn=holdout_trajectories_valset.collate,
         pin_memory=pin_memory,
         sampler=(DistributedSampler(holdout_trajectories_valset) if use_ddp else None),
-        persistent_workers=True,
-        prefetch_factor=prefetch_factor,
+        persistent_workers=cfg.training.num_workers > 0,
+        prefetch_factor=prefetch_factor if cfg.training.num_workers > 0 else None,
         **dataloader_kwargs,
     )
 
@@ -236,6 +262,9 @@ def get_data(cfg, rank: int = 0):
             collate_fn=holdout_samples_valset.collate,
             pin_memory=pin_memory,
             sampler=(DistributedSampler(holdout_samples_valset) if use_ddp else None),
+            persistent_workers=cfg.training.num_workers > 0,
+            prefetch_factor=prefetch_factor if cfg.training.num_workers > 0 else None,
+            **dataloader_kwargs,
         )
 
     augmentations = []
@@ -249,16 +278,31 @@ def get_data(cfg, rank: int = 0):
                     )
                 )
             elif key == "mask_modes":
+                mix_weights = getattr(
+                    cfg.dataset.augment.mask_modes, "mix_weights", None
+                )
+                cutoff = getattr(cfg.dataset.augment.mask_modes, "cutoff", None)
                 augmentations.append(
                     mask_modes(
                         mask_ratio=cfg.dataset.augment.mask_modes.mask_ratio,
+                        strategy=cfg.dataset.augment.mask_modes.strategy,
+                        cutoff=cutoff,
+                        mix_weights=mix_weights,
                         is_fourier=cfg.dataset.augment.mask_modes.is_fourier,
                         rescale=cfg.dataset.augment.mask_modes.rescale,
                         zf_separated=cfg.dataset.separate_zf,
                         weights=cfg.dataset.augment.mask_modes.weights,
                         mask_zero_mode=cfg.dataset.augment.mask_modes.mask_zero_mode,
-                        denormalize_fn=trainset.denormalize if not cfg.dataset.augment.mask_modes.is_fourier else None,
-                        normalize_fn=trainset.normalize if not cfg.dataset.augment.mask_modes.is_fourier else None,
+                        denormalize_fn=(
+                            trainset.denormalize
+                            if not cfg.dataset.augment.mask_modes.is_fourier
+                            else None
+                        ),
+                        normalize_fn=(
+                            trainset.normalize
+                            if not cfg.dataset.augment.mask_modes.is_fourier
+                            else None
+                        ),
                     )
                 )
             else:

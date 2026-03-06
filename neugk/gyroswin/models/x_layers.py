@@ -29,7 +29,6 @@ class MixingBlock(nn.Module):
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
     ):
-
         super().__init__()
         self.left_dim = left_dim
         self.right_dim = right_dim
@@ -105,7 +104,6 @@ class LatentMixingTransformer(nn.Module):
         act_fn: nn.Module = nn.GELU,
         init_weights: Optional[str] = None,
     ):
-
         super().__init__()
 
         if isinstance(drop_path, float):

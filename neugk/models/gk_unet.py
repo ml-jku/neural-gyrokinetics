@@ -636,6 +636,10 @@ class SwinNDUnet(nn.Module):
             x = torch.cat([x, first_res], -1)
         return self.patch_decode(x, pad_axes, **cond)
 
+    def get_pad_axes(self, resolution: Sequence[int]) -> List[int]:
+        _, pad_axes = pad_to_blocks(resolution, self.patch_size)
+        return pad_axes
+
     def patch_encode(self, x: torch.Tensor) -> torch.Tensor:
         x = rearrange(x, "b c ... -> b ... c")
         # pad to patch blocks
@@ -683,9 +687,9 @@ class Swin5DUnet(SwinNDUnet):
     def __init__(self, decouple_mu: bool = False, **kwargs):
         full_in_channels = kwargs["in_channels"]
         kwargs["space"] = 5
+        full_resolution = list(kwargs["base_resolution"])
         if decouple_mu:
             kwargs["space"] = 4
-            full_resolution = list(kwargs["base_resolution"])
             # adjust patch and window size
             patch_size = kwargs["patch_size"]
             kwargs["patch_size"] = [patch_size[0]] + patch_size[2:]
