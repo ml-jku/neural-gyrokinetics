@@ -270,18 +270,24 @@ class CycloneDataset(Dataset):
                     if k not in stats:
                         stats[k] = RunningMeanStd()
                     mean = meta[f"{k}_mean"]
-                    var = meta[f"{k}_std"]**2
+                    var = meta[f"{k}_std"] ** 2
                     traj_min = meta[f"{k}_min"]
                     traj_max = meta[f"{k}_max"]
                     if self.normalizers[k]["agg_axes"]:
                         # aggregate along specified dimensions
-                        mean, var, traj_min, traj_max = stats[k].aggregate_stats(mean, var, traj_min, traj_max, agg_axes=tuple(self.normalizers[k]["agg_axes"]))
+                        mean, var, traj_min, traj_max = stats[k].aggregate_stats(
+                            mean,
+                            var,
+                            traj_min,
+                            traj_max,
+                            agg_axes=tuple(self.normalizers[k]["agg_axes"]),
+                        )
 
                     self.stats[k][f_id]["mean"] = mean
                     self.stats[k][f_id]["std"] = np.sqrt(var)
                     self.stats[k][f_id]["min"] = traj_min
                     self.stats[k][f_id]["max"] = traj_max
-                    
+
                     stats[k].update(
                         self.stats[k][f_id]["mean"],
                         self.stats[k][f_id]["std"] ** 2,
@@ -476,8 +482,12 @@ class CycloneDataset(Dataset):
             df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
             y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
             phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
-            y_phi=(torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None),
-            y_flux=(torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None),
+            y_phi=(
+                torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
+            ),
+            y_flux=(
+                torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None
+            ),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
@@ -1003,7 +1013,9 @@ class LinearCycloneDataset(CycloneDataset):
         key = "df"
         if self.normalizers[key]["agg_axes"]:
             norm_axes = tuple(self.normalizers[key]["agg_axes"])
-            mean, var, traj_min, traj_max = stats.aggregate_stats(stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes)
+            mean, var, traj_min, traj_max = stats.aggregate_stats(
+                stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
+            )
             if key == "phi":
                 # unsqueeze phi to add channel dim
                 mean = np.expand_dims(mean, axis=0)

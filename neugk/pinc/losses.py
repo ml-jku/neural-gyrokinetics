@@ -30,6 +30,7 @@ def _wide_min_norm_solution(
     a = torch.linalg.solve(G, w)
     return a @ U
 
+
 class PINCLossWrapper(LossWrapper):
     """PINCLossWrapper class."""
 
@@ -215,9 +216,13 @@ class PINCLossWrapper(LossWrapper):
             if loss_type == "mse":
                 per_mode[f"mode_loss/ky={m}"] = F.mse_loss(p[..., m], t[..., m])
             elif loss_type == "relative_mse":
-                per_mode[f"mode_loss/ky={m}"] = (torch.sum((p[..., m] - t[..., m]) ** 2) / (torch.sum(t[..., m]**2) + 1e-8))
+                per_mode[f"mode_loss/ky={m}"] = torch.sum(
+                    (p[..., m] - t[..., m]) ** 2
+                ) / (torch.sum(t[..., m] ** 2) + 1e-8)
             else:
-                raise NotImplementedError(f"Unsupported per-mode loss type: {loss_type}")
+                raise NotImplementedError(
+                    f"Unsupported per-mode loss type: {loss_type}"
+                )
 
         return per_mode
 
@@ -250,11 +255,12 @@ class PINCLossWrapper(LossWrapper):
         return {"vicreg_covariance": cov_loss}
 
     def compute_data_loss(
-        self, pred: torch.Tensor, 
-        target: torch.Tensor, 
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
         eps: float = 1e-8,
-        loss_type: Optional[str] = None, 
-        reduction: str = "mean"
+        loss_type: Optional[str] = None,
+        reduction: str = "mean",
     ) -> torch.Tensor:
         loss_type = loss_type or self._get_current_loss_types()["data"]
 
@@ -268,20 +274,22 @@ class PINCLossWrapper(LossWrapper):
             return F.smooth_l1_loss(pred, target, reduction=reduction)
         if loss_type == "relative_mse":
             if reduction == "mean":
-                return (torch.sum((pred - target) ** 2) / (torch.sum(target**2) + eps))
+                return torch.sum((pred - target) ** 2) / (torch.sum(target**2) + eps)
             else:
                 return (pred - target) ** 2 / (target**2 + eps)
         if loss_type == "relative_l1":
             return (torch.abs(pred - target) / (torch.abs(target) + eps)).mean()
         if loss_type == "log_error":
             return F.mse_loss(
-                torch.log(torch.abs(pred) + eps), torch.log(torch.abs(target) + eps),
-                reduction=reduction
+                torch.log(torch.abs(pred) + eps),
+                torch.log(torch.abs(target) + eps),
+                reduction=reduction,
             )
         if loss_type == "log_l1_error":
             return F.l1_loss(
-                torch.log(torch.abs(pred) + eps), torch.log(torch.abs(target) + eps),
-                reduction=reduction
+                torch.log(torch.abs(pred) + eps),
+                torch.log(torch.abs(target) + eps),
+                reduction=reduction,
             )
         if loss_type == "log_cosh":
             return torch.log(torch.cosh(pred - target)).mean()

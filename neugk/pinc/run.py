@@ -41,7 +41,11 @@ class PINCRunner(BaseRunner):
         #     else {}
         # )
         dataset_stats = {}
-        augmentations = [k for k in getattr(self.cfg.dataset, "augment", {}).keys() if getattr(self.cfg.dataset.augment, k).active]
+        augmentations = [
+            k
+            for k in getattr(self.cfg.dataset, "augment", {}).keys()
+            if getattr(self.cfg.dataset.augment, k).active
+        ]
 
         self.loss_wrap = PINCLossWrapper(
             weights=weights,

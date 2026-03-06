@@ -452,7 +452,9 @@ class RunningMeanStd:
         self.count = new_count
 
     @staticmethod
-    def aggregate_stats(means, vars, mins, maxs, agg_axes=(1,2,3,4,5)) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def aggregate_stats(
+        means, vars, mins, maxs, agg_axes=(1, 2, 3, 4, 5)
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Reduces coordinate-wise stats to channel-wise stats.
 
@@ -462,11 +464,11 @@ class RunningMeanStd:
         """
         # The mean of means is the global mean.
         channel_means = np.mean(means, axis=agg_axes, keepdims=True)
-        
+
         # average of the local variances
         avg_of_vars = np.mean(vars, axis=agg_axes, keepdims=True)
-        
-        # variance of the local means 
+
+        # variance of the local means
         diff_sq = (means - channel_means) ** 2
         var_of_means = np.mean(diff_sq, axis=agg_axes, keepdims=True)
 
@@ -474,7 +476,7 @@ class RunningMeanStd:
         channel_vars = avg_of_vars + var_of_means
         channel_mins = np.min(mins, axis=agg_axes, keepdims=True)
         channel_maxs = np.max(maxs, axis=agg_axes, keepdims=True)
-        
+
         return channel_means, channel_vars, channel_mins, channel_maxs
 
 

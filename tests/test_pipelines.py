@@ -261,6 +261,7 @@ def test_pinc_ae_pipeline(mock_eval, mock_get_data, common_cfg):
     runner = PINCRunner(0, cfg, 1)
     runner(skip_eval=True)
 
+
 @patch("os.listdir", return_value=["traj1.h5", "traj2.h5"])
 @patch("os.path.exists", return_value=True)
 def test_dataset_pipeline(mock_exists, mock_listdir):
@@ -268,11 +269,17 @@ def test_dataset_pipeline(mock_exists, mock_listdir):
     from neugk.dataset.cyclone import CycloneDataset
     from neugk.dataset.backend import DataBackend
     import contextlib
-    
+
     class MockBackend(DataBackend):
-        def is_valid(self, path): return True
-        def exists(self, path): return True
-        def format_path(self, path, *args, **kwargs): return path
+        def is_valid(self, path):
+            return True
+
+        def exists(self, path):
+            return True
+
+        def format_path(self, path, *args, **kwargs):
+            return path
+
         def read_metadata(self, path, fields=None):
             return {
                 "timesteps": np.arange(10),
@@ -296,37 +303,46 @@ def test_dataset_pipeline(mock_exists, mock_listdir):
                 "q": np.array([1.0]),
                 "geometry": {"krho": np.zeros(4)},
             }
-        
+
         @contextlib.contextmanager
         def open(self, path):
             yield MagicMock()
-            
+
         @contextlib.contextmanager
         def create(self, path):
             yield MagicMock()
-            
+
         def read_df(self, f, t_str, shape, active_keys=None):
             return np.random.randn(*shape)
+
         def read_phi(self, f, t_str, shape):
             return np.random.randn(2, *shape)
-        def write_metadata(self, f, metadata): pass
-        def write_df(self, f, timestamp, df): pass
-        def write_phi(self, f, timestamp, phi): pass
+
+        def write_metadata(self, f, metadata):
+            pass
+
+        def write_df(self, f, timestamp, df):
+            pass
+
+        def write_phi(self, f, timestamp, phi):
+            pass
 
     backend = MockBackend()
     import numpy as np
-    
+
     ds = CycloneDataset(
         backend=backend,
         path="/mock/path",
         fields_to_load=["df", "phi", "flux"],
-        normalization={"df": {"type": "zscore", "agg_axes": []}, 
-                       "phi": {"type": "zscore", "agg_axes": []},
-                       "flux": {"type": "zscore", "agg_axes": []}},
+        normalization={
+            "df": {"type": "zscore", "agg_axes": []},
+            "phi": {"type": "zscore", "agg_axes": []},
+            "flux": {"type": "zscore", "agg_axes": []},
+        },
         normalization_scope="dataset",
-        num_workers=1
+        num_workers=1,
     )
-    
+
     assert len(ds) > 0
     with patch("os.replace"):
         sample = ds[0]

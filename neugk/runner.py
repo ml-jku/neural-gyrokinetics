@@ -114,7 +114,8 @@ class BaseRunner:
                 # for OneCycle, final_div_factor = initial_lr / final_lr
                 # but let's just pass it through
                 kwargs["final_div_factor"] = (
-                    self.cfg.training.learning_rate / self.cfg.training.final_learning_rate
+                    self.cfg.training.learning_rate
+                    / self.cfg.training.final_learning_rate
                 )
 
             # warm up steps (not used by OneCycle but needed by others)

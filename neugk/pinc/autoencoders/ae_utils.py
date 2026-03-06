@@ -51,11 +51,16 @@ def train_step_autoencoder(
     x_preds = model(xs["df"], condition=condition)
 
     if cfg.dataset.augment.mask_modes.active:
-        assert denormalize_fn is not None, "denormalize_fn must be provided for masked spectral loss"
+        assert (
+            denormalize_fn is not None
+        ), "denormalize_fn must be provided for masked spectral loss"
         pred_df_delta, gt_df_delta = masked_spectral_loss(
-            x_preds["df"], df_tgt, mask, separated_zf, 
-            de_normalize_fn=denormalize_fn, 
-            file_idx=idx_data["file_index"]
+            x_preds["df"],
+            df_tgt,
+            mask,
+            separated_zf,
+            de_normalize_fn=denormalize_fn,
+            file_idx=idx_data["file_index"],
         )
         x_preds["df_delta"] = pred_df_delta
         xs["df_delta"] = gt_df_delta
@@ -71,6 +76,7 @@ def train_step_autoencoder(
         separate_zf=extra_zf_loss,
     )
     return loss, losses
+
 
 def masked_spectral_loss(y_hat, y, mask, zf_separated, de_normalize_fn, file_idx):
     """
@@ -89,9 +95,10 @@ def masked_spectral_loss(y_hat, y, mask, zf_separated, de_normalize_fn, file_idx
 
     # Isolate masked modes
     masked_pred = (1.0 - mask) * y_hat_k
-    masked_gt   = (1.0 - mask) * y_k
+    masked_gt = (1.0 - mask) * y_k
 
     return masked_pred, masked_gt
+
 
 def train_step_peft(
     cfg: DictConfig,
