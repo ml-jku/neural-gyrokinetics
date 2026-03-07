@@ -134,6 +134,10 @@ class Swin5DAE(Swin5DUnet):
         return {
             "input_elements": int(input_elements),
             "latent_elements": int(latent_elements),
+            "input_shape": list(self.base_resolution),
+            "input_channels": self.problem_dim,
+            "latent_shape": list(self.bottleneck_grid_size),
+            "latent_channels": self.bottleneck_dim,
             "rate": input_elements / latent_elements,
             "type": "ae",
         }
@@ -299,6 +303,10 @@ class Swin5DVQVAE(Swin5DAE):
         return {
             "input_elements": int(input_elements),
             "latent_elements": int(latent_elements),
+            "input_shape": list(self.base_resolution),
+            "input_channels": self.problem_dim,
+            "latent_shape": list(self.bottleneck_grid_size),
+            "latent_channels": self.vq.embedding_dim,
             "rate": rate,
             "type": "vqvae",
         }

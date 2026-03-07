@@ -149,6 +149,10 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         print(f"AE parameters: {params_m:.1f}M")
         if hasattr(ae, "get_compression_info"):
             c_info = ae.get_compression_info()
-            print(f"Compression: {c_info['rate']:.1f}x (type: {c_info['type']})")
+            print(
+                f"Compression: {c_info['rate']:.1f}x (type: {c_info['type']}). "
+                f"({c_info['input_channels']}, *{c_info['input_shape']}) -> "
+                f"({c_info['latent_channels']}, *{c_info['latent_shape']})"
+            )
 
     return ae

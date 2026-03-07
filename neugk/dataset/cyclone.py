@@ -352,7 +352,7 @@ class CycloneDataset(Dataset):
 
         # Deterministic filename for the multi-field stats
         file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
-        keys_tag = "-".join(sorted(keys))
+        keys_tag = "_".join(sorted(keys))
         tmu = "mu" if self.decouple_mu else ""
         segments = [
             prefix,
@@ -366,70 +366,97 @@ class CycloneDataset(Dataset):
         stats_filename = "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
         stats_path = os.path.join(self.dir, stats_filename)
 
-        # DDP coordination: only rank 0 computes, others wait
+        # DDP coordination: all ranks participate in work
         use_ddp = dist.is_initialized()
+        world_size = dist.get_world_size() if use_ddp else 1
+        rank = dist.get_rank() if use_ddp else 0
+
         if not os.path.exists(stats_path):
-            if not use_ddp or self.rank == 0:
-                # group indices by file to optimize I/O
-                t_indices = list(range(0, self.length, 2))
-                file_to_indices = defaultdict(list)
-                for t_idx in t_indices:
-                    file_idx, _ = self.flat_index_to_file_and_tstep[t_idx]
-                    file_to_indices[file_idx].append(t_idx)
+            # group indices by file to optimize I/O
+            t_indices = list(range(0, self.length))
+            file_to_indices = defaultdict(list)
+            for t_idx in t_indices:
+                file_idx, _ = self.flat_index_to_file_and_tstep[t_idx]
+                file_to_indices[file_idx].append(t_idx)
 
-                all_stats = {k: RunningMeanStd() for k in keys}
-                stats_lock = threading.Lock()
+            all_f_indices = sorted(list(file_to_indices.keys()))
+            # shard files across ranks
+            if use_ddp:
+                local_f_indices = [
+                    idx for i, idx in enumerate(all_f_indices) if i % world_size == rank
+                ]
+            else:
+                local_f_indices = all_f_indices
 
-                def process_file(f_idx):
-                    f_indices = file_to_indices[f_idx]
-                    local_stats = {k: RunningMeanStd() for k in keys}
+            local_stats = {k: RunningMeanStd() for k in keys}
+            stats_lock = threading.Lock()
 
-                    with self.backend.open(self.files[f_idx]) as f:
-                        batch_size = 16
-                        for i in range(0, len(f_indices), batch_size):
-                            batch = f_indices[i : i + batch_size]
-                            batch_data = {k: [] for k in keys}
+            def process_file(f_idx):
+                f_indices = file_to_indices[f_idx]
+                file_local_stats = {k: RunningMeanStd() for k in keys}
 
-                            for t_idx in batch:
-                                _, t_index = self.flat_index_to_file_and_tstep[t_idx]
-                                s = self._load_minimal_data(f, f_idx, t_index, keys)
+                with self.backend.open(self.files[f_idx]) as f:
+                    batch_size = 16
+                    for i in range(0, len(f_indices), batch_size):
+                        batch = f_indices[i : i + batch_size]
+                        batch_data = {k: [] for k in keys}
 
-                                for k in keys:
-                                    x = s[k]
-                                    if isinstance(x, torch.Tensor):
-                                        x = x.cpu().numpy()
-                                    batch_data[k].append(x)
+                        for t_idx in batch:
+                            _, t_index = self.flat_index_to_file_and_tstep[t_idx]
+                            s = self._load_minimal_data(f, f_idx, t_index, keys)
 
                             for k in keys:
-                                data = np.stack(batch_data[k])
-                                local_stats[k].update(
-                                    np.mean(data, axis=0),
-                                    np.var(data, axis=0),
-                                    np.min(data, axis=0),
-                                    np.max(data, axis=0),
-                                    count=len(data),
-                                )
-                    # sync updates
-                    with stats_lock:
-                        for k in keys:
-                            all_stats[k].combine(local_stats[k])
+                                x = s[k]
+                                if isinstance(x, torch.Tensor):
+                                    x = x.cpu().numpy()
+                                batch_data[k].append(x)
 
-                # load files, update stats
+                        for k in keys:
+                            data = np.stack(batch_data[k])
+                            file_local_stats[k].update(
+                                np.mean(data, axis=0),
+                                np.var(data, axis=0),
+                                np.min(data, axis=0),
+                                np.max(data, axis=0),
+                                count=len(data),
+                            )
+                # sync updates
+                with stats_lock:
+                    for k in keys:
+                        local_stats[k].combine(file_local_stats[k])
+
+            # load files, update stats
+            if len(local_f_indices) > 0:
                 with ThreadPoolExecutor(max(1, self.num_workers)) as executor:
                     list(
                         tqdm.tqdm(
-                            executor.map(process_file, file_to_indices.keys()),
-                            total=len(file_to_indices),
-                            desc=f"re-computing stats for {keys}",
-                            disable=self.rank != 0,
+                            executor.map(process_file, local_f_indices),
+                            total=len(local_f_indices),
+                            desc=f"re-computing stats for {keys} (rank {rank})",
+                            disable=rank != 0,
                         )
                     )
 
-                stats_dict = all_stats
+            if use_ddp:
+                # Gather all_stats from all ranks
+                all_ranks_stats = [None] * world_size
+                dist.all_gather_object(all_ranks_stats, local_stats)
+
+                if rank == 0:
+                    combined_stats = {k: RunningMeanStd() for k in keys}
+                    for r_stats in all_ranks_stats:
+                        for k in keys:
+                            combined_stats[k].combine(r_stats[k])
+
+                    stats_dict = combined_stats
+                    with open(stats_path, "wb") as f:
+                        pickle.dump(stats_dict, f)
+                    print(f"saved recomputed stats to {stats_path}")
+            else:
+                stats_dict = local_stats
                 with open(stats_path, "wb") as f:
                     pickle.dump(stats_dict, f)
-                if self.rank == 0:
-                    print(f"saved recomputed stats to {stats_path}")
+                print(f"saved recomputed stats to {stats_path}")
 
             if use_ddp:
                 dist.barrier()
@@ -607,7 +634,7 @@ class CycloneDataset(Dataset):
         if "df" in keys:
             x = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
             if self.separate_zf:
-                x = separate_zf_fn(x)
+                x = separate_zf_fn(x, dim=0)
             sample["df"] = x
 
         if "phi" in keys:
