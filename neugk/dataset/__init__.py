@@ -150,6 +150,7 @@ def get_data(cfg, rank: int = 0):
         num_workers=cfg.dataset.num_workers,
         real_potens=cfg.dataset.real_potens,
         decouple_mu=cfg.dataset.norm_decouple_mu,
+        rank=rank,
         **train_kwargs,
     )
 
@@ -179,6 +180,7 @@ def get_data(cfg, rank: int = 0):
         num_workers=cfg.dataset.num_workers,
         real_potens=cfg.dataset.real_potens,
         decouple_mu=cfg.dataset.norm_decouple_mu,
+        rank=rank,
         **val_kwargs,
     )
 
@@ -253,6 +255,7 @@ def get_data(cfg, rank: int = 0):
             num_workers=cfg.dataset.num_workers,
             real_potens=cfg.dataset.real_potens,
             decouple_mu=cfg.dataset.norm_decouple_mu,
+            rank=rank,
         )
         holdout_samples_valloader = DataLoader(
             holdout_samples_valset,

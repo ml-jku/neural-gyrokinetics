@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Sequence, Any
+from typing import Optional, Dict, Sequence, Any, Union, List
 
 import os
 import pickle
@@ -51,11 +51,13 @@ class CycloneAEDataset(CycloneDataset):
         self.autoencoder = autoencoder
         super().__init__(*args, **kwargs)
 
-    def _recompute_stats(self, key: str, offset: int = 0):
+    def _recompute_stats(
+        self, keys: Union[str, List[str]], offset: int = 0
+    ) -> Dict[str, RunningMeanStd]:
         filter_tag = (
             f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         )
-        return super()._recompute_stats(key, offset, prefix="diff", suffix=filter_tag)
+        return super()._recompute_stats(keys, offset, prefix="diff", suffix=filter_tag)
 
     def __getitem__(
         self, index: int, get_normalized: bool = True, override_latens: bool = False

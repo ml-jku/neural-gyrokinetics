@@ -10,10 +10,11 @@ import warnings
 import random
 from collections import defaultdict
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import torch
+import torch.distributed as dist
 import numpy as np
 from torch.utils.data import Dataset
 from torch.utils._pytree import tree_map
@@ -321,12 +322,12 @@ class CycloneDataset(Dataset):
 
         norm_dataset = normalization is not None and normalization_scope == "dataset"
         if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
-            # recompute for all fields
+            # recompute for all fields in a single pass
+            recomputed_stats = self._recompute_stats(
+                keys=self.fields_to_load, offset=self.offsets[0]
+            )
             for key in self.fields_to_load:
-                stats_recomputed = self._recompute_stats(
-                    key=key, offset=self.offsets[0]
-                )
-            stats[key] = stats_recomputed
+                stats[key] = recomputed_stats[key]
 
         if (
             normalization_scope == "dataset"
@@ -340,88 +341,126 @@ class CycloneDataset(Dataset):
                 self.stats[k]["full"]["max"] = stats[k].max.astype(np.float32)
 
     def _recompute_stats(
-        self, key: str, offset: int = 0, prefix: str = "", suffix: str = ""
-    ):
-        stats_lock = threading.Lock()
-        shared_stats = RunningMeanStd()
+        self,
+        keys: Union[str, List[str]],
+        offset: int = 0,
+        prefix: str = "",
+        suffix: str = "",
+    ) -> Dict[str, RunningMeanStd]:
+        if isinstance(keys, str):
+            keys = [keys]
 
-        def process_t_idx(t_idx, key):
-            file_index, t_index = self.flat_index_to_file_and_tstep[t_idx]
-            with self.backend.open(self.files[file_index]) as f:
-                sample = self._load_data(f, file_index, t_index)
-
-            # force to numpy for math
-            if isinstance(sample.get("x"), torch.Tensor):
-                sample["x"] = sample["x"].cpu().numpy()
-            if isinstance(sample.get("phi"), torch.Tensor):
-                sample["phi"] = sample["phi"].cpu().numpy()
-
-            # handle both ae and base dataset flux naming
-            flux_val = sample.get("flux") if "flux" in sample else sample.get("gt_flux")
-            if isinstance(flux_val, torch.Tensor):
-                flux_val = flux_val.cpu().numpy()
-
-            if key == "df":
-                x = sample["x"]
-                if self.separate_zf:
-                    x = separate_zf_fn(x)
-            elif key == "phi":
-                x = sample["phi"]
-            else:
-                x = np.array([flux_val], dtype=np.float32)
-
-            with stats_lock:
-                shared_stats.update(x, np.zeros_like(x), x, x, count=1)
-
-        # subsample by two for normalization stats
-        t_indices = (
-            list(range(0, self.length, 2))
-            if key in ["df", "phi"]
-            else list(range(self.length))
-        )
+        # Deterministic filename for the multi-field stats
         file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        keys_tag = "-".join(sorted(keys))
         tmu = "mu" if self.decouple_mu else ""
-        segments = [prefix, key, f"offset{offset}", tmu, suffix, file_hash, "stats"]
+        segments = [
+            prefix,
+            keys_tag,
+            f"offset{offset}",
+            tmu,
+            suffix,
+            file_hash,
+            "stats",
+        ]
         stats_filename = "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
         stats_path = os.path.join(self.dir, stats_filename)
 
-        if os.path.exists(stats_path):
-            stats = pickle.load(open(stats_path, "rb"))
-        else:
-            with ThreadPoolExecutor(self.num_workers) as executor:
-                futures = [
-                    executor.submit(process_t_idx, t_idx, key) for t_idx in t_indices
-                ]
-                for future in tqdm.tqdm(
-                    as_completed(futures),
-                    total=len(futures),
-                    desc=f"re-computing normalization stats for {key}",
-                ):
-                    future.result()  # re-raise any worker exception
+        # DDP coordination: only rank 0 computes, others wait
+        use_ddp = dist.is_initialized()
+        if not os.path.exists(stats_path):
+            if not use_ddp or self.rank == 0:
+                # group indices by file to optimize I/O
+                t_indices = list(range(0, self.length, 2))
+                file_to_indices = defaultdict(list)
+                for t_idx in t_indices:
+                    file_idx, _ = self.flat_index_to_file_and_tstep[t_idx]
+                    file_to_indices[file_idx].append(t_idx)
 
-            stats = shared_stats
-            pickle.dump(stats, open(stats_path, "wb"))
-            print(f"saved recomputed stats to {stats_path}")
+                all_stats = {k: RunningMeanStd() for k in keys}
+                stats_lock = threading.Lock()
 
-        if self.normalizers[key]["agg_axes"]:
-            norm_axes = tuple(self.normalizers[key]["agg_axes"])
-            mean, var, traj_min, traj_max = stats.aggregate_stats(
-                stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
-            )
-            if key == "phi":
-                # unsqueeze phi to add channel dim
-                mean = np.expand_dims(mean, axis=0)
-                var = np.expand_dims(var, axis=0)
-                traj_min = np.expand_dims(traj_min, axis=0)
-                traj_max = np.expand_dims(traj_max, axis=0)
-            stats.mean = mean
-            stats.var = var
-            stats.min = traj_min
-            stats.max = traj_max
-        else:
-            print(f"No aggregations of stats, using stats of shape: {stats.mean.shape}")
+                def process_file(f_idx):
+                    f_indices = file_to_indices[f_idx]
+                    local_stats = {k: RunningMeanStd() for k in keys}
 
-        return stats
+                    with self.backend.open(self.files[f_idx]) as f:
+                        batch_size = 16
+                        for i in range(0, len(f_indices), batch_size):
+                            batch = f_indices[i : i + batch_size]
+                            batch_data = {k: [] for k in keys}
+
+                            for t_idx in batch:
+                                _, t_index = self.flat_index_to_file_and_tstep[t_idx]
+                                s = self._load_minimal_data(f, f_idx, t_index, keys)
+
+                                for k in keys:
+                                    x = s[k]
+                                    if isinstance(x, torch.Tensor):
+                                        x = x.cpu().numpy()
+                                    batch_data[k].append(x)
+
+                            for k in keys:
+                                data = np.stack(batch_data[k])
+                                local_stats[k].update(
+                                    np.mean(data, axis=0),
+                                    np.var(data, axis=0),
+                                    np.min(data, axis=0),
+                                    np.max(data, axis=0),
+                                    count=len(data),
+                                )
+                    # sync updates
+                    with stats_lock:
+                        for k in keys:
+                            all_stats[k].combine(local_stats[k])
+
+                # load files, update stats
+                with ThreadPoolExecutor(max(1, self.num_workers)) as executor:
+                    list(
+                        tqdm.tqdm(
+                            executor.map(process_file, file_to_indices.keys()),
+                            total=len(file_to_indices),
+                            desc=f"re-computing stats for {keys}",
+                            disable=self.rank != 0,
+                        )
+                    )
+
+                stats_dict = all_stats
+                with open(stats_path, "wb") as f:
+                    pickle.dump(stats_dict, f)
+                if self.rank == 0:
+                    print(f"saved recomputed stats to {stats_path}")
+
+            if use_ddp:
+                dist.barrier()
+
+        # apply final aggregations
+        with open(stats_path, "rb") as f:
+            stats_dict = pickle.load(f)
+
+        for key in keys:
+            stats = stats_dict[key]
+            if self.normalizers[key]["agg_axes"]:
+                norm_axes = tuple(self.normalizers[key]["agg_axes"])
+                mean, var, traj_min, traj_max = stats.aggregate_stats(
+                    stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
+                )
+                if key == "phi":
+                    # unsqueeze phi to add channel dim
+                    mean = np.expand_dims(mean, axis=0)
+                    var = np.expand_dims(var, axis=0)
+                    traj_min = np.expand_dims(traj_min, axis=0)
+                    traj_max = np.expand_dims(traj_max, axis=0)
+                stats.mean = mean
+                stats.var = var
+                stats.min = traj_min
+                stats.max = traj_max
+            elif self.rank == 0:
+                print(
+                    f"No aggregations for {key}, using stats of shape: {stats.mean.shape}"
+                )
+
+        return stats_dict
 
     def __getitem__(
         self, index: Union[int, Tuple[int, int]], get_normalized: bool = True
@@ -555,6 +594,31 @@ class CycloneDataset(Dataset):
         sample["s_hat"] = meta["s_hat"].squeeze()
         sample["q"] = meta["q"].squeeze()
         sample["geometry"] = meta["geometry"]
+        return sample
+
+    def _load_minimal_data(
+        self, f: Any, file_index: int, t_index: int, keys: List[str]
+    ) -> Dict:
+        """Lightweight loader for statistics, avoids ground truth and bundling."""
+        original_t_index = t_index + self.offsets[file_index]
+        t_str = str(original_t_index).zfill(5)
+        sample = {}
+
+        if "df" in keys:
+            x = self.backend.read_df(f, t_str, self.df_shape, self.active_keys)
+            if self.separate_zf:
+                x = separate_zf_fn(x)
+            sample["df"] = x
+
+        if "phi" in keys:
+            sample["phi"] = self.backend.read_phi(f, t_str, self.phi_resolution)
+
+        if "flux" in keys:
+            meta = self.metadata[file_index]
+            sample["flux"] = np.array(
+                [meta["fluxes"][original_t_index]], dtype=np.float32
+            )
+
         return sample
 
     def normalize(

@@ -1,6 +1,6 @@
 import torch
 import einops
-from typing import Optional, Callable, Dict, Tuple
+from typing import Optional, Callable, Dict
 from enum import Enum
 from functools import partial
 

@@ -16,7 +16,7 @@ import torch.distributed as dist
 from omegaconf import DictConfig
 
 from neugk.utils import RunningMeanStd, filter_config_subset, filter_cli_priority
-from neugk.dataset.augment import reverse_ifft, ifft, de_normalize
+from neugk.dataset.augment import reverse_ifft, de_normalize
 from neugk.pinc.peft_utils import create_lora_model_wrapper
 from neugk.pinc.autoencoders import get_autoencoder
 
