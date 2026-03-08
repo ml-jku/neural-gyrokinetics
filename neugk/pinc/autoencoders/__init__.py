@@ -99,6 +99,10 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             model_kwargs["use_simae_decoder"] = ae_cfg.bottleneck.use_simae_decoder
             model_kwargs["vit_predictor"] = ae_cfg.bottleneck.vit_predictor
 
+        # flux head config
+        if hasattr(ae_cfg, "flux_head") and getattr(ae_cfg.flux_head, "enable", False):
+            model_kwargs["flux_head_config"] = ae_cfg.flux_head
+
         ae = AE(
             dim=latent_dim,
             bottleneck_dim=bottleneck_dim,

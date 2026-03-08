@@ -77,6 +77,15 @@ class PINCRunner(BaseRunner):
 
         self._load_checkpoints()
 
+        # optional freeze
+        if getattr(model_cfg, "freeze_ae", False):
+            print("Freezing autoencoder weights, training only eflux_head.")
+            for name, param in self.model.named_parameters():
+                if "eflux_head" not in name:
+                    param.requires_grad = False
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            print(f"Trainable parameters after freeze: {trainable_params/1e6:.2f}M")
+
         self.simae = len(set(self.loss_wrap.active_losses).difference({"simsiam"})) > 0
         if self.use_ddp:
             self.model = DDP(
@@ -129,6 +138,10 @@ class PINCRunner(BaseRunner):
             loss_wrap=self.loss_wrap,
         )
         self.input_fields = set(self.cfg.dataset.input_fields)
+        # Add fields required by loss weights
+        for k in self.loss_wrap.weights:
+            if self.loss_wrap.weights[k] > 0 and k in ["df", "phi", "flux"]:
+                self.input_fields.add(k)
         self.idx_keys = ["file_index", "timestep_index"]
 
     def _load_checkpoints(self):
@@ -359,5 +372,5 @@ class PINCRunner(BaseRunner):
             loss_val_min=self.loss_val_min,
             trainloader=self.trainloader,
             evaluate_recon=True,  # TODO adapt
-            evaluate_probing=False,
+            evaluate_probing=True,
         )

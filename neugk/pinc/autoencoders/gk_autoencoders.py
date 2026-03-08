@@ -24,6 +24,7 @@ class Swin5DAE(Swin5DUnet):
         bottleneck_dim: Optional[int] = None,
         bottleneck_num_heads: int = 2,
         bottleneck_depth: int = 2,
+        flux_head_config: Optional[Dict] = None,
         **kwargs,
     ):
         super().__init__(*args, conditioning=[] if conditioning else None, **kwargs)
@@ -76,6 +77,33 @@ class Swin5DAE(Swin5DUnet):
         )
         del self.middle
 
+        # optional heat flux head
+        self.eflux_head = None
+        if flux_head_config is not None:
+            flux_dim = flux_head_config.get("flux_dim", 1)
+            hidden_dim = flux_head_config.get("dim", 128)
+            self.eflux_head = MLP(
+                [self.bottleneck_dim, hidden_dim, flux_dim],
+                act_fn=self.act_fn,
+            )
+    
+    def get_compression_info(self):
+        """Returns a dictionary with compression-related information."""
+        import numpy as np
+
+        input_elements = np.prod(self.base_resolution) * self.problem_dim
+        latent_elements = np.prod(self.bottleneck_grid_size) * self.bottleneck_dim
+        return {
+            "input_elements": int(input_elements),
+            "latent_elements": int(latent_elements),
+            "input_shape": list(self.base_resolution),
+            "input_channels": self.problem_dim,
+            "latent_shape": list(self.bottleneck_grid_size),
+            "latent_channels": self.bottleneck_dim,
+            "rate": input_elements / latent_elements,
+            "type": "ae",
+        }
+
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
             condition = self.cond_embed(condition)
@@ -123,24 +151,11 @@ class Swin5DAE(Swin5DUnet):
         if condition is not None:
             condition = self.cond_embed(condition)
         zdf, pad_axes = self.encode(df, condition=condition)
-        return self.decode(zdf, pad_axes, condition=condition)
-
-    def get_compression_info(self):
-        """Returns a dictionary with compression-related information."""
-        import numpy as np
-
-        input_elements = np.prod(self.base_resolution) * self.problem_dim
-        latent_elements = np.prod(self.bottleneck_grid_size) * self.bottleneck_dim
-        return {
-            "input_elements": int(input_elements),
-            "latent_elements": int(latent_elements),
-            "input_shape": list(self.base_resolution),
-            "input_channels": self.problem_dim,
-            "latent_shape": list(self.bottleneck_grid_size),
-            "latent_channels": self.bottleneck_dim,
-            "rate": input_elements / latent_elements,
-            "type": "ae",
-        }
+        out = self.decode(zdf, pad_axes, condition=condition)
+        if self.eflux_head is not None:
+            z_pooled = zdf.flatten(1, -2).mean(dim=1)  # (batch, n_tokens, dim) -> (batch, dim)
+            out["flux"] = self.eflux_head(z_pooled)
+        return out
 
 
 class Swin5DVAE(Swin5DAE):
@@ -218,6 +233,26 @@ class Swin5DVQVAE(Swin5DAE):
         del self.middle_upproj
         self.middle_vq_downproj = nn.Linear(self.middle_dim, embedding_dim)
         self.middle_vq_upproj = nn.Linear(embedding_dim, self.middle_dim)
+    
+    def get_compression_info(self):
+        """Returns a dictionary with compression-related information."""
+        import numpy as np
+
+        input_elements = np.prod(self.base_resolution) * self.problem_dim
+        latent_elements = np.prod(self.bottleneck_grid_size)
+        bits_per_index = np.ceil(np.log2(self.vq.codebook_size))
+        # depends on bits for indices
+        rate = (input_elements * 8) / (latent_elements * bits_per_index)
+        return {
+            "input_elements": int(input_elements),
+            "latent_elements": int(latent_elements),
+            "input_shape": list(self.base_resolution),
+            "input_channels": self.problem_dim,
+            "latent_shape": list(self.bottleneck_grid_size),
+            "latent_channels": self.vq.embedding_dim,
+            "rate": rate,
+            "type": "vqvae",
+        }
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
         if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
@@ -265,15 +300,6 @@ class Swin5DVQVAE(Swin5DAE):
 
         return {"df": self.patch_decode(zdf, pad_axes, **kwcond)}
 
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        if condition is not None:
-            condition = self.cond_embed(condition)
-        zdf, pad_axes = self.encode(df, condition=condition)
-        outputs = self.decode(zdf, pad_axes, condition=condition)
-        outputs["vq_commit_loss"] = self._vq_commit_loss
-        outputs["vq_indices"] = self._vq_indices
-        return outputs
-
     def get_codebook_usage(self) -> torch.Tensor:
         if hasattr(self, "_vq_indices") and self._vq_indices is not None:
             return self._vq_indices.unique().numel() / self.vq.codebook_size
@@ -291,25 +317,14 @@ class Swin5DVQVAE(Swin5DAE):
             return self._vq_indices
         raise RuntimeError("no vq indices available. run encode() or forward() first.")
 
-    def get_compression_info(self):
-        """Returns a dictionary with compression-related information."""
-        import numpy as np
-
-        input_elements = np.prod(self.base_resolution) * self.problem_dim
-        latent_elements = np.prod(self.bottleneck_grid_size)
-        bits_per_index = np.ceil(np.log2(self.vq.codebook_size))
-        # depends on bits for indices
-        rate = (input_elements * 8) / (latent_elements * bits_per_index)
-        return {
-            "input_elements": int(input_elements),
-            "latent_elements": int(latent_elements),
-            "input_shape": list(self.base_resolution),
-            "input_channels": self.problem_dim,
-            "latent_shape": list(self.bottleneck_grid_size),
-            "latent_channels": self.vq.embedding_dim,
-            "rate": rate,
-            "type": "vqvae",
-        }
+    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+        if condition is not None:
+            condition = self.cond_embed(condition)
+        zdf, pad_axes = self.encode(df, condition=condition)
+        outputs = self.decode(zdf, pad_axes, condition=condition)
+        outputs["vq_commit_loss"] = self._vq_commit_loss
+        outputs["vq_indices"] = self._vq_indices
+        return outputs
 
 
 class Swin5DSimSiam(Swin5DAE):

@@ -190,9 +190,6 @@ def load_autoencoder(
         config = dict_to_namespace(cfg_dict)
 
         problem_dim = len(config.dataset.active_keys)
-        # Attempt to get resolution from config if available, otherwise fallback
-        # In this project, resolution is usually fixed by the physics but can be inferred
-        # from other config fields if necessary. For now, we use the one from config.dataset if present
         res = getattr(config.dataset, "resolution", (32, 8, 16, 85, 32))
 
         class DummyDataset:
@@ -267,10 +264,21 @@ def load_autoencoder(
                 f"{len(state_dict)} parameters (removed PEFT parameters)"
             )
 
-    model.load_state_dict(
-        state_dict,
-        strict=not (is_peft_checkpoint and has_peft_params and not load_peft),
-    )
+    # Check if we have an eflux_head in the model but not in the state_dict
+    has_eflux_head_in_model = getattr(model, "eflux_head", None)
+    if hasattr(model, "module"):
+        has_eflux_head_in_model = getattr(model.module, "eflux_head", None)
+    has_eflux_head_in_ckpt = any("eflux_head" in k for k in state_dict.keys())
+
+    if has_eflux_head_in_model and not has_eflux_head_in_ckpt:
+        print("Model has eflux_head but checkpoint does not. Loading with strict=False.")
+        model.load_state_dict(state_dict, strict=False)
+    else:
+        model.load_state_dict(
+            state_dict,
+            strict=not (is_peft_checkpoint and has_peft_params and not load_peft),
+        )
+
     resume_epoch = loaded_ckpt["epoch"]
     print(f"Loading model {ckp_path} (stopped at epoch {resume_epoch}) ")
     if config is None:

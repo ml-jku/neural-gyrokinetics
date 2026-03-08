@@ -666,8 +666,12 @@ class PINCLossWrapper(LossWrapper):
         for k in data_keys:
             loss_type = "relative_mse" if k == "df_delta" else None
             p, t = preds.get(k, torch.zeros_like(tgts[k])), tgts[k]
-            if p.shape != t.shape and k == "phi":
-                p = p.unsqueeze(0)
+            if p.shape != t.shape:
+                if k == "phi":
+                    p = p.unsqueeze(0)
+                elif k == "flux":
+                    # ensure same dimensionality for scalar flux
+                    p, t = p.flatten(), t.flatten()
             losses[k] = (
                 self.compute_data_loss(p[:, :2], t[:, :2], loss_type=loss_type)
                 + self.compute_data_loss(p[:, 2:], t[:, 2:], loss_type=loss_type)
@@ -676,16 +680,22 @@ class PINCLossWrapper(LossWrapper):
             )
 
         if self.training:
-            monitor_mse = {
-                f"{k}_mse": (
-                    F.mse_loss(preds[k][:, :2], tgts[k][:, :2])
-                    + F.mse_loss(preds[k][:, 2:], tgts[k][:, 2:])
-                    if k == "df" and separate_zf
-                    else F.mse_loss(preds[k], tgts[k])
-                )
-                for k in data_keys
-                if k in preds
-            }
+            monitor_mse = {}
+            for k in data_keys:
+                if k not in preds:
+                    continue
+                p, t = preds[k], tgts[k]
+                if k == "flux":
+                    p, t = p.flatten(), t.flatten()
+                
+                if k == "df" and separate_zf:
+                    monitor_mse[f"{k}_mse"] = (
+                        F.mse_loss(p[:, :2], t[:, :2])
+                        + F.mse_loss(p[:, 2:], t[:, 2:])
+                    )
+                else:
+                    monitor_mse[f"{k}_mse"] = F.mse_loss(p, t)
+            
             for k, v in losses.items():
                 self._update_ema_loss_scale(k, v)
             norm_losses = self._apply_ema_normalization(losses)
