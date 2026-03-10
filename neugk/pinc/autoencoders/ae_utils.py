@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Callable
 
 import os
 import pickle
@@ -16,8 +16,9 @@ import torch.distributed as dist
 from omegaconf import DictConfig
 
 from neugk.utils import RunningMeanStd, filter_config_subset, filter_cli_priority
+from neugk.dataset.augment import reverse_ifft, de_normalize
 from neugk.pinc.peft_utils import create_lora_model_wrapper
-from neugk.models.layers import ContinuousConditionEmbed
+from neugk.pinc.autoencoders import get_autoencoder
 
 
 def train_step_autoencoder(
@@ -29,35 +30,42 @@ def train_step_autoencoder(
     geometry: Dict[str, torch.Tensor],
     loss_wrap: nn.Module,
     progress_remaining: float,
+    denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
 ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
     model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
-    separate_zf = (
+    extra_zf_loss = (
         cfg.dataset.separate_zf
         if hasattr(getattr(cfg, model_key), "extra_zf_loss")
         and getattr(cfg, model_key).extra_zf_loss
         else False
     )
+    separated_zf = cfg.dataset.separate_zf
     model.train()
 
     if cfg.dataset.augment.mask_modes.active:
         df_tgt = xs.pop("df_tgt")
+        mask = xs.pop("mask")
 
     # model prediction
     # for ae we only use df
     x_preds = model(xs["df"], condition=condition)
 
     if cfg.dataset.augment.mask_modes.active:
-        pred_df_delta = x_preds["df"] - xs["df"]
-        gt_df_delta = (df_tgt - xs["df"]).detach()
+        assert (
+            denormalize_fn is not None
+        ), "denormalize_fn must be provided for masked spectral loss"
+        pred_df_delta, gt_df_delta = masked_spectral_loss(
+            x_preds["df"],
+            df_tgt,
+            mask,
+            separated_zf,
+            de_normalize_fn=denormalize_fn,
+            file_idx=idx_data["file_index"],
+        )
         x_preds["df_delta"] = pred_df_delta
         xs["df_delta"] = gt_df_delta
         # re-assign target to input for loss
         xs["df"] = df_tgt.detach()
-
-    # compute losses
-    # TODO(diff) get rid of loss_wrap?
-    # loss = F.mse_loss(x_preds["df"], xs["df"])
-    # losses = {"df": loss}
 
     loss, losses = loss_wrap(
         x_preds,
@@ -65,9 +73,31 @@ def train_step_autoencoder(
         idx_data,
         geometry=geometry,
         progress_remaining=progress_remaining,
-        separate_zf=separate_zf,
+        separate_zf=extra_zf_loss,
     )
     return loss, losses
+
+
+def masked_spectral_loss(y_hat, y, mask, zf_separated, de_normalize_fn, file_idx):
+    """
+    y_hat : predicted field (real space)
+    y     : ground truth field (real space)
+    mask  : binary mask in Fourier space (1=visible, 0=masked)
+    zf_separated : applied channel-wise zonal flow separation
+    """
+
+    # de-normalize fields first
+    y_hat = de_normalize(y_hat, file_idx, de_normalize_fn)
+    y = de_normalize(y, file_idx, de_normalize_fn)
+    # FFT to spectral space
+    y_hat_k = reverse_ifft(y_hat, zf_separated=zf_separated)
+    y_k = reverse_ifft(y, zf_separated=zf_separated)
+
+    # Isolate masked modes
+    masked_pred = (1.0 - mask) * y_hat_k
+    masked_gt = (1.0 - mask) * y_k
+
+    return masked_pred, masked_gt
 
 
 def train_step_peft(
@@ -159,139 +189,18 @@ def load_autoencoder(
 
         config = dict_to_namespace(cfg_dict)
 
-        problem_dim = 2
-        separate_zf = config.dataset.separate_zf
-        if separate_zf:
-            problem_dim = problem_dim + 2
+        problem_dim = len(config.dataset.active_keys)
+        # Attempt to get resolution from config if available, otherwise fallback
+        # In this project, resolution is usually fixed by the physics but can be inferred
+        # from other config fields if necessary. For now, we use the one from config.dataset if present
+        res = getattr(config.dataset, "resolution", (32, 8, 16, 85, 32))
 
-        ae_cfg = getattr(config, "autoencoder", getattr(config, "model", None))
+        class DummyDataset:
+            def __init__(self, problem_dim, resolution):
+                self.active_keys = list(range(problem_dim))
+                self.resolution = resolution
 
-        if ae_cfg is None:
-            raise ValueError("Autoencoder config not found.")
-
-        model_type = getattr(ae_cfg, "model_type", "ae")
-        # Import appropriate model class
-        if model_type == "ae":
-            from neugk.pinc.autoencoders.gk_autoencoders import Swin5DAE as AE
-        elif model_type == "vae":
-            from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVAE as AE
-        elif model_type == "vqvae":
-            from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVQVAE as AE
-        elif model_type == "simsiam":
-            from neugk.pinc.autoencoders.gk_autoencoders import Swin5DSimSiam as AE
-        else:
-            raise ValueError(f"Unknown model_type: {model_type}")
-
-        bottleneck_dim = ae_cfg.bottleneck.dim
-        bottleneck_num_heads = getattr(ae_cfg.bottleneck, "num_heads", None)
-        bottleneck_depth = getattr(ae_cfg.bottleneck, "depth", None)
-        normalized_latent = getattr(ae_cfg.bottleneck, "normalized_latent", True)
-        norm_learnable = getattr(ae_cfg.bottleneck, "norm_learnable", False)
-
-        base_resolution = (32, 8, 16, 85, 32)
-        decouple_mu = ae_cfg.decouple_mu
-        patch_size = ae_cfg.patch.patch_size
-        window_size = ae_cfg.patch.window_size
-        merging_depth = getattr(ae_cfg.patch, "merging_depth", 2)
-        unmerging_depth = getattr(ae_cfg.patch, "unmerging_depth", 2)
-        patching_hidden_ratio = ae_cfg.patch.merging_hidden_ratio
-        unmerging_hidden_ratio = ae_cfg.patch.unmerging_hidden_ratio
-        c_multiplier = ae_cfg.patch.c_multiplier
-        act_fn = getattr(torch.nn, ae_cfg.act_fn)
-        norm_fn = getattr(torch.nn, getattr(ae_cfg, "norm_fn", "LayerNorm"))
-
-        num_heads = ae_cfg.vit.num_heads
-        depth = ae_cfg.vit.depth
-        use_rpb = getattr(ae_cfg.vit, "use_rpb", None)
-        use_rope = getattr(ae_cfg.vit, "use_rope", None)
-        gated_attention = getattr(ae_cfg.vit, "gated_attention", None)
-        qk_norm = getattr(ae_cfg.vit, "qk_norm", True)
-        gradient_checkpoint = ae_cfg.vit.gradient_checkpoint
-        use_abs_pe = ae_cfg.vit.use_abs_pe
-        modulation = ae_cfg.vit.modulation
-        drop_path = ae_cfg.vit.drop_path
-        num_layers = len(depth)
-        assert num_layers == len(num_heads)
-
-        cond_fn = None
-        n_cond = len(ae_cfg.conditioning)
-        if n_cond > 0:
-            cond_fn = ContinuousConditionEmbed(32, n_cond)
-
-        # VAE/VQ-VAE configs
-        model_kwargs = {}
-        if model_type == "vae":
-            model_kwargs["beta_vae"] = getattr(ae_cfg, "beta_vae", 1.0)
-        elif model_type == "vqvae":
-            vq_config = {}
-            if hasattr(ae_cfg, "vq"):
-                vq_config = {
-                    "codebook_size": getattr(ae_cfg.vq, "codebook_size", 8192),
-                    "embedding_dim": getattr(ae_cfg.vq, "embedding_dim", 256),
-                    "commitment_weight": getattr(ae_cfg.vq, "commitment_weight", 0.25),
-                    "codebook_type": getattr(ae_cfg.vq, "codebook_type", "euclidean"),
-                    "ema_decay": getattr(ae_cfg.vq, "ema_decay", 0.99),
-                    "threshold_ema_dead_code": getattr(
-                        ae_cfg.vq, "threshold_ema_dead_code", 2
-                    ),
-                }
-            else:
-                vq_config = {
-                    "codebook_size": 8192,
-                    "embedding_dim": 256,
-                    "commitment_weight": 0.25,
-                    "codebook_type": "euclidean",
-                    "ema_decay": 0.99,
-                    "threshold_ema_dead_code": 2,
-                }
-            model_kwargs["vq_config"] = vq_config
-        elif model_type == "simsiam":
-            model_kwargs["use_simae_decoder"] = getattr(
-                ae_cfg.bottleneck, "use_simae_decoder", True
-            )
-            model_kwargs["vit_predictor"] = getattr(
-                ae_cfg.bottleneck, "vit_predictor", True
-            )
-
-        model = AE(
-            dim=ae_cfg.latent_dim,
-            bottleneck_dim=bottleneck_dim,
-            base_resolution=base_resolution,
-            patch_size=patch_size,
-            window_size=window_size,
-            depth=depth,
-            num_heads=num_heads,
-            bottleneck_num_heads=bottleneck_num_heads,
-            bottleneck_depth=bottleneck_depth,
-            in_channels=problem_dim,
-            out_channels=problem_dim,
-            num_layers=num_layers,
-            use_checkpoint=gradient_checkpoint,
-            drop_path=drop_path,
-            use_abs_pe=use_abs_pe,
-            conv_patch=False,
-            hidden_mlp_ratio=2.0,
-            c_multiplier=c_multiplier,
-            merging_depth=merging_depth,
-            unmerging_depth=unmerging_depth,
-            merging_hidden_ratio=patching_hidden_ratio,
-            unmerging_hidden_ratio=unmerging_hidden_ratio,
-            cond_embed=cond_fn,
-            init_weights=ae_cfg.init_weights,
-            patching_init_weights=ae_cfg.patching_init_weights,
-            act_fn=act_fn,
-            use_rope=use_rope,
-            gated_attention=gated_attention,
-            use_rpb=use_rpb,
-            qk_norm=qk_norm,
-            norm_layer=norm_fn,
-            modulation=modulation,
-            decouple_mu=decouple_mu,
-            conditioning=True,
-            normalized_latent=normalized_latent,
-            mid_norm_learnable=norm_learnable,
-            **model_kwargs,
-        )
+        model = get_autoencoder(config, DummyDataset(problem_dim, res), rank=None)
 
     # Check if the checkpoint has 'module.' prefix and if the model expects it
     checkpoint_has_module = any(k.startswith("module.") for k in state_dict.keys())
@@ -299,9 +208,7 @@ def load_autoencoder(
 
     if checkpoint_has_module and not model_is_ddp:
         # Checkpoint has module prefix but model doesn't - remove prefix
-        state_dict = {
-            k[7:]: v for k, v in state_dict.items() if k.startswith("module.")
-        }
+        state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
     elif not checkpoint_has_module and model_is_ddp:
         # Checkpoint doesn't have module prefix but model does - add prefix
         state_dict = {"module." + k: v for k, v in state_dict.items()}
@@ -345,10 +252,7 @@ def load_autoencoder(
             else:
                 print(f"Warning: Could not find config file at {config_path}")
         else:
-            # Loading PEFT checkpoint into base model - filter out PEFT parameters
-            print(
-                "Found PEFT checkpoint. Filtering out PEFT parameters to load the base model."
-            )
+            print("Found PEFT checkpoint. Filtering out parameters to load base model.")
             base_state_dict = {}
             for k, v in state_dict.items():
                 # Skip PEFT-specific parameters
@@ -359,7 +263,8 @@ def load_autoencoder(
                     base_state_dict[k] = v
             state_dict = base_state_dict
             print(
-                f"Filtered state dict: {len(state_dict)} parameters (removed PEFT parameters)"
+                "Filtered state dict: "
+                f"{len(state_dict)} parameters (removed PEFT parameters)"
             )
 
     model.load_state_dict(
@@ -619,107 +524,6 @@ def adam_update(grad, buf1, buf2, step, betas, eps):
     return buf1c / (buf2c.sqrt() + eps)
 
 
-class Muon(torch.optim.Optimizer):
-    """
-    Muon - MomentUm Orthogonalized by Newton-schulz
-
-    https://kellerjordan.github.io/posts/muon/
-
-    Muon internally runs standard SGD-momentum, and then performs an orthogonalization post-
-    processing step, in which each 2D parameter's update is replaced with the nearest orthogonal
-    matrix. For efficient orthogonalization we use a Newton-Schulz iteration, which has the
-    advantage that it can be stably run in bfloat16 on the GPU.
-
-    Muon should only be used for hidden weight layers. The input embedding, final output layer,
-    and any internal gains or biases should be optimized using a standard method such as AdamW.
-    Hidden convolutional weights can be trained using Muon by viewing them as 2D and then
-    collapsing their last 3 dimensions.
-
-    Arguments:
-        lr: The learning rate, in units of spectral norm per update.
-        weight_decay: The AdamW-style weight decay.
-        momentum: The momentum. A value of 0.95 here is usually fine.
-    """
-
-    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
-        assert (
-            isinstance(params, list)
-            and len(params) >= 1
-            and isinstance(params[0], torch.nn.Parameter)
-        )
-        params = sorted(params, key=lambda x: x.size(), reverse=True)
-        super().__init__(params, defaults)
-
-    @torch.no_grad()
-    def step(self, closure=None):
-
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for group in self.param_groups:
-            params = group["params"]
-            params_pad = params + [torch.empty_like(params[-1])] * (
-                dist.get_world_size() - len(params) % dist.get_world_size()
-            )
-            for base_i in range(len(params))[:: dist.get_world_size()]:
-                if base_i + dist.get_rank() < len(params):
-                    p = params[base_i + dist.get_rank()]
-                    if p.grad is None:
-                        # continue
-                        p.grad = torch.zeros_like(p)  # Force synchronization
-                    state = self.state[p]
-                    if len(state) == 0:
-                        state["momentum_buffer"] = torch.zeros_like(p)
-                    update = muon_update(
-                        p.grad, state["momentum_buffer"], beta=group["momentum"]
-                    )
-                    p.mul_(1 - group["lr"] * group["weight_decay"])
-                    p.add_(update.reshape(p.shape), alpha=-group["lr"])
-                dist.all_gather(
-                    params_pad[base_i : base_i + dist.get_world_size()],
-                    params_pad[base_i + dist.get_rank()],
-                )
-
-        return loss
-
-
-class SingleDeviceMuon(torch.optim.Optimizer):
-    """
-    Muon variant for usage in non-distributed settings.
-    """
-
-    def __init__(self, params, lr=0.02, weight_decay=0, momentum=0.95):
-        defaults = dict(lr=lr, weight_decay=weight_decay, momentum=momentum)
-        super().__init__(params, defaults)
-
-    @torch.no_grad()
-    def step(self, closure=None):
-
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    # continue
-                    p.grad = torch.zeros_like(p)  # Force synchronization
-                state = self.state[p]
-                if len(state) == 0:
-                    state["momentum_buffer"] = torch.zeros_like(p)
-                update = muon_update(
-                    p.grad, state["momentum_buffer"], beta=group["momentum"]
-                )
-                p.mul_(1 - group["lr"] * group["weight_decay"])
-                p.add_(update.reshape(p.shape), alpha=-group["lr"])
-
-        return loss
-
-
 class MuonWithAuxAdam(torch.optim.Optimizer):
     """
     Distributed Muon variant that can be used for all parameters in the network, since it runs an
@@ -775,7 +579,6 @@ class MuonWithAuxAdam(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None):
-
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -859,7 +662,6 @@ class SingleDeviceMuonWithAuxAdam(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None):
-
         loss = None
         if closure is not None:
             with torch.enable_grad():

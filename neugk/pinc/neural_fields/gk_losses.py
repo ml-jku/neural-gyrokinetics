@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from neugk.pinc.neural_fields.nf_utils import phi_fft
 from neugk.integrals import get_integrals
 
+
 def diagnostics(
     phi_fft: torch.Tensor,
     eflux_field: torch.Tensor,

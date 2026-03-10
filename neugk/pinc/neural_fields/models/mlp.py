@@ -115,7 +115,7 @@ class MLPNF(nn.Module):
         embed_type: str = "linear",
         skips: bool = False,
         use_z_functa: bool = False,
-        grid_size: Tuple[int] = (32, 8, 16, 85, 32),
+        grid_size: Tuple[int],
     ):
         super().__init__()
 

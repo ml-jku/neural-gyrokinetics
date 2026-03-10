@@ -12,16 +12,14 @@ import subprocess
 import random
 
 import torch
-import torch.multiprocessing as mp
 import yaml
 
 import hydra
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-import submitit
+import torch.multiprocessing as mp
 
-# Project Imports
-from neugk.utils import set_seed, compress_src, find_free_port, filter_cli_priority
+from neugk.utils import compress_src, filter_cli_priority, find_free_port
 
 from neugk.gyroswin import GyroSwinRunner
 from neugk.pinc import PINCRunner
@@ -49,7 +47,9 @@ def main(config: DictConfig):
     os.environ["HYDRA_FULL_ERROR"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    # os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+    # os.environ["NCCL_BUFFSIZE"] = "1048576"
+    # os.environ["NCCL_P2P_DISABLE"] = "0"
 
     rand_suffix = random.randint(0, 999)
     print("#" * 88, "\nStarting Cyclone with configs:")
@@ -168,20 +168,24 @@ def main(config: DictConfig):
         is_ddp = config.ddp.enable
         is_torchrun = "RANK" in os.environ
         is_slurm = "SLURM_JOB_ID" in os.environ
+        if is_torchrun and is_slurm:
+            # set wandb directory to prevent distructive symlinks from wandb
+            job_id = os.environ.get("SLURM_JOB_ID")
+            os.environ["WANDB_DIR"] = f"{dict_config['output_path']}/wandb_{job_id}"
+
         if is_ddp:
             world_size = config.ddp.n_nodes * torch.cuda.device_count()
             if not is_torchrun and is_slurm:
                 overrides = HydraConfig.get().overrides.task
                 overrides = [
-                    o for o in overrides
-                    if not o.startswith("hydra/launcher=")
+                    o for o in overrides if not o.startswith("hydra/launcher=")
                 ]
                 if config.ddp.n_nodes == 1:
                     # should be run with torchrun
                     cmd = [
                         "torchrun",
                         f"--nproc_per_node={torch.cuda.device_count()}",
-                        "main.py"
+                        "main.py",
                     ] + overrides
                 else:
                     # multinode setup
@@ -192,26 +196,45 @@ def main(config: DictConfig):
                         f"--rdzv_backend={os.environ['RDZV_BACKEND']}",
                         f"--rdzv_id={os.environ['RDZV_ID']}",
                         f"--rdzv_endpoint={os.environ['HEAD_NODE_IP']}:29501",
-                        "main.py"
+                        "main.py",
                     ] + overrides
 
-                print(f"Launching DDP job with command: {' '.join(cmd)}")
+                print(f"DDP job with command: {' '.join(cmd)}")
                 subprocess.check_call(cmd)
                 return
             elif is_torchrun and not is_slurm or is_torchrun and is_slurm:
                 rank = int(os.environ["RANK"])
+                conf = torch.cuda.memory_stats()
+                # This will show 'expandable_segments' in the output if supported/active
+                print(f"Alloc Conf: {torch.cuda.get_allocator_backend()}")
                 dispatch_runner(rank, config, world_size=world_size)
             else:
-                # here we could again revert to mp.spawn, but ideally should not be done anymore
-                raise ValueError("Invalid DDP setup: torchrun and SLURM env vars are inconsistent")
+                # here we revert to mp.spawn to allow "normal" DDP startup
+                print(f"Local DDP with mp.spawn (nprocs={torch.cuda.device_count()})")
+                os.environ["MASTER_ADDR"] = "localhost"
+                os.environ["MASTER_PORT"] = str(find_free_port())
+                if "NCCL_SOCKET_IFNAME" in os.environ:
+                    del os.environ["NCCL_SOCKET_IFNAME"]
+
+                mp.spawn(
+                    dispatch_runner,
+                    args=(config, world_size),
+                    nprocs=torch.cuda.device_count(),
+                    join=True,
+                )
         else:
             # single gpu
             rank = 0
             dispatch_runner(rank, config, world_size=1)
 
-    except BaseException:
+    except BaseException as e:
         traceback.print_exc(file=sys.stderr)
-        raise
+        if "out of memory" in str(e):
+            print("| WARNING: OUT OF MEMORY |")
+            # This gives a detailed table of blocks, holes, and reserved memory
+            print(torch.cuda.memory_summary(device=None, abbreviated=False))
+            torch.cuda.empty_cache()
+        raise e
     finally:
         sys.stdout.flush()
         sys.stderr.flush()

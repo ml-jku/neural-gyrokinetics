@@ -1,7 +1,17 @@
 import torch
 import einops
-from typing import Optional, Callable
+from typing import Optional, Callable, Dict
+from enum import Enum
 from functools import partial
+
+
+class MaskStrategy(str, Enum):
+    RANDOM = "random"
+    LOW_FROM_HIGH = "low_from_high"  # mask low modes, predict them from high
+    HIGH_FROM_LOW = "high_from_low"  # mask high modes, predict them from low
+    ZONAL_FLOW = "zonal_flow"  # mask zero mode only
+    MIXED = "mixed"  # uniform coin flip over the four above
+
 
 def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: int = 1):
     def _noise(x: torch.Tensor) -> torch.Tensor:
@@ -15,6 +25,7 @@ def noise_transform(std: float = 1e-4, accumulated: bool = True, window_size: in
             return x + torch.normal(0, std, size=(x.shape), device=x.device)
 
     return _noise
+
 
 def reverse_ifft(x, zf_separated=False):
     # Ensure input is a torch.Tensor
@@ -37,6 +48,7 @@ def reverse_ifft(x, zf_separated=False):
     x = x.permute(1, 0, *range(2, x.ndim))
     return x.to(torch.float32)
 
+
 def ifft(x):
     x = x.permute(0, *range(2, x.ndim), 1).contiguous()
     x = torch.view_as_complex(x)
@@ -45,15 +57,12 @@ def ifft(x):
     x = x.permute(1, 0, *range(2, x.ndim))
     return x.to(torch.float32)
 
+
 def de_normalize(x, file_idx, denormalize_fn):
     # de/normalize physics data keys
-    x = torch.stack(
-        [
-            denormalize_fn(f, x[b])
-            for b, f in enumerate(file_idx.tolist())
-        ]
-    )
+    x = torch.stack([denormalize_fn(f, x[b]) for b, f in enumerate(file_idx.tolist())])
     return x
+
 
 def separate_zf(x):
     nky = x.shape[-1]
@@ -61,19 +70,118 @@ def separate_zf(x):
     x = torch.cat([zf, x - zf], dim=1)
     return x
 
+
+def _build_mask(
+    nky: int,
+    strategy: MaskStrategy,
+    mask_ratio: float,
+    cutoff: int,
+    weights: Optional[torch.Tensor],
+    mask_zero_mode: bool,
+    rescale: bool,
+    device: torch.device,
+) -> torch.Tensor:
+    """Return a 1-D mask of shape (nky,) where 1 = keep, 0 = drop.
+
+    If rescale is True, kept modes are scaled up so expected energy is preserved.
+    """
+    if strategy == MaskStrategy.RANDOM:
+        if weights is None:
+            probs = torch.full((nky,), mask_ratio, device=device)
+        else:
+            w = weights.to(device)
+            probs = mask_ratio * (w / w.mean())
+            probs = probs.clamp(0.0, 1.0)
+
+        if not mask_zero_mode:
+            probs[0] = 0.0
+
+        keep_prob = 1.0 - probs
+        mask = torch.bernoulli(keep_prob)
+
+        if rescale:
+            scale = torch.where(
+                keep_prob > 0, 1.0 / keep_prob, torch.zeros_like(keep_prob)
+            )
+            mask = mask * scale
+
+    elif strategy == MaskStrategy.LOW_FROM_HIGH:
+        # Mask out modes [0, cutoff), keep [cutoff, nky)
+        mask = torch.ones(nky, device=device)
+        mask[:cutoff] = 0.0
+        if not mask_zero_mode:
+            mask[0] = 1.0
+        if rescale:
+            n_kept = mask.sum().clamp(min=1)
+            mask = mask * (nky / n_kept)
+
+    elif strategy == MaskStrategy.HIGH_FROM_LOW:
+        # Keep modes [0, cutoff), mask out [cutoff, nky)
+        mask = torch.ones(nky, device=device)
+        mask[cutoff:] = 0.0
+        # always rescale energy for high->low to not plateau
+        n_kept = mask.sum().clamp(min=1)
+        full_scale = nky / n_kept
+        scale = 1.0 + torch.rand(1, device=device).item() * (full_scale - 1.0)
+        mask = mask * scale
+
+    elif strategy == MaskStrategy.ZONAL_FLOW:
+        # Mask only the zero mode
+        mask = torch.ones(nky, device=device)
+        mask[0] = 0.0
+        if rescale:
+            mask = mask * (nky / (nky - 1))
+
+    else:
+        raise ValueError(f"Unknown strategy: {strategy}")
+
+    return mask
+
+
+def _sample_strategy(
+    strategy: MaskStrategy,
+    mix_weights: Dict[MaskStrategy, float],
+) -> MaskStrategy:
+    """If strategy is MIXED, sample a leaf strategy according to mix_weights."""
+    if strategy != MaskStrategy.MIXED:
+        return strategy
+
+    strategies = list(mix_weights.keys())
+    probs = torch.tensor([mix_weights[s] for s in strategies])
+    probs = probs / probs.sum()
+    idx = torch.multinomial(probs, 1).item()
+    return strategies[idx]
+
+
 def mask_modes(
-        mask_ratio: float, 
-        is_fourier: bool = False, 
-        zf_separated: bool = False, 
-        weights: Optional[torch.Tensor] = None,
-        rescale: bool = True,
-        mask_zero_mode: bool = True,
-        denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-    ):
+    mask_ratio: float,
+    strategy: str | MaskStrategy = MaskStrategy.RANDOM,
+    is_fourier: bool = False,
+    zf_separated: bool = False,
+    weights: Optional[torch.Tensor] = None,
+    rescale: bool = True,
+    mask_zero_mode: bool = True,
+    cutoff: Optional[int] = None,
+    mix_weights: Optional[Dict[str | MaskStrategy, float]] = None,
+    denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+):
     assert 0.0 <= mask_ratio <= 1.0, "mask_ratio must be in [0, 1]"
     if weights is not None and not isinstance(weights, torch.Tensor):
         weights = torch.from_numpy(weights).to(device)
+
+    # Resolve mix weights
+    _mix = {}
+    _leaf = [s for s in MaskStrategy if s != MaskStrategy.MIXED]
+    if strategy == MaskStrategy.MIXED:
+        if mix_weights is not None:
+            for k, v in mix_weights.items():
+                _mix[MaskStrategy(k) if isinstance(k, str) else k] = v
+        else:
+            _mix = {s: 1.0 / len(_leaf) for s in _leaf}
+        assert all(
+            s in _leaf for s in _mix
+        ), f"mix_weights keys must be leaf strategies, got {list(_mix.keys())}"
 
     def _mask(x: torch.Tensor, file_idx: torch.Tensor) -> torch.Tensor:
         device = x.device
@@ -83,27 +191,21 @@ def mask_modes(
             if denormalize_fn is not None:
                 x = de_normalize(x, file_idx, denormalize_fn)
             x = reverse_ifft(x, zf_separated=zf_separated)
-        
+
         nky = x.shape[-1]
-        if weights is None:
-            probs = torch.full((nky,), mask_ratio, device=device)
-        else:
-            normalized_weights = weights / weights.mean()
-            probs = mask_ratio * normalized_weights
-            probs = torch.clamp(probs, 0.0, 1.0)
+        # select strategy
+        chosen = _sample_strategy(strategy, _mix)
 
-        # Handle zero mode separately for linear sims
-        if not mask_zero_mode:
-            probs[0] = 0.0
-
-        # Sample Bernoulli mask (1 = keep, 0 = drop)
-        keep_prob = 1.0 - probs
-        mask_1d = torch.bernoulli(keep_prob)
-
-        # Optional rescaling to preserve expected energy
-        if rescale:
-            scale = torch.where(keep_prob > 0, 1.0 / keep_prob, torch.zeros_like(keep_prob))
-            mask_1d = mask_1d * scale
+        mask_1d = _build_mask(
+            nky=nky,
+            strategy=chosen,
+            mask_ratio=mask_ratio,
+            weights=weights,
+            mask_zero_mode=mask_zero_mode,
+            rescale=rescale,
+            cutoff=cutoff if cutoff is not None else nky // 2,
+            device=device,
+        )
 
         # Reshape for broadcasting
         shape = [1] * x.ndim
@@ -116,7 +218,9 @@ def mask_modes(
                 # remove zf again if it was removed originally
                 x_masked = separate_zf(x_masked)
             if normalize_fn is not None:
-                x_masked = de_normalize(x_masked, file_idx, partial(normalize_fn, return_stats=False))
-        return x_masked, x_tgt
+                x_masked = de_normalize(
+                    x_masked, file_idx, partial(normalize_fn, return_stats=False)
+                )
+        return x_masked, x_tgt, mask, chosen
 
     return _mask

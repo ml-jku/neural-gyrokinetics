@@ -244,7 +244,6 @@ class GyroSwin(nn.Module):
     def forward(
         self, df: torch.Tensor, phi: Optional[torch.Tensor] = None, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-
         use_phi = hasattr(self, "phi_unet") and phi is not None
         df, phi, df_pad_axes, phi_pad_axes = self.patch_encode(df, phi, use_phi)
 
@@ -571,7 +570,7 @@ class GyroSwinMultitask(GyroSwin):
         out = [df]
         if self.use_phi:
             phi = rearrange(phi, "b c s x y -> b c x s y")
-            out += [phi.squeeze()]
+            out += [phi.squeeze(1)]
 
         if self.flux_head is not None:
             flux = self.flux_head(flux_lats)

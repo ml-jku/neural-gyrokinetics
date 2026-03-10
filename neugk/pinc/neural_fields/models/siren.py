@@ -1,3 +1,5 @@
+from typing import Sequence, Optional
+
 import numpy as np
 
 import torch
@@ -73,6 +75,7 @@ class SIREN(nn.Module):
         skips: bool = False,
         clip_out: bool = False,
         bias: bool = True,
+        grid_size: Optional[Sequence[int]] = None,
     ):
         super().__init__()
 
@@ -90,10 +93,7 @@ class SIREN(nn.Module):
             self.coord_embed = IntegerSincosConditionEmbed(
                 dim,
                 in_dim,
-                # TODO
-                max_size=(
-                    (32, 8, 16, 85, 32) if in_dim == 5 else (50, 32, 8, 16, 85, 32)
-                ),
+                max_size=grid_size,
                 use_mlp=False,
             )
             embed_dim = self.coord_embed.cond_dim
@@ -101,10 +101,7 @@ class SIREN(nn.Module):
             self.coord_embed = IntegerConditionEmbed(
                 dim,
                 in_dim,
-                # TODO
-                max_size=(
-                    (32, 8, 16, 85, 32) if in_dim == 5 else (50, 32, 8, 16, 85, 32)
-                ),
+                max_size=grid_size,
                 use_mlp=False,
             )
             embed_dim = self.coord_embed.cond_dim

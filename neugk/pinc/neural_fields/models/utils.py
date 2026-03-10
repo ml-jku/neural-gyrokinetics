@@ -17,7 +17,7 @@ class NFPeftWrapper(nn.Module):
         self,
         coords: Optional[torch.Tensor] = None,
         input_ids: Optional[torch.Tensor] = None,
-        **kwargs
+        **kwargs,
     ):
         del kwargs
         if coords is None and input_ids is not None:
