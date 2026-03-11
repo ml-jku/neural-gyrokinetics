@@ -125,6 +125,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             cond_embed=cond_fn,
             init_weights=ae_cfg.init_weights,
             patching_init_weights=ae_cfg.patching_init_weights,
+            cond_init_weights=ae_cfg.cond_init_weights,
             act_fn=act_fn,
             use_rpb=use_rpb,
             use_rope=use_rope,

@@ -3,3 +3,5 @@ n_eval_steps: 2
 validate_every_n_epochs: 20
 eval_integrals: true
 model_selection_metric: "df"
+probe:
+  targets: ["flux", "itg", "dg", "q", "s_hat"]

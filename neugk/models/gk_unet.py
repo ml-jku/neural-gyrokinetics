@@ -364,7 +364,7 @@ class SwinNDUnet(nn.Module):
         expand_act_fn: nn.Module = nn.LeakyReLU,
         init_weights: str = "xavier_uniform",
         patching_init_weights: str = "xavier_uniform",
-        cond_init_weights: str = "xavier_uniform",  # "normal_smallvar",
+        cond_init_weights: str = "normal_smallvar",
         norm_output: bool = False,
         patch_skip: bool = False,
         swin_bottleneck: bool = False,

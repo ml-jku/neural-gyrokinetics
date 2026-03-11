@@ -5,6 +5,7 @@ plus EMA normalization and custom Conflict-Free Gradient Descent (ConFIG) patchi
 """
 
 from typing import List, Callable, Dict, Optional, Any
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -123,17 +124,13 @@ class PINCLossWrapper(LossWrapper):
             if name == "mask_modes":
                 # df_delta is already added to _data_losses by the base class;
                 # no extra loss keys needed here.
-                self.weights.setdefault("df_delta", 1.0)
-            elif name == "vicreg_variance":
-                self.weights.setdefault(name, 1.0)
-            elif name == "vicreg_covariance":
-                self.weights.setdefault(name, 1.0)
+                name = "df_delta"  # for weight registration and logging
+                if not "df_delta" in self.weights:
+                    self.weights.setdefault("df_delta", 1.0)
             else:
-                raise ValueError(
-                    f"Unknown augmentation '{name}'. "
-                    f"Supported: mask_modes, vicreg_variance, vicreg_covariance."
-                )
-            self._augmentation_losses.append(name)
+                if not name in self.weights:
+                    self.weights.setdefault(name, 1.0)
+                self._augmentation_losses.append(name)
 
     @property
     def all_losses(self):
@@ -221,22 +218,33 @@ class PINCLossWrapper(LossWrapper):
 
         return per_mode
 
-    def compute_vicreg_variance(self, preds: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        B, D = z.shape
-
-        z_centered = z - z.mean(dim=0)
-        std = z_centered.std(dim=0)  # (D,)
-        var_loss = F.relu(1.0 - std + eps).mean()
+    def compute_vicreg_variance(self, z: torch.Tensor, eps: float = 1e-8) -> Dict[str, torch.Tensor]:
+        # flatten batch and spatial dimensions, keep latent dim
+        z = z.reshape(-1, z.shape[-1])
+        std = torch.sqrt(z.var(dim=0) + eps)
+        var_loss = torch.mean(F.relu(1.0 - std))
         return {"vicreg_variance": var_loss}
 
-    def compute_vicreg_covariance(self, preds: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        B, D = z.shape
+    def compute_vicreg_covariance(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+        z = z.reshape(-1, z.shape[-1])
+        z_centered = z - z.mean(dim=0)
+        B, D = z_centered.shape
 
         # --- Covariance ---
         cov = (z_centered.T @ z_centered) / (B - 1)  # (D, D)
         off_diag = cov - torch.diag(cov.diag())
         cov_loss = (off_diag ** 2).sum() / D
         return {"vicreg_covariance": cov_loss}
+
+    def compute_logdet(self, z: torch.Tensor, eps: float = 1e-8) -> Dict[str, torch.Tensor]:
+        z = z.reshape(-1, z.shape[-1]).float()
+        d = z.shape[-1]
+        z_std = (z - z.mean(dim=0)) / (z.std(dim=0) + eps)
+        cov = (z_std.T @ z_std) / max(z.shape[0] - 1, 1)
+        logdet = -torch.logdet(cov + eps * torch.eye(d, device=z.device)) / d
+        # cov = torch.cov(z.T) + eps * torch.eye(z.shape[-1], device=z.device)
+        # logdet = torch.logdet(cov) / d
+        return {"logdet": logdet}
 
     def compute_data_loss(
         self, pred: torch.Tensor, 
@@ -617,10 +625,13 @@ class PINCLossWrapper(LossWrapper):
             losses.update(self.compute_simsiam_loss(preds))
 
         # 3. Augmentation losses (VICReg, etc.)
-        for name in self._augmentation_losses:
-            # TODO: need to pass latent in predictions for VICReg losses
-            if "vicreg" in name:
-                losses.update(getattr(self, f"compute_{name}")(preds))
+        if self.training:
+            for name in self._augmentation_losses:
+                if "vicreg" in name and not "latent" in preds:
+                    warnings.warn(f"Latents not found in predictions for augmentation loss: {name}")
+                    continue
+                if name != "df_delta":
+                    losses.update(getattr(self, f"compute_{name}")(preds["latent"]))
 
         special_keys = set(
             self._int_losses
@@ -628,7 +639,7 @@ class PINCLossWrapper(LossWrapper):
             + self._vqvae_losses
             + self._spectral_losses
             + self._simsiam_losses
-            + self.augmentations
+            + self._augmentation_losses
         )
 
         available_keys = list(set(tgts.keys()) | set(preds.keys()) | special_keys)
@@ -687,7 +698,8 @@ class PINCLossWrapper(LossWrapper):
                 for k in all_keys
                 if k in losses and self.weights.get(k, 0.0) > 0
             }
-            log_losses.update({"total_mse": sum(monitor_mse.values())})
+            if len(monitor_mse) > 0:
+                log_losses.update({"total_mse": sum(monitor_mse.values())})
             log_losses.update(int_monitor)
             log_losses.update(per_mode_losses)
             if self.ema_normalization_loss:

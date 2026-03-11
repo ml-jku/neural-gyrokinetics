@@ -101,6 +101,10 @@ class BaseRunner:
                 )
         if self.cfg.dataset.augment.mask_modes.active:
             weights["df_delta"] = self.cfg.dataset.augment.mask_modes.df_delta_weight
+        if self.cfg.dataset.augment.vicreg_variance.active:
+            weights["vicreg_variance"] = self.cfg.dataset.augment.vicreg_variance.weight
+        if self.cfg.dataset.augment.logdet.active:
+            weights["logdet"] = self.cfg.dataset.augment.logdet.weight
         return weights
 
     def setup_scheduler(self):

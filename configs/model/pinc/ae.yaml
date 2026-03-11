@@ -8,7 +8,7 @@ conditioning: ["itg", "dg", "s_hat", "q"]
 extra_zf_loss: false
 init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
 patching_init_weights: "kaiming_uniform"
-cond_init_weights: "kaiming_uniform"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
+cond_init_weights: "normal_smallvar"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
 
 loss_scheduler: null
 loss_weights:

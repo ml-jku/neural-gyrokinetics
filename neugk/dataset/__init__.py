@@ -185,7 +185,7 @@ def get_data(cfg, rank: int = 0):
     # gpudirect storage only used if kvikio is required, oterwise raw bins
     use_gpudirect = backend == "gds" and use_kvikio_train
     # dataloaders
-    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
+    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 0
     # NOTE: must be false when returning gpu data
     pin_memory = cfg.training.pin_memory and not use_gpudirect
     dataloader_kwargs = {}
@@ -303,6 +303,9 @@ def get_data(cfg, rank: int = 0):
                         ),
                     )
                 )
+            elif key in ["vicreg_variance", "vicreg_covariance", "logdet"]:
+                # no additional augmentation function needed, just compute loss on latents
+                pass
             else:
                 raise ValueError(f"Unknown augmentation: {key}")
 

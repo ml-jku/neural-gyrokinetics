@@ -1,7 +1,5 @@
 import os
-from tqdm import tqdm
 from functools import partial
-
 from collections import defaultdict
 from time import perf_counter_ns
 
@@ -42,7 +40,11 @@ class PINCRunner(BaseRunner):
         #     else {}
         # )
         dataset_stats = {}
-        augmentations = [k for k in getattr(self.cfg.dataset, "augment", {}).keys() if getattr(self.cfg.dataset.augment, k).active]
+        augmentations = [
+            k
+            for k in getattr(self.cfg.dataset, "augment", {}).keys()
+            if getattr(self.cfg.dataset.augment, k).active
+        ]
 
         self.loss_wrap = PINCLossWrapper(
             weights=weights,
@@ -293,7 +295,10 @@ class PINCRunner(BaseRunner):
                 # dispatch to correct step function
                 if self.cfg.stage == "autoencoder":
                     if self.cfg.dataset.augment.mask_modes.active:
-                        step_fn = partial(train_step_autoencoder, denormalize_fn=self.trainset.denormalize)
+                        step_fn = partial(
+                            train_step_autoencoder,
+                            denormalize_fn=self.trainset.denormalize,
+                        )
                     else:
                         step_fn = train_step_autoencoder
                 if self.cfg.stage == "peft":
@@ -330,7 +335,8 @@ class PINCRunner(BaseRunner):
             self.cur_update_step += 1.0
             loss_logs["total"].append(loss.item())
             for k, v in losses.items():
-                loss_logs[k].append(v.item())
+                if not torch.isnan(v).item():
+                    loss_logs[k].append(v.item())
 
             # if self.cur_update_step % 100 == 0:
             #     del xs, condition, idx_data, geometry, loss, losses
@@ -352,7 +358,8 @@ class PINCRunner(BaseRunner):
             epoch=epoch,
             device=self.device,
             loss_val_min=self.loss_val_min,
-            trainloader=self.trainloader,
+            trainloader=self.trainloader if self.cfg.validation.get("probe", None) else None,
+            trainset=self.trainset if self.cfg.validation.get("probe", None) else None,
+            probe_cfg=self.cfg.validation.get("probe", None),
             evaluate_recon=True,  # TODO adapt
-            evaluate_probing=False,
         )

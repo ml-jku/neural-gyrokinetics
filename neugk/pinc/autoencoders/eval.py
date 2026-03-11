@@ -14,6 +14,15 @@ from neugk.utils import recombine_zf
 class AutoencoderEvaluator(BaseEvaluator):
     """Evaluator for autoencoder models with optional linear probing."""
 
+    # mapping from probe target names to metadata keys
+    _META_KEY_MAP = {
+        "flux": "fluxes",
+        "itg": "ion_temp_grad",
+        "dg": "density_grad",
+        "s_hat": "s_hat",
+        "q": "q",
+    }
+
     def _prepare_sample(self, sample: CycloneAESample, device: torch.device) -> Tuple[
         Dict[str, torch.Tensor],
         Dict[str, torch.Tensor],
@@ -38,6 +47,33 @@ class AutoencoderEvaluator(BaseEvaluator):
         }
         return xs, tgts, condition, idx_data
 
+    def _gather_probe_targets(
+        self,
+        sample: CycloneAESample,
+        dataset,
+        probe_targets: Optional[List[str]] = None,
+    ) -> torch.Tensor:
+        """Extract probe target values from per-file dataset metadata.
+
+        Returns a (B, n_targets) tensor.
+        """
+        file_indices = sample.file_index  # (B,)
+        timestep_indices = sample.timestep_index  # (B,)
+        batch_targets = []
+        for fi, ti in zip(file_indices.tolist(), timestep_indices.tolist()):
+            meta = dataset.metadata[fi]
+            vals = []
+            for tgt_name in probe_targets:
+                meta_key = self._META_KEY_MAP.get(tgt_name, tgt_name)
+                v = meta[meta_key]
+                # time-indexed arrays (e.g. fluxes) vs per-file scalars (e.g. itg)
+                if hasattr(v, '__len__') and len(v) > 1:
+                    v = v[ti]
+                v_t = torch.as_tensor(v, dtype=torch.float32).reshape(-1)
+                vals.append(v_t)
+            batch_targets.append(torch.cat(vals))
+        return torch.stack(batch_targets, dim=0)
+
     @torch.no_grad()
     def collect_xy(
         self,
@@ -45,12 +81,14 @@ class AutoencoderEvaluator(BaseEvaluator):
         dataloader: torch.utils.data.DataLoader,
         model: torch.nn.Module,
         device: torch.device,
+        dataset=None,
         desc: Optional[str] = "linear probe",
+        probe_targets: Optional[List[str]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Collect model latents and target fluxes for linear probing."""
+        """Collect model latents and probe targets for linear probing."""
         model.eval()
         latents: List[torch.Tensor] = []
-        fluxes: List[torch.Tensor] = []
+        targets: List[torch.Tensor] = []
 
         # setup iterator
         use_tqdm = (not dist.is_initialized() or rank == 0) and desc
@@ -64,7 +102,6 @@ class AutoencoderEvaluator(BaseEvaluator):
                 if sample.conditioning is not None
                 else None
             )
-            flux = sample.flux.to(device, non_blocking=True)
 
             # forward pass for latents
             if hasattr(model, "encode"):
@@ -76,9 +113,12 @@ class AutoencoderEvaluator(BaseEvaluator):
             # global average pool spatially
             zpool = z.view(z.shape[0], -1, z.shape[-1]).mean(1)
             latents.append(zpool.cpu())
-            fluxes.append(flux.view(flux.shape[0], -1).cpu())
 
-        return torch.cat(latents, 0), torch.cat(fluxes, 0)
+            # gather probe targets from dataset metadata
+            y = self._gather_probe_targets(sample, dataset, probe_targets)
+            targets.append(y)
+
+        return torch.cat(latents, 0), torch.cat(targets, 0)
 
     @torch.no_grad()
     def __call__(
@@ -93,7 +133,7 @@ class AutoencoderEvaluator(BaseEvaluator):
         loss_val_min: float,
         trainloader: Optional[torch.utils.data.DataLoader] = None,
         evaluate_recon: bool = False,
-        evaluate_probing: bool = False,
+        probe_cfg: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
         """Evaluate autoencoder model on validation datasets"""
@@ -205,28 +245,40 @@ class AutoencoderEvaluator(BaseEvaluator):
                 )
 
         # linear probing evaluation
-        if trainloader is not None and evaluate_probing:
+        if trainloader is not None and probe_cfg is not None:
+            probe_targets: List[str] = probe_cfg.get("targets", ["flux"])
+            trainset = kwargs.get("trainset")
+            target_label = "+".join(probe_targets)
             # compute probe weights on trainset
-            x_train, y_train = self.collect_xy(rank, trainloader, model, device)
+            x_train, y_train = self.collect_xy(
+                rank, trainloader, model, device, dataset=trainset, probe_targets=probe_targets, desc="linear probe training",
+            )
             # column of ones for bias
             x_train_b = torch.cat([x_train, torch.ones(x_train.shape[0], 1)], dim=1)
-            # solve linear system: w @ w = y
-            res = torch.linalg.lstsq(x_train_b, y_train, driver="gels")
-            w = res.solution
+            # solve linear system: w @ x = y
+            w = torch.linalg.pinv(x_train_b) @ y_train
             # report train RMSE on physical scale
             y_train_pred = x_train_b @ w
-            train_rmse = torch.sqrt(torch.mean((y_train_pred - y_train) ** 2))
-            log_metric_dict["val_traj/probe_train_rmse"] = train_rmse.item()
+            train_mse = torch.mean((y_train_pred - y_train) ** 2, dim=0)
+            for i, tgt in enumerate(probe_targets):
+                log_metric_dict[f"val_traj/probe_{tgt}_train_rmse"] = train_mse[i].sqrt().item()
+            log_metric_dict[f"val_traj/probe_{target_label}_train_rmse"] = train_mse.mean().sqrt().item()
+
             # evaluate on validation sets
-            for val_idx, valloader in enumerate(self.valloaders):
+            for val_idx, (valset, valloader) in enumerate(
+                zip(self.valsets, self.valloaders)
+            ):
                 valname = "val_traj" if val_idx == 0 else "val_samples"
                 x_val, y_val = self.collect_xy(
-                    rank, valloader, model, device, desc=None
+                    rank, valloader, model, device, dataset=valset, desc=None, probe_targets=probe_targets,
                 )
                 x_val_b = torch.cat([x_val, torch.ones(x_val.shape[0], 1)], dim=1)
                 y_val_pred = x_val_b @ w
-                val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val) ** 2))
-                log_metric_dict[f"{valname}/probe_val_rmse"] = val_rmse.item()
+                val_mse = torch.mean((y_val_pred - y_val) ** 2, dim=0)
+                for i, tgt in enumerate(probe_targets):
+                    log_metric_dict[f"{valname}/probe_{tgt}_val_rmse"] = val_mse[i].sqrt().item()
+                log_metric_dict[f"{valname}/probe_{target_label}_val_rmse"] = val_mse.mean().sqrt().item()
+                
         # save checkpoint
         loss_val_min = self._save_checkpoint(
             rank, model, opt, scheduler, epoch, log_metric_dict, loss_val_min

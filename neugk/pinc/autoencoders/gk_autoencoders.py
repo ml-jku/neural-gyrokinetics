@@ -119,11 +119,14 @@ class Swin5DAE(Swin5DUnet):
 
         return {"df": self.patch_decode(zdf, pad_axes, **kwcond)}
 
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, return_latent: bool = False):
         if condition is not None:
             condition = self.cond_embed(condition)
         zdf, pad_axes = self.encode(df, condition=condition)
-        return self.decode(zdf, pad_axes, condition=condition)
+        outputs = self.decode(zdf, pad_axes, condition=condition)
+        if return_latent:
+            outputs["latent"] = zdf
+        return outputs
 
     def get_compression_info(self):
         """Returns a dictionary with compression-related information."""

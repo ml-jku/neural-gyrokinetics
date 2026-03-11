@@ -48,7 +48,11 @@ def train_step_autoencoder(
 
     # model prediction
     # for ae we only use df
-    x_preds = model(xs["df"], condition=condition)
+    return_latents = False
+    for key in loss_wrap.active_losses:
+        if key in ["vicreg_variance", "vicreg_covariance", "logdet"]:
+            return_latents = True
+    x_preds = model(xs["df"], condition=condition, return_latent=return_latents)
 
     if cfg.dataset.augment.mask_modes.active:
         assert denormalize_fn is not None, "denormalize_fn must be provided for masked spectral loss"
