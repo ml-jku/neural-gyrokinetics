@@ -4,7 +4,8 @@ bundle_seq_length: 1
 latent_dim: 1024
 act_fn: GELU
 decouple_mu: true
-conditioning: ["itg", "dg", "s_hat", "q"]
+encoder_conditioning: ["itg", "dg", "s_hat", "q"]
+decoder_conditioning: ["itg", "dg", "s_hat", "q"]
 extra_zf_loss: false
 init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
 patching_init_weights: "kaiming_uniform"

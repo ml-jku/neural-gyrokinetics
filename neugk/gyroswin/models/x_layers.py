@@ -330,9 +330,7 @@ class RSpaceReduce(AttentionDecoder):
             x.is_contiguous() and self.integral_token.is_contiguous()
         ), "Tensors not contiguous."
         q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
-        k, v = rearrange(
-            self.kv(x), "b n (t h c) -> t b h n c", t=2, h=self.num_heads
-        )
+        k, v = rearrange(self.kv(x), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
         q = q.expand(k.size(0), -1, -1, -1).contiguous()
         if dist.is_initialized():
             with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):

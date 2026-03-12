@@ -26,9 +26,15 @@ class Swin5DAE(Swin5DUnet):
         bottleneck_num_heads: int = 2,
         bottleneck_depth: int = 2,
         flux_head_config: Optional[Dict] = None,
+        mid_norm_learnable: bool = True,
         **kwargs,
     ):
-        super().__init__(*args, conditioning=[] if conditioning else None, **kwargs)
+        super().__init__(
+            *args,
+            conditioning=[] if conditioning else None,
+            mid_norm_learnable=mid_norm_learnable,
+            **kwargs,
+        )
 
         self.bottleneck_dim = bottleneck_dim or self.middle.dim
         self.bottleneck_grid_size = self.middle.grid_size
@@ -45,7 +51,7 @@ class Swin5DAE(Swin5DUnet):
             del self.up_blocks[i].proj_concat
 
         # bottleneck, project channels down
-        self.middle_pre = self.GlobalLayerType(
+        self.middle_pre = self.EncoderGlobalLayerType(
             self.space,
             dim=self.middle.dim,
             grid_size=self.middle.grid_size,
@@ -62,7 +68,7 @@ class Swin5DAE(Swin5DUnet):
         self.middle_downproj = nn.Linear(self.middle.dim, self.bottleneck_dim)
         # channels up
         self.middle_upproj = nn.Linear(self.bottleneck_dim, self.middle.dim)
-        self.middle_post = self.GlobalLayerType(
+        self.middle_post = self.DecoderGlobalLayerType(
             self.space,
             dim=self.middle.dim,
             grid_size=self.middle.grid_size,
@@ -125,8 +131,14 @@ class Swin5DAE(Swin5DUnet):
         }
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
-            condition = self.cond_embed(condition)
+        if condition is not None and condition.shape[-1] != self.enc_cond_dim:
+            condition = self.condition(
+                {"condition": condition},
+                self.enc_cond_embed,
+                self.encoder_condition_keys,
+                indices=self.enc_indices,
+            ).get("condition")
+
         kwcond = {"condition": condition} if condition is not None else {}
 
         zdf, pad_axes = self.patch_encode(df)
@@ -151,8 +163,14 @@ class Swin5DAE(Swin5DUnet):
         if pad_axes is None:
             pad_axes = self.get_pad_axes(self.base_resolution)
 
-        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
-            condition = self.cond_embed(condition)
+        if condition is not None and condition.shape[-1] != self.dec_cond_dim:
+            condition = self.condition(
+                {"condition": condition},
+                self.dec_cond_embed,
+                self.decoder_condition_keys,
+                indices=self.dec_indices,
+            ).get("condition")
+
         kwcond = {"condition": condition} if condition is not None else {}
 
         if self.normalized_latent:
@@ -168,16 +186,14 @@ class Swin5DAE(Swin5DUnet):
         return {"df": self.patch_decode(zdf, pad_axes, **kwcond)}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        if condition is not None:
-            condition = self.cond_embed(condition)
         zdf, pad_axes = self.encode(df, condition=condition)
         out = self.decode(zdf, pad_axes, condition=condition)
+
         if self.eflux_head is not None:
             if isinstance(self.eflux_head, MLP):
-                z_pooled = zdf.mean(dim=1)  # (batch, n_tokens, dim) -> (batch, dim)
+                z_pooled = zdf.mean(dim=1)
                 out["flux"] = self.eflux_head(z_pooled)
             else:
-                # it's a FluxDecoder
                 flux_lat = self.eflux_head.mix(0, zdf, zdf)
                 out["flux"] = self.eflux_head([flux_lat])
         return out
@@ -202,8 +218,13 @@ class Swin5DVAE(Swin5DAE):
         return mu + torch.randn_like(std) * std
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
-            condition = self.cond_embed(condition)
+        if condition is not None and condition.shape[-1] != self.enc_cond_dim:
+            condition = self.condition(
+                {"condition": condition},
+                self.enc_cond_embed,
+                self.encoder_condition_keys,
+                indices=self.enc_indices,
+            ).get("condition")
         kwcond = {"condition": condition} if condition is not None else {}
 
         zdf, pad_axes = self.patch_encode(df)
@@ -222,8 +243,6 @@ class Swin5DVAE(Swin5DAE):
         return z, pad_axes
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        if condition is not None:
-            condition = self.cond_embed(condition)
         zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["mu"] = self._mu
@@ -258,7 +277,7 @@ class Swin5DVQVAE(Swin5DAE):
         del self.middle_upproj
         self.middle_vq_downproj = nn.Linear(self.middle_dim, embedding_dim)
         self.middle_vq_upproj = nn.Linear(embedding_dim, self.middle_dim)
-    
+
     def get_compression_info(self):
         """Returns a dictionary with compression-related information."""
         import numpy as np
@@ -280,8 +299,13 @@ class Swin5DVQVAE(Swin5DAE):
         }
 
     def encode(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
-            condition = self.cond_embed(condition)
+        if condition is not None and condition.shape[-1] != self.enc_cond_dim:
+            condition = self.condition(
+                {"condition": condition},
+                self.enc_cond_embed,
+                self.encoder_condition_keys,
+                indices=self.enc_indices,
+            ).get("condition")
         kwcond = {"condition": condition} if condition is not None else {}
 
         zdf, pad_axes = self.patch_encode(df)
@@ -312,8 +336,13 @@ class Swin5DVQVAE(Swin5DAE):
         if pad_axes is None:
             pad_axes = self.get_pad_axes(self.base_resolution)
 
-        if condition is not None and condition.shape[-1] != self.cond_embed.cond_dim:
-            condition = self.cond_embed(condition)
+        if condition is not None and condition.shape[-1] != self.dec_cond_dim:
+            condition = self.condition(
+                {"condition": condition},
+                self.dec_cond_embed,
+                self.decoder_condition_keys,
+                indices=self.dec_indices,
+            ).get("condition")
         kwcond = {"condition": condition} if condition is not None else {}
 
         zdf = self.middle_vq_upproj(zdf)
@@ -343,8 +372,6 @@ class Swin5DVQVAE(Swin5DAE):
         raise RuntimeError("no vq indices available. run encode() or forward() first.")
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
-        if condition is not None:
-            condition = self.cond_embed(condition)
         zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["vq_commit_loss"] = self._vq_commit_loss
@@ -407,9 +434,7 @@ class Swin5DSimSiam(Swin5DAE):
         zdf, pad_axes = self.encode(df, condition=condition)
         pdf = self.predictor(zdf)
         if decoder and self.use_simae_decoder:
-            return {
-                "df": self.decode(zdf, pad_axes, condition)["df"],
-                "z": zdf,
-                "p": pdf,
-            }
-        return {"z": zdf, "p": pdf}
+            df = self.decode(zdf, pad_axes, condition=condition)["df"]
+            return {"df": df, "z": zdf, "p": pdf}
+        else:
+            return {"z": zdf, "p": pdf}

@@ -62,11 +62,17 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         num_layers = len(depth)
         assert num_layers == len(num_heads)
 
-        cond_fn = None
         conditioning = getattr(ae_cfg, "conditioning", [])
-        n_cond = len(conditioning)
-        if n_cond > 0:
-            cond_fn = ContinuousConditionEmbed(32, n_cond)
+        enc_conditioning = getattr(ae_cfg, "encoder_conditioning", conditioning)
+        dec_conditioning = getattr(ae_cfg, "decoder_conditioning", conditioning)
+
+        enc_cond_fn = None
+        if len(enc_conditioning) > 0:
+            enc_cond_fn = ContinuousConditionEmbed(32, len(enc_conditioning))
+
+        dec_cond_fn = None
+        if len(dec_conditioning) > 0:
+            dec_cond_fn = ContinuousConditionEmbed(32, len(dec_conditioning))
 
         # VAE/VQ-VAE configs
         model_kwargs = {}
@@ -126,7 +132,10 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             unmerging_depth=unmerging_depth,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
-            cond_embed=cond_fn,
+            enc_cond_embed=enc_cond_fn,
+            dec_cond_embed=dec_cond_fn,
+            encoder_conditioning=enc_conditioning,
+            decoder_conditioning=dec_conditioning,
             init_weights=ae_cfg.init_weights,
             patching_init_weights=ae_cfg.patching_init_weights,
             act_fn=act_fn,

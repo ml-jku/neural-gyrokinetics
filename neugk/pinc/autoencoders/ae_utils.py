@@ -264,20 +264,102 @@ def load_autoencoder(
                 f"{len(state_dict)} parameters (removed PEFT parameters)"
             )
 
+    # Remap old conditioning keys to new ones if necessary
+    remapped_state_dict = {}
+    did_remap = False
+
+    # Pre-detect if we are loading into an architecture that might have changed (e.g. missing modulation)
+    # If the state dict has dit keys but the model doesn't, we'll need strict=False
+    has_dit_in_ckpt = any(".dit." in k for k in state_dict.keys())
+    has_modulation_in_ckpt = any(".modulation." in k for k in state_dict.keys())
+
+    def get_base_model(m):
+        return m.module if hasattr(m, "module") else m
+
+    base_model = get_base_model(model)
+    has_dit_in_model = any(".dit." in n for n, _ in model.named_parameters())
+
+    if (has_dit_in_ckpt or has_modulation_in_ckpt) and not has_dit_in_model:
+        print("Architecture mismatch (modulation). Enabling relaxed loading.")
+        did_remap = True
+
+    for k, v in state_dict.items():
+        new_k = k.replace("encoder_cond_embed", "enc_cond_embed").replace(
+            "decoder_cond_embed", "dec_cond_embed"
+        )
+        if new_k != k:
+            did_remap = True
+
+        # Handle the very old 'cond_embed' name (pre-split)
+        if new_k.startswith("cond_embed."):
+            suffix = new_k[len("cond_embed.") :]
+
+            enc_attr = getattr(base_model, "enc_cond_embed", None)
+            dec_attr = getattr(base_model, "dec_cond_embed", None)
+
+            mapped = False
+            # Check if shapes match before mapping to avoid RuntimeError
+            if enc_attr is not None:
+                # Get the parameter shape from the actual module to be sure
+                try:
+                    target_param = (
+                        enc_attr.get_parameter(suffix)
+                        if hasattr(enc_attr, "get_parameter")
+                        else None
+                    )
+                    if target_param is None:
+                        # Fallback to dict lookup
+                        target_param = dict(enc_attr.named_parameters()).get(suffix)
+
+                    if target_param is not None and target_param.shape == v.shape:
+                        remapped_state_dict[f"enc_cond_embed.{suffix}"] = v
+                        did_remap = True
+                        mapped = True
+                except Exception:
+                    pass
+
+            if dec_attr is not None:
+                try:
+                    target_param = (
+                        dec_attr.get_parameter(suffix)
+                        if hasattr(dec_attr, "get_parameter")
+                        else None
+                    )
+                    if target_param is None:
+                        target_param = dict(dec_attr.named_parameters()).get(suffix)
+
+                    if target_param is not None and target_param.shape == v.shape:
+                        remapped_state_dict[f"dec_cond_embed.{suffix}"] = v
+                        did_remap = True
+                        mapped = True
+                except Exception:
+                    pass
+
+            # If we didn't map to either, keep the original key if strict=False might save us
+            if not mapped:
+                remapped_state_dict[new_k] = v
+        else:
+            remapped_state_dict[new_k] = v
+
+    state_dict = remapped_state_dict
+
     # Check if we have an eflux_head in the model but not in the state_dict
-    has_eflux_head_in_model = getattr(model, "eflux_head", None)
-    if hasattr(model, "module"):
-        has_eflux_head_in_model = getattr(model.module, "eflux_head", None)
+    has_eflux_head_in_model = getattr(base_model, "eflux_head", None)
     has_eflux_head_in_ckpt = any("eflux_head" in k for k in state_dict.keys())
 
+    # Set strict=False if we did remapping or if we are missing the eflux head
+    strict = not did_remap
     if has_eflux_head_in_model and not has_eflux_head_in_ckpt:
-        print("Model has eflux_head but checkpoint does not. Loading with strict=False.")
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        model.load_state_dict(
-            state_dict,
-            strict=not (is_peft_checkpoint and has_peft_params and not load_peft),
+        print(
+            "Model has eflux_head but checkpoint does not. Loading with strict=False."
         )
+        strict = False
+
+    # Force strict=False if loading a base model from a PEFT checkpoint (already handled by filtering usually)
+    if is_peft_checkpoint and not load_peft:
+        strict = False
+
+    model.load_state_dict(state_dict, strict=strict)
 
     resume_epoch = loaded_ckpt["epoch"]
     print(f"Loading model {ckp_path} (stopped at epoch {resume_epoch}) ")

@@ -8,21 +8,25 @@ from torch import nn
 from functools import partial
 
 from neugk.models.layers import seq_weight_init
-from neugk.models.nd_vit import (
+from neugk.models.nd_vit.swin_layers import (
     SwinLayer,
     DiTSwinLayer,
     FilmSwinLayer,
+)
+from neugk.models.nd_vit.vit_layers import (
+    LayerModes,
     ViTLayer,
     DiTLayer,
     FilmViTLayer,
-    LayerModes,
-    APE,
+)
+from neugk.models.nd_vit.patching import (
     PatchEmbed,
     PatchMerge,
     PatchExpand,
     pad_to_blocks,
     unpad,
 )
+from neugk.models.nd_vit.positional import APE
 
 
 class SwinBlockDown(nn.Module):
@@ -358,6 +362,10 @@ class SwinNDUnet(nn.Module):
         unmerging_depth: int = 2,
         conditioning: Optional[List[str]] = None,
         cond_embed: Optional[nn.Module] = None,
+        enc_cond_embed: Optional[nn.Module] = None,
+        dec_cond_embed: Optional[nn.Module] = None,
+        encoder_conditioning: Optional[List[str]] = None,
+        decoder_conditioning: Optional[List[str]] = None,
         modulation: str = "dit",
         act_fn: nn.Module = nn.GELU,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
@@ -411,47 +419,95 @@ class SwinNDUnet(nn.Module):
 
         # set layer type and conditioning
         self.cond_embed = cond_embed
-        if self.cond_embed is not None:
-            self.condition_keys = sorted(conditioning)
-            if modulation == "dit":
-                ModulatedSwinLayer = DiTSwinLayer
-                ModulatedViTLayer = DiTLayer
-            elif modulation == "film":
-                ModulatedSwinLayer = FilmSwinLayer
-                ModulatedViTLayer = FilmViTLayer
-            else:
-                raise ValueError(f"Unknown modulation type: {modulation}")
+        self.enc_cond_embed = enc_cond_embed
+        self.dec_cond_embed = dec_cond_embed
 
-            # Set conditioning parameters
-            ModulatedSwinLayer = partial(
-                ModulatedSwinLayer, cond_dim=self.cond_embed.cond_dim
-            )
-            ModulatedViTLayer = partial(
-                ModulatedViTLayer, cond_dim=self.cond_embed.cond_dim
-            )
-
-            LocalLayer = ModulatedSwinLayer
-            GlobalLayer = ModulatedSwinLayer if swin_bottleneck else ModulatedViTLayer
+        if self.enc_cond_embed is None and encoder_conditioning is None:
+            self.enc_cond_embed = cond_embed
+            self.encoder_condition_keys = sorted(conditioning) if conditioning else []
         else:
-            LocalLayer = SwinLayer
-            GlobalLayer = SwinLayer if swin_bottleneck else ViTLayer
-        self.LocalLayerType = partial(
-            LocalLayer,
-            use_rpb=use_rpb,
-            use_rope=use_rope,
-            gated_attention=gated_attention,
-            qk_norm=qk_norm,
-        )
-        self.GlobalLayerType = partial(
-            GlobalLayer,
-            use_rope=use_rope,
-            gated_attention=gated_attention,
-            qk_norm=qk_norm,
-        )
-        if swin_bottleneck:
-            self.GlobalLayerType = partial(
-                self.GlobalLayerType, window_size=window_size, use_rpb=use_rpb
+            self.encoder_condition_keys = (
+                sorted(encoder_conditioning) if encoder_conditioning else []
             )
+
+        if self.dec_cond_embed is None and decoder_conditioning is None:
+            self.dec_cond_embed = cond_embed
+            self.decoder_condition_keys = sorted(conditioning) if conditioning else []
+        else:
+            self.decoder_condition_keys = (
+                sorted(decoder_conditioning) if decoder_conditioning else []
+            )
+
+        if modulation == "dit":
+            ModulatedSwinLayer = DiTSwinLayer
+            ModulatedViTLayer = DiTLayer
+        elif modulation == "film":
+            ModulatedSwinLayer = FilmSwinLayer
+            ModulatedViTLayer = FilmViTLayer
+        else:
+            raise ValueError(f"Unknown modulation type: {modulation}")
+
+        def get_layer_types(embed, swin_bottleneck):
+            if embed is not None:
+                # Set conditioning parameters
+                M_SwinLayer = partial(ModulatedSwinLayer, cond_dim=embed.cond_dim)
+                M_ViTLayer = partial(ModulatedViTLayer, cond_dim=embed.cond_dim)
+
+                Local = M_SwinLayer
+                Global = M_SwinLayer if swin_bottleneck else M_ViTLayer
+            else:
+                Local = SwinLayer
+                Global = SwinLayer if swin_bottleneck else ViTLayer
+
+            Local = partial(
+                Local,
+                use_rpb=use_rpb,
+                use_rope=use_rope,
+                gated_attention=gated_attention,
+                qk_norm=qk_norm,
+            )
+            if swin_bottleneck:
+                Global = partial(
+                    Global,
+                    window_size=window_size,
+                    use_rpb=use_rpb,
+                    use_rope=use_rope,
+                    gated_attention=gated_attention,
+                    qk_norm=qk_norm,
+                )
+            else:
+                Global = partial(
+                    Global,
+                    use_rope=use_rope,
+                    gated_attention=gated_attention,
+                    qk_norm=qk_norm,
+                )
+            return Local, Global
+
+        self.EncoderLocalLayerType, self.EncoderGlobalLayerType = get_layer_types(
+            self.enc_cond_embed, swin_bottleneck
+        )
+        self.DecoderLocalLayerType, self.DecoderGlobalLayerType = get_layer_types(
+            self.dec_cond_embed, swin_bottleneck
+        )
+        self.enc_cond_dim = self.enc_cond_embed.cond_dim if self.enc_cond_embed else -1
+        self.dec_cond_dim = self.dec_cond_embed.cond_dim if self.dec_cond_embed else -1
+
+        self.condition_keys = sorted(
+            list(set(self.encoder_condition_keys) | set(self.decoder_condition_keys))
+        )
+
+        # Precompute indices for tensor-based conditioning (e.g. PINC)
+        self.enc_indices = (
+            [self.condition_keys.index(k) for k in self.encoder_condition_keys]
+            if self.encoder_condition_keys
+            else None
+        )
+        self.dec_indices = (
+            [self.condition_keys.index(k) for k in self.decoder_condition_keys]
+            if self.decoder_condition_keys
+            else None
+        )
 
         self.patch_embed = PatchEmbed(
             space=space,
@@ -486,7 +542,7 @@ class SwinNDUnet(nn.Module):
                 c_multiplier=c_multiplier,
                 act_fn=act_fn,
                 norm_layer=norm_layer,
-                LayerType=self.LocalLayerType,
+                LayerType=self.EncoderLocalLayerType,
             )
             down_blocks.append(block)
             down_dims.append(block.out_dim)
@@ -502,7 +558,7 @@ class SwinNDUnet(nn.Module):
             if norm_layer
             else None
         )
-        self.middle = self.GlobalLayerType(
+        self.middle = self.DecoderGlobalLayerType(
             space,
             down_dims[-1],
             grid_size=grid_sizes[-1],
@@ -553,7 +609,7 @@ class SwinNDUnet(nn.Module):
                     use_checkpoint=use_checkpoint,
                     act_fn=act_fn,
                     norm_layer=norm_layer,
-                    LayerType=self.LocalLayerType,
+                    LayerType=self.DecoderLocalLayerType,
                     conv_upsample=conv_patch,
                 )
             )
@@ -572,7 +628,7 @@ class SwinNDUnet(nn.Module):
                 use_checkpoint=use_checkpoint,
                 act_fn=act_fn,
                 norm_layer=norm_layer,
-                LayerType=self.LocalLayerType,
+                LayerType=self.DecoderLocalLayerType,
                 mode=LayerModes.SEQUENCE,
             )
         )
@@ -591,7 +647,7 @@ class SwinNDUnet(nn.Module):
             mlp_ratio=unmerging_hidden_ratio,
             act_fn=expand_act_fn,
             patch_skip=self.patch_skip,
-            cond_dim=self.cond_embed.cond_dim if self.cond_embed else None,
+            cond_dim=(self.dec_cond_embed.cond_dim if self.dec_cond_embed else None),
             mlp_depth=unmerging_depth,
         )
         self.reset_parameters()
@@ -603,9 +659,15 @@ class SwinNDUnet(nn.Module):
         # conditioning
         if hasattr(self, "cond_embed") and self.cond_embed is not None:
             self.cond_embed.reset_parameters(self.cond_init_weights)
+        if hasattr(self, "encoder_cond_embed") and self.enc_cond_embed is not None:
+            self.enc_cond_embed.reset_parameters(self.cond_init_weights)
+        if hasattr(self, "decoder_cond_embed") and self.decoder_cond_embed is not None:
+            self.decoder_cond_embed.reset_parameters(self.cond_init_weights)
+
         # backbone
-        for up_blk, down_blk in zip(self.up_blocks, self.down_blocks):
+        for up_blk in self.up_blocks:
             up_blk.reset_parameters(self.init_weights)
+        for down_blk in self.down_blocks:
             down_blk.reset_parameters(self.init_weights)
         self.middle.reset_parameters(self.init_weights)
         self.middle_upscale.reset_parameters(self.init_weights)
@@ -616,25 +678,37 @@ class SwinNDUnet(nn.Module):
         if self.patch_skip:
             first_res = x.clone()
         # backbone
-        cond = self.condition(kwargs)
+        enc_cond = self.condition(
+            kwargs,
+            self.enc_cond_embed,
+            self.encoder_condition_keys,
+            indices=self.enc_indices,
+        )
+        dec_cond = self.condition(
+            kwargs,
+            self.decoder_cond_embed,
+            self.decoder_condition_keys,
+            indices=self.dec_indices,
+        )
+
         # down path
         feature_maps = []
         for blk in self.down_blocks:
-            x, x_pre = blk(x, **cond)
+            x, x_pre = blk(x, **enc_cond)
             feature_maps.append(x_pre)
         # middle block
         if hasattr(self, "middle_pe"):
             x = self.middle_pe(x)
-        x = self.middle(x, **cond)
+        x = self.middle(x, **dec_cond)
         x = self.middle_upscale(x)
         # up path
         feature_maps = feature_maps[::-1]
         for i, blk in enumerate(self.up_blocks):
-            x = blk(x, s=feature_maps[i], **cond)
+            x = blk(x, s=feature_maps[i], **dec_cond)
         # expand to original
         if self.patch_skip:
             x = torch.cat([x, first_res], -1)
-        return self.patch_decode(x, pad_axes, **cond)
+        return self.patch_decode(x, pad_axes, **dec_cond)
 
     def get_pad_axes(self, resolution: Sequence[int]) -> List[int]:
         _, pad_axes = pad_to_blocks(resolution, self.patch_size)
@@ -662,25 +736,48 @@ class SwinNDUnet(nn.Module):
         x = rearrange(x, "b ... c -> b c ...")
         return x
 
-    def condition(self, kwconds: Dict[str, torch.Tensor]) -> Dict:
-        kwconds = {k: v for k, v in kwconds.items() if k in self.condition_keys}
-        if len(kwconds) == 0:
+    def condition(
+        self,
+        kwconds: Dict[str, torch.Tensor],
+        embed: Optional[nn.Module] = None,
+        keys: Optional[List[str]] = None,
+        indices: Optional[List[int]] = None,
+    ) -> Dict:
+        embed = embed or self.cond_embed
+        keys = keys or self.condition_keys
+
+        if embed is None:
             return {}
 
-        assert self.condition_keys == sorted(list(kwconds.keys())), (
+        # 1. Handle raw tensor passed in kwconds['condition'] (e.g. from PINC forward)
+        if "condition" in kwconds and isinstance(kwconds["condition"], torch.Tensor):
+            raw_tensor = kwconds["condition"]
+            if indices is not None:
+                cond = raw_tensor[:, indices]
+            elif raw_tensor.shape[-1] == len(keys):
+                cond = raw_tensor
+            else:
+                return {}
+            return {"condition": embed(cond)}
+
+        # 2. Handle individual variables in kwconds (e.g. from GyroSwin forward)
+        if not keys:
+            return {}
+
+        selected = {k: v for k, v in kwconds.items() if k in keys}
+        if len(selected) == 0:
+            return {}
+
+        assert keys == sorted(list(selected.keys())), (
             "Mismatch in conditioning keys "
-            f"{self.condition_keys} != {sorted(list(kwconds.keys()))}"
+            f"{keys} != {sorted(list(selected.keys()))}"
         )
 
         cond = torch.cat(
-            [kwconds[k].view(kwconds[k].shape[0], -1) for k in self.condition_keys],
+            [selected[k].view(selected[k].shape[0], -1) for k in keys],
             dim=-1,
         )
-
-        if self.cond_embed is not None:
-            return {"condition": self.cond_embed(cond)}
-        else:
-            return {}
+        return {"condition": embed(cond)}
 
 
 class Swin5DUnet(SwinNDUnet):

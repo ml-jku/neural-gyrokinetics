@@ -96,8 +96,13 @@ def get_data(cfg, rank: int = 0):
         use_kvikio_train = True
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
-        train_kwargs = {"conditions": list(cfg.model.conditioning)}
-        val_kwargs = {"conditions": list(cfg.model.conditioning)}
+
+        enc_cond = getattr(cfg.model, "encoder_conditioning", [])
+        dec_cond = getattr(cfg.model, "decoder_conditioning", [])
+        conditioning = sorted(list(set(enc_cond) | set(dec_cond)))
+
+        train_kwargs = {"conditions": conditioning}
+        val_kwargs = {"conditions": conditioning}
         if cfg.stage == "simsiam":
             dataset_class = CycloneSimSiamDataset
         else:

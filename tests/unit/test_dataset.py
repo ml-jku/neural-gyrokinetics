@@ -1,7 +1,6 @@
 import pytest
 import torch
 import numpy as np
-import os
 import contextlib
 from unittest.mock import MagicMock, patch, mock_open
 from neugk.dataset.cyclone import CycloneDataset, CycloneSample, LinearCycloneDataset
@@ -104,7 +103,7 @@ def test_dataset_getitem(mock_dataset):
 
 
 def test_recompute_stats(mock_dataset):
-    mock_stats = RunningMeanStd(shape=(2, 8, 4, 4, 4, 4))
+    mock_stats = RunningMeanStd(shape=(2, 1, 1, 1, 1, 1))
     with patch("neugk.dataset.cyclone.os.path.exists", return_value=False), patch(
         "neugk.dataset.cyclone.os.replace"
     ), patch("pickle.dump"), patch(
@@ -114,7 +113,7 @@ def test_recompute_stats(mock_dataset):
     ):
         stats_dict = mock_dataset._recompute_stats(keys=["df"])
         assert "df" in stats_dict
-        assert stats_dict["df"].mean.shape == (2, 8, 4, 4, 4, 4)
+        assert stats_dict["df"].mean.shape == (2, 1, 1, 1, 1, 1)
 
 
 def test_dataset_separate_zf(mock_dataset):

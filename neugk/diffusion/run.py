@@ -186,10 +186,6 @@ class DDPMRunner(BaseRunner):
                 if getattr(sample, k) is not None
             }
             condition = sample.conditioning.to(self.device)
-            idx_data = {
-                k: getattr(sample, k).to(device=self.device) for k in self.idx_keys
-            }
-            geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
 
             # apply augmentations
             if self.augmentations:

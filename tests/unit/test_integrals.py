@@ -118,7 +118,7 @@ def test_flux_integral_real_data_adiabatic(adiabatic_dir, idx):
     b = np.loadtxt(f"{adiabatic_dir}/{spc_file}")
     gt_spc = np.reshape(b, (nkx, ns, nky), order="F")
     phi_fft_unpadded = phi_to_spc(phi_raw, gt_spc, out_shape=(nkx, ns, nky))
-    phi_real = phi_fft_to_real(phi_fft_unpadded, out_shape=phi_fft_unpadded.shape)
+    phi_fft_to_real(phi_fft_unpadded, out_shape=phi_fft_unpadded.shape)
 
     df_tensor = torch.tensor(knth, dtype=torch.float64)
     phi_pred, (_, eflux_pred, _) = get_integrals(
@@ -160,7 +160,7 @@ def test_flux_integral_real_data_kinetic(kinetic_dir, idx):
     krho = np.loadtxt(f"{kinetic_dir}/krho")
     vpgr = np.loadtxt(f"{kinetic_dir}/vpgr.dat")
     ns = sgrid.shape[1] if len(sgrid.shape) > 1 else sgrid.shape[0]
-    nx, ny = xphi.shape[1], xphi.shape[0]
+    _nx, _ny = xphi.shape[1], xphi.shape[0]
     nkx, nky = krho.shape[1], krho.shape[0]
     nvpar, nmu = vpgr.shape[1], vpgr.shape[0]
     resolution = (nvpar, nmu, ns, nkx, nky)
@@ -172,7 +172,7 @@ def test_flux_integral_real_data_kinetic(kinetic_dir, idx):
         pytest.skip(f"Index {idx} out of range.")
 
     k_file = ks[idx]
-    pot_file = potens[idx]
+    potens[idx]
 
     with open(f"{kinetic_dir}/{k_file}", "rb") as fid:
         ff = np.fromfile(fid, dtype=np.float64)

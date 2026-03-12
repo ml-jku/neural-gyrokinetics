@@ -108,6 +108,7 @@ class MLPNF(nn.Module):
         self,
         in_dim: int,
         out_dim: int,
+        grid_size: Tuple[int],
         n_layers: int = 2,
         dim: int = 512,
         act_fn: nn.Module = nn.SiLU,
@@ -115,7 +116,6 @@ class MLPNF(nn.Module):
         embed_type: str = "linear",
         skips: bool = False,
         use_z_functa: bool = False,
-        grid_size: Tuple[int],
     ):
         super().__init__()
 

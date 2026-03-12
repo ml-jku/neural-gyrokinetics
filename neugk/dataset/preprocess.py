@@ -120,7 +120,7 @@ def preprocess(
 
         ks = K_files(dir_in.replace("_Lin", ""))
         potens, _ = poten_files(dir_in.replace("_Lin", ""))
-        k_dir = dir_in.replace("_Lin", "")
+        # k_dir = dir_in.replace("_Lin", "")
         if not len(ks):
             # load k dump files of other sim, they are sampled the same anyways
             # this is only for extracting the correct flux timesteps
@@ -128,7 +128,7 @@ def preprocess(
             potens, _ = poten_files(
                 "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
             )
-            k_dir = "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
+            # k_dir = "/restricteddata/ukaea/gyrokinetics/raw/iteration_0"
         # get timestamps
         ts = []
         for k in ks:

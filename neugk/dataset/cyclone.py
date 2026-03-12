@@ -919,9 +919,7 @@ class LinearCycloneDataset(CycloneDataset):
         x = sample["x"]
         if self.separate_zf and x is not None:
             x = separate_zf_fn(x, dim=0)
-        gt = None
-
-        phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
+        phi, flux = sample["phi"], sample["gt_flux"]
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
         geometry = sample["geometry"]

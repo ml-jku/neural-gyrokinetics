@@ -441,15 +441,15 @@ class PINCLossWrapper(LossWrapper):
 
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
 
-        monitor = {
-            "phi_int_mse": F.mse_loss(pphi_int, tgt_phi),
-            "flux_int_mse": torch.abs(pflux).mean()
-            + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze()),
-        }
-        int_losses = (
-            {"flux_int": monitor["flux_int_mse"], "phi_int": monitor["phi_int_mse"]}
-            if integral_loss_type == "mse"
-            else {
+        if integral_loss_type == "mse":
+            int_losses = {
+                "phi_int": F.mse_loss(pphi_int, tgt_phi),
+                "flux_int": torch.abs(pflux).mean()
+                + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze()),
+            }
+            monitor = {}
+        else:
+            int_losses = {
                 "phi_int": self.compute_integral_loss(
                     pphi_int, tgt_phi, integral_loss_type, loss_name="phi_int"
                 ),
@@ -458,7 +458,11 @@ class PINCLossWrapper(LossWrapper):
                     eflux, tgt_eflux, integral_loss_type, loss_name="flux_int"
                 ),
             }
-        )
+            monitor = {
+                "phi_int_mse": F.mse_loss(pphi_int, tgt_phi),
+                "flux_int_mse": torch.abs(pflux).mean()
+                + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze()),
+            }
 
         return int_losses, monitor, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
 
@@ -681,21 +685,21 @@ class PINCLossWrapper(LossWrapper):
 
         if self.training:
             monitor_mse = {}
+            current_loss_types = self._get_current_loss_types()
             for k in data_keys:
                 if k not in preds:
                     continue
                 p, t = preds[k], tgts[k]
                 if k == "flux":
                     p, t = p.flatten(), t.flatten()
-                
+
                 if k == "df" and separate_zf:
-                    monitor_mse[f"{k}_mse"] = (
-                        F.mse_loss(p[:, :2], t[:, :2])
-                        + F.mse_loss(p[:, 2:], t[:, 2:])
-                    )
+                    monitor_mse[f"{k}_mse"] = F.mse_loss(
+                        p[:, :2], t[:, :2]
+                    ) + F.mse_loss(p[:, 2:], t[:, 2:])
                 else:
                     monitor_mse[f"{k}_mse"] = F.mse_loss(p, t)
-            
+
             for k, v in losses.items():
                 self._update_ema_loss_scale(k, v)
             norm_losses = self._apply_ema_normalization(losses)
@@ -717,7 +721,13 @@ class PINCLossWrapper(LossWrapper):
                 for k in all_keys
                 if k in losses and self.weights.get(k, 0.0) > 0
             }
-            log_losses.update({"total_mse": sum(monitor_mse.values())})
+            # only log individual _mse if the main loss is not already mse
+            if current_loss_types.get("data") != "mse" and monitor_mse:
+                log_losses.update(monitor_mse)
+
+            log_losses.update(
+                {"total_mse": sum(monitor_mse.values()) if monitor_mse else 0.0}
+            )
             log_losses.update(int_monitor)
             log_losses.update(per_mode_losses)
             if self.ema_normalization_loss:

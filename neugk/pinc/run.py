@@ -83,7 +83,9 @@ class PINCRunner(BaseRunner):
             for name, param in self.model.named_parameters():
                 if "eflux_head" not in name:
                     param.requires_grad = False
-            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            trainable_params = sum(
+                p.numel() for p in self.model.parameters() if p.requires_grad
+            )
             print(f"Trainable parameters after freeze: {trainable_params/1e6:.2f}M")
 
         self.simae = len(set(self.loss_wrap.active_losses).difference({"simsiam"})) > 0
@@ -348,7 +350,7 @@ class PINCRunner(BaseRunner):
             self.cur_update_step += 1.0
             loss_logs["total"].append(loss.item())
             for k, v in losses.items():
-                loss_logs[k].append(v.item())
+                loss_logs[k].append(v.item() if isinstance(v, torch.Tensor) else v)
 
             # if self.cur_update_step % 100 == 0:
             #     del xs, condition, idx_data, geometry, loss, losses
