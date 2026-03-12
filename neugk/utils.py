@@ -194,7 +194,7 @@ def save_model_and_config(
             "epoch": epoch,
             "model_state_dict": state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
             "loss": val_loss,
         },
         f"{cfg.output_path}/ckp.pth",

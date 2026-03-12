@@ -319,29 +319,31 @@ class RSpaceReduce(AttentionDecoder):
         self.register_buffer("integral_token", integral_token)
         self.out_dim = out_dim
 
-    def forward(self, phi: torch.Tensor):
-        b, *_ = phi.shape
-        phi = rearrange(phi, "b s x y c -> b (s x y) c")
+    def forward(self, x: torch.Tensor):
+        b = x.shape[0]
+        # flatten all spatial/velocity dimensions
+        x = rearrange(x, "b ... c -> b (...) c")
 
         # qkv embeddings from inputs
-        phi = phi.contiguous()
+        x = x.contiguous()
         assert (
-            phi.is_contiguous() and self.integral_token.is_contiguous()
+            x.is_contiguous() and self.integral_token.is_contiguous()
         ), "Tensors not contiguous."
         q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
         k, v = rearrange(
-            self.kv(phi), "b n (t h c) -> t b h n c", t=2, h=self.num_heads
+            self.kv(x), "b n (t h c) -> t b h n c", t=2, h=self.num_heads
         )
+        q = q.expand(k.size(0), -1, -1, -1).contiguous()
         if dist.is_initialized():
             with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                phi = F.scaled_dot_product_attention(
+                out = F.scaled_dot_product_attention(
                     q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
                 )
         else:
-            phi = F.scaled_dot_product_attention(
+            out = F.scaled_dot_product_attention(
                 q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
             )
-        phi = rearrange(phi, "b k n c -> b n (k c)")
-        phi = self.proj(phi)
-        phi = self.proj_drop(phi)
-        return phi.view(b, self.out_dim)
+        out = rearrange(out, "b k n c -> b n (k c)")
+        out = self.proj(out)
+        out = self.proj_drop(out)
+        return out.view(b, self.out_dim)

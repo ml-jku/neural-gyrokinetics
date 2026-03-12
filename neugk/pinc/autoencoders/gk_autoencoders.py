@@ -11,6 +11,7 @@ from neugk.models.gk_unet import Swin5DUnet
 from neugk.pinc.autoencoders.vector_quantize import VectorQuantize
 from neugk.models.nd_vit.vit_layers import ViTLayer
 from neugk.models.nd_vit.positional import APE
+from neugk.gyroswin.models.x_layers import FluxDecoder
 
 
 class Swin5DAE(Swin5DUnet):
@@ -81,12 +82,31 @@ class Swin5DAE(Swin5DUnet):
         self.eflux_head = None
         if flux_head_config is not None:
             flux_dim = flux_head_config.get("flux_dim", 1)
-            hidden_dim = flux_head_config.get("dim", 128)
-            self.eflux_head = MLP(
-                [self.bottleneck_dim, hidden_dim, flux_dim],
-                act_fn=self.act_fn,
-            )
-    
+            head_type = flux_head_config.get("type", "mlp")
+
+            if head_type == "mlp":
+                hidden_dim = flux_head_config.get("dim", 128)
+                self.eflux_head = MLP(
+                    [self.bottleneck_dim, hidden_dim, flux_dim],
+                    act_fn=self.act_fn,
+                )
+            elif head_type == "cross_attn":
+                depth = flux_head_config.get("depth", 1)
+                num_heads = flux_head_config.get("num_heads", 8)
+                mlp_ratio = flux_head_config.get("mlp_ratio", 2.0)
+                self.eflux_head = FluxDecoder(
+                    left_dims=[self.bottleneck_dim],
+                    right_dims=[self.bottleneck_dim],
+                    num_heads=num_heads,
+                    depth=depth,
+                    mlp_ratio=mlp_ratio,
+                    act_fn=self.act_fn,
+                    init_weights=self.init_weights,
+                    reduction="integral",
+                )
+            else:
+                raise ValueError(f"Unknown flux head type: {head_type}")
+
     def get_compression_info(self):
         """Returns a dictionary with compression-related information."""
         import numpy as np
@@ -153,8 +173,13 @@ class Swin5DAE(Swin5DUnet):
         zdf, pad_axes = self.encode(df, condition=condition)
         out = self.decode(zdf, pad_axes, condition=condition)
         if self.eflux_head is not None:
-            z_pooled = zdf.flatten(1, -2).mean(dim=1)  # (batch, n_tokens, dim) -> (batch, dim)
-            out["flux"] = self.eflux_head(z_pooled)
+            if isinstance(self.eflux_head, MLP):
+                z_pooled = zdf.mean(dim=1)  # (batch, n_tokens, dim) -> (batch, dim)
+                out["flux"] = self.eflux_head(z_pooled)
+            else:
+                # it's a FluxDecoder
+                flux_lat = self.eflux_head.mix(0, zdf, zdf)
+                out["flux"] = self.eflux_head([flux_lat])
         return out
 
 
