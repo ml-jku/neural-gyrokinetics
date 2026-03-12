@@ -383,6 +383,97 @@ class BaseEvaluator:
             return tqdm(valloader, desc=desc)
         return valloader
 
+    @torch.no_grad()
+    def collect_latents(
+        self,
+        rank: int,
+        dataloader: torch.utils.data.DataLoader,
+        extraction_fn: Callable,
+        device: torch.device,
+        desc: Optional[str] = "collect latents",
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Collect model latents and target fluxes.
+
+        Args:
+            rank: Process rank.
+            dataloader: Data to process.
+            extraction_fn: Function that takes (sample, device) and returns (latent, flux).
+                           Latent should be pooled if necessary.
+            device: Computing device.
+            desc: Progress bar description.
+        """
+        latents: List[torch.Tensor] = []
+        fluxes: List[torch.Tensor] = []
+
+        # setup iterator
+        use_tqdm = (not dist.is_initialized() or rank == 0) and desc
+        iterator = tqdm(dataloader, desc=desc) if use_tqdm else dataloader
+
+        for sample in iterator:
+            z, flux = extraction_fn(sample, device)
+
+            # global average pool if necessary
+            if z.ndim > 2:
+                # handle both (B, C, ...) and (B, ..., C)
+                if z.shape[1] < z.shape[-1]:
+                    # likely (B, C, ...)
+                    zpool = z.view(z.shape[0], z.shape[1], -1).mean(-1)
+                else:
+                    # likely (B, ..., C)
+                    zpool = z.view(z.shape[0], -1, z.shape[-1]).mean(1)
+            else:
+                zpool = z
+
+            latents.append(zpool.cpu())
+            fluxes.append(flux.view(flux.shape[0], -1).cpu())
+
+        return torch.cat(latents, 0), torch.cat(fluxes, 0)
+
+    def run_probing_evaluation(
+        self,
+        rank: int,
+        trainloader: torch.utils.data.DataLoader,
+        extraction_fn: Callable,
+        device: torch.device,
+        epoch: int,
+        log_metric_dict: Dict[str, float],
+        val_plots: Dict[str, Any],
+    ):
+        """Run linear probing and generate t-SNE plots."""
+        from neugk.plot_utils import plot_latent_tsne
+
+        # 1. compute probe weights on trainset
+        x_train, y_train = self.collect_latents(
+            rank, trainloader, extraction_fn, device, desc="probe trainset"
+        )
+        # column of ones for bias
+        x_train_b = torch.cat([x_train, torch.ones(x_train.shape[0], 1)], dim=1)
+        # solve linear system: w @ w = y
+        res = torch.linalg.lstsq(x_train_b, y_train, driver="gels")
+        w = res.solution
+
+        # report train RMSE on physical scale
+        y_train_pred = x_train_b @ w
+        train_rmse = torch.sqrt(torch.mean((y_train_pred - y_train) ** 2))
+        log_metric_dict["val_traj/probe_train_rmse"] = train_rmse.item()
+
+        # 2. evaluate on validation sets
+        for val_idx, valloader in enumerate(self.valloaders):
+            valname = "val_traj" if val_idx == 0 else "val_samples"
+            x_val, y_val = self.collect_latents(
+                rank, valloader, extraction_fn, device, desc=None
+            )
+            x_val_b = torch.cat([x_val, torch.ones(x_val.shape[0], 1)], dim=1)
+            y_val_pred = x_val_b @ w
+            val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val) ** 2))
+            log_metric_dict[f"{valname}/probe_val_rmse"] = val_rmse.item()
+
+            # add t-SNE plot for the first validation set
+            if val_idx == 0:
+                val_plots["latent_tsne"] = plot_latent_tsne(
+                    x_val, y_val, title=f"Latent Space t-SNE (Epoch {epoch})"
+                )
+
     @abstractmethod
     def __call__(
         self,

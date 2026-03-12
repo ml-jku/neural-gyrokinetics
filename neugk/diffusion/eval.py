@@ -7,6 +7,7 @@ from collections import defaultdict
 import torch
 import numpy as np
 import torch.distributed as dist
+from tqdm import tqdm
 
 from neugk.evaluate import BaseEvaluator, validation_metrics
 from neugk.plot_utils import generate_val_plots, avg_flux_confidence
@@ -28,6 +29,8 @@ class DiffusionEvaluator(BaseEvaluator):
         device: torch.device,
         loss_val_min: float,
         sample_fn: Optional[Callable] = None,
+        trainloader: Optional[torch.utils.data.DataLoader] = None,
+        evaluate_probing: bool = False,
         **kwargs,
     ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
         """Run evaluation on multiple validation sets and log metrics."""
@@ -190,6 +193,26 @@ class DiffusionEvaluator(BaseEvaluator):
                     val_plots["avg_flux_UQ"] = avg_flux_confidence(
                         pred_means, pred_stds, tgt_vals, traj_ids
                     )
+
+        # linear probing evaluation
+        if trainloader is not None and evaluate_probing:
+
+            def sample_wrap_fn(sample, device):
+                condition = sample.conditioning.to(device, non_blocking=True)
+                flux = sample.flux.to(device, non_blocking=True)
+                # generate latents from condition
+                z = sample_fn(condition, latent_only=True)
+                return z, flux
+
+            self.run_probing_evaluation(
+                rank=rank,
+                trainloader=trainloader,
+                extraction_fn=sample_wrap_fn,
+                device=device,
+                epoch=epoch,
+                log_metric_dict=log_metric_dict,
+                val_plots=val_plots,
+            )
 
         # store checkpoints
         loss_val_min = self._save_checkpoint(

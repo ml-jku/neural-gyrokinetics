@@ -236,10 +236,7 @@ class DDPMRunner(BaseRunner):
         return loss_logs, info_dict
 
     @torch.no_grad()
-    def sample(
-        self,
-        condition: torch.Tensor,
-    ):
+    def sample(self, condition: torch.Tensor, latent_only: bool = False):
         """Generate samples from noise via iterative denoising."""
         self.model.eval()
         bs = condition.shape[0]
@@ -257,6 +254,10 @@ class DDPMRunner(BaseRunner):
 
         # decode result
         latents = latents / self.latent_scale
+        if latent_only:
+            self.model.train()
+            return latents
+
         decoded = self.autoencoder.decode(latents, condition=condition)
         self.model.train()
         return decoded
@@ -273,6 +274,8 @@ class DDPMRunner(BaseRunner):
             device=self.device,
             loss_val_min=self.loss_val_min,
             sample_fn=self.sample,
+            trainloader=self.trainloader,
+            evaluate_probing=True,
         )
 
 
@@ -316,6 +319,7 @@ class StudentTRunner(DDPMRunner):
         self,
         condition: torch.Tensor,
         num_inference_steps: int = 100,
+        latent_only: bool = False,
     ):
         """Generate samples using iterative denoising with heavy-tailed priors."""
         self.model.eval()
@@ -333,6 +337,10 @@ class StudentTRunner(DDPMRunner):
 
         # finalize output
         latents = latents / getattr(self, "latent_scale", 1.0)
+        if latent_only:
+            self.model.train()
+            return latents
+
         decoded = self.autoencoder.decode(latents, condition=condition)
         self.model.train()
         return decoded

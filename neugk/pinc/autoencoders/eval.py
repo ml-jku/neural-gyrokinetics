@@ -1,9 +1,7 @@
-from typing import Dict, Optional, Tuple, Any, List
+from typing import Dict, Optional, Tuple, Any
 
 import torch
 import torch.nn as nn
-import torch.distributed as dist
-from tqdm import tqdm
 
 from neugk.dataset.cyclone_diff import CycloneAESample
 from neugk.evaluate import BaseEvaluator, validation_metrics
@@ -37,48 +35,6 @@ class AutoencoderEvaluator(BaseEvaluator):
             k: getattr(sample, k).to(device) for k in ["file_index", "timestep_index"]
         }
         return xs, tgts, condition, idx_data
-
-    @torch.no_grad()
-    def collect_xy(
-        self,
-        rank: int,
-        dataloader: torch.utils.data.DataLoader,
-        model: torch.nn.Module,
-        device: torch.device,
-        desc: Optional[str] = "linear probe",
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Collect model latents and target fluxes for linear probing."""
-        model.eval()
-        latents: List[torch.Tensor] = []
-        fluxes: List[torch.Tensor] = []
-
-        # setup iterator
-        use_tqdm = (not dist.is_initialized() or rank == 0) and desc
-        iterator = tqdm(dataloader, desc=desc) if use_tqdm else dataloader
-
-        for sample in iterator:
-            sample: CycloneAESample
-            xs = sample.df.to(device, non_blocking=True)
-            condition = (
-                sample.conditioning.to(device, non_blocking=True)
-                if sample.conditioning is not None
-                else None
-            )
-            flux = sample.flux.to(device, non_blocking=True)
-
-            # forward pass for latents
-            if hasattr(model, "encode"):
-                z, _ = model.encode(xs, condition=condition)
-            else:
-                # DDP wrapper
-                z, _ = model.module.encode(xs, condition=condition)
-
-            # global average pool spatially
-            zpool = z.view(z.shape[0], -1, z.shape[-1]).mean(1)
-            latents.append(zpool.cpu())
-            fluxes.append(flux.view(flux.shape[0], -1).cpu())
-
-        return torch.cat(latents, 0), torch.cat(fluxes, 0)
 
     @torch.no_grad()
     def __call__(
@@ -206,27 +162,35 @@ class AutoencoderEvaluator(BaseEvaluator):
 
         # linear probing evaluation
         if trainloader is not None and evaluate_probing:
-            # compute probe weights on trainset
-            x_train, y_train = self.collect_xy(rank, trainloader, model, device)
-            # column of ones for bias
-            x_train_b = torch.cat([x_train, torch.ones(x_train.shape[0], 1)], dim=1)
-            # solve linear system: w @ w = y
-            res = torch.linalg.lstsq(x_train_b, y_train, driver="gels")
-            w = res.solution
-            # report train RMSE on physical scale
-            y_train_pred = x_train_b @ w
-            train_rmse = torch.sqrt(torch.mean((y_train_pred - y_train) ** 2))
-            log_metric_dict["val_traj/probe_train_rmse"] = train_rmse.item()
-            # evaluate on validation sets
-            for val_idx, valloader in enumerate(self.valloaders):
-                valname = "val_traj" if val_idx == 0 else "val_samples"
-                x_val, y_val = self.collect_xy(
-                    rank, valloader, model, device, desc=None
+
+            def encode_fn(sample, device):
+                sample: CycloneAESample
+                xs = sample.df.to(device, non_blocking=True)
+                condition = (
+                    sample.conditioning.to(device, non_blocking=True)
+                    if sample.conditioning is not None
+                    else None
                 )
-                x_val_b = torch.cat([x_val, torch.ones(x_val.shape[0], 1)], dim=1)
-                y_val_pred = x_val_b @ w
-                val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val) ** 2))
-                log_metric_dict[f"{valname}/probe_val_rmse"] = val_rmse.item()
+                flux = sample.flux.to(device, non_blocking=True)
+
+                # forward pass for latents
+                if hasattr(model, "encode"):
+                    z, _ = model.encode(xs, condition=condition)
+                else:
+                    # DDP wrapper
+                    z, _ = model.module.encode(xs, condition=condition)
+                return z, flux
+
+            self.run_probing_evaluation(
+                rank=rank,
+                trainloader=trainloader,
+                extraction_fn=encode_fn,
+                device=device,
+                epoch=epoch,
+                log_metric_dict=log_metric_dict,
+                val_plots=val_plots,
+            )
+
         # save checkpoint
         loss_val_min = self._save_checkpoint(
             rank, model, opt, scheduler, epoch, log_metric_dict, loss_val_min
