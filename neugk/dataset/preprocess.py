@@ -181,6 +181,9 @@ def preprocess(
             for k in geometry.keys()
         }
 
+        kyspec = np.loadtxt(f"{dir_in}/kyspec")[ts_slices]
+        fluxspec = np.loadtxt(f"{dir_in}/eflux_spectra.dat")[ts_slices]
+
         metadata = {
             "timesteps": timesteps,
             "resolution": resolution,
@@ -190,6 +193,8 @@ def preprocess(
             "s_hat": np.array([s_hat]),
             "q": np.array([q]),
             "geometry": np_geom,
+            "kyspec": kyspec,
+            "fluxspec": fluxspec,
         }
 
         if geometry_only:
@@ -379,7 +384,7 @@ if __name__ == "__main__":
     separate_zf = False
     split_into_bands = None
 
-    datasets = [f"iteration_{i}" for i in range(300)]
+    datasets = [f"iteration_{i}" for i in [100, 200]]
 
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)
