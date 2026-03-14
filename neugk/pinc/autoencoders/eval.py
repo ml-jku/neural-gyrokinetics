@@ -1,9 +1,11 @@
 from typing import Dict, Optional, Tuple, Any, List
+import warnings
 
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 from tqdm import tqdm
+import numpy as np
 
 from neugk.dataset.cyclone_diff import CycloneAESample
 from neugk.evaluate import BaseEvaluator, validation_metrics
@@ -13,15 +15,6 @@ from neugk.utils import recombine_zf
 
 class AutoencoderEvaluator(BaseEvaluator):
     """Evaluator for autoencoder models with optional linear probing."""
-
-    # mapping from probe target names to metadata keys
-    _META_KEY_MAP = {
-        "flux": "fluxes",
-        "itg": "ion_temp_grad",
-        "dg": "density_grad",
-        "s_hat": "s_hat",
-        "q": "q",
-    }
 
     def _prepare_sample(self, sample: CycloneAESample, device: torch.device) -> Tuple[
         Dict[str, torch.Tensor],
@@ -64,11 +57,21 @@ class AutoencoderEvaluator(BaseEvaluator):
             meta = dataset.metadata[fi]
             vals = []
             for tgt_name in probe_targets:
-                meta_key = self._META_KEY_MAP.get(tgt_name, tgt_name)
-                v = meta[meta_key]
+                v = meta[tgt_name]
                 # time-indexed arrays (e.g. fluxes) vs per-file scalars (e.g. itg)
                 if hasattr(v, '__len__') and len(v) > 1:
                     v = v[ti]
+                stats = dataset.stats.get(tgt_name, {})
+                mean = 0.0
+                std = 1.0
+                if len(stats):
+                    mean = stats["full"]["mean"]
+                    std = stats["full"]["std"]
+                else:
+                    warnings.warn(f"No stats found for probe target '{tgt_name}', skipping normalization.")
+                if tgt_name in ["fluxspec", "kyspec"]:
+                    v = np.log1p(v)  # log-transform spectra for stability
+                v = (v - mean) / std  # normalize
                 v_t = torch.as_tensor(v, dtype=torch.float32).reshape(-1)
                 vals.append(v_t)
             batch_targets.append(torch.cat(vals))
@@ -248,7 +251,6 @@ class AutoencoderEvaluator(BaseEvaluator):
         if trainloader is not None and probe_cfg is not None:
             probe_targets: List[str] = probe_cfg.get("targets", ["flux"])
             trainset = kwargs.get("trainset")
-            target_label = "+".join(probe_targets)
             # compute probe weights on trainset
             x_train, y_train = self.collect_xy(
                 rank, trainloader, model, device, dataset=trainset, probe_targets=probe_targets, desc="linear probe training",
@@ -259,10 +261,28 @@ class AutoencoderEvaluator(BaseEvaluator):
             w = torch.linalg.pinv(x_train_b) @ y_train
             # report train RMSE on physical scale
             y_train_pred = x_train_b @ w
-            train_mse = torch.mean((y_train_pred - y_train) ** 2, dim=0)
-            for i, tgt in enumerate(probe_targets):
-                log_metric_dict[f"val_traj/probe_{tgt}_train_rmse"] = train_mse[i].sqrt().item()
-            log_metric_dict[f"val_traj/probe_{target_label}_train_rmse"] = train_mse.mean().sqrt().item()
+            # denormalize predictions and targets
+            cat_mean = []
+            cat_std = []
+            for tgt_name in probe_targets:
+                stats = valset.stats.get(tgt_name, {})
+                mean = stats["full"]["mean"]
+                std = stats["full"]["std"]
+                cat_mean.append(np.atleast_1d(mean))
+                cat_std.append(np.atleast_1d(std))
+            mean = torch.as_tensor(np.concatenate(cat_mean), device=y_train_pred.device)
+            std = torch.as_tensor(np.concatenate(cat_std), device=y_train_pred.device)
+            y_train_pred = y_train_pred * std + mean
+            y_train = y_train * std + mean  
+            pred_splits = np.split(y_train_pred, np.cumsum(probe_cfg["sizes"])[:-1], axis=1)
+            target_splits = np.split(y_train, np.cumsum(probe_cfg["sizes"])[:-1], axis=1)
+            if probe_cfg.get("log_train", False):
+                for name, pred, target in zip(probe_targets, pred_splits, target_splits):
+                    if name in ["fluxspec", "kyspec"]:
+                        pred = np.expm1(pred)
+                        target = np.expm1(target)
+                    train_mse = torch.mean((pred - target) ** 2)
+                    log_metric_dict[f"val_traj/probe_{name}_train_rmse"] = train_mse.sqrt().item()
 
             # evaluate on validation sets
             for val_idx, (valset, valloader) in enumerate(
@@ -274,10 +294,16 @@ class AutoencoderEvaluator(BaseEvaluator):
                 )
                 x_val_b = torch.cat([x_val, torch.ones(x_val.shape[0], 1)], dim=1)
                 y_val_pred = x_val_b @ w
-                val_mse = torch.mean((y_val_pred - y_val) ** 2, dim=0)
-                for i, tgt in enumerate(probe_targets):
-                    log_metric_dict[f"{valname}/probe_{tgt}_val_rmse"] = val_mse[i].sqrt().item()
-                log_metric_dict[f"{valname}/probe_{target_label}_val_rmse"] = val_mse.mean().sqrt().item()
+                y_val_pred = y_val_pred * std + mean
+                y_val = y_val * std + mean
+                pred_splits = np.split(y_val_pred, np.cumsum(probe_cfg["sizes"])[:-1], axis=1)
+                target_splits = np.split(y_val, np.cumsum(probe_cfg["sizes"])[:-1], axis=1)
+                for name, pred, target in zip(probe_targets, pred_splits, target_splits):
+                    if name in ["fluxspec", "kyspec"]:
+                        pred = np.expm1(pred)
+                        target = np.expm1(target)
+                    val_mse = torch.mean((pred - target) ** 2)
+                    log_metric_dict[f"{valname}/probe_{name}_val_rmse"] = val_mse.sqrt().item()
                 
         # save checkpoint
         loss_val_min = self._save_checkpoint(

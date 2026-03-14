@@ -4,4 +4,6 @@ validate_every_n_epochs: 20
 eval_integrals: true
 model_selection_metric: "df"
 probe:
-  targets: ["flux", "itg", "dg", "q", "s_hat"]
+  targets: ["flux", "ion_temp_grad", "density_grad", "q", "s_hat", "kyspec", "fluxspec", "fluxavg"]
+  log_train: true
+  sizes: [1, 1, 1, 1, 1, 32, 32, 1]

@@ -65,6 +65,7 @@ class CycloneDataset(Dataset):
         split: str = "train",
         active_keys: Optional[List[str]] = None,
         fields_to_load: Optional[List[str]] = ["df"],
+        probe_targets: Optional[List[str]] = None,
         trajectories: Optional[List[str]] = None,
         partial_holdouts: Optional[dict] = None,
         normalization: Optional[dict] = None,
@@ -111,7 +112,7 @@ class CycloneDataset(Dataset):
         self.stats = (
             normalization_stats
             if normalization_stats is not None
-            else {k: defaultdict(dict) for k in fields_to_load}
+            else {k: defaultdict(dict) for k in fields_to_load + (probe_targets or [])}
         )
         self.normalization_scope = normalization_scope
         self.cond_filters = cond_filters
@@ -234,6 +235,9 @@ class CycloneDataset(Dataset):
             # unify metadata read
             meta = self.backend.read_metadata(f_path, self.fields_to_load)
             self.metadata[f_id] = meta
+            if "fluxavg" in probe_targets and "fluxavg" not in meta and split == "val":
+                # need to add fluxavg to validation data
+                meta["fluxavg"] = np.mean(meta["flux"][offset:], axis=0)
 
             if self.n_tail_holdout:
                 if split == "train":
@@ -267,14 +271,37 @@ class CycloneDataset(Dataset):
                 and normalization is not None
             ):
                 assert split == "train", "validation must have normalization_stats"
-                for k in self.fields_to_load:
+                for k in set(self.fields_to_load + (probe_targets or [])):
                     if k not in stats:
                         stats[k] = RunningMeanStd()
-                    mean = meta[f"{k}_mean"]
-                    var = meta[f"{k}_std"]**2
-                    traj_min = meta[f"{k}_min"]
-                    traj_max = meta[f"{k}_max"]
-                    if self.normalizers[k]["agg_axes"]:
+
+                    if k in self.fields_to_load:
+                        mean = meta[f"{k}_mean"]
+                        var = meta[f"{k}_std"]**2
+                        traj_min = meta[f"{k}_min"]
+                        traj_max = meta[f"{k}_max"]
+                    else:
+                        if k in ["fluxspec", "kyspec"]:
+                            # spectra, log-transform for stability
+                            mean = np.mean(np.log1p(meta[k][offset:]), axis=0)
+                            var = np.var(np.log1p(meta[k][offset:]), axis=0)
+                            traj_min = np.min(np.log1p(meta[k][offset:]), axis=0)
+                            traj_max = np.max(np.log1p(meta[k][offset:]), axis=0)
+                        elif k  == "fluxavg":
+                            # spectra, log-transform for stability
+                            mean = np.mean(meta["flux"][offset:])
+                            self.metadata[f_id]["fluxavg"] = mean
+                            var = np.var(meta["flux"][offset:])
+                            traj_min = np.min(meta["flux"][offset:])
+                            traj_max = np.max(meta["flux"][offset:])
+                        else:
+                            # only scalars left
+                            mean = meta[k]
+                            var = np.zeros_like(mean)
+                            traj_min = mean
+                            traj_max = mean
+
+                    if self.normalizers.get(k, False) and self.normalizers[k]["agg_axes"]:
                         # aggregate along specified dimensions
                         mean, var, traj_min, traj_max = stats[k].aggregate_stats(
                             mean, var, traj_min, traj_max, agg_axes=tuple(self.normalizers[k]["agg_axes"])
@@ -284,14 +311,7 @@ class CycloneDataset(Dataset):
                     self.stats[k][f_id]["std"] = np.sqrt(var)
                     self.stats[k][f_id]["min"] = traj_min
                     self.stats[k][f_id]["max"] = traj_max
-                    
-                    stats[k].update(
-                        self.stats[k][f_id]["mean"],
-                        self.stats[k][f_id]["std"] ** 2,
-                        self.stats[k][f_id]["min"],
-                        self.stats[k][f_id]["max"],
-                        count=len(timesteps),
-                    )
+                    stats[k].update(mean, var, traj_min, traj_max, count=len(timesteps))
 
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
@@ -325,14 +345,14 @@ class CycloneDataset(Dataset):
                 stats_recomputed = self._recompute_stats(
                     key=key, offset=self.offsets[0]
                 )
-            stats[key] = stats_recomputed
-
+                stats[key] = stats_recomputed
+            
         if (
             normalization_scope == "dataset"
             and normalization_stats is None
             and normalization is not None
         ):
-            for k in fields_to_load:
+            for k in set(fields_to_load + (probe_targets or [])):
                 self.stats[k]["full"]["mean"] = stats[k].mean.astype(np.float32)
                 self.stats[k]["full"]["std"] = (stats[k].var ** 0.5).astype(np.float32)
                 self.stats[k]["full"]["min"] = stats[k].min.astype(np.float32)
@@ -495,7 +515,7 @@ class CycloneDataset(Dataset):
                 poten.append(phi)
                 y_poten.append(phi_gt)
 
-            flux = meta["fluxes"][original_t_index + self.bundle_seq_length + i]
+            flux = meta["flux"][original_t_index + self.bundle_seq_length + i]
             gt_flux.append(flux)
 
         sample = {}
@@ -608,7 +628,7 @@ class CycloneDataset(Dataset):
                 cond = meta[cond_name]
                 if not isinstance(cond_range[0], Sequence):
                     cond_range = [cond_range]
-                if cond_name == "fluxes":
+                if cond_name == "flux":
                     if where == "first":
                         cond = np.mean(cond[:offset])
                     else:
@@ -626,7 +646,7 @@ class CycloneDataset(Dataset):
         flat_idx_counter = 0
 
         for file_idx in range(len(self.files)):
-            fluxes = self.metadata[file_idx]["fluxes"]
+            fluxes = self.metadata[file_idx]["flux"]
             ref_fluxes = fluxes[ref_offset:]
             ref_mean = np.mean(ref_fluxes)
             ref_std = np.std(ref_fluxes)
@@ -757,7 +777,7 @@ class CycloneDataset(Dataset):
         return timesteps_tensor
 
     def get_fluxes(self, file_index: int):
-        fluxes = self.metadata[file_index]["fluxes"]
+        fluxes = self.metadata[file_index]["flux"]
         return torch.tensor(fluxes[1:])
 
     def get_avg_flux(self, file_index: Union[int, Sequence[int]]):
@@ -876,7 +896,7 @@ class LinearCycloneDataset(CycloneDataset):
                 poten.append(phi)
 
             if "flux" in self.fields_to_load:
-                flux = meta["fluxes"][original_t_index + i]
+                flux = meta["flux"][original_t_index + i]
                 gt_flux.append(flux)
 
         sample = {}

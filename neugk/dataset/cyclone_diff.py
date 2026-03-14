@@ -152,7 +152,7 @@ class CycloneAEDataset(CycloneDataset):
                 phi = self.backend.read_phi(f, t_str, self.phi_resolution)
                 phis.append(phi)
 
-            flux = meta["fluxes"][original_t_index + i]
+            flux = meta["flux"][original_t_index + i]
             fluxes.append(flux)
 
         sample = {}
@@ -505,7 +505,7 @@ class CycloneSimSiamDataset(CycloneAEDataset):
                 phi = self.backend.read_phi(f, t_str, self.phi_resolution)
                 phis.append(phi)
 
-            flux = meta["fluxes"][orig_t_index + i]
+            flux = meta["flux"][orig_t_index + i]
             fluxes.append(flux)
 
         sample = {}

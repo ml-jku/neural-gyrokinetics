@@ -189,7 +189,7 @@ def preprocess(
             "resolution": resolution,
             "ion_temp_grad": np.array([ion_temp_grad]),
             "density_grad": np.array([density_grad]),
-            "fluxes": fluxes,
+            "flux": fluxes,
             "s_hat": np.array([s_hat]),
             "q": np.array([q]),
             "geometry": np_geom,
@@ -384,7 +384,7 @@ if __name__ == "__main__":
     separate_zf = False
     split_into_bands = None
 
-    datasets = [f"iteration_{i}" for i in [100, 200]]
+    datasets = [f"iteration_{i}" for i in [0, 1, 13]]
 
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)
