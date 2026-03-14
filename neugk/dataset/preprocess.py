@@ -349,7 +349,9 @@ def preprocess(
             backend.write_metadata(f, metadata)
 
         return out_path, False
-
+    except Exception as e:
+        print(f"Error processing {filename}: {e}")
+        return out_path, False
     finally:
         # Free up the terminal row for the next job
         if position_queue is not None:
@@ -384,7 +386,7 @@ if __name__ == "__main__":
     separate_zf = False
     split_into_bands = None
 
-    datasets = [f"iteration_{i}" for i in [0, 1, 13]]
+    datasets = [f"iteration_{i}" for i in range(300)]
 
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)
