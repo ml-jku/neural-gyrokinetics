@@ -72,7 +72,7 @@ class PINCLossWrapper(LossWrapper):
         self._register_augmentation_losses()
 
         # Extended loss categories
-        self._vae_losses = ["kl_div"]
+        self._vae_losses = ["beta_vae"]
         self._vqvae_losses = ["vq_commit"]
         self._spectral_losses = [
             "kxspec",
@@ -366,7 +366,7 @@ class PINCLossWrapper(LossWrapper):
         if "mu" not in preds or "logvar" not in preds:
             return {}
         return {
-            "kl_div": -0.5
+            "beta_vae": -0.5
             * torch.mean(
                 1 + preds["logvar"] - preds["mu"].pow(2) - preds["logvar"].exp()
             )
