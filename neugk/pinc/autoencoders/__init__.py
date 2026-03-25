@@ -159,7 +159,13 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
 
     if rank == 0 or rank is None:
         params_m = sum(p.numel() for p in ae.parameters()) / 1e6
-        print(f"AE parameters: {params_m:.1f}M")
+        if model_type == "vae":
+            print(f"VAE parameters: {params_m:.1f}M")
+        elif model_type == "vqvae":
+            print(f"VQ-VAE parameters: {params_m:.1f}M")
+        else:
+            print(f"AE parameters: {params_m:.1f}M")
+            
         if hasattr(ae, "get_compression_info"):
             c_info = ae.get_compression_info()
             print(

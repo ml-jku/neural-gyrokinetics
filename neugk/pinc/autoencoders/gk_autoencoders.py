@@ -212,6 +212,24 @@ class Swin5DVAE(Swin5DAE):
         del self.middle_downproj
         self.middle_vae_downproj = nn.Linear(self.middle_dim, 2 * self.bottleneck_dim)
 
+    def get_compression_info(self):
+        """Returns a dictionary with compression-related information."""
+        import numpy as np
+
+        input_elements = np.prod(self.base_resolution) * self.problem_dim
+        latent_elements = np.prod(self.bottleneck_grid_size) * self.bottleneck_dim
+        return {
+            "input_elements": int(input_elements),
+            "latent_elements": int(latent_elements),
+            "input_shape": list(self.base_resolution),
+            "input_channels": self.problem_dim,
+            "latent_shape": list(self.bottleneck_grid_size),
+            "latent_channels": self.bottleneck_dim,
+            "rate": input_elements / latent_elements,
+            "type": "vae",
+            "beta_vae": float(self.beta_vae),
+        }
+
     def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         """Reparameterization trick for vae"""
         std = torch.exp(0.5 * logvar)

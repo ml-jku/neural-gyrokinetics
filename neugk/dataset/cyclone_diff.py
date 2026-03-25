@@ -266,7 +266,11 @@ class CycloneAEDataset(CycloneDataset):
         config_keys = ["cond_filters", "subsample", "separate_zf"]
         config_str = "".join(str(getattr(self, k, "")) for k in config_keys)
         model_str = str({k: v.shape for k, v in autoencoder.state_dict().items()})
-        hash_str = "".join(sorted(self.files)) + config_str + model_str
+        ae_checkpoint_path = str(
+            getattr(autoencoder, "checkpoint_path", "")
+            or getattr(autoencoder, "_checkpoint_path", "")
+        )
+        hash_str = "".join(sorted(self.files)) + config_str + model_str + ae_checkpoint_path
         file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
 
         tmu = "mu" if self.decouple_mu else ""
@@ -385,6 +389,295 @@ class CycloneAEDataset(CycloneDataset):
             self.latent_stats = latent_stats
 
         # update backend to not use kvikio, not needed for diffusion beyond this point
+        if isinstance(self.backend, KvikIOBackend):
+            self.backend = KvikIOBackend(self.rank, use_kvikio=False)
+
+
+class CycloneVAEDataset(CycloneAEDataset):
+    def __init__(
+        self,
+        *args,
+        latent_sampling_mode: str = "stochastic",
+        **kwargs,
+    ):
+        self.latent_sampling_mode = latent_sampling_mode.lower()
+        if self.latent_sampling_mode not in {"stochastic", "deterministic"}:
+            raise ValueError(
+                "latent_sampling_mode must be either 'stochastic' or 'deterministic'."
+            )
+        super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _sample_from_mu_var(
+        mu: Union[torch.Tensor, np.ndarray],
+        var: Union[torch.Tensor, np.ndarray],
+    ) -> np.ndarray:
+        mu_np = mu.detach().cpu().numpy() if isinstance(mu, torch.Tensor) else np.asarray(mu)
+        var_np = (
+            var.detach().cpu().numpy() if isinstance(var, torch.Tensor) else np.asarray(var)
+        )
+        var_np = np.clip(var_np, 1e-12, None)
+        return mu_np + np.sqrt(var_np) * np.random.randn(*mu_np.shape)
+
+    def __getitem__(
+        self, index: int, get_normalized: bool = True, override_latens: bool = False
+    ) -> CycloneAESample:
+        file_index, t_index = self.flat_index_to_file_and_tstep[index]
+
+        if (
+            getattr(self, "precomputed_latents", None) is not None
+            and not override_latens
+        ):
+            sample = self.precomputed_latents[(file_index, t_index)]
+            if "mu" in sample and "var" in sample:
+                if self.latent_sampling_mode == "stochastic":
+                    x = self._sample_from_mu_var(sample["mu"], sample["var"])
+                else:
+                    x = (
+                        sample["mu"].detach().cpu().numpy()
+                        if isinstance(sample["mu"], torch.Tensor)
+                        else np.asarray(sample["mu"])
+                    )
+            else:
+                x = sample["x"]
+        else:
+            with self.backend.open(self.files[file_index]) as f:
+                sample = self._load_data(f, file_index, t_index)
+            x = sample["x"]
+            if x is not None and self.separate_zf:
+                x = separate_zf_fn(x, dim=0)
+
+        phi = sample["phi"]
+        flux = sample["flux"]
+        timestep = sample["timestep"]
+        geom = sample["geometry"]
+
+        avg_flux = self.get_avg_flux(file_index)
+
+        conditioning = None
+        if self.conditions is not None and len(self.conditions) > 0:
+            cond_list = []
+            for k in self.conditions:
+                val = sample[k]
+                if isinstance(val, torch.Tensor):
+                    cond_list.append(val.to(dtype=self.dtype))
+                else:
+                    cond_list.append(torch.tensor(val, dtype=self.dtype))
+            conditioning = torch.stack(cond_list, dim=-1)
+
+        if get_normalized:
+            if x is not None and self.precomputed_latents is None:
+                x, _, _ = self.normalize(file_index, df=x)
+            if phi is not None:
+                phi, _, _ = self.normalize(file_index, phi=phi)
+
+        if phi is not None and phi.ndim == 3:
+            phi = (
+                phi.unsqueeze(0)
+                if isinstance(phi, torch.Tensor)
+                else np.expand_dims(phi, 0)
+            )
+
+        x_out = (
+            torch.tensor(x, dtype=self.dtype)
+            if not isinstance(x, torch.Tensor) and x is not None
+            else x
+        )
+        if x_out is not None:
+            x_out = x_out.to(dtype=self.dtype)
+
+        phi_out = (
+            torch.tensor(phi, dtype=self.dtype)
+            if not isinstance(phi, torch.Tensor) and phi is not None
+            else phi
+        )
+        if phi_out is not None:
+            phi_out = phi_out.to(dtype=self.dtype)
+
+        return CycloneAESample(
+            df=x_out,
+            phi=phi_out,
+            flux=torch.as_tensor(flux, dtype=self.dtype),
+            avg_flux=torch.as_tensor(avg_flux, dtype=self.dtype),
+            file_index=torch.tensor(file_index, dtype=torch.long),
+            timestep_index=torch.tensor(t_index, dtype=torch.long),
+            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
+            timestep=torch.as_tensor(timestep, dtype=self.dtype),
+            conditioning=conditioning,
+        )
+
+    @torch.no_grad()
+    def precompute_latents(
+        self,
+        rank: int,
+        dataloader: DataLoader,
+        autoencoder: torch.nn.Module,
+        device: torch.device = "cuda",
+        latent_stats: Optional[RunningMeanStd] = None,
+    ):
+        self.autoencoder = autoencoder
+
+        config_keys = ["cond_filters", "subsample", "separate_zf"]
+        config_str = "".join(str(getattr(self, k, "")) for k in config_keys)
+        model_str = str({k: v.shape for k, v in autoencoder.state_dict().items()})
+        vae_checkpoint_path = str(
+            getattr(autoencoder, "checkpoint_path", "")
+            or getattr(autoencoder, "_checkpoint_path", "")
+        )
+        hash_str = (
+            "".join(sorted(self.files))
+            + config_str
+            + model_str
+            + vae_checkpoint_path
+            + "vae"
+        )
+        file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
+
+        tmu = "mu" if self.decouple_mu else ""
+        offset = self.offsets[0]
+        filter_tag = (
+            f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
+        )
+
+        segments = [
+            "diff",
+            f"{self.split}_latents",
+            f"offset{offset}",
+            tmu,
+            filter_tag,
+            "vae",
+            file_hash,
+            "latents",
+        ]
+        latents_dump_pkl = os.path.join(
+            self.dir, "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
+        )
+
+        if os.path.exists(latents_dump_pkl):
+            if rank == 0:
+                print(f"loading precomputed latents from {latents_dump_pkl}")
+            with open(latents_dump_pkl, "rb") as f:
+                loaded = pickle.load(f)
+            self.precomputed_latents = (
+                loaded["samples"]
+                if isinstance(loaded, dict) and "samples" in loaded
+                else loaded
+            )
+            if dist.is_initialized():
+                dist.barrier()
+        else:
+            tmp_loader = dataloader
+            autoencoder.eval()
+            autoencoder.to(device)
+            latents_dict = {}
+            desc = f"precomputing {self.split} latents (rank:{rank})"
+
+            for batch in tqdm(tmp_loader, desc=desc):
+                df = batch.df.to(device)
+                cond = (
+                    batch.conditioning.to(device)
+                    if hasattr(batch, "conditioning")
+                    else None
+                )
+                z, _ = autoencoder.encode(df, condition=cond)
+                z = z.cpu().numpy()
+
+                mu = getattr(autoencoder, "_mu", None)
+                logvar = getattr(autoencoder, "_logvar", None)
+                if mu is None or logvar is None:
+                    raise RuntimeError(
+                        "VAE latent precompute expects encoder to expose _mu/_logvar."
+                    )
+                mu_np = mu.detach().cpu().numpy()
+                var_np = np.exp(logvar.detach().cpu().numpy())
+
+                for i in range(len(batch.file_index)):
+                    f_idx = batch.file_index[i].item()
+                    t_idx = batch.timestep_index[i].item()
+
+                    with self.backend.open(self.files[f_idx]) as f:
+                        sample = self._load_data(f, f_idx, t_idx)
+
+                    if isinstance(sample["phi"], torch.Tensor):
+                        sample["phi"] = sample["phi"].cpu().numpy()
+                    if isinstance(sample["flux"], torch.Tensor):
+                        sample["flux"] = sample["flux"].cpu().numpy()
+
+                    sample["mu"] = mu_np[i]
+                    sample["var"] = var_np[i]
+                    sample["x"] = z[i]
+                    latents_dict[(f_idx, t_idx)] = sample
+
+            if dist.is_initialized():
+                gathered_dict = [None for _ in range(dist.get_world_size())]
+                dist.all_gather_object(gathered_dict, latents_dict)
+                full_latents_dict = {}
+                for d in gathered_dict:
+                    full_latents_dict.update(d)
+                self.precomputed_latents = full_latents_dict
+            else:
+                self.precomputed_latents = latents_dict
+
+            if rank == 0:
+                with open(latents_dump_pkl, "wb") as f:
+                    pickle.dump(self.precomputed_latents, f)
+                print(f"saved precomputed latents to {latents_dump_pkl}")
+            if dist.is_initialized():
+                dist.barrier()
+
+        if self.split == "train":
+            stats = None
+            l2_norms = []
+            for sample in self.precomputed_latents.values():
+                mu = (
+                    sample["mu"].detach().cpu().numpy()
+                    if isinstance(sample["mu"], torch.Tensor)
+                    else np.asarray(sample["mu"])
+                )
+                var = (
+                    sample["var"].detach().cpu().numpy()
+                    if isinstance(sample["var"], torch.Tensor)
+                    else np.asarray(sample["var"])
+                )
+                var = np.clip(var, 1e-12, None)
+                norm_axes = tuple(range(0, mu.ndim))
+
+                if self.latent_sampling_mode == "stochastic":
+                    x_mean = np.mean(mu, axis=norm_axes, keepdims=True)
+                    mu2_mean = np.mean(mu**2, axis=norm_axes, keepdims=True)
+                    var_mean = np.mean(var, axis=norm_axes, keepdims=True)
+                    x_var = var_mean + mu2_mean - x_mean**2
+                    std = np.sqrt(var)
+                    x_min = np.min(mu - 3.0 * std, axis=norm_axes, keepdims=True)
+                    x_max = np.max(mu + 3.0 * std, axis=norm_axes, keepdims=True)
+                    l2_norms.append(
+                        np.sqrt(np.sum(mu**2 + var, axis=norm_axes, keepdims=True))
+                    )
+                else:
+                    x_mean = np.mean(mu, axis=norm_axes, keepdims=True)
+                    x_var = np.var(mu, axis=norm_axes, keepdims=True)
+                    x_min = np.min(mu, axis=norm_axes, keepdims=True)
+                    x_max = np.max(mu, axis=norm_axes, keepdims=True)
+                    l2_norms.append(
+                        np.sqrt(np.sum(mu**2, axis=norm_axes, keepdims=True))
+                    )
+
+                if stats is None:
+                    stats = RunningMeanStd(shape=x_mean.shape)
+                stats.update(x_mean, x_var, x_min, x_max)
+
+            self.latent_stats = stats
+            l2_norm = np.mean(l2_norms, axis=0)
+            if rank == 0:
+                print(f"latent mean: {np.squeeze(stats.mean)}")
+                print(f"latent var: {np.squeeze(stats.var)}")
+                print(f"latent l2 norm: {np.squeeze(l2_norm)}")
+            if dist.is_initialized():
+                dist.barrier()
+        else:
+            assert latent_stats is not None
+            self.latent_stats = latent_stats
+
         if isinstance(self.backend, KvikIOBackend):
             self.backend = KvikIOBackend(self.rank, use_kvikio=False)
 

@@ -1,9 +1,11 @@
 from torch.utils.data.dataloader import DataLoader
+import os
 
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import resource
+from omegaconf import OmegaConf
 
 from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import (
@@ -13,6 +15,7 @@ from neugk.dataset.cyclone import (
 )
 from neugk.dataset.cyclone_diff import (
     CycloneAEDataset,
+    CycloneVAEDataset,
     CycloneSimSiamDataset,
     CycloneAESample,
 )
@@ -45,6 +48,24 @@ def check_partial_holdouts(dataset_cfg):
                 f"Trajectory '{file}' in partial_holdouts is not in training_trajectories."
             )
     return
+
+
+def _is_vae_checkpoint(cfg) -> bool:
+    ckp_path = getattr(cfg, "ae_checkpoint", None)
+    if not ckp_path or not os.path.exists(ckp_path):
+        return False
+
+    cfg_path = os.path.join(str(ckp_path), "config.yaml")
+    if not os.path.exists(cfg_path):
+        return False
+
+    try:
+        ae_cfg = OmegaConf.load(cfg_path)
+    except Exception:
+        return False
+
+    model_name = str(getattr(ae_cfg.model, "name", "")).lower()
+    return "vae" in model_name
 
 
 def get_data(cfg, rank: int = 0):
@@ -112,9 +133,26 @@ def get_data(cfg, rank: int = 0):
         use_kvikio_train = getattr(cfg.dataset, "gds_override", False)
         train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
+
+        use_vae_latents = _is_vae_checkpoint(cfg)
+
+        dataset_class = CycloneVAEDataset if use_vae_latents else CycloneAEDataset
         train_kwargs = {"conditions": list(cfg.model.conditioning)}
         val_kwargs = {"conditions": list(cfg.model.conditioning)}
-        dataset_class = CycloneAEDataset
+
+        if use_vae_latents:
+            latent_sampling_mode = getattr(
+                cfg.dataset, "latent_sampling_mode", "stochastic"
+            )
+            val_latent_sampling_mode = getattr(
+                cfg.dataset, "val_latent_sampling_mode", latent_sampling_mode
+            )
+            train_kwargs["latent_sampling_mode"] = latent_sampling_mode
+            val_kwargs["latent_sampling_mode"] = val_latent_sampling_mode
+
+        if rank == 0:
+            latent_type = "VAE" if use_vae_latents else "AE"
+            print(f"Diffusion latent dataset mode: {latent_type}")
     else:
         raise NotImplementedError
 
@@ -347,5 +385,6 @@ __all__ = [
     "CycloneDataset",
     "CycloneSample",
     "CycloneAEDataset",
+    "CycloneVAEDataset",
     "CycloneAESample",
 ]

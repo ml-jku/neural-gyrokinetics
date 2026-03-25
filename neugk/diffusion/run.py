@@ -7,10 +7,12 @@ from collections import defaultdict
 from time import perf_counter_ns
 
 import torch
+import numpy as np
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
+from torch.utils.data import DataLoader
 from torch.utils._pytree import tree_map
 from diffusers import DDPMScheduler
 from torch.distributions import Normal, StudentT, Laplace
@@ -38,14 +40,35 @@ class DDPMRunner(BaseRunner):
             if not ckp_path or not os.path.exists(ckp_path):
                 raise ValueError(f"AE not found at {ckp_path} (latent diffusion).")
             self.autoencoder, _, _ = load_autoencoder(ckp_path, device=self.device)
+            self.autoencoder.checkpoint_path = os.path.abspath(str(ckp_path))
+
+            # dedicated loader so worker dataset copies are not initialized
+            # before precomputed latents are available
+            precompute_loader = DataLoader(
+                self.trainset,
+                batch_size=self.cfg.training.batch_size,
+                num_workers=0,
+                shuffle=False,
+                collate_fn=self.trainset.collate,
+                pin_memory=False,
+                sampler=self.trainloader.sampler if self.use_ddp else None,
+                drop_last=getattr(self.trainloader, "drop_last", False),
+            )
             self.trainset.precompute_latents(
                 self.rank,
-                dataloader=self.trainloader,
+                dataloader=precompute_loader,
                 autoencoder=self.autoencoder,
                 device=self.device,
             )
             # compute scale
-            self.latent_scale = 1.0 / (self.trainset.latent_stats.var**0.5).item()
+            latent_var = np.asarray(self.trainset.latent_stats.var, dtype=np.float64)
+            latent_std = float(np.sqrt(np.maximum(np.mean(latent_var), 1e-12)))
+            self.latent_scale = 1.0 / latent_std
+            if self.rank == 0:
+                print(
+                    f"latent stats -> mean(var): {float(np.mean(latent_var)):.6e}, "
+                    f"latent_scale: {self.latent_scale:.6f}"
+                )
         else:
             # pixel-space
             self.autoencoder = DummyAE()
@@ -145,7 +168,11 @@ class DDPMRunner(BaseRunner):
         timesteps = torch.randint(0, n_timesteps, (bs,), device=self.device).long()
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
         # model inference
-        model_output = self.model(noisy_latents, tstep=timesteps, condition=condition)
+        model_output = self.model(
+            noisy_latents,
+            tstep=timesteps.to(noisy_latents.dtype),
+            condition=condition,
+        )
         # compute loss
         pred_type = self.noise_scheduler.config.prediction_type
         if pred_type == "epsilon":
@@ -248,7 +275,11 @@ class DDPMRunner(BaseRunner):
         # denoise loop
         for t in self.noise_scheduler.timesteps:
             t_batch = torch.full((bs,), t, device=self.device, dtype=torch.long)
-            pred = self.model(latents, tstep=t_batch, condition=condition)
+            pred = self.model(
+                latents,
+                tstep=t_batch.to(latents.dtype),
+                condition=condition,
+            )
             step_output = self.noise_scheduler.step(pred, t, latents)
             latents = step_output.prev_sample
 
@@ -300,7 +331,11 @@ class StudentTRunner(DDPMRunner):
         n_timesteps = self.noise_scheduler.config.num_train_timesteps
         timesteps = torch.randint(0, n_timesteps, (bs,), device=self.device).long()
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
-        model_output = self.model(noisy_latents, tstep=timesteps, condition=condition)
+        model_output = self.model(
+            noisy_latents,
+            tstep=timesteps.to(noisy_latents.dtype),
+            condition=condition,
+        )
         # compute loss
         loss = F.mse_loss(model_output, noise, reduction="none")
         loss = loss.flatten(1).mean(1)
@@ -331,7 +366,11 @@ class StudentTRunner(DDPMRunner):
         self.noise_scheduler.set_timesteps(num_inference_steps)
         for t in self.noise_scheduler.timesteps:
             t_batch = torch.full((bs,), t, device=self.device, dtype=torch.long)
-            pred = self.model(latents, tstep=t_batch, condition=condition)
+            pred = self.model(
+                latents,
+                tstep=t_batch.to(latents.dtype),
+                condition=condition,
+            )
             step_output = self.noise_scheduler.step(pred, t, latents)
             latents = step_output.prev_sample
 
@@ -515,7 +554,7 @@ class FlowMatchingRunner(DDPMRunner):
         # compute velocity
         xt = t * x1 + (1.0 - t) * x0
         target_v = x1 - x0
-        pred = self.model(xt, tstep=tstep, condition=condition)
+        pred = self.model(xt, tstep=tstep.to(xt.dtype), condition=condition)
         return F.mse_loss(pred, target_v)
 
     @torch.no_grad()
@@ -545,7 +584,7 @@ class FlowMatchingRunner(DDPMRunner):
                     dtype=torch.long,
                 )
 
-            v_pred = self.model(x, tstep=t_batch, condition=condition)
+            v_pred = self.model(x, tstep=t_batch.to(x.dtype), condition=condition)
             x = x + v_pred * dt
 
         # decode
@@ -590,7 +629,7 @@ class JiTRunner(DDPMRunner):
         xt = self.noise_scheduler.add_noise(x0, noise, tstep)
 
         # model predicts x0 directly
-        pred_x0 = self.model(xt, tstep=tstep, condition=condition)
+        pred_x0 = self.model(xt, tstep=tstep.to(xt.dtype), condition=condition)
 
         # compute loss on x0 prediction
         loss = F.mse_loss(pred_x0, x0, reduction="none")
@@ -626,7 +665,7 @@ class JiTRunner(DDPMRunner):
             t_batch = torch.full((bs,), t_val, device=self.device, dtype=torch.long)
 
             # predict x0
-            x0_pred = self.model(xt, tstep=t_batch, condition=condition)
+            x0_pred = self.model(xt, tstep=t_batch.to(xt.dtype), condition=condition)
 
             if i < steps - 1:
                 # move to next timestep (re-noise)
