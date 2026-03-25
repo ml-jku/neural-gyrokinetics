@@ -39,6 +39,21 @@ Running is managed with Hydra configs, structured as follows.
 
 After generating and preprocessing the dataset, GyroSwin and baselines training can be started with `main.py`.
 
+## Diffusion Sample Generation
+To generate new samples from a trained diffusion checkpoint and save them as H5 files, use:
+
+```bash
+python generate_samples.py --config configs/generation/generate_samples.yaml
+```
+
+Set the following fields in the config file:
+- `diffusion_checkpoint_dir`: path to the trained diffusion run directory (must contain `config.yaml` and checkpoint snapshots)
+- `ae_checkpoint`: path to AE checkpoint directory or file (optional if present in diffusion `config.yaml`)
+- `generation.trajectories`: trajectory pattern or list (for example `iteration_{0-5,7-12}.h5` or `ood_iteration_{0-4}.h5`)
+- `generation.output_dir`: directory for generated H5 files
+
+You can also provide explicit conditioning vectors via `generation.conditions` instead of trajectories.
+
 ## <img src="pages/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="18px"> GyroSwin
 <p align="center">
   <img src="pages/imgs/figure1.png" alt="Figure 1" width="66%">
