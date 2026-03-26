@@ -160,6 +160,9 @@ class BaseEvaluator:
         self.valsets = valsets
         self.valloaders = valloaders
         self.loss_wrap = loss_wrap
+        self.model_selection_metric: str = cfg.validation.get(
+            "model_selection_metric", "df"
+        )
 
     def _is_eval_epoch(self, epoch: int) -> bool:
         return epoch % self.cfg.validation.validate_every_n_epochs == 0 or epoch == 1
@@ -329,10 +332,19 @@ class BaseEvaluator:
         return log_metric_dict
 
     def _get_val_loss(
-        self, log_metric_dict: Dict[str, float], default_metric: str = "df"
+        self,
+        log_metric_dict: Dict[str, float],
+        default_metric: Optional[str] = None,
     ) -> float:
-        m_name = self.cfg.validation.get("model_selection_metric", default_metric)
-        val_loss = log_metric_dict.get(f"val_traj/{m_name}")
+        m_name = default_metric or self.model_selection_metric
+
+        # try direct lookup first (supports fully-qualified keys like
+        # "val_traj/probe_flux_val_rmse" as well as short names like "df")
+        val_loss = log_metric_dict.get(m_name)
+
+        # fall back to val_traj/<metric> prefix
+        if val_loss is None:
+            val_loss = log_metric_dict.get(f"val_traj/{m_name}")
 
         if val_loss is None:
             # handle multi-step keys by averaging across sequence
@@ -353,7 +365,7 @@ class BaseEvaluator:
         epoch: int,
         log_metric_dict: Dict[str, float],
         loss_val_min: float,
-        default_metric: str = "df",
+        default_metric: Optional[str] = None,
     ) -> float:
         val_loss = self._get_val_loss(log_metric_dict, default_metric=default_metric)
 

@@ -5,6 +5,7 @@ plus EMA normalization and custom Conflict-Free Gradient Descent (ConFIG) patchi
 """
 
 from typing import List, Callable, Dict, Optional, Any
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -53,6 +54,7 @@ class PINCLossWrapper(LossWrapper):
         eval_spectral_loss_type: str = "l1",
         augmentations: Optional[List[str]] = None,
         dataset: Optional[Any] = None,
+        integral_precision: str = "float64",
     ):
         augmentations = augmentations or []
         masked_mode_modeling = "mask_modes" in augmentations
@@ -87,10 +89,12 @@ class PINCLossWrapper(LossWrapper):
         self._simsiam_losses = ["simsiam"]
 
         self.integrator = FluxIntegral(
-            real_potens=real_potens, flux_fields=False, spectral_df=False
+            real_potens=real_potens, flux_fields=False, spectral_df=False,
+            integral_precision=integral_precision,
         )
         self.integrator_spec = FluxIntegral(
-            real_potens=real_potens, flux_fields=True, spectral_df=True
+            real_potens=real_potens, flux_fields=True, spectral_df=True,
+            integral_precision=integral_precision,
         )
 
         self.loss_type = loss_type
@@ -124,17 +128,13 @@ class PINCLossWrapper(LossWrapper):
             if name == "mask_modes":
                 # df_delta is already added to _data_losses by the base class;
                 # no extra loss keys needed here.
-                self.weights.setdefault("df_delta", 1.0)
-            elif name == "vicreg_variance":
-                self.weights.setdefault(name, 1.0)
-            elif name == "vicreg_covariance":
-                self.weights.setdefault(name, 1.0)
+                name = "df_delta"  # for weight registration and logging
+                if not "df_delta" in self.weights:
+                    self.weights.setdefault("df_delta", 1.0)
             else:
-                raise ValueError(
-                    f"Unknown augmentation '{name}'. "
-                    f"Supported: mask_modes, vicreg_variance, vicreg_covariance."
-                )
-            self._augmentation_losses.append(name)
+                if not name in self.weights:
+                    self.weights.setdefault(name, 1.0)
+                self._augmentation_losses.append(name)
 
     @property
     def all_losses(self):
@@ -226,33 +226,33 @@ class PINCLossWrapper(LossWrapper):
 
         return per_mode
 
-    def compute_vicreg_variance(
-        self, preds: Dict[str, torch.Tensor], eps: float = 1e-4
-    ) -> Dict[str, torch.Tensor]:
-        z = preds.get("z")
-        if z is None:
-            return {}
-        B, D = z.shape
-
-        z_centered = z - z.mean(dim=0)
-        std = torch.sqrt(z_centered.var(dim=0) + eps)
-        var_loss = F.relu(1.0 - std).mean()
+    def compute_vicreg_variance(self, z: torch.Tensor, eps: float = 1e-8) -> Dict[str, torch.Tensor]:
+        # flatten batch and spatial dimensions, keep latent dim
+        z = z.reshape(-1, z.shape[-1])
+        std = torch.sqrt(z.var(dim=0) + eps)
+        var_loss = torch.mean(F.relu(1.0 - std))
         return {"vicreg_variance": var_loss}
 
-    def compute_vicreg_covariance(
-        self, preds: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
-        z = preds.get("z")
-        if z is None:
-            return {}
-        B, D = z.shape
+    def compute_vicreg_covariance(self, z: torch.Tensor) -> Dict[str, torch.Tensor]:
+        z = z.reshape(-1, z.shape[-1])
         z_centered = z - z.mean(dim=0)
+        B, D = z_centered.shape
 
         # --- Covariance ---
         cov = (z_centered.T @ z_centered) / (B - 1)  # (D, D)
         off_diag = cov - torch.diag(cov.diag())
         cov_loss = (off_diag**2).sum() / D
         return {"vicreg_covariance": cov_loss}
+
+    def compute_logdet(self, z: torch.Tensor, eps: float = 1e-8) -> Dict[str, torch.Tensor]:
+        z = z.reshape(-1, z.shape[-1]).float()
+        d = z.shape[-1]
+        z_std = (z - z.mean(dim=0)) / (z.std(dim=0) + eps)
+        cov = (z_std.T @ z_std) / max(z.shape[0] - 1, 1)
+        logdet = -torch.logdet(cov + eps * torch.eye(d, device=z.device)) / d
+        # cov = torch.cov(z.T) + eps * torch.eye(z.shape[-1], device=z.device)
+        # logdet = torch.logdet(cov) / d
+        return {"logdet": logdet}
 
     def compute_data_loss(
         self,
@@ -441,15 +441,15 @@ class PINCLossWrapper(LossWrapper):
 
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
 
-        if integral_loss_type == "mse":
-            int_losses = {
-                "phi_int": F.mse_loss(pphi_int, tgt_phi),
-                "flux_int": torch.abs(pflux).mean()
-                + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze()),
-            }
-            monitor = {}
-        else:
-            int_losses = {
+        monitor = {
+            "phi_int_mse": F.mse_loss(pphi_int, tgt_phi).detach(),
+            "flux_int_mse": (torch.abs(pflux).mean()
+            + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze())).detach(),
+        }
+        int_losses = (
+            {"flux_int": monitor["flux_int_mse"], "phi_int": monitor["phi_int_mse"]}
+            if integral_loss_type == "mse"
+            else {
                 "phi_int": self.compute_integral_loss(
                     pphi_int, tgt_phi, integral_loss_type, loss_name="phi_int"
                 ),
@@ -458,11 +458,7 @@ class PINCLossWrapper(LossWrapper):
                     eflux, tgt_eflux, integral_loss_type, loss_name="flux_int"
                 ),
             }
-            monitor = {
-                "phi_int_mse": F.mse_loss(pphi_int, tgt_phi),
-                "flux_int_mse": torch.abs(pflux).mean()
-                + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze()),
-            }
+        )
 
         return int_losses, monitor, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
 
@@ -606,6 +602,7 @@ class PINCLossWrapper(LossWrapper):
         compute_integrals: bool = True,
         progress_remaining: float = 1.0,
         separate_zf: bool = False,
+        loss_type: str = "mse",
     ):
         losses, int_losses, int_monitor = {}, {}, {}
 
@@ -640,10 +637,13 @@ class PINCLossWrapper(LossWrapper):
             losses.update(self.compute_simsiam_loss(preds))
 
         # 3. Augmentation losses (VICReg, etc.)
-        for name in self._augmentation_losses:
-            # TODO: need to pass latent in predictions for VICReg losses
-            if "vicreg" in name:
-                losses.update(getattr(self, f"compute_{name}")(preds))
+        if self.training:
+            for name in self._augmentation_losses:
+                if "vicreg" in name and not "latent" in preds:
+                    warnings.warn(f"Latents not found in predictions for augmentation loss: {name}")
+                    continue
+                if name != "df_delta":
+                    losses.update(getattr(self, f"compute_{name}")(preds["latent"]))
 
         special_keys = set(
             self._int_losses
@@ -651,7 +651,7 @@ class PINCLossWrapper(LossWrapper):
             + self._vqvae_losses
             + self._spectral_losses
             + self._simsiam_losses
-            + self.augmentations
+            + self._augmentation_losses
         )
 
         available_keys = list(set(tgts.keys()) | set(preds.keys()) | special_keys)
@@ -668,7 +668,6 @@ class PINCLossWrapper(LossWrapper):
         if not self.training:
             data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
-            loss_type = "relative_mse" if k == "df_delta" else None
             p, t = preds.get(k, torch.zeros_like(tgts[k])), tgts[k]
             if p.shape != t.shape:
                 if k == "phi":
@@ -763,6 +762,7 @@ class PINCGradientBalancer(GradientBalancer):
         clip_grad: bool = True,
         clip_to: float = 1.0,
         n_tasks: Optional[int] = None,
+        deepspeed_engine=None,
     ):
         super().__init__(
             optimizer,
@@ -771,6 +771,7 @@ class PINCGradientBalancer(GradientBalancer):
             clip_grad,
             clip_to,
             n_tasks,
+            deepspeed_engine,
         )
         self.mode = mode
 

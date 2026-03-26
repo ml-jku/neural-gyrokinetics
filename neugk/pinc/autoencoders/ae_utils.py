@@ -48,7 +48,11 @@ def train_step_autoencoder(
 
     # model prediction
     # for ae we only use df
-    x_preds = model(xs["df"], condition=condition)
+    return_latents = False
+    for key in loss_wrap.active_losses:
+        if key in ["vicreg_variance", "vicreg_covariance", "logdet"]:
+            return_latents = True
+    x_preds = model(xs["df"], condition=condition, return_latent=return_latents)
 
     if cfg.dataset.augment.mask_modes.active:
         assert (
@@ -90,8 +94,8 @@ def masked_spectral_loss(y_hat, y, mask, zf_separated, de_normalize_fn, file_idx
     y_hat = de_normalize(y_hat, file_idx, de_normalize_fn)
     y = de_normalize(y, file_idx, de_normalize_fn)
     # FFT to spectral space
-    y_hat_k = reverse_ifft(y_hat, zf_separated=zf_separated)
-    y_k = reverse_ifft(y, zf_separated=zf_separated)
+    y_hat_k = reverse_ifft(y_hat.float(), zf_separated=zf_separated)
+    y_k = reverse_ifft(y.float(), zf_separated=zf_separated)
 
     # Isolate masked modes
     masked_pred = (1.0 - mask) * y_hat_k

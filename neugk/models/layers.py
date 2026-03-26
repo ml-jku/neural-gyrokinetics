@@ -189,6 +189,8 @@ class IntegerSincosConditionEmbed(nn.Module):
             self.mlp.apply(
                 seq_weight_init(partial(nn.init.normal_(mean=0.0, std=1e-3)))
             )
+        elif init_weights == "zeros":
+            self.mlp.apply(seq_weight_init(nn.init.zeros_))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.mlp.apply(seq_weight_init(nn.init.trunc_normal_))
         else:
@@ -299,6 +301,8 @@ class ContinuousConditionEmbed(nn.Module):
             self.mlp.apply(
                 seq_weight_init(partial(nn.init.normal_, mean=0.0, std=1e-3))
             )
+        elif init_weights == "zeros":
+            self.mlp.apply(seq_weight_init(nn.init.zeros_))
         elif init_weights in ["truncnormal", "truncnormal002"]:
             self.mlp.apply(seq_weight_init(nn.init.trunc_normal_))
         else:

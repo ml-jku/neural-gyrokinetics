@@ -12,6 +12,7 @@ import re
 import torch
 import torch.distributed as dist
 from torch import nn
+import cupy as cp
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
@@ -133,6 +134,23 @@ def ddp_setup(rank, world_size):
         backend="nccl", rank=rank, world_size=world_size, timeout=timedelta(minutes=20)
     )
 
+def handle_signal(signum, frame):
+    cleanup()
+    exit(1)
+
+def cleanup():
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+    torch.cuda.empty_cache()
+
+def print_mem_stats(rank):
+    print(f"Rank {rank} — before forward pass:")
+    print(f"  torch.cuda.memory_allocated: {torch.cuda.memory_allocated() / 1024**2:.0f} MiB")
+    print(f"  torch.cuda.memory_reserved: {torch.cuda.memory_reserved() / 1024**2:.0f} MiB")
+    # This is the key one — total GPU memory vs. what's free
+    free, total = torch.cuda.mem_get_info()
+    print(f"  GPU total: {total / 1024**2:.0f} MiB, free: {free / 1024**2:.0f} MiB")
+    print(f"  Used by other processes/NCCL/KvikIO: {(total - free) / 1024**2 - torch.cuda.memory_reserved() / 1024**2:.0f} MiB")
 
 def edit_tag(d, prefix=None, postfix=None):
     """Update dictionary keys with prefix and postfix tags, avoiding duplicates."""
@@ -779,6 +797,8 @@ def memory_cleanup(device=None, aggressive=False):
     # aggressive cleanup
     if aggressive:
         gc.collect()
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
         if torch.cuda.is_available() and device is not None:
             # force sync
             torch.cuda.synchronize(device)

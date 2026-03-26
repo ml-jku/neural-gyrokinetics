@@ -2,8 +2,58 @@
 Hydra entry point for GyroSwin and PINC.
 """
 
-import gc
 import os
+import ctypes
+
+def _gpu_numa_map():
+    """Discover GPU→CPU NUMA node mapping from sysfs. Returns {gpu_idx: numa_node}."""
+    import glob
+    mapping = {}
+    gpu_idx = 0
+    for class_path in sorted(glob.glob("/sys/bus/pci/devices/*/class")):
+        try:
+            with open(class_path) as f:
+                # 0x030000 = VGA compatible controller, 0x030200 = 3D controller
+                if not f.read().strip().startswith("0x030"):
+                    continue
+            numa_path = class_path.replace("class", "numa_node")
+            with open(numa_path) as f:
+                numa_node = int(f.read().strip())
+            if numa_node >= 0:  # -1 means no NUMA affinity
+                mapping[gpu_idx] = numa_node
+            gpu_idx += 1
+        except (IOError, ValueError):
+            continue
+    return mapping
+
+
+def _early_numa_bind():
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is None:
+        return
+    local_rank = int(local_rank)
+    try:
+        libnuma = ctypes.CDLL("libnuma.so.1", use_errno=True)
+        if libnuma.numa_available() == -1:
+            return
+
+        # Discover which CPU NUMA node is paired with this GPU
+        gpu_map = _gpu_numa_map()
+        numa_node = gpu_map.get(local_rank, local_rank)  # fallback to local_rank
+
+        # Pin this process to the correct CPU node
+        libnuma.numa_run_on_node.argtypes = [ctypes.c_int]
+        libnuma.numa_run_on_node(numa_node)
+        # Prefer memory allocations from that node
+        libnuma.numa_set_preferred.argtypes = [ctypes.c_int]
+        libnuma.numa_set_preferred(numa_node)
+        print(f"NUMA: rank {local_rank} → node {numa_node} (map: {gpu_map})", flush=True)
+    except (OSError, AttributeError) as e:
+        print(f"NUMA: binding unavailable ({e}), skipping", flush=True)
+
+_early_numa_bind()
+
+import gc
 import os.path as osp
 import sys
 import traceback
@@ -30,7 +80,11 @@ def dispatch_runner(rank, config, world_size):
     workflow = config.get("workflow", "gyroswin")
     # get base workflow name (handle pinc_autoencoder, pinc_peft,...)
     base_workflow = workflow.split("_")[0] if "_" in workflow else workflow
-
+    if not rank:
+        print("#" * 88, "\nStarting Cyclone with configs:")
+        print(OmegaConf.to_yaml(config))
+        print("#" * 88, "\n")
+    
     if base_workflow == "gyroswin":
         GyroSwinRunner(rank, config, world_size=world_size)()
     elif base_workflow == "pinc":
@@ -46,16 +100,13 @@ def main(config: DictConfig):
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
     os.environ["HYDRA_FULL_ERROR"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    if config.ddp.get("debug", False):
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
     # os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
     # os.environ["NCCL_BUFFSIZE"] = "1048576"
     # os.environ["NCCL_P2P_DISABLE"] = "0"
 
     rand_suffix = random.randint(0, 999)
-    print("#" * 88, "\nStarting Cyclone with configs:")
-    print(OmegaConf.to_yaml(config))
-    print("#" * 88, "\n")
-
     workflow = config.get("workflow")
     dict_config = OmegaConf.to_container(config)
     date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
@@ -165,15 +216,16 @@ def main(config: DictConfig):
         config.logging.run_id = f"{name}_{date_and_time}"
 
     try:
-        is_ddp = config.ddp.enable
+        is_deepspeed = getattr(config, "deepspeed", {}).get("enable", False)
         is_torchrun = "RANK" in os.environ
         is_slurm = "SLURM_JOB_ID" in os.environ
+        is_distributed = config.ddp.enable or is_deepspeed
+
         if is_torchrun and is_slurm:
-            # set wandb directory to prevent distructive symlinks from wandb
             job_id = os.environ.get("SLURM_JOB_ID")
             os.environ["WANDB_DIR"] = f"{dict_config['output_path']}/wandb_{job_id}"
-
-        if is_ddp:
+    
+        if is_distributed:
             world_size = config.ddp.n_nodes * torch.cuda.device_count()
             if not is_torchrun and is_slurm:
                 overrides = HydraConfig.get().overrides.task

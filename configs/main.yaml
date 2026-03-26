@@ -9,10 +9,19 @@ defaults:
 
 experiment_id: test
 seed: 0
-output_path: /system/user/publicwork/galletti/checkpoints
+output_path: outputs 
 ddp:
   enable: false
   n_nodes: 1
+  debug: false
+deepspeed:
+  enable: false
+  zero_stage: 2              # 1 or 2
+  offload_optimizer: true    # offload Adam states to CPU (effective on GH200 NVLink-C2C)
+  offload_param: false       # offload params to CPU (only for stage 3, not implemented)
+  offload_activations: false # offload activations to CPU during forward pass
+  allgather_bucket_size: 5e8
+  reduce_bucket_size: 5e8
 amp: 
   enable: true  # set to false when using rope or integrals in training (complex / fft)
   bfloat: true  # set to false for fno
@@ -20,6 +29,6 @@ mode: "train"
 eval: true
 device: "cuda"
 load_ckpt: false
-workflow: "gyroswin" # "gyroswin", "pinc", "diffusion"
+workflow: "pinc" # "gyroswin", "pinc", "diffusion"
 stage: null  # training style, eg. "autoencoder", "peft"
 ae_checkpoint: null
