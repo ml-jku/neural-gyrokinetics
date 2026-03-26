@@ -213,8 +213,6 @@ class DDPMRunner(BaseRunner):
                 if getattr(sample, k) is not None
             }
             condition = sample.conditioning.to(self.device)
-<<<<<<< HEAD
-=======
             idx_data = {
                 k: getattr(sample, k).to(device=self.device) for k in self.idx_keys
             }
@@ -222,7 +220,6 @@ class DDPMRunner(BaseRunner):
                 lambda g: g.to(self.device),
                 self.trainset.get_batch_geometry(idx_data["file_index"]),
             )
->>>>>>> feat/latent_losses
 
             # apply augmentations
             if self.augmentations:
