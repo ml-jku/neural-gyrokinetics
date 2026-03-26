@@ -41,7 +41,6 @@ class CycloneSample:
     s_hat: torch.Tensor
     q: torch.Tensor
     # geometric tensors for integrals
-    geometry: Optional[Dict[str, torch.Tensor]] = None
     y_fluxavg: Optional[torch.Tensor] = None
     position: Optional[torch.Tensor] = None
 
@@ -312,7 +311,12 @@ class CycloneDataset(Dataset):
                     self.stats[k][f_id]["min"] = traj_min
                     self.stats[k][f_id]["max"] = traj_max
                     stats[k].update(mean, var, traj_min, traj_max, count=len(timesteps))
-
+                    
+                    if normalization_scope == "dataset" and k not in probe_targets:
+                         # delete stats from metadata to save memory
+                        for suffix in ["_mean", "_std", "_min", "_max"]:
+                            meta.pop(f"{k}{suffix}", None)
+                   
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
         self.offsets = [offset for _ in range(len(self.files))]
@@ -383,7 +387,7 @@ class CycloneDataset(Dataset):
             if key == "df":
                 x = sample["x"]
                 if self.separate_zf:
-                    x = separate_zf_fn(x)
+                    x = separate_zf_fn(x, dim=0)
             elif key == "phi":
                 x = sample["phi"]
             else:
@@ -407,7 +411,7 @@ class CycloneDataset(Dataset):
         if os.path.exists(stats_path):
             stats = pickle.load(open(stats_path, "rb"))
         else:
-            with ThreadPoolExecutor(10) as executor:
+            with ThreadPoolExecutor(self.num_workers) as executor:
                 futures = [
                     executor.submit(process_t_idx, t_idx, key)
                     for t_idx in t_indices
@@ -432,12 +436,15 @@ class CycloneDataset(Dataset):
                 var = np.expand_dims(var, axis=0)
                 traj_min = np.expand_dims(traj_min, axis=0)
                 traj_max = np.expand_dims(traj_max, axis=0)
+            if not self.rank:
+                print(f"Aggregation of stats for {key} from shape: {stats.mean.shape} to shape: {mean.shape}")
             stats.mean = mean
             stats.var = var
             stats.min = traj_min
             stats.max = traj_max
         else:
-            print(f"No aggregations of stats, using stats of shape: {stats.mean.shape}")
+            if not self.rank:
+                print(f"No aggregations of stats, using stats of shape: {stats.mean.shape}")
 
         return stats
 
@@ -462,7 +469,6 @@ class CycloneDataset(Dataset):
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
-        geom = sample["geometry"]
 
         if self.normalizers is not None and get_normalized:
             if x is not None:
@@ -485,7 +491,6 @@ class CycloneDataset(Dataset):
             timestep=torch.as_tensor(timestep, self.dtype),
             file_index=torch.tensor(file_index, torch.long),
             timestep_index=torch.tensor(t_index, torch.long),
-            geometry=tree_map(lambda g: torch.as_tensor(g, torch.float64), geom),
             itg=torch.as_tensor(itg, self.dtype),
             dg=torch.as_tensor(dg, self.dtype),
             s_hat=torch.as_tensor(s_hat, self.dtype),
@@ -568,7 +573,6 @@ class CycloneDataset(Dataset):
         sample["dg"] = meta["density_grad"].squeeze()
         sample["s_hat"] = meta["s_hat"].squeeze()
         sample["q"] = meta["q"].squeeze()
-        sample["geometry"] = meta["geometry"]
         return sample
 
     def normalize(
@@ -699,6 +703,20 @@ class CycloneDataset(Dataset):
             shift = torch.as_tensor(shift, dtype=x.dtype, device=x.device)
         return scale, shift
 
+    def get_batch_geometry(self, file_indices, dtype=torch.float32):
+        """Look up geometry by file index and stack into a batch.
+
+        Geometry is shared across all timesteps of a file, so this avoids
+        storing redundant per-sample copies in the dataloader.
+        """
+        geom_list = [self.metadata[f]["geometry"] for f in file_indices.tolist()]
+        return tree_map(
+            lambda *gs: torch.stack(
+                [torch.as_tensor(np.ascontiguousarray(g), dtype=dtype) for g in gs]
+            ),
+            *geom_list,
+        )
+
     def get_at_time(
         self,
         file_idx: torch.Tensor,
@@ -818,10 +836,6 @@ class CycloneDataset(Dataset):
             dg=stack_batch(batch, "dg"),
             s_hat=stack_batch(batch, "s_hat"),
             q=stack_batch(batch, "q"),
-            geometry=tree_map(
-                lambda *x: torch.stack([torch.as_tensor(v) for v in x]),
-                *[s.geometry for s in batch],
-            ),
             y_fluxavg=stack_batch(batch, "y_fluxavg"),
             position=stack_batch(batch, "position"),
         )
@@ -847,7 +861,6 @@ class LinearCycloneDataset(CycloneDataset):
         phi, y_phi, flux = sample["phi"], sample["y_phi"], sample["gt_flux"]
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
-        geometry = sample["geometry"]
 
         if get_normalized:
             if x is not None:
@@ -872,9 +885,6 @@ class LinearCycloneDataset(CycloneDataset):
             dg=torch.as_tensor(dg, dtype=self.dtype),
             s_hat=torch.as_tensor(s_hat, dtype=self.dtype),
             q=torch.as_tensor(q, dtype=self.dtype),
-            geometry=tree_map(
-                lambda geom: torch.as_tensor(geom, dtype=self.dtype), geometry
-            ),
         )
 
     def _load_data(self, f, file_index, t_index) -> dict:
@@ -945,7 +955,6 @@ class LinearCycloneDataset(CycloneDataset):
         sample["dg"] = meta["density_grad"].squeeze()
         sample["s_hat"] = meta["s_hat"].squeeze()
         sample["q"] = meta["q"].squeeze()
-        sample["geometry"] = meta["geometry"]
         sample["fluxavg"] = (
             self.get_avg_flux(file_index).squeeze()
             if "fluxavg" in self.fields_to_load
@@ -1077,5 +1086,4 @@ class CoordinateCycloneDataset(CycloneDataset):
         sample["dg"] = meta["density_grad"].squeeze()
         sample["s_hat"] = meta["s_hat"].squeeze()
         sample["q"] = meta["q"].squeeze()
-        sample["geometry"] = meta["geometry"]
         return sample

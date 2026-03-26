@@ -3,6 +3,9 @@
 import os
 from abc import abstractmethod
 from tqdm import tqdm
+import atexit
+import signal
+import gc
 
 import torch
 import torch.distributed as dist
@@ -14,6 +17,9 @@ from neugk.utils import (
     remainig_progress,
     set_seed,
     get_scheduler,
+    cleanup,
+    handle_signal,
+    memory_cleanup
 )
 from neugk.dataset import get_data
 
@@ -25,11 +31,14 @@ class BaseRunner:
         self.rank = rank
         self.cfg = cfg
         self.world_size = world_size
+        self.use_deepspeed = getattr(cfg, "deepspeed", {}).get("enable", False)
         set_seed(cfg.seed)
 
         # ddp setup
         if cfg.ddp.enable and cfg.ddp.n_nodes > 1 and world_size > 1:
             self.local_rank = int(os.environ["LOCAL_RANK"])
+        elif self.use_deepspeed:
+            self.local_rank = int(os.environ.get("LOCAL_RANK", rank))
         else:
             self.local_rank = rank
 
@@ -39,11 +48,22 @@ class BaseRunner:
         else:
             self.device = torch.device("cpu")
 
-        if cfg.ddp.enable and world_size > 1:
+        if self.use_deepspeed:
+            assert not cfg.ddp.enable, (
+                "Cannot enable both DDP and DeepSpeed. Set ddp.enable=false."
+            )
+            import deepspeed
+            deepspeed.init_distributed()
+            self.use_ddp = False
+        elif cfg.ddp.enable and world_size > 1:
             ddp_setup(rank, world_size)
             self.use_ddp = True
         else:
             self.use_ddp = False
+
+        # register what happens on SIGTERM (e.g. from slurm)
+        atexit.register(cleanup)
+        signal.signal(signal.SIGTERM, lambda sig, frame: (cleanup(), exit(1)))
 
         self.writer = setup_logging(cfg) if not rank else None
 
@@ -60,10 +80,25 @@ class BaseRunner:
             self.use_amp and self.cfg.amp.bfloat and torch.cuda.is_bf16_supported()
         )
         self.amp_dtype = torch.bfloat16 if self.use_bf16 else torch.float16
-        self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
+        if self.use_deepspeed:
+            self.scaler = None
+        else:
+            self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
 
         self.setup_data()
+        if not rank:
+            with open("/proc/self/status") as _f:
+                for _l in _f:
+                    if "VmRSS" in _l:
+                        print(f"[init] RSS after setup_data: {int(_l.split()[1])/1024/1024:.1f} GB")
+                        break
         self.setup_components()
+        if not rank:
+            with open("/proc/self/status") as _f:
+                for _l in _f:
+                    if "VmRSS" in _l:
+                        print(f"[init] RSS after setup_components: {int(_l.split()[1])/1024/1024:.1f} GB")
+                        break
         self.setup_scheduler()
 
     def setup_data(self):
@@ -136,6 +171,43 @@ class BaseRunner:
                 num_training_steps=self.total_steps,
                 scheduler_specific_kwargs=kwargs,
             )
+    
+    def _build_deepspeed_config(self):
+        """Translate Hydra config into a DeepSpeed JSON config dict."""
+        ds = self.cfg.deepspeed
+        ds_config = {
+            "train_micro_batch_size_per_gpu": self.cfg.training.batch_size,
+            "gradient_clipping": (
+                self.cfg.training.clip_to if self.cfg.training.clip_grad else 0.0
+            ),
+            "zero_optimization": {
+                "stage": ds.zero_stage,
+                "offload_optimizer": {
+                    "device": "cpu" if ds.offload_optimizer else "none",
+                    "pin_memory": True,
+                },
+                "offload_param": {
+                    "device": "cpu" if ds.offload_param else "none",
+                    "pin_memory": True,
+                },
+                "allgather_bucket_size": int(float(ds.allgather_bucket_size)),
+                "reduce_bucket_size": int(float(ds.reduce_bucket_size)),
+                "overlap_comm": True,
+                "contiguous_gradients": True,
+            },
+        }
+        if ds.offload_activations:
+            ds_config["activation_checkpointing"] = {
+                "partition_activations": True,
+                "cpu_checkpointing": True,
+                "number_checkpoints": None,
+                "contiguous_memory_optimization": False,
+            }
+        if self.use_bf16:
+            ds_config["bf16"] = {"enabled": True}
+        elif self.use_amp:
+            ds_config["fp16"] = {"enabled": True, "initial_scale_power": 16}
+        return ds_config
 
     def _log_epoch(self, epoch, epoch_logs, info_dict, val_plots):
         """Log training and validation statistics."""
@@ -208,6 +280,22 @@ class BaseRunner:
             info_dict = {f"info/{k}": sum(v) / len(v) for k, v in info_dict.items()}
 
             # evaluate
+            memory_cleanup(self.device, aggressive=True)
+            if not self.rank:
+                with open("/proc/self/status") as _f:
+                    for _line in _f:
+                        if "VmRSS" in _line:
+                            rss_gb = int(_line.split()[1]) / 1024 / 1024
+                            break
+                gpu_alloc = torch.cuda.memory_allocated(self.device) / 1024**3
+                gpu_reserved = torch.cuda.memory_reserved(self.device) / 1024**3
+                print(
+                    f"[rank 0] epoch {epoch} post-cleanup: "
+                    f"RSS={rss_gb:.1f} GB, "
+                    f"GPU alloc={gpu_alloc:.1f} GB, "
+                    f"GPU reserved={gpu_reserved:.1f} GB, "
+                    f"Slurm headroom={115 - rss_gb:.1f} GB"
+                )
             log_metric_dict, val_plots = {}, {}
             if not skip_eval:
                 log_metric_dict, val_plots, self.loss_val_min = self.evaluate(epoch)

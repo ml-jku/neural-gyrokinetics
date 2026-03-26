@@ -1,3 +1,4 @@
+import os
 from torch.utils.data.dataloader import DataLoader
 
 from torch.utils.data.distributed import DistributedSampler
@@ -31,8 +32,23 @@ def set_ulimit(limit: int = 65536):
         pass
 
 
+def bind_worker_to_numa_node():
+    # Bind worker to same NUMA node as parent
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is not None:
+        try:
+            import ctypes
+            libnuma = ctypes.CDLL("libnuma.so.1", use_errno=True)
+            if libnuma.numa_available() != -1:
+                libnuma.numa_set_preferred.argtypes = [ctypes.c_int]
+                libnuma.numa_set_preferred(int(local_rank))
+        except (OSError, AttributeError):
+            pass
+
+
 def _worker_init_fn(worker_id):
     _ = worker_id
+    bind_worker_to_numa_node()
     set_ulimit()
 
 
@@ -187,7 +203,7 @@ def get_data(cfg, rank: int = 0):
     # gpudirect storage only used if kvikio is required, oterwise raw bins
     use_gpudirect = backend == "gds" and use_kvikio_train
     # dataloaders
-    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 0
+    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
     # NOTE: must be false when returning gpu data
     pin_memory = cfg.training.pin_memory and not use_gpudirect
     dataloader_kwargs = {}
@@ -304,6 +320,7 @@ def get_data(cfg, rank: int = 0):
                             if not cfg.dataset.augment.mask_modes.is_fourier
                             else None
                         ),
+                        per_sample=getattr(cfg.dataset.augment.mask_modes, "per_sample", False),
                     )
                 )
             elif key in ["vicreg_variance", "vicreg_covariance", "logdet"]:

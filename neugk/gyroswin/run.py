@@ -32,7 +32,8 @@ class GyroSwinRunner(BaseRunner):
         self.model = get_model(self.cfg, dataset=self.trainset).to(self.device)
         if self.use_ddp:
             self.model = DDP(
-                self.model, device_ids=[self.local_rank], find_unused_parameters=True
+                self.model, device_ids=[self.local_rank],
+                find_unused_parameters=getattr(self.cfg.ddp, "find_unused_parameters", False),
             )
 
         # load checkpoints
@@ -167,7 +168,10 @@ class GyroSwinRunner(BaseRunner):
                 if getattr(sample, k) is not None
             }
             idx_data = {k: getattr(sample, k).to(self.device) for k in self.idx_keys}
-            geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
+            geometry = tree_map(
+                lambda g: g.to(self.device),
+                self.trainset.get_batch_geometry(idx_data["file_index"]),
+            )
 
             # augmentations
             if self.augmentations:

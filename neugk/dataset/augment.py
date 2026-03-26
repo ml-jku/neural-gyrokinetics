@@ -137,16 +137,17 @@ def _build_mask(
 def _sample_strategy(
     strategy: MaskStrategy,
     mix_weights: Dict[MaskStrategy, float],
-) -> MaskStrategy:
-    """If strategy is MIXED, sample a leaf strategy according to mix_weights."""
+    batch_size: int = 1,
+) -> list:
+    """Sample a strategy per batch element. Returns a list of MaskStrategy."""
     if strategy != MaskStrategy.MIXED:
-        return strategy
+        return [strategy] * batch_size
 
     strategies = list(mix_weights.keys())
     probs = torch.tensor([mix_weights[s] for s in strategies])
     probs = probs / probs.sum()
-    idx = torch.multinomial(probs, 1).item()
-    return strategies[idx]
+    indices = torch.multinomial(probs, batch_size, replacement=True)
+    return [strategies[i] for i in indices]
 
 def mask_modes(
         mask_ratio: float,
@@ -160,6 +161,7 @@ def mask_modes(
         mix_weights: Optional[Dict[str | MaskStrategy, float]] = None,
         denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+        per_sample: bool = True,
     ):
     assert 0.0 <= mask_ratio <= 1.0, "mask_ratio must be in [0, 1]"
     if weights is not None and not isinstance(weights, torch.Tensor):
@@ -180,40 +182,48 @@ def mask_modes(
 
     def _mask(x: torch.Tensor, file_idx: torch.Tensor) -> torch.Tensor:
         device = x.device
+        batch_size = x.shape[0]
         x_tgt = x.clone()
         if not is_fourier:
-            # x was dumped in real space, denormalize and transform to fourier again
             if denormalize_fn is not None:
                 x = de_normalize(x, file_idx, denormalize_fn)
             x = reverse_ifft(x, zf_separated=zf_separated)
 
         nky = x.shape[-1]
-        # select strategy
-        chosen = _sample_strategy(strategy, _mix)
+        _cutoff = cutoff if cutoff is not None else nky // 2
 
-        mask_1d = _build_mask(
-            nky=nky,
-            strategy=chosen,
-            mask_ratio=mask_ratio,
-            weights=weights,
-            mask_zero_mode=mask_zero_mode,
-            rescale=rescale,
-            cutoff=cutoff if cutoff is not None else nky // 2,
-            device=device,
-        )
+        # sample strategies: per-sample or shared across batch
+        n_strategies = batch_size if per_sample else 1
+        chosen_list = _sample_strategy(strategy, _mix, n_strategies)
 
-        # Reshape for broadcasting
-        shape = [1] * x.ndim
-        shape[-1] = nky
-        mask = mask_1d.view(shape)
+        # build masks and stack along batch dim
+        masks_1d = torch.stack([
+            _build_mask(
+                nky=nky,
+                strategy=s,
+                mask_ratio=mask_ratio,
+                weights=weights,
+                mask_zero_mode=mask_zero_mode,
+                rescale=rescale,
+                cutoff=_cutoff,
+                device=device,
+            )
+            for s in chosen_list
+        ])  # (B, nky) if per_sample else (1, nky)
+        if not per_sample:
+            masks_1d = masks_1d.expand(batch_size, -1)
+            chosen_list = chosen_list * batch_size
+
+        # reshape for broadcasting: (B, 1, 1, ..., nky)
+        shape = [batch_size] + [1] * (x.ndim - 2) + [nky]
+        mask = masks_1d.view(shape)
         x_masked = x * mask
         if not is_fourier:
             x_masked = ifft(x_masked)
             if zf_separated:
-                # remove zf again if it was removed originally
                 x_masked = separate_zf(x_masked)
             if normalize_fn is not None:
                 x_masked = de_normalize(x_masked, file_idx, partial(normalize_fn, return_stats=False))
-        return x_masked, x_tgt, mask, chosen
+        return x_masked, x_tgt, mask, chosen_list
 
     return _mask

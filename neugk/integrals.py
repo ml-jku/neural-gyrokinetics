@@ -91,6 +91,7 @@ class FluxIntegral(nn.Module):
         spectral_potens: bool = False,
         flux_fields: bool = False,
         spectral_df: bool = False,
+        integral_precision: str = "float64",
     ):
         super().__init__()
 
@@ -98,12 +99,13 @@ class FluxIntegral(nn.Module):
         self.spectral_potens = spectral_potens
         self.flux_fields = flux_fields
         self.spectral_df = spectral_df
+        self.integral_dtype = torch.float64 if integral_precision == "float64" else torch.float32
 
     def _geom_tensors(
         self, geometry: Dict[str, torch.Tensor], dtype: torch.dtype = torch.float32
     ) -> Dict[str, torch.Tensor]:
         # use float64 for stability
-        geometry = tree_map(lambda g: g.to(dtype=torch.float64), geometry)
+        geometry = tree_map(lambda g: g.to(dtype=self.integral_dtype), geometry)
         geom_ = {}
 
         # grid expansion for broadcasting

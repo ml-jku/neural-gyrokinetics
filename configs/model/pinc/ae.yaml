@@ -25,8 +25,8 @@ patch:
   c_multiplier: 1.0
 
 vit:
-  num_heads: [8, 16]
-  depth: [4, 4]
+  num_heads: [16]
+  depth: [4]
   gradient_checkpoint: false
   use_abs_pe: false
   use_rpb: true

@@ -97,10 +97,11 @@ class DiffusionEvaluator(BaseEvaluator):
                         tgts["df"] = recombine_zf(tgts["df"], dim=1)
 
                 # validation metrics
+                geometry = valset.get_batch_geometry(idx_data["file_index"])
                 metrics_i, integrated_i = validation_metrics(
                     tgts=tgts,
                     preds=preds,
-                    geometry=sample.geometry,
+                    geometry=geometry,
                     loss_wrap=self.loss_wrap,
                     eval_integrals=eval_integrals,
                 )

@@ -53,6 +53,7 @@ class PINCLossWrapper(LossWrapper):
         eval_spectral_loss_type: str = "l1",
         augmentations: Optional[List[str]] = None,
         dataset: Optional[Any] = None,
+        integral_precision: str = "float64",
     ):
         augmentations = augmentations or []
         masked_mode_modeling = "mask_modes" in augmentations
@@ -87,10 +88,12 @@ class PINCLossWrapper(LossWrapper):
         self._simsiam_losses = ["simsiam"]
 
         self.integrator = FluxIntegral(
-            real_potens=real_potens, flux_fields=False, spectral_df=False
+            real_potens=real_potens, flux_fields=False, spectral_df=False,
+            integral_precision=integral_precision,
         )
         self.integrator_spec = FluxIntegral(
-            real_potens=real_potens, flux_fields=True, spectral_df=True
+            real_potens=real_potens, flux_fields=True, spectral_df=True,
+            integral_precision=integral_precision,
         )
 
         self.loss_type = loss_type
@@ -431,9 +434,9 @@ class PINCLossWrapper(LossWrapper):
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
 
         monitor = {
-            "phi_int_mse": F.mse_loss(pphi_int, tgt_phi),
-            "flux_int_mse": torch.abs(pflux).mean()
-            + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze()),
+            "phi_int_mse": F.mse_loss(pphi_int, tgt_phi).detach(),
+            "flux_int_mse": (torch.abs(pflux).mean()
+            + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze())).detach(),
         }
         int_losses = (
             {"flux_int": monitor["flux_int_mse"], "phi_int": monitor["phi_int_mse"]}
@@ -591,6 +594,7 @@ class PINCLossWrapper(LossWrapper):
         compute_integrals: bool = True,
         progress_remaining: float = 1.0,
         separate_zf: bool = False,
+        loss_type: str = "mse",
     ):
         losses, int_losses, int_monitor = {}, {}, {}
 
@@ -656,8 +660,7 @@ class PINCLossWrapper(LossWrapper):
         if not self.training:
             data_keys.remove("df_delta") if "df_delta" in data_keys else None
         for k in data_keys:
-            loss_type = "relative_mse" if k == "df_delta" else None
-            p, t = preds.get(k, torch.zeros_like(tgts[k])), tgts[k]
+            p, t = preds[k], tgts[k]
             if p.shape != t.shape and k == "phi":
                 p = p.unsqueeze(0)
             losses[k] = (
@@ -668,16 +671,17 @@ class PINCLossWrapper(LossWrapper):
             )
 
         if self.training:
-            monitor_mse = {
-                f"{k}_mse": (
-                    F.mse_loss(preds[k][:, :2], tgts[k][:, :2])
-                    + F.mse_loss(preds[k][:, 2:], tgts[k][:, 2:])
-                    if k == "df" and separate_zf
-                    else F.mse_loss(preds[k], tgts[k])
-                )
-                for k in data_keys
-                if k in preds
-            }
+            with torch.no_grad():
+                monitor_mse = {
+                    f"{k}_mse": (
+                        F.mse_loss(preds[k][:, :2], tgts[k][:, :2])
+                        + F.mse_loss(preds[k][:, 2:], tgts[k][:, 2:])
+                        if k == "df" and separate_zf
+                        else F.mse_loss(preds[k], tgts[k])
+                    )
+                    for k in data_keys
+                    if k in preds
+                }
             for k, v in losses.items():
                 self._update_ema_loss_scale(k, v)
             norm_losses = self._apply_ema_normalization(losses)
@@ -735,6 +739,7 @@ class PINCGradientBalancer(GradientBalancer):
         clip_grad: bool = True,
         clip_to: float = 1.0,
         n_tasks: Optional[int] = None,
+        deepspeed_engine=None,
     ):
         super().__init__(
             optimizer,
@@ -743,6 +748,7 @@ class PINCGradientBalancer(GradientBalancer):
             clip_grad,
             clip_to,
             n_tasks,
+            deepspeed_engine,
         )
         self.mode = mode
 

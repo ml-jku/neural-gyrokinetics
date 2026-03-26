@@ -178,10 +178,6 @@ class AutoencoderEvaluator(BaseEvaluator):
                         tgts, idx_data, valset.denormalize, dataset=valset
                     )
 
-                    # cpu transfer for metric calculation
-                    tgts = {k: v.cpu() for k, v in tgts.items()}
-                    preds = {k: v.cpu() for k, v in preds.items()}
-
                     # combine zonal flow
                     if self.cfg.dataset.separate_zf:
                         if "df" in preds:
@@ -190,10 +186,11 @@ class AutoencoderEvaluator(BaseEvaluator):
                             tgts["df"] = recombine_zf(tgts["df"], dim=1)
 
                     # compute validation metrics
+                    geometry = valset.get_batch_geometry(idx_data["file_index"])
                     metrics_i, integrated_i = validation_metrics(
-                        tgts=tgts,
-                        preds=preds,
-                        geometry=sample.geometry,
+                        tgts={k: v.cpu() for k, v in tgts.items()},
+                        preds={k: v.cpu() for k, v in preds.items()},
+                        geometry=geometry,
                         loss_wrap=self.loss_wrap,
                         eval_integrals=eval_integrals,
                     )

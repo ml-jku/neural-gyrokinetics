@@ -27,7 +27,6 @@ class CycloneAESample:
     timestep_index: torch.Tensor
     timestep: torch.Tensor
     conditioning: torch.Tensor
-    geometry: Optional[Dict[str, torch.Tensor]] = None
 
     def pin_memory(self):
         if self.df is not None:
@@ -78,7 +77,6 @@ class CycloneAEDataset(CycloneDataset):
         phi = sample["phi"]
         flux = sample["flux"]
         timestep = sample["timestep"]
-        geom = sample["geometry"]
 
         avg_flux = self.get_avg_flux(file_index)
 
@@ -130,7 +128,6 @@ class CycloneAEDataset(CycloneDataset):
             avg_flux=torch.as_tensor(avg_flux, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
-            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             conditioning=conditioning,
         )
@@ -193,7 +190,6 @@ class CycloneAEDataset(CycloneDataset):
         sample["dg"] = meta["density_grad"].squeeze()
         sample["s_hat"] = meta["s_hat"].squeeze()
         sample["q"] = meta["q"].squeeze()
-        sample["geometry"] = meta["geometry"]
         return sample
 
     def denormalize(
@@ -244,10 +240,6 @@ class CycloneAEDataset(CycloneDataset):
             file_index=stack_batch(batch, "file_index"),
             timestep_index=stack_batch(batch, "timestep_index"),
             conditioning=stack_batch(batch, "conditioning"),
-            geometry=tree_map(
-                lambda *x: torch.stack([torch.as_tensor(v) for v in x]),
-                *[s.geometry for s in batch],
-            ),
         )
 
     @torch.no_grad()
@@ -413,7 +405,6 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         phi, flux = sample["phi"], sample["flux"]
         avg_flux = self.get_avg_flux(file_index)
         timestep = sample["timestep"]
-        geom = sample["geometry"]
 
         conditioning = None
         if self.conditions is not None and len(self.conditions) > 0:
@@ -473,7 +464,6 @@ class CycloneSimSiamDataset(CycloneAEDataset):
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
             timestep_index_aug=torch.tensor(t_index_aug, dtype=torch.long),
-            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             conditioning=conditioning,
         )
@@ -555,7 +545,6 @@ class CycloneSimSiamDataset(CycloneAEDataset):
         sample["dg"] = meta["density_grad"].squeeze()
         sample["s_hat"] = meta["s_hat"].squeeze()
         sample["q"] = meta["q"].squeeze()
-        sample["geometry"] = meta["geometry"]
 
         return sample
 
@@ -575,8 +564,4 @@ class CycloneSimSiamDataset(CycloneAEDataset):
             file_index=stack_batch(batch, "file_index"),
             timestep_index=stack_batch(batch, "timestep_index"),
             conditioning=stack_batch(batch, "conditioning"),
-            geometry=tree_map(
-                lambda *x: torch.stack([torch.as_tensor(v) for v in x]),
-                *[s.geometry for s in batch],
-            ),
         )
