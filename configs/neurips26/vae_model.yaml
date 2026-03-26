@@ -121,7 +121,7 @@ model:
       type: linear
       start: 0.0
       end: 0.06
-      start_fraction: 0.15
+      start_fraction: 0.05
       end_fraction: 0.9
   loss_weights:
     df: 1.0
