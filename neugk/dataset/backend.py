@@ -126,7 +126,7 @@ class H5Backend(DataBackend):
         meta = {}
         with h5py.File(path, "r", swmr=True) as f:
             meta["timesteps"] = f["metadata/timesteps"][:]
-            meta["fluxes"] = f["metadata/fluxes"][:]
+            meta["flux"] = f["metadata/flux"][:]
             meta["ion_temp_grad"] = f["metadata/ion_temp_grad"][:]
             meta["density_grad"] = f["metadata/density_grad"][:]
             meta["s_hat"] = f["metadata/s_hat"][:]

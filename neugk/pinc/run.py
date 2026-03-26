@@ -69,6 +69,7 @@ class PINCRunner(BaseRunner):
             ),
             augmentations=augmentations,
             dataset=self.trainset,
+            integral_precision=getattr(self.cfg.training, "integral_precision", "float64"),
         )
 
         self.model = get_autoencoder(
@@ -89,25 +90,22 @@ class PINCRunner(BaseRunner):
             print(f"Trainable parameters after freeze: {trainable_params/1e6:.2f}M")
 
         self.simae = len(set(self.loss_wrap.active_losses).difference({"simsiam"})) > 0
-        if self.use_ddp:
-            self.model = DDP(
-                self.model,
-                device_ids=[self.local_rank],
-                # NOTE unused only if no decode
-                find_unused_parameters=(self.cfg.stage == "simsiam"),
-            )
 
         is_muon = getattr(self.cfg.training, "optimizer", "") == "muon"
+        grad_mode = self.cfg.training.gradnorm_balancer
 
-        if is_muon:
-            param_groups = self._split_muon_param_groups(self.model)
-            opt_cls = MuonWithAuxAdam if self.use_ddp else SingleDeviceMuonWithAuxAdam
-            self.opt = opt_cls(param_groups)
-            self.opt.defaults = {"lr": self.cfg.training.learning_rate}
-        elif self.cfg.training.gradnorm_balancer == "pseudo":
-            params = [p for p in self.model.parameters() if p.requires_grad]
-            self.opt = torch.optim.SGD(params, lr=self.cfg.training.learning_rate)
-        else:
+        if self.use_deepspeed:
+            assert not is_muon, (
+                "Muon optimizer is incompatible with DeepSpeed "
+                "(uses dist.all_gather on raw params which conflicts with ZeRO)."
+            )
+            assert grad_mode != "full", (
+                "Gradient balancer 'full' mode is incompatible with DeepSpeed "
+                "(requires retain_graph=True which conflicts with ZeRO gradient hooks)."
+            )
+            import deepspeed
+
+            # build optimizer for DeepSpeed to wrap
             params = [p for p in self.model.parameters() if p.requires_grad]
             if not params:
                 raise ValueError("no trainable params")
@@ -116,20 +114,80 @@ class PINCRunner(BaseRunner):
                 groups = exclude_from_weight_decay(
                     self.model, exclude, self.cfg.training.weight_decay
                 )
-                self.opt = torch.optim.Adam(groups, lr=self.cfg.training.learning_rate)
+                optimizer = torch.optim.Adam(
+                    groups, lr=self.cfg.training.learning_rate
+                )
             else:
-                self.opt = torch.optim.Adam(
+                optimizer = torch.optim.Adam(
                     params,
                     lr=self.cfg.training.learning_rate,
                     weight_decay=self.cfg.training.weight_decay,
                 )
 
-        self.grad_balancer = PINCGradientBalancer(
-            self.opt,
-            mode=self.cfg.training.gradnorm_balancer,
-            scaler=self.scaler,
-            clip_grad=self.cfg.training.clip_grad,
-            n_tasks=len(self.loss_wrap.active_losses),
+            ds_config = self._build_deepspeed_config()
+            self.model_engine, self.opt, _, _ = deepspeed.initialize(
+                model=self.model,
+                optimizer=optimizer,
+                config=ds_config,
+            )
+            self.model = self.model_engine
+
+            self.grad_balancer = PINCGradientBalancer(
+                self.opt,
+                mode=grad_mode,
+                scaler=None,
+                clip_grad=False,  # DeepSpeed handles clipping
+                n_tasks=len(self.loss_wrap.active_losses),
+                deepspeed_engine=self.model_engine,
+            )
+        else:
+            if self.use_ddp:
+                self.model = DDP(
+                    self.model,
+                    device_ids=[self.local_rank],
+                    find_unused_parameters=(self.cfg.stage == "simsiam"),
+                )
+
+            if is_muon:
+                param_groups = self._split_muon_param_groups(self.model)
+                opt_cls = MuonWithAuxAdam if self.use_ddp else SingleDeviceMuonWithAuxAdam
+                self.opt = opt_cls(param_groups)
+                self.opt.defaults = {"lr": self.cfg.training.learning_rate}
+            elif grad_mode == "pseudo":
+                params = [p for p in self.model.parameters() if p.requires_grad]
+                self.opt = torch.optim.SGD(params, lr=self.cfg.training.learning_rate)
+            else:
+                params = [p for p in self.model.parameters() if p.requires_grad]
+                if not params:
+                    raise ValueError("no trainable params")
+                exclude = getattr(self.cfg.training, "exclude_from_wd", [])
+                if exclude:
+                    groups = exclude_from_weight_decay(
+                        self.model, exclude, self.cfg.training.weight_decay
+                    )
+                    self.opt = torch.optim.Adam(
+                        groups, lr=self.cfg.training.learning_rate
+                    )
+                else:
+                    self.opt = torch.optim.Adam(
+                        params,
+                        lr=self.cfg.training.learning_rate,
+                        weight_decay=self.cfg.training.weight_decay,
+                    )
+
+            self.grad_balancer = PINCGradientBalancer(
+                self.opt,
+                mode=self.cfg.training.gradnorm_balancer,
+                scaler=self.scaler,
+                clip_grad=self.cfg.training.clip_grad,
+                n_tasks=len(self.loss_wrap.active_losses),
+            )
+
+        # whether integral losses need geometry on GPU during training
+        int_spec_keys = set(self.loss_wrap._int_losses + self.loss_wrap._spectral_losses)
+        self._int_losses_active = (
+            any(self.loss_wrap.weights.get(k, 0.0) > 0 for k in int_spec_keys)
+            or any(k in self.loss_scheduler_dict for k in int_spec_keys)
         )
 
         # setup evaluator
@@ -292,7 +350,9 @@ class PINCRunner(BaseRunner):
                 else None
             )
             idx_data = {k: getattr(sample, k).to(self.device) for k in self.idx_keys}
-            geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
+            geometry = self.trainset.get_batch_geometry(idx_data["file_index"])
+            if self._int_losses_active:
+                geometry = tree_map(lambda g: g.to(self.device), geometry)
 
             if self.augmentations:
                 for aug_fn in self.augmentations:
@@ -351,10 +411,7 @@ class PINCRunner(BaseRunner):
             loss_logs["total"].append(loss.item())
             for k, v in losses.items():
                 loss_logs[k].append(v.item() if isinstance(v, torch.Tensor) else v)
-
-            # if self.cur_update_step % 100 == 0:
-            #     del xs, condition, idx_data, geometry, loss, losses
-            #     memory_cleanup(self.device, aggressive=True)
+            del xs, condition, idx_data, geometry, loss, losses, grad_losses
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)
@@ -372,7 +429,9 @@ class PINCRunner(BaseRunner):
             epoch=epoch,
             device=self.device,
             loss_val_min=self.loss_val_min,
-            trainloader=self.trainloader,
+            trainloader=self.trainloader if self.cfg.validation.get("probe", None) else None,
+            trainset=self.trainset if self.cfg.validation.get("probe", None) else None,
+            probe_cfg=self.cfg.validation.get("probe", None),
             evaluate_recon=True,  # TODO adapt
             evaluate_probing=True,
         )

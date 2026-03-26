@@ -224,6 +224,7 @@ class GradientBalancer(nn.Module):
         clip_grad: bool = True,
         clip_to: float = 1.0,
         n_tasks: Optional[int] = None,
+        deepspeed_engine=None,
     ):
         super().__init__()
         self.optimizer = optimizer
@@ -231,6 +232,7 @@ class GradientBalancer(nn.Module):
         self.clip_grad = clip_grad
         self.scaler = scaler
         self.clip_to = clip_to
+        self.deepspeed_engine = deepspeed_engine
 
         # operator setup
         if mode == "pseudo":
@@ -240,6 +242,29 @@ class GradientBalancer(nn.Module):
             self.operator = ConFIGOperator()
 
     def forward(
+        self, model: nn.Module, weighted_loss: torch.Tensor, losses: List[torch.Tensor]
+    ):
+        """Balances multitask gradients with conflict-free IG."""
+        if self.deepspeed_engine is not None:
+            return self._forward_deepspeed(model, weighted_loss, losses)
+        return self._forward_default(model, weighted_loss, losses)
+
+    def _forward_deepspeed(
+        self, model: nn.Module, weighted_loss: torch.Tensor, losses: List[torch.Tensor]
+    ):
+        if self.mode in [None, "none"]:
+            self.deepspeed_engine.zero_grad()
+            self.deepspeed_engine.backward(weighted_loss)
+            self.deepspeed_engine.step()
+        elif self.mode == "pseudo":
+            self.deepspeed_engine.zero_grad()
+            idx, loss_i = self.loss_selector.select(1, losses)
+            self.deepspeed_engine.backward(loss_i)
+            self.operator.update_gradient(model, idx, grads=get_gradient_vector(model))
+            self.deepspeed_engine.step()
+        return model
+
+    def _forward_default(
         self, model: nn.Module, weighted_loss: torch.Tensor, losses: List[torch.Tensor]
     ):
         """Balances multitask gradients with conflict-free IG."""
@@ -280,6 +305,7 @@ def get_pushforward_fn(
     use_bf16: bool = False,
     device: str = None,
 ) -> Callable:
+    _executor = ThreadPoolExecutor(max_workers=1)
     def _loss_fn(
         model: nn.Module,
         inputs: Dict,
@@ -325,10 +351,9 @@ def get_pushforward_fn(
                 ts_unrolled.cpu(),
             )
 
-        executor = ThreadPoolExecutor(max_workers=1)
         with torch.no_grad():
             ts_unrolled = idx_data["timestep_index"] + (n_unrolls - 1) * ts_step
-            future = executor.submit(
+            future = _executor.submit(
                 fetch_target, dataset, idx_data["file_index"], ts_unrolled
             )
 

@@ -1,3 +1,4 @@
+import os
 from torch.utils.data.dataloader import DataLoader
 import os
 
@@ -34,8 +35,23 @@ def set_ulimit(limit: int = 65536):
         pass
 
 
+def bind_worker_to_numa_node():
+    # Bind worker to same NUMA node as parent
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is not None:
+        try:
+            import ctypes
+            libnuma = ctypes.CDLL("libnuma.so.1", use_errno=True)
+            if libnuma.numa_available() != -1:
+                libnuma.numa_set_preferred.argtypes = [ctypes.c_int]
+                libnuma.numa_set_preferred(int(local_rank))
+        except (OSError, AttributeError):
+            pass
+
+
 def _worker_init_fn(worker_id):
     _ = worker_id
+    bind_worker_to_numa_node()
     set_ulimit()
 
 
@@ -172,6 +188,7 @@ def get_data(cfg, rank: int = 0):
         backend=train_backend,
         active_keys=cfg.dataset.active_keys,
         fields_to_load=train_input_fields,
+        probe_targets=cfg.validation.probe.targets,
         path=cfg.dataset.path,
         split="train",
         random_seed=cfg.seed,
@@ -201,6 +218,7 @@ def get_data(cfg, rank: int = 0):
         backend=val_backend,
         active_keys=cfg.dataset.active_keys,
         fields_to_load=val_input_fields,
+        probe_targets=cfg.validation.probe.targets,
         path=cfg.dataset.path,
         split="val",
         random_seed=cfg.seed,
@@ -276,6 +294,7 @@ def get_data(cfg, rank: int = 0):
             backend=val_backend,
             active_keys=cfg.dataset.active_keys,
             fields_to_load=val_input_fields,
+            probe_targets=cfg.validation.probe.targets,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
@@ -349,8 +368,12 @@ def get_data(cfg, rank: int = 0):
                             if not cfg.dataset.augment.mask_modes.is_fourier
                             else None
                         ),
+                        per_sample=getattr(cfg.dataset.augment.mask_modes, "per_sample", False),
                     )
                 )
+            elif key in ["vicreg_variance", "vicreg_covariance", "logdet"]:
+                # no additional augmentation function needed, just compute loss on latents
+                pass
             else:
                 raise ValueError(f"Unknown augmentation: {key}")
 

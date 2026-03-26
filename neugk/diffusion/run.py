@@ -213,6 +213,16 @@ class DDPMRunner(BaseRunner):
                 if getattr(sample, k) is not None
             }
             condition = sample.conditioning.to(self.device)
+<<<<<<< HEAD
+=======
+            idx_data = {
+                k: getattr(sample, k).to(device=self.device) for k in self.idx_keys
+            }
+            geometry = tree_map(
+                lambda g: g.to(self.device),
+                self.trainset.get_batch_geometry(idx_data["file_index"]),
+            )
+>>>>>>> feat/latent_losses
 
             # apply augmentations
             if self.augmentations:
@@ -249,10 +259,7 @@ class DDPMRunner(BaseRunner):
             self.cur_update_step += 1.0
             loss_logs["loss"].append(loss.item())
 
-            # # memory management
-            # if (self.cur_update_step % 100) == 0:
-            #     del xs, condition, idx_data, geometry, loss
-            #     memory_cleanup(self.device, aggressive=True)
+            del xs, condition, idx_data, geometry, loss
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)

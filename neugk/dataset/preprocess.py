@@ -181,15 +181,20 @@ def preprocess(
             for k in geometry.keys()
         }
 
+        kyspec = np.loadtxt(f"{dir_in}/kyspec")[ts_slices]
+        fluxspec = np.loadtxt(f"{dir_in}/eflux_spectra.dat")[ts_slices]
+
         metadata = {
             "timesteps": timesteps,
             "resolution": resolution,
             "ion_temp_grad": np.array([ion_temp_grad]),
             "density_grad": np.array([density_grad]),
-            "fluxes": fluxes,
+            "flux": fluxes,
             "s_hat": np.array([s_hat]),
             "q": np.array([q]),
             "geometry": np_geom,
+            "kyspec": kyspec,
+            "fluxspec": fluxspec,
         }
 
         if geometry_only:
@@ -356,7 +361,9 @@ def preprocess(
             backend.write_metadata(f, metadata)
 
         return out_path, False
-
+    except Exception as e:
+        print(f"Error processing {filename}: {e}")
+        return out_path, False
     finally:
         # Free up the terminal row for the next job
         if position_queue is not None:
