@@ -660,7 +660,7 @@ class CycloneDataset(Dataset):
         if "flux" in keys:
             meta = self.metadata[file_index]
             sample["flux"] = np.array(
-                [meta["fluxes"][original_t_index]], dtype=np.float32
+                [meta["flux"][original_t_index]], dtype=np.float32
             )
 
         return sample

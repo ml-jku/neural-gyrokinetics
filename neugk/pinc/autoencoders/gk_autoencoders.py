@@ -186,13 +186,10 @@ class Swin5DAE(Swin5DUnet):
         return {"df": self.patch_decode(zdf, pad_axes, **kwcond)}
 
     def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, return_latent: bool = False):
-        if condition is not None:
-            condition = self.cond_embed(condition)
         zdf, pad_axes = self.encode(df, condition=condition)
-        outputs = self.decode(zdf, pad_axes, condition=condition)
+        out = self.decode(zdf, pad_axes, condition=condition)
         if return_latent:
-            outputs["latent"] = zdf
-        return outputs
+            out["latent"] = zdf
 
         if self.eflux_head is not None:
             if isinstance(self.eflux_head, MLP):
