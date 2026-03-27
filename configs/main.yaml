@@ -9,7 +9,8 @@ defaults:
 
 experiment_id: test
 seed: 0
-output_path: outputs 
+output_path: /projects/u6eb/outputs
+# output_path: outputs 
 ddp:
   enable: false
   n_nodes: 1
