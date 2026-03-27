@@ -245,92 +245,41 @@ class AutoencoderEvaluator(BaseEvaluator):
                 )
 
         # linear probing evaluation
-        # if trainloader is not None and evaluate_probing:
-
-        #     def encode_fn(sample, device):
-        #         sample: CycloneAESample
-        #         xs = sample.df.to(device, non_blocking=True)
-        #         condition = (
-        #             sample.conditioning.to(device, non_blocking=True)
-        #             if sample.conditioning is not None
-        #             else None
-        #         )
-        #         flux = sample.flux.to(device, non_blocking=True)
-
-        #         # forward pass for latents
-        #         if hasattr(model, "encode"):
-        #             z, _ = model.encode(xs, condition=condition)
-        #         else:
-        #             # DDP wrapper
-        #             z, _ = model.module.encode(xs, condition=condition)
-        #         return z, flux
-
-        #     self.run_probing_evaluation(
-        #         rank=rank,
-        #         trainloader=trainloader,
-        #         extraction_fn=encode_fn,
-        #         device=device,
-        #         epoch=epoch,
-        #         log_metric_dict=log_metric_dict,
-        #         val_plots=val_plots,
-        #     )
-
         if trainloader is not None and probe_cfg is not None:
-            probe_targets: List[str] = probe_cfg.get("targets", ["flux"])
             trainset = kwargs.get("trainset")
-            # compute probe weights on trainset
-            x_train, y_train = self.collect_xy(
-                rank, trainloader, model, device, dataset=trainset, probe_targets=probe_targets, desc="linear probe training",
-            )
-            # column of ones for bias
-            x_train_b = torch.cat([x_train, torch.ones(x_train.shape[0], 1)], dim=1)
-            # solve linear system: w @ x = y
-            w = torch.linalg.pinv(x_train_b) @ y_train
-            # report train RMSE on physical scale
-            y_train_pred = x_train_b @ w
-            # denormalize predictions and targets
-            cat_mean = []
-            cat_std = []
-            for tgt_name in probe_targets:
-                stats = valset.stats.get(tgt_name, {})
-                mean = stats["full"]["mean"]
-                std = stats["full"]["std"]
-                cat_mean.append(np.atleast_1d(mean))
-                cat_std.append(np.atleast_1d(std))
-            mean = torch.as_tensor(np.concatenate(cat_mean), device=y_train_pred.device)
-            std = torch.as_tensor(np.concatenate(cat_std), device=y_train_pred.device)
-            y_train_pred = y_train_pred * std + mean
-            y_train = y_train * std + mean  
-            pred_splits = np.split(y_train_pred, np.cumsum(probe_cfg["sizes"])[:-1], axis=1)
-            target_splits = np.split(y_train, np.cumsum(probe_cfg["sizes"])[:-1], axis=1)
-            if probe_cfg.get("log_train", False):
-                for name, pred, target in zip(probe_targets, pred_splits, target_splits):
-                    if name in ["fluxspec", "kyspec"]:
-                        pred = np.expm1(pred)
-                        target = np.expm1(target)
-                    train_mse = torch.mean((pred - target) ** 2)
-                    log_metric_dict[f"val_traj/probe_{name}_train_rmse"] = train_mse.sqrt().item()
+            probe_targets: List[str] = probe_cfg.get("targets", ["flux"])
 
-            # evaluate on validation sets
-            for val_idx, (valset, valloader) in enumerate(
-                zip(self.valsets, self.valloaders)
-            ):
-                valname = "val_traj" if val_idx == 0 else "val_samples"
-                x_val, y_val = self.collect_xy(
-                    rank, valloader, model, device, dataset=valset, desc=None, probe_targets=probe_targets,
-                )
-                x_val_b = torch.cat([x_val, torch.ones(x_val.shape[0], 1)], dim=1)
-                y_val_pred = x_val_b @ w
-                y_val_pred = y_val_pred * std + mean
-                y_val = y_val * std + mean
-                pred_splits = np.split(y_val_pred, np.cumsum(probe_cfg["sizes"])[:-1], axis=1)
-                target_splits = np.split(y_val, np.cumsum(probe_cfg["sizes"])[:-1], axis=1)
-                for name, pred, target in zip(probe_targets, pred_splits, target_splits):
-                    if name in ["fluxspec", "kyspec"]:
-                        pred = np.expm1(pred)
-                        target = np.expm1(target)
-                    val_mse = torch.mean((pred - target) ** 2)
-                    log_metric_dict[f"{valname}/probe_{name}_val_rmse"] = val_mse.sqrt().item()
+            def _make_encode_fn(dataset):
+                def encode_fn(sample, device):
+                    sample: CycloneAESample
+                    xs = sample.df.to(device, non_blocking=True)
+                    condition = (
+                        sample.conditioning.to(device, non_blocking=True)
+                        if sample.conditioning is not None
+                        else None
+                    )
+                    # forward pass for latents
+                    if hasattr(model, "encode"):
+                        z, _ = model.encode(xs, condition=condition)
+                    else:
+                        z, _ = model.module.encode(xs, condition=condition)
+                    y = self._gather_probe_targets(sample, dataset, probe_targets)
+                    return z, y
+                return encode_fn
+
+            self.run_probing_evaluation(
+                rank=rank,
+                trainloader=trainloader,
+                extraction_fn=_make_encode_fn(trainset),
+                device=device,
+                epoch=epoch,
+                log_metric_dict=log_metric_dict,
+                val_plots=val_plots,
+                probe_cfg=probe_cfg,
+                probe_targets=probe_targets,
+                val_extraction_fns=[_make_encode_fn(vs) for vs in self.valsets],
+                dataset_for_stats=trainset,
+            )
                 
         # save checkpoint
         loss_val_min = self._save_checkpoint(

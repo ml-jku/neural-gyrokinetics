@@ -27,9 +27,28 @@ def _gpu_numa_map():
     return mapping
 
 
+def _is_grace_hopper():
+    """Check if running on GH200 (Grace Hopper) hardware."""
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=gpu_name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return any("gh200" in line.lower() or "grace" in line.lower()
+                       for line in result.stdout.strip().splitlines())
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return False
+
+
 def _early_numa_bind():
     local_rank = os.environ.get("LOCAL_RANK")
     if local_rank is None:
+        return
+    if not _is_grace_hopper():
+        print("NUMA: not a GH200 node, skipping NUMA binding", flush=True)
         return
     local_rank = int(local_rank)
     try:

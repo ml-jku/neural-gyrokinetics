@@ -450,41 +450,116 @@ class BaseEvaluator:
         epoch: int,
         log_metric_dict: Dict[str, float],
         val_plots: Dict[str, Any],
+        probe_cfg: Optional[Dict[str, Any]] = None,
+        probe_targets: Optional[List[str]] = None,
+        val_extraction_fns: Optional[List[Callable]] = None,
+        dataset_for_stats=None,
     ):
-        """Run linear probing and generate t-SNE plots."""
+        """Run linear probing and generate t-SNE plots.
+
+        When *probe_cfg* is provided the method performs multi-target probing
+        with per-target denormalization and RMSE.  Otherwise the original
+        single-target behaviour is used (backward-compatible).
+
+        Args:
+            extraction_fn: ``(sample, device) -> (latent, target)`` for training.
+            val_extraction_fns: Optional per-valset extraction functions.  When
+                ``None``, *extraction_fn* is reused for every validation loader.
+            probe_cfg: Dict with ``"sizes"`` (list of ints, one per target) and
+                optionally ``"targets"`` (list of target names).
+            probe_targets: List of target names (used for metric keys and
+                denormalization).
+            dataset_for_stats: Dataset whose ``.stats`` are used to build
+                denormalization tensors.  Only required when *probe_cfg* is set.
+        """
+        import numpy as np
         from neugk.plot_utils import plot_latent_tsne
 
         # 1. compute probe weights on trainset
         x_train, y_train = self.collect_latents(
             rank, trainloader, extraction_fn, device, desc="probe trainset"
         )
-        # column of ones for bias
         x_train_b = torch.cat([x_train, torch.ones(x_train.shape[0], 1)], dim=1)
-        # solve linear system: w @ w = y
-        res = torch.linalg.lstsq(x_train_b, y_train, driver="gels")
-        w = res.solution
 
-        # report train RMSE on physical scale
+        if probe_cfg is not None:
+            w = torch.linalg.pinv(x_train_b) @ y_train
+        else:
+            res = torch.linalg.lstsq(x_train_b, y_train, driver="gels")
+            w = res.solution
+
         y_train_pred = x_train_b @ w
-        train_rmse = torch.sqrt(torch.mean((y_train_pred - y_train) ** 2))
-        log_metric_dict["val_traj/probe_train_rmse"] = train_rmse.item()
+
+        # build denormalization tensors for multi-target mode
+        norm_mean = norm_std = None
+        if probe_cfg is not None and dataset_for_stats is not None:
+            cat_mean, cat_std = [], []
+            for tgt_name in probe_targets:
+                stats = dataset_for_stats.stats.get(tgt_name, {})
+                mean = stats["full"]["mean"] if stats else 0.0
+                std = stats["full"]["std"] if stats else 1.0
+                cat_mean.append(np.atleast_1d(mean))
+                cat_std.append(np.atleast_1d(std))
+            norm_mean = torch.as_tensor(np.concatenate(cat_mean), device=y_train.device)
+            norm_std = torch.as_tensor(np.concatenate(cat_std), device=y_train.device)
+
+        if probe_cfg is None:
+            # single-target: report overall train RMSE
+            train_rmse = torch.sqrt(torch.mean((y_train_pred - y_train) ** 2))
+            log_metric_dict["val_traj/probe_train_rmse"] = train_rmse.item()
 
         # 2. evaluate on validation sets
         for val_idx, valloader in enumerate(self.valloaders):
             valname = "val_traj" if val_idx == 0 else "val_samples"
+            val_fn = (
+                val_extraction_fns[val_idx]
+                if val_extraction_fns is not None
+                else extraction_fn
+            )
             x_val, y_val = self.collect_latents(
-                rank, valloader, extraction_fn, device, desc=None
+                rank, valloader, val_fn, device, desc=None
             )
             x_val_b = torch.cat([x_val, torch.ones(x_val.shape[0], 1)], dim=1)
             y_val_pred = x_val_b @ w
-            val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val) ** 2))
-            log_metric_dict[f"{valname}/probe_val_rmse"] = val_rmse.item()
 
-            # add t-SNE plot for the first validation set
+            if probe_cfg is not None and norm_mean is not None:
+                # multi-target: denormalize and per-target RMSE
+                y_val_pred = y_val_pred * norm_std + norm_mean
+                y_val = y_val * norm_std + norm_mean
+                sizes = [int(s) for s in probe_cfg["sizes"]]
+                pred_splits = torch.split(y_val_pred, sizes, dim=1)
+                target_splits = torch.split(y_val, sizes, dim=1)
+                for name, pred, target in zip(probe_targets, pred_splits, target_splits):
+                    if name in ["fluxspec", "kyspec"]:
+                        pred = torch.expm1(pred)
+                        target = torch.expm1(target)
+                    val_rmse = torch.sqrt(torch.mean((pred - target) ** 2))
+                    log_metric_dict[f"{valname}/probe_{name}_val_rmse"] = val_rmse.item()
+            else:
+                # single-target: overall RMSE
+                val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val) ** 2))
+                log_metric_dict[f"{valname}/probe_val_rmse"] = val_rmse.item()
+
+            # t-SNE plots for first validation set
             if val_idx == 0:
-                val_plots["latent_tsne"] = plot_latent_tsne(
-                    x_val, y_val, title=f"Latent Space t-SNE (Epoch {epoch})"
-                )
+                tsne_targets = list(probe_cfg.get("tsne_targets", ["flux"])) if probe_cfg is not None else None
+                if tsne_targets is not None and probe_targets is not None:
+                    sizes = [int(s) for s in probe_cfg["sizes"]]
+                    offsets = [sum(sizes[:i]) for i in range(len(sizes))]
+                    for tsne_tgt in tsne_targets:
+                        if tsne_tgt not in probe_targets:
+                            continue
+                        idx = probe_targets.index(tsne_tgt)
+                        col_start = offsets[idx]
+                        y_color = y_val[:, col_start:col_start + sizes[idx]].mean(dim=1)
+                        val_plots[f"latent_tsne_{tsne_tgt}"] = plot_latent_tsne(
+                            x_val, y_color,
+                            title=f"t-SNE colored by {tsne_tgt} (Epoch {epoch})",
+                        )
+                else:
+                    y_color = y_val[:, 0] if y_val.ndim > 1 else y_val
+                    val_plots["latent_tsne"] = plot_latent_tsne(
+                        x_val, y_color, title=f"Latent Space t-SNE (Epoch {epoch})"
+                    )
 
     @abstractmethod
     def __call__(
