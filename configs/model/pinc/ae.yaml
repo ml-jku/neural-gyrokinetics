@@ -3,15 +3,16 @@ model_type: ae
 bundle_seq_length: 1
 latent_dim: 1024
 act_fn: GELU
+norm_fn: RMSNorm
 decouple_mu: true
-encoder_conditioning: ["itg", "dg", "s_hat", "q"]
+encoder_conditioning: []
 decoder_conditioning: ["itg", "dg", "s_hat", "q"]
 extra_zf_loss: false
 init_weights: "kaiming_uniform"  # "xavier_uniform", "truncnormal", "kaiming_uniform"
 patching_init_weights: "kaiming_uniform"
 cond_init_weights: "normal_smallvar"  # "kaiming_uniform", "normal_smallvar", "xavier_uniform"
 
-loss_scheduler: null
+loss_scheduler: {}
 loss_weights:
   df: 1.0
 extra_loss_weights: {}
@@ -19,15 +20,15 @@ extra_loss_weights: {}
 patch:
   patch_size: [ 4, 0, 4, 5, 4 ]
   window_size: [ 4, 0, 4, 9, 4 ]
-  merging_depth: 1
-  unmerging_depth: 1
+  merging_depth: 2
+  unmerging_depth: 2
   merging_hidden_ratio: 1.0
   unmerging_hidden_ratio: 1.0
   c_multiplier: 1.0
 
 vit:
   num_heads: [16]
-  depth: [4]
+  depth: [8]
   gradient_checkpoint: false
   use_abs_pe: false
   use_rpb: true
@@ -38,7 +39,7 @@ vit:
   qk_norm: true
 
 bottleneck:
-  dim: 512
+  dim: 256
   norm_learnable: false
   normalized_latent: false
   num_heads: 4
