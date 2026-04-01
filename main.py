@@ -157,6 +157,7 @@ def main(config: DictConfig):
             )
 
         if not os.path.exists(dict_config["output_path"]):
+            print(f"Creating output directory: {dict_config['output_path']}")
             os.makedirs(dict_config["output_path"], exist_ok=True)
 
         compress_src(dict_config["output_path"])

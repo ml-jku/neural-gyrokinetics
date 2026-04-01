@@ -23,6 +23,27 @@ from neugk.utils import RunningMeanStd, expand_as, separate_zf as separate_zf_fn
 from neugk.dataset.backend import DataBackend
 
 
+def resolve_trajectories(path: str, trajectories) -> List[str]:
+    """Expand a trajectories spec (string pattern or list) to raw file paths."""
+    if isinstance(trajectories, str):
+        match = re.match(r"^(.*?)\{([^}]+)\}(.*?)$", trajectories)
+        if not match:
+            traj_list = [trajectories]
+        else:
+            traj_prefix, ranges_str, traj_suffix = match.groups()
+            traj_numbers = []
+            for part in ranges_str.split(","):
+                if "-" in part:
+                    start, end = map(int, part.split("-"))
+                    traj_numbers.extend(range(start, end + 1))
+                else:
+                    traj_numbers.append(int(part))
+            traj_list = [f"{traj_prefix}{num}{traj_suffix}" for num in traj_numbers]
+    else:
+        traj_list = list(trajectories)
+    return [os.path.join(path, f) for f in traj_list]
+
+
 @dataclass
 class CycloneSample:
     df: torch.Tensor
@@ -136,28 +157,9 @@ class CycloneDataset(Dataset):
         # with specified files / pattern
         if trajectories is not None:
             if split == "val" and partial_holdouts:
-                self.files = []
-                for key in partial_holdouts.keys():
-                    self.files.append(os.path.join(self.dir, key))
+                self.files = [os.path.join(self.dir, key) for key in partial_holdouts.keys()]
             else:
-                if isinstance(trajectories, str):
-                    match = re.match(r"^(.*?)\{([^}]+)\}(.*?)$", trajectories)
-                    if not match:
-                        trajectories = [trajectories]
-                    else:
-                        prefix, ranges_str, suffix = match.groups()
-                        traj_numbers = []
-                        for part in ranges_str.split(","):
-                            if "-" in part:
-                                start, end = map(int, part.split("-"))
-                                traj_numbers.extend(range(start, end + 1))
-                            else:
-                                traj_numbers.append(int(part))
-                        trajectories = [
-                            f"{prefix}{num}{suffix}" for num in traj_numbers
-                        ]
-
-                self.files = [os.path.join(self.dir, f_name) for f_name in trajectories]
+                self.files = resolve_trajectories(self.dir, trajectories)
 
         # take all files in path
         if trajectories is None:
@@ -484,6 +486,8 @@ class CycloneDataset(Dataset):
 
             if use_ddp:
                 dist.barrier()
+        else:
+            print(f"loading pre-computed stats from {stats_path}")
 
         # apply final aggregations
         with open(stats_path, "rb") as f:

@@ -169,6 +169,17 @@ def get_data(cfg, rank: int = 0):
         if rank == 0:
             latent_type = "VAE" if use_vae_latents else "AE"
             print(f"Diffusion latent dataset mode: {latent_type}")
+
+        # load AE cfg for normalization stats
+        ae_checkpoint = getattr(cfg, "ae_checkpoint", None)
+        ae_cfg = None
+        if ae_checkpoint and os.path.isdir(str(ae_checkpoint)):
+            ae_cfg_path = os.path.join(str(ae_checkpoint), "config.yaml")
+            if os.path.exists(ae_cfg_path):
+                ae_cfg = OmegaConf.load(ae_cfg_path)
+                if rank == 0:
+                    print(f"Loaded AE config for normalization from {ae_cfg_path}")
+        train_kwargs["ae_cfg"] = ae_cfg
     else:
         raise NotImplementedError
 
