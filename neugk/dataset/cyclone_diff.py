@@ -13,7 +13,7 @@ from torch.utils._pytree import tree_map
 from torch.utils.data import DataLoader
 
 from neugk.utils import RunningMeanStd, separate_zf as separate_zf_fn
-from neugk.dataset.cyclone import CycloneDataset
+from neugk.dataset.cyclone import CycloneDataset, resolve_trajectories
 from neugk.dataset.backend import KvikIOBackend
 
 
@@ -43,11 +43,13 @@ class CycloneAEDataset(CycloneDataset):
         conditions: Sequence[str],
         precomputed_latents: Optional[Dict] = None,
         autoencoder: Optional[torch.nn.Module] = None,
+        ae_cfg=None,
         **kwargs,
     ):
         self.conditions = conditions
         self.precomputed_latents = precomputed_latents
         self.autoencoder = autoencoder
+        self._ae_cfg = ae_cfg
         super().__init__(*args, **kwargs)
 
     def _recompute_stats(
@@ -56,7 +58,74 @@ class CycloneAEDataset(CycloneDataset):
         filter_tag = (
             f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         )
-        return super()._recompute_stats(keys, offset, prefix="diff", suffix=filter_tag)
+
+        if self._ae_cfg is None:
+            return super()._recompute_stats(keys, offset, prefix="diff", suffix=filter_tag)
+
+        # diffusion dataset may use different training_trajectories than the AE
+        # for normalization to be consistent, stats must be computed from the AE cfg
+        ae_ds = self._ae_cfg.dataset
+        ae_offset = getattr(ae_ds, "offset", offset)
+        ae_decouple_mu = getattr(ae_ds, "norm_decouple_mu", self.decouple_mu)
+        ae_filter_tag = (
+            f"std{ae_ds.timestep_std_filter}"
+            if getattr(ae_ds, "timestep_std_filter", None)
+            else ""
+        )
+        raw_ae_files = resolve_trajectories(self.dir, ae_ds.training_trajectories)
+        ae_files = [
+            self.backend.format_path(
+                f, ae_ds.spatial_ifft, getattr(ae_ds, "split_into_bands", None), getattr(ae_ds, "real_potens", True)
+            )
+            for f in raw_ae_files
+        ]
+        ae_files = [f for f in set(ae_files) if self.backend.is_valid(f)]
+
+        # apply the AE training_cond_filters so the hash matches
+        ae_cond_filters = getattr(ae_ds, "training_cond_filters", None)
+        if ae_cond_filters:
+            ae_threshold = ae_offset if ae_offset > 0 else 80
+            orig_cond_filters = self.cond_filters
+            self.cond_filters = ae_cond_filters
+            ae_files = [f for f in ae_files if self._conditioning_filter(f, ae_threshold)]
+            self.cond_filters = orig_cond_filters
+
+        # setup AE index; (file_idx, t_idx) mapping and metadata
+        ae_flat_index = {}
+        ae_metadata = {}
+        flat_idx = 0
+        for file_idx, ae_file in enumerate(ae_files):
+            meta = self.backend.read_metadata(ae_file, input_fields=list(keys) if isinstance(keys, (list, tuple)) else [keys])
+            ae_metadata[file_idx] = meta
+            n_t = len(meta.get("timesteps", []))
+            for t_idx in range(max(0, n_t - ae_offset)):
+                ae_flat_index[flat_idx] = (file_idx, t_idx)
+                flat_idx += 1
+
+        # temporarily replace self state so the parent _recompute_stats use AE cfg/files/metadata
+        saved = (
+            self.files, self.decouple_mu,
+            self.flat_index_to_file_and_tstep, self.length,
+            self.offsets, self.metadata,
+        )
+        self.files = ae_files
+        self.decouple_mu = ae_decouple_mu
+        self.flat_index_to_file_and_tstep = ae_flat_index
+        self.length = flat_idx
+        self.offsets = [ae_offset] * len(ae_files)
+        self.metadata = ae_metadata
+        try:
+            result = super()._recompute_stats(
+                keys, ae_offset, prefix="diff", suffix=ae_filter_tag
+            )
+        finally:
+            (
+                self.files, self.decouple_mu,
+                self.flat_index_to_file_and_tstep, self.length,
+                self.offsets, self.metadata,
+            ) = saved
+
+        return result
 
     def __getitem__(
         self, index: int, get_normalized: bool = True, override_latens: bool = False
