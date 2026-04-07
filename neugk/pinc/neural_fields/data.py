@@ -1,5 +1,7 @@
 from typing import Tuple, Sequence, Optional, Union
 
+import os
+import pickle
 
 import h5py
 import numpy as np
@@ -28,13 +30,9 @@ class CycloneNFDataset(Dataset):
         separate_ky_modes: Optional[Sequence[int]] = None,
         flux_fields: bool = False,
         flux_fields_train: bool = False,
+        backend: str = "gds",
     ):
         super().__init__()
-
-        self.raw_path = f"{path}/{trajectory.replace('.h5', '')}"
-
-        trajectory = trajectory.replace(".h5", "")
-        h5_file = f"{path}/{trajectory}_ifft{'_realpotens' if realpotens else ''}.h5"
 
         self.normalize = normalize
         self.flux_fields = flux_fields
@@ -43,15 +41,27 @@ class CycloneNFDataset(Dataset):
         self.realpotens = realpotens
         self.beta1 = beta1
         self.beta2 = beta2
+        self.backend = backend
+
+        trajectory = trajectory.replace(".h5", "")
 
         if isinstance(timesteps, int):
             timesteps = [timesteps]
         self.timesteps = timesteps
 
         # load all samples
-        self.df, self.phi, self.flux, self.geom = self._load_gkw_data(
-            h5_file, timesteps, separate_ky_modes
-        )
+        if backend == "kvikio":
+            kvikio_dir = f"{path}/{trajectory}_ifft{'_realpotens' if realpotens else ''}"
+            self.raw_path = kvikio_dir
+            self.df, self.phi, self.flux, self.geom = self._load_gkw_data_kvikio(
+                kvikio_dir, timesteps, separate_ky_modes
+            )
+        else:
+            self.raw_path = f"{path}/{trajectory}"
+            h5_file = f"{path}/{trajectory}_ifft{'_realpotens' if realpotens else ''}.h5"
+            self.df, self.phi, self.flux, self.geom = self._load_gkw_data(
+                h5_file, timesteps, separate_ky_modes
+            )
 
         grid = torch.meshgrid(
             [torch.arange(d) for d in self.df.shape[1:]], indexing="ij"
@@ -74,7 +84,12 @@ class CycloneNFDataset(Dataset):
 
         self._get_norm_stats()
 
-        sgrid = np.loadtxt(f"/restricteddata/ukaea/gyrokinetics/raw/{trajectory}/sgrid")
+        # strip _Lin or similar suffixes to find raw trajectory name
+        raw_traj = trajectory.split("_Lin")[0].split("_ifft")[0]
+        raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{raw_traj}"
+        if not os.path.isdir(raw_path):
+            raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{trajectory}"
+        sgrid = np.loadtxt(f"{raw_path}/sgrid")
         self.ds = sgrid[1] - sgrid[0]
 
     def _load_gkw_data(
@@ -115,6 +130,77 @@ class CycloneNFDataset(Dataset):
                 fluxes = torch.stack(fluxes_int, 0).squeeze(0)
             if self.realpotens:
                 # replace potentials (realpotens incompatible with losses)
+                phis = torch.stack(phis_int, 0).squeeze(0)
+
+        if len(timesteps) > 1:
+            phis = rearrange(phis, "t c ... -> c t ...")
+            if self.flux_fields:
+                fluxes = rearrange(fluxes, "t c ... -> c t ...")
+
+        if self.spatial_fft or separate_ky_modes is not None:
+            dfs = self._split_into_bands(dfs, self.spatial_fft, separate_ky_modes)
+
+        return dfs, phis, fluxes, geom
+
+    def _load_gkw_data_kvikio(
+        self,
+        kvikio_dir: str,
+        timesteps: Sequence[int],
+        separate_ky_modes: Optional[Sequence[int]] = None,
+    ):
+        with open(os.path.join(kvikio_dir, "metadata.pkl"), "rb") as f:
+            meta = pickle.load(f)
+
+        geom = {k: np.array(v) for k, v in meta["geometry"].items()}
+        for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
+            if k not in geom:
+                geom[k] = np.array(1.0, dtype=np.float64)
+        resolution = tuple(meta["resolution"])  # (nvpar, nmu, ns, nkx, nky)
+        df_shape = (2, *resolution)
+        phi_shape = tuple(meta["phi_mean"].shape) if "phi_mean" in meta else resolution[2:]
+
+        dfs, phis, fluxes = [], [], []
+        for t in timesteps:
+            ts = str(t).zfill(5)
+            df_file = os.path.join(kvikio_dir, "data", f"timestep_{ts}.bin")
+            df = np.fromfile(df_file, dtype=np.float32).reshape(df_shape)
+            dfs.append(df)
+
+            phi_file = os.path.join(kvikio_dir, "data", f"poten_{ts}.bin")
+            if os.path.exists(phi_file):
+                phi = np.fromfile(phi_file, dtype=np.float32).reshape(phi_shape)
+                # ensure 2-channel format (re, im) for compatibility
+                if phi.ndim == len(resolution) - 2:
+                    phi = np.stack([phi, np.zeros_like(phi)], axis=0)
+            else:
+                phi = np.zeros((2, *resolution[2:]), dtype=np.float32)
+            phis.append(phi)
+
+            fluxes.append(meta["fluxes"][t])
+
+        dfs = torch.from_numpy(np.stack(dfs, 0)).squeeze(0)
+        phis = torch.from_numpy(np.stack(phis, 0)).squeeze(0)
+        fluxes = torch.from_numpy(np.stack(fluxes, 0)).squeeze(0)
+        geom = {k: torch.from_numpy(g).squeeze(0) for k, g in geom.items()}
+
+        if len(timesteps) > 1:
+            dfs = rearrange(dfs, "t c ... -> c t ...")
+
+        if self.flux_fields or self.realpotens:
+            geom_ = {k: g[None] for k, g in geom.items()}
+            dfs_ = dfs.clone()
+            if len(timesteps) == 1:
+                dfs_ = dfs_[:, None]
+            phis_int, fluxes_int = [], []
+            for t_idx in range(len(timesteps)):
+                assert dfs_[:, t_idx].shape[0] == 2
+                integrator = FluxIntegral(flux_fields=self.flux_fields)
+                phi_t, (_, fluxes_t, _) = integrator(geom_, df=dfs_[None, :, t_idx])
+                fluxes_int.append(fluxes_t.squeeze(0))
+                phis_int.append(phi_t.squeeze(0))
+            if self.flux_fields:
+                fluxes = torch.stack(fluxes_int, 0).squeeze(0)
+            if self.realpotens:
                 phis = torch.stack(phis_int, 0).squeeze(0)
 
         if len(timesteps) > 1:

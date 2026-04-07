@@ -246,8 +246,15 @@ class BaseRunner:
         raise NotImplementedError
 
     def __call__(self, skip_eval: bool = False):
-        """Main training loop execution."""
+        """Main training loop execution.
+
+        Returns:
+            list[dict]: Per-epoch log dicts (train losses + val metrics).
+                        Each dict also contains ``"val_plots"`` when
+                        evaluation produced figures (e.g. ``avg_flux_UQ``).
+        """
         use_tqdm = self.cfg.logging.tqdm if not self.use_ddp else False
+        all_logs = []
 
         # main loop
         for epoch in range(self.start_epoch + 1, self.cfg.training.n_epochs + 1):
@@ -301,10 +308,15 @@ class BaseRunner:
                 log_metric_dict, val_plots, self.loss_val_min = self.evaluate(epoch)
 
             # finalize logs
-            epoch_logs = train_losses_dict | log_metric_dict
+            epoch_logs = {"epoch": epoch} | train_losses_dict | log_metric_dict | info_dict
+            if val_plots:
+                epoch_logs["val_plots"] = val_plots
+            all_logs.append(epoch_logs)
             self._log_epoch(epoch, epoch_logs, info_dict, val_plots)
 
         if self.writer:
             self.writer.finish()
         if self.use_ddp:
             dist.destroy_process_group()
+
+        return all_logs
