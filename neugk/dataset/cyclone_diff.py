@@ -355,8 +355,9 @@ class CycloneAEDataset(CycloneDataset):
             getattr(autoencoder, "checkpoint_path", "")
             or getattr(autoencoder, "_checkpoint_path", "")
         )
-        hash_str = "".join(sorted(self.files)) + config_str + model_str + ae_checkpoint_path
-        file_hash = hashlib.sha256(hash_str.encode()).hexdigest()[:12]
+
+        file_basenames = sorted(os.path.basename(f) for f in self.files)
+        file_hash = hashlib.sha256("".join(file_basenames).encode()).hexdigest()[:12]
 
         tmu = "mu" if self.decouple_mu else ""
         offset = self.offsets[0]
