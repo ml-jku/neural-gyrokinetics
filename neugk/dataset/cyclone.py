@@ -202,24 +202,48 @@ class CycloneDataset(Dataset):
         self.files = existing_files
 
         self.metadata = {}
-        # apply condition filters before building indices
-        if self.cond_filters:
-            threshold = offset if offset > 0 else 80
-            self.files = [
-                f for f in self.files if self._conditioning_filter(f, threshold)
-            ]
 
         if len(self.files) == 0:
             raise RuntimeError(f"no trajectories found! active filters: {cond_filters}")
 
-        # load unified metadata
+        # load metadata, apply conditioning filters, compute stats for normalization
+        cond_threshold = offset if offset > 0 else 80
+        filtered_files = []
         self.file_num_samples = []
         self.file_num_timesteps = []
         self.steps_per_file = {}
         per_file_t_indexes = []
         stats: Dict[str, RunningMeanStd] = {}
 
-        for f_id, f_path in enumerate(self.files):
+        for f_path in self.files:
+            meta = self.backend.read_metadata(f_path, self.fields_to_load)
+            # apply condition filters inline
+            if self.cond_filters:
+                skip = False
+                for cond_name, cond_range in self.cond_filters.items():
+                    where = None
+                    if len(cond_name.split("_")) > 1:
+                        where, cond_name = cond_name.split("_")
+                    if cond_name in meta:
+                        cond = meta[cond_name]
+                        if not isinstance(cond_range[0], Sequence):
+                            cond_range = [cond_range]
+                        if cond_name == "flux":
+                            if where == "first":
+                                cond = np.mean(cond[:cond_threshold])
+                            else:
+                                cond = np.mean(cond[-cond_threshold:])
+                        if not any(min_ <= cond <= max_ for min_, max_ in cond_range):
+                            skip = True
+                            break
+                    else:
+                        raise UserWarning(f"`{cond_name}` not found in metadata {f_path}.")
+                if skip:
+                    continue
+
+            filtered_files.append(f_path)
+            f_id = len(filtered_files) - 1
+
             filename = os.path.split(f_path)[-1]
             if spatial_ifft:
                 n_bands_tag = f"_{split_into_bands}bands" if split_into_bands else ""
@@ -231,8 +255,6 @@ class CycloneDataset(Dataset):
             if self.partial_holdouts.get(filename, 0) > self.n_tail_holdout:
                 self.n_tail_holdout += self.partial_holdouts.get(filename, 0)
 
-            # unify metadata read
-            meta = self.backend.read_metadata(f_path, self.fields_to_load)
             self.metadata[f_id] = meta
             if "fluxavg" in probe_targets and "fluxavg" not in meta and split == "val":
                 # need to add fluxavg to validation data
@@ -321,6 +343,7 @@ class CycloneDataset(Dataset):
                         for suffix in ["_mean", "_std", "_min", "_max"]:
                             meta.pop(f"{k}{suffix}", None)
                    
+        self.files = filtered_files
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
         self.offsets = [offset for _ in range(len(self.files))]
@@ -348,7 +371,6 @@ class CycloneDataset(Dataset):
 
         norm_dataset = normalization is not None and normalization_scope == "dataset"
         if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
-            # recompute for all fields in a single pass
             recomputed_stats = self._recompute_stats(
                 keys=self.fields_to_load, offset=self.offsets[0]
             )
@@ -376,8 +398,9 @@ class CycloneDataset(Dataset):
         if isinstance(keys, str):
             keys = [keys]
 
-        # Deterministic filename for the multi-field stats
-        file_hash = hashlib.sha256("".join(sorted(self.files)).encode()).hexdigest()[:8]
+        # Deterministic filename for the multi-field stats (uses basenames)
+        file_basenames = sorted(os.path.basename(f) for f in self.files)
+        file_hash = hashlib.sha256("".join(file_basenames).encode()).hexdigest()[:8]
         keys_tag = "_".join(sorted(keys))
         tmu = "mu" if self.decouple_mu else ""
         segments = [

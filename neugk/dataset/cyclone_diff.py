@@ -63,7 +63,6 @@ class CycloneAEDataset(CycloneDataset):
             return super()._recompute_stats(keys, offset, prefix="diff", suffix=filter_tag)
 
         # diffusion dataset may use different training_trajectories than the AE
-        # for normalization to be consistent, stats must be computed from the AE cfg
         ae_ds = self._ae_cfg.dataset
         ae_offset = getattr(ae_ds, "offset", offset)
         ae_decouple_mu = getattr(ae_ds, "norm_decouple_mu", self.decouple_mu)
@@ -72,6 +71,8 @@ class CycloneAEDataset(CycloneDataset):
             if getattr(ae_ds, "timestep_std_filter", None)
             else ""
         )
+
+        # build AE file list from config
         raw_ae_files = resolve_trajectories(self.dir, ae_ds.training_trajectories)
         ae_files = [
             self.backend.format_path(
@@ -84,25 +85,20 @@ class CycloneAEDataset(CycloneDataset):
         # apply the AE training_cond_filters so the hash matches
         ae_cond_filters = getattr(ae_ds, "training_cond_filters", None)
         if ae_cond_filters:
-            ae_threshold = ae_offset if ae_offset > 0 else 80
-            orig_cond_filters = self.cond_filters
-            self.cond_filters = ae_cond_filters
-            ae_files = [f for f in ae_files if self._conditioning_filter(f, ae_threshold)]
-            self.cond_filters = orig_cond_filters
+            # check if the diffusion self.files is a subset of the AE
+            ae_basenames = {os.path.basename(f) for f in ae_files}
+            self_basenames = {os.path.basename(f) for f in self.files}
+            if self_basenames == ae_basenames:
+                # reuse self.files which is already filtered
+                ae_files = self.files
+            else:
+                ae_threshold = ae_offset if ae_offset > 0 else 80
+                orig_cond_filters = self.cond_filters
+                self.cond_filters = ae_cond_filters
+                ae_files = [f for f in ae_files if self._conditioning_filter(f, ae_threshold)]
+                self.cond_filters = orig_cond_filters
 
-        # setup AE index; (file_idx, t_idx) mapping and metadata
-        ae_flat_index = {}
-        ae_metadata = {}
-        flat_idx = 0
-        for file_idx, ae_file in enumerate(ae_files):
-            meta = self.backend.read_metadata(ae_file, input_fields=list(keys) if isinstance(keys, (list, tuple)) else [keys])
-            ae_metadata[file_idx] = meta
-            n_t = len(meta.get("timesteps", []))
-            for t_idx in range(max(0, n_t - ae_offset)):
-                ae_flat_index[flat_idx] = (file_idx, t_idx)
-                flat_idx += 1
-
-        # temporarily replace self state so the parent _recompute_stats use AE cfg/files/metadata
+        # swap self state so the parent uses AE files/config for the hash + pkl
         saved = (
             self.files, self.decouple_mu,
             self.flat_index_to_file_and_tstep, self.length,
@@ -110,10 +106,38 @@ class CycloneAEDataset(CycloneDataset):
         )
         self.files = ae_files
         self.decouple_mu = ae_decouple_mu
-        self.flat_index_to_file_and_tstep = ae_flat_index
-        self.length = flat_idx
-        self.offsets = [ae_offset] * len(ae_files)
-        self.metadata = ae_metadata
+
+        # check if the pkl already exists
+        _keys = sorted(keys) if not isinstance(keys, str) else [keys]
+        _basenames = sorted(os.path.basename(f) for f in ae_files)
+        _file_hash = hashlib.sha256("".join(_basenames).encode()).hexdigest()[:8]
+        _tmu = "mu" if ae_decouple_mu else ""
+        _segs = ["diff", "_".join(_keys), f"offset{ae_offset}", _tmu, ae_filter_tag, _file_hash, "stats"]
+        _stats_path = os.path.join(self.dir, "_".join(filter(None, _segs)) + ".pkl")
+
+        if not os.path.exists(_stats_path):
+            # build full index + metadata
+            input_keys = list(keys) if isinstance(keys, (list, tuple)) else [keys]
+            ae_metadata = {}
+            ae_flat_index = {}
+            flat_idx = 0
+            for file_idx, ae_file in enumerate(ae_files):
+                meta = self.backend.read_metadata(ae_file, input_fields=input_keys)
+                ae_metadata[file_idx] = meta
+                n_t = len(meta.get("timesteps", []))
+                for t_idx in range(max(0, n_t - ae_offset)):
+                    ae_flat_index[flat_idx] = (file_idx, t_idx)
+                    flat_idx += 1
+            self.flat_index_to_file_and_tstep = ae_flat_index
+            self.length = flat_idx
+            self.offsets = [ae_offset] * len(ae_files)
+            self.metadata = ae_metadata
+        else:
+            self.flat_index_to_file_and_tstep = {}
+            self.length = 0
+            self.offsets = [ae_offset] * len(ae_files)
+            self.metadata = {}
+
         try:
             result = super()._recompute_stats(
                 keys, ae_offset, prefix="diff", suffix=ae_filter_tag
