@@ -216,10 +216,6 @@ class DDPMRunner(BaseRunner):
             idx_data = {
                 k: getattr(sample, k).to(device=self.device) for k in self.idx_keys
             }
-            geometry = tree_map(
-                lambda g: g.to(self.device),
-                self.trainset.get_batch_geometry(idx_data["file_index"]),
-            )
 
             # apply augmentations
             if self.augmentations:
@@ -256,7 +252,7 @@ class DDPMRunner(BaseRunner):
             self.cur_update_step += 1.0
             loss_logs["loss"].append(loss.item())
 
-            del xs, condition, idx_data, geometry, loss
+            del xs, condition, idx_data, loss
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)
@@ -267,14 +263,14 @@ class DDPMRunner(BaseRunner):
         return loss_logs, info_dict
 
     @torch.no_grad()
-    def sample(self, condition: torch.Tensor, latent_only: bool = False):
+    def sample(self, condition: torch.Tensor, latent_only: bool = False, steps: int = None):
         """Generate samples from noise via iterative denoising."""
         self.model.eval()
         bs = condition.shape[0]
         # start with noise
         latents = torch.randn((bs, *self.model.latent_shape), device=self.device)
-        n_train_steps = self.noise_scheduler.config.num_train_timesteps
-        self.noise_scheduler.set_timesteps(n_train_steps)
+        n_steps = steps or self.noise_scheduler.config.num_train_timesteps
+        self.noise_scheduler.set_timesteps(n_steps)
 
         # denoise loop
         for t in self.noise_scheduler.timesteps:

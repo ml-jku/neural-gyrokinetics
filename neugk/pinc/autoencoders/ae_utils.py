@@ -168,7 +168,10 @@ def load_autoencoder(
     # TODO latest or best?
     if os.path.isdir(ckp_path):
         ckp_path = os.path.join(ckp_path, "best.pth")
-    loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
+    try:
+        loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
+    except pickle.UnpicklingError:
+        loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=False)
     state_dict = loaded_ckpt["model_state_dict"]
 
     config = None

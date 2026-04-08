@@ -153,8 +153,8 @@ def get_data(cfg, rank: int = 0):
         use_vae_latents = _is_vae_checkpoint(cfg)
 
         dataset_class = CycloneVAEDataset if use_vae_latents else CycloneAEDataset
-        train_kwargs = {"conditions": list(cfg.model.conditioning)}
-        val_kwargs = {"conditions": list(cfg.model.conditioning)}
+        train_kwargs = {"conditions": sorted(cfg.model.conditioning)}
+        val_kwargs = {"conditions": sorted(cfg.model.conditioning)}
 
         if use_vae_latents:
             latent_sampling_mode = getattr(

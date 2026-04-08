@@ -74,15 +74,64 @@ class CycloneAEDataset(CycloneDataset):
 
         # build AE file list from config
         raw_ae_files = resolve_trajectories(self.dir, ae_ds.training_trajectories)
-        ae_files = [
+        ae_files = sorted(set(
             self.backend.format_path(
                 f, ae_ds.spatial_ifft, getattr(ae_ds, "split_into_bands", None), getattr(ae_ds, "real_potens", True)
             )
             for f in raw_ae_files
-        ]
-        ae_files = [f for f in set(ae_files) if self.backend.is_valid(f)]
+        ))
 
-        # apply the AE training_cond_filters so the hash matches
+        # build expected stats filename to check cache
+        file_hash = hashlib.sha256("".join(sorted(ae_files)).encode()).hexdigest()[:8]
+        keys_tag = "_".join(sorted(keys if isinstance(keys, (list, tuple)) else [keys]))
+        tmu = "mu" if ae_decouple_mu else ""
+        norm_tag = "_".join(
+            f"{k}{''.join(str(a) for a in self.normalizers[k]['agg_axes'])}"
+            for k in sorted(keys if isinstance(keys, (list, tuple)) else [keys])
+            if self.normalizers[k]["agg_axes"]
+        )
+        segments = ["diff", keys_tag, f"offset{ae_offset}", tmu, ae_filter_tag, file_hash, "stats"]
+        stats_filename = "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
+        stats_path = os.path.join(self.dir, stats_filename)
+
+        # fast path: load small aggregated cache (avoids loading 681MB+ raw stats pkl)
+        agg_segments = segments[:-1] + [norm_tag, "agg_stats"]
+        agg_filename = "_".join(filter(None, (str(s) for s in agg_segments))) + ".pkl"
+        agg_path = os.path.join(self.dir, agg_filename)
+
+        if os.path.exists(agg_path):
+            print(f"loading aggregated stats from {agg_path}")
+            with open(agg_path, "rb") as f:
+                return pickle.load(f)
+
+        if os.path.exists(stats_path):
+            # raw stats exist but no aggregated cache yet — load, aggregate, save small cache
+            print(f"loading raw stats from {stats_path} (building aggregated cache...)")
+            with open(stats_path, "rb") as f:
+                stats_dict = pickle.load(f)
+            for key in (keys if isinstance(keys, (list, tuple)) else [keys]):
+                stats = stats_dict[key]
+                if self.normalizers[key]["agg_axes"]:
+                    norm_axes = tuple(self.normalizers[key]["agg_axes"])
+                    mean, var, traj_min, traj_max = stats.aggregate_stats(
+                        stats.mean, stats.var, stats.min, stats.max, agg_axes=norm_axes
+                    )
+                    if key == "phi":
+                        mean = np.expand_dims(mean, axis=0)
+                        var = np.expand_dims(var, axis=0)
+                        traj_min = np.expand_dims(traj_min, axis=0)
+                        traj_max = np.expand_dims(traj_max, axis=0)
+                    stats.mean = mean
+                    stats.var = var
+                    stats.min = traj_min
+                    stats.max = traj_max
+            with open(agg_path, "wb") as f:
+                pickle.dump(stats_dict, f)
+            print(f"saved aggregated stats to {agg_path}")
+            return stats_dict
+
+        # validate files and apply filters (only when stats need recomputing)
+        ae_files = [f for f in ae_files if self.backend.is_valid(f)]
         ae_cond_filters = getattr(ae_ds, "training_cond_filters", None)
         if ae_cond_filters:
             # check if the diffusion self.files is a subset of the AE
@@ -161,6 +210,9 @@ class CycloneAEDataset(CycloneDataset):
             and not override_latens
         ):
             sample = self.precomputed_latents[(file_index, t_index)]
+            # fast path: pre-tensorized latents (after _tensorize_latents)
+            if "_sample" in sample:
+                return sample["_sample"]
             x = sample["x"]
         else:
             with self.backend.open(self.files[file_index]) as f:
@@ -187,8 +239,8 @@ class CycloneAEDataset(CycloneDataset):
             conditioning = torch.stack(cond_list, dim=-1)
 
         if get_normalized:
-            # skip normalization if latents are precomputed
-            if x is not None and self.precomputed_latents is None:
+            # skip normalization if latents are precomputed (unless overriding)
+            if x is not None and (self.precomputed_latents is None or override_latens):
                 x, _, _ = self.normalize(file_index, df=x)
             if phi is not None:
                 phi, _, _ = self.normalize(file_index, phi=phi)
@@ -419,17 +471,27 @@ class CycloneAEDataset(CycloneDataset):
                     f_idx = batch.file_index[i].item()
                     t_idx = batch.timestep_index[i].item()
 
-                    # load raw sample data directly
-                    with self.backend.open(self.files[f_idx]) as f:
-                        sample = self._load_data(f, f_idx, t_idx)
+                    sample = {"x": z[i]}
 
-                    sample["x"] = z[i]
+                    # extract from batch instead of re-reading from disk
+                    if batch.phi is not None:
+                        phi_i = batch.phi[i]
+                        sample["phi"] = phi_i.cpu().numpy() if isinstance(phi_i, torch.Tensor) else np.asarray(phi_i)
+                    else:
+                        sample["phi"] = None
 
-                    # convert torch/numpy fields cleanly
-                    if isinstance(sample["phi"], torch.Tensor):
-                        sample["phi"] = sample["phi"].cpu().numpy()
-                    if isinstance(sample["flux"], torch.Tensor):
-                        sample["flux"] = sample["flux"].cpu().numpy()
+                    flux_i = batch.flux[i]
+                    sample["flux"] = flux_i.cpu().numpy() if isinstance(flux_i, torch.Tensor) else np.asarray(flux_i)
+
+                    ts_i = batch.timestep[i]
+                    sample["timestep"] = ts_i.cpu().numpy() if isinstance(ts_i, torch.Tensor) else np.asarray(ts_i)
+
+                    if batch.conditioning is not None:
+                        cond_i = batch.conditioning[i]
+                        if isinstance(cond_i, torch.Tensor):
+                            cond_i = cond_i.cpu().numpy()
+                        for j, key in enumerate(self.conditions):
+                            sample[key] = cond_i[j]
 
                     latents_dict[(f_idx, t_idx)] = sample
 
@@ -479,6 +541,55 @@ class CycloneAEDataset(CycloneDataset):
         # update backend to not use kvikio, not needed for diffusion beyond this point
         if isinstance(self.backend, KvikIOBackend):
             self.backend = KvikIOBackend(self.rank, use_kvikio=False)
+
+        # pre-tensorize latents and cache avg_flux for fast __getitem__
+        self._tensorize_latents()
+
+    def _tensorize_latents(self):
+        """Pre-build CycloneAESample objects for zero-alloc __getitem__."""
+        if self.precomputed_latents is None:
+            return
+        # cache avg_flux per file
+        avg_flux_cache = {}
+        for f_id in self.metadata:
+            fluxes = self.metadata[f_id]["flux"]
+            avg_flux_cache[f_id] = torch.tensor(float(np.mean(fluxes[-80:])), dtype=self.dtype)
+
+        for (file_index, t_index), sample in self.precomputed_latents.items():
+            x = sample["x"]
+            if isinstance(x, np.ndarray):
+                x = torch.tensor(x, dtype=self.dtype)
+            flux = sample["flux"]
+            if isinstance(flux, np.ndarray):
+                flux = torch.as_tensor(flux, dtype=self.dtype)
+            elif not isinstance(flux, torch.Tensor):
+                flux = torch.tensor(flux, dtype=self.dtype)
+            timestep = sample["timestep"]
+            if isinstance(timestep, np.ndarray):
+                timestep = torch.as_tensor(timestep, dtype=self.dtype)
+            elif not isinstance(timestep, torch.Tensor):
+                timestep = torch.tensor(timestep, dtype=self.dtype)
+            conditioning = None
+            if self.conditions:
+                cond_vals = []
+                for k in self.conditions:
+                    val = sample[k]
+                    if isinstance(val, torch.Tensor):
+                        cond_vals.append(val.to(dtype=self.dtype))
+                    else:
+                        cond_vals.append(torch.tensor(val, dtype=self.dtype))
+                conditioning = torch.stack(cond_vals, dim=-1)
+
+            sample["_sample"] = CycloneAESample(
+                df=x,
+                phi=None,  # not used in diffusion training
+                flux=flux,
+                avg_flux=avg_flux_cache.get(file_index, torch.tensor(0.0)),
+                file_index=torch.tensor(file_index, dtype=torch.long),
+                timestep_index=torch.tensor(t_index, dtype=torch.long),
+                timestep=timestep,
+                conditioning=conditioning,
+            )
 
 
 class CycloneVAEDataset(CycloneAEDataset):
@@ -684,17 +795,27 @@ class CycloneVAEDataset(CycloneAEDataset):
                     f_idx = batch.file_index[i].item()
                     t_idx = batch.timestep_index[i].item()
 
-                    with self.backend.open(self.files[f_idx]) as f:
-                        sample = self._load_data(f, f_idx, t_idx)
+                    sample = {"x": z[i], "mu": mu_np[i], "var": var_np[i]}
 
-                    if isinstance(sample["phi"], torch.Tensor):
-                        sample["phi"] = sample["phi"].cpu().numpy()
-                    if isinstance(sample["flux"], torch.Tensor):
-                        sample["flux"] = sample["flux"].cpu().numpy()
+                    if batch.phi is not None:
+                        phi_i = batch.phi[i]
+                        sample["phi"] = phi_i.cpu().numpy() if isinstance(phi_i, torch.Tensor) else np.asarray(phi_i)
+                    else:
+                        sample["phi"] = None
 
-                    sample["mu"] = mu_np[i]
-                    sample["var"] = var_np[i]
-                    sample["x"] = z[i]
+                    flux_i = batch.flux[i]
+                    sample["flux"] = flux_i.cpu().numpy() if isinstance(flux_i, torch.Tensor) else np.asarray(flux_i)
+
+                    ts_i = batch.timestep[i]
+                    sample["timestep"] = ts_i.cpu().numpy() if isinstance(ts_i, torch.Tensor) else np.asarray(ts_i)
+
+                    if batch.conditioning is not None:
+                        cond_i = batch.conditioning[i]
+                        if isinstance(cond_i, torch.Tensor):
+                            cond_i = cond_i.cpu().numpy()
+                        for j, key in enumerate(self.conditions):
+                            sample[key] = cond_i[j]
+
                     latents_dict[(f_idx, t_idx)] = sample
 
             if dist.is_initialized():
