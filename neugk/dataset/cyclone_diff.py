@@ -364,6 +364,7 @@ class CycloneAEDataset(CycloneDataset):
         filter_tag = (
             f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         )
+        ae_tag = 'ae' + ae_checkpoint_path.split("_")[-1] if ae_checkpoint_path else ""
 
         segments = [
             "diff",
@@ -373,6 +374,7 @@ class CycloneAEDataset(CycloneDataset):
             filter_tag,
             file_hash,
             "latents",
+            ae_tag,
         ]
         latents_dump_pkl = os.path.join(
             self.dir, "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
@@ -624,6 +626,7 @@ class CycloneVAEDataset(CycloneAEDataset):
         filter_tag = (
             f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         )
+        vae_tag = 'vae' + vae_checkpoint_path.split("_")[-1] if vae_checkpoint_path else ""
 
         segments = [
             "diff",
@@ -631,9 +634,9 @@ class CycloneVAEDataset(CycloneAEDataset):
             f"offset{offset}",
             tmu,
             filter_tag,
-            "vae",
             file_hash,
             "latents",
+            vae_tag,
         ]
         latents_dump_pkl = os.path.join(
             self.dir, "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
