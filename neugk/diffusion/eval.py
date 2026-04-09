@@ -31,6 +31,7 @@ class DiffusionEvaluator(BaseEvaluator):
         sample_fn: Optional[Callable] = None,
         trainloader: Optional[torch.utils.data.DataLoader] = None,
         evaluate_probing: bool = False,
+        no_save: bool = False,
         **kwargs,
     ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
         """Run evaluation on multiple validation sets and log metrics."""
@@ -215,16 +216,16 @@ class DiffusionEvaluator(BaseEvaluator):
                 val_plots=val_plots,
             )
 
-        # store checkpoints
-        loss_val_min = self._save_checkpoint(
-            rank,
-            model,
-            opt,
-            scheduler,
-            epoch,
-            log_metric_dict,
-            loss_val_min,
-            default_metric="avg_flux_rmse",
-        )
+        if not no_save:
+            loss_val_min = self._save_checkpoint(
+                rank,
+                model,
+                opt,
+                scheduler,
+                epoch,
+                log_metric_dict,
+                loss_val_min,
+                default_metric="avg_flux_rmse",
+            )
 
         return log_metric_dict, val_plots, loss_val_min
