@@ -4,6 +4,7 @@ from typing import Dict
 
 import os
 from collections import defaultdict
+from functools import partial
 from time import perf_counter_ns
 
 import torch
@@ -295,6 +296,8 @@ class DDPMRunner(BaseRunner):
 
     def evaluate(self, epoch):
         """Execute evaluation pipeline and log results."""
+        eval_steps = getattr(self.cfg.validation, "eval_sample_steps", None)
+        sample_fn = partial(self.sample, steps=eval_steps) if eval_steps else self.sample
         return self.evaluator(
             rank=self.rank,
             world_size=self.world_size,
@@ -304,7 +307,7 @@ class DDPMRunner(BaseRunner):
             epoch=epoch,
             device=self.device,
             loss_val_min=self.loss_val_min,
-            sample_fn=self.sample,
+            sample_fn=sample_fn,
             trainloader=self.trainloader,
             evaluate_probing=True,
         )

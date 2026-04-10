@@ -2,6 +2,7 @@ batch_size: 16
 n_eval_steps: 2
 validate_every_n_epochs: 20
 eval_integrals: true
+eval_sample_steps: null  # inference steps for diffusion sampling during eval
 model_selection_metric: "df"
 probe:
   targets: ["flux", "ion_temp_grad", "density_grad", "q", "s_hat", "kyspec", "fluxspec", "fluxavg"]
