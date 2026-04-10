@@ -215,8 +215,27 @@ class CycloneDataset(Dataset):
         per_file_t_indexes = []
         stats: Dict[str, RunningMeanStd] = {}
 
+        import time as _time; _init_t0 = _time.time()
+        _use_lightweight = (
+            normalization_scope == "dataset"
+            and (offset > 0 or separate_zf)
+        )
+
+        from concurrent.futures import ThreadPoolExecutor
+        def _load_meta(f_path):
+            return self.backend.read_metadata(f_path, self.fields_to_load, lightweight=_use_lightweight)
+
+        _all_meta = {}
+        with ThreadPoolExecutor(max_workers=min(16, num_workers or 4)) as ex:
+            for _fi, (f_path, meta) in enumerate(zip(self.files, ex.map(_load_meta, self.files))):
+                _all_meta[f_path] = meta
+                if rank == 0:
+                    print(f"    metadata {_fi+1}/{len(self.files)} ({_time.time()-_init_t0:.1f}s)", end="\r")
+        if rank == 0:
+            print(f"    metadata: {len(self.files)} files in {_time.time()-_init_t0:.1f}s (lightweight={_use_lightweight})")
+
         for f_path in self.files:
-            meta = self.backend.read_metadata(f_path, self.fields_to_load)
+            meta = _all_meta[f_path]
             # apply condition filters inline
             if self.cond_filters:
                 skip = False
@@ -297,10 +316,19 @@ class CycloneDataset(Dataset):
                         stats[k] = RunningMeanStd()
 
                     if k in self.fields_to_load:
-                        mean = meta[f"{k}_mean"]
-                        var = meta[f"{k}_std"]**2
-                        traj_min = meta[f"{k}_min"]
-                        traj_max = meta[f"{k}_max"]
+                        norm_type = self.normalizers[k]["type"] if self.normalizers.get(k) else "zscore"
+                        if norm_type == "minmax":
+                            traj_min = meta[f"{k}_min"]
+                            traj_max = meta[f"{k}_max"]
+                            mean = (traj_min + traj_max) / 2
+                            var = ((traj_max - traj_min) / 2) ** 2
+                        elif f"{k}_mean" in meta:
+                            mean = meta[f"{k}_mean"]
+                            var = meta[f"{k}_std"]**2
+                            traj_min = np.zeros_like(mean)
+                            traj_max = np.ones_like(mean)
+                        else:
+                            continue
                     else:
                         if k in ["fluxspec", "kyspec"]:
                             # spectra, log-transform for stability

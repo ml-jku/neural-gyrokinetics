@@ -248,17 +248,37 @@ class KvikIOBackend(DataBackend):
         return path
 
     def read_metadata(
-        self, path: str, input_fields: Sequence[str] = ["df"]
+        self, path: str, input_fields: Sequence[str] = ["df"], lightweight: bool = False,
     ) -> Dict[str, Any]:
-        _ = input_fields
         path = self._strip_h5(path)
-        with open(os.path.join(path, "metadata.pkl"), "rb") as mf:
-            meta = pickle.load(mf)
-            if "geometry" in meta:
-                for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
-                    if k not in meta["geometry"]:
-                        meta["geometry"][k] = np.array(1.0, dtype=np.float64)
-            return meta
+
+        # fast path: use cached lightweight metadata if available
+        light_path = os.path.join(path, "metadata_light.pkl")
+        full_path = os.path.join(path, "metadata.pkl")
+
+        if lightweight and os.path.exists(light_path):
+            with open(light_path, "rb") as mf:
+                meta = pickle.load(mf)
+        else:
+            with open(full_path, "rb") as mf:
+                meta = pickle.load(mf)
+            if lightweight:
+                drop_keys = {"df_min", "df_max", "df_var", "df_mean", "df_std",
+                             "phi_min", "phi_max", "phi_var"}
+                light_meta = {k: v for k, v in meta.items()
+                              if k not in drop_keys}
+                try:
+                    with open(light_path, "wb") as lf:
+                        pickle.dump(light_meta, lf)
+                except OSError:
+                    pass
+                meta = light_meta
+
+        if "geometry" in meta:
+            for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
+                if k not in meta["geometry"]:
+                    meta["geometry"][k] = np.array(1.0, dtype=np.float64)
+        return meta
 
     @contextlib.contextmanager
     def open(self, path: str):
