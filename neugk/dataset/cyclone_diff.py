@@ -81,7 +81,24 @@ class CycloneAEDataset(CycloneDataset):
             for f in raw_ae_files
         ))
 
-        # validate files and apply cond filters
+        # try agg cache with unfiltered files first (avoids NFS stat calls)
+        _unfiltered_hash = hashlib.sha256("".join(sorted(os.path.basename(f) for f in ae_files)).encode()).hexdigest()[:8]
+        _keys_list = sorted(keys if isinstance(keys, (list, tuple)) else [keys])
+        _keys_tag = "_".join(_keys_list)
+        _tmu = "mu" if ae_decouple_mu else ""
+        _norm_tag = "_".join(
+            f"{k}{''.join(str(a) for a in self.normalizers[k]['agg_axes'])}"
+            for k in _keys_list if self.normalizers[k]["agg_axes"]
+        )
+        for _h in [_unfiltered_hash]:
+            _segs = ["diff", _keys_tag, f"offset{ae_offset}", _tmu, ae_filter_tag, _h, _norm_tag, "agg_stats"]
+            _agg_path = os.path.join(self.dir, "_".join(filter(None, (str(s) for s in _segs))) + ".pkl")
+            if os.path.exists(_agg_path):
+                print(f"loading aggregated stats from {_agg_path}")
+                with open(_agg_path, "rb") as f:
+                    return pickle.load(f)
+
+        # validate files (slow on NFS, but only if no cache hit)
         ae_files = [f for f in ae_files if self.backend.is_valid(f)]
         ae_cond_filters = getattr(ae_ds, "training_cond_filters", None)
         if ae_cond_filters:
@@ -110,6 +127,7 @@ class CycloneAEDataset(CycloneDataset):
         segments = ["diff", keys_tag, f"offset{ae_offset}", tmu, ae_filter_tag, file_hash, "stats"]
         stats_filename = "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
         stats_path = os.path.join(self.dir, stats_filename)
+        self.raw_stats_path = stats_path
 
         # fast path: load small aggregated cache (avoids loading 681MB+ raw stats pkl)
         agg_segments = segments[:-1] + [norm_tag, "agg_stats"]

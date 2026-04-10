@@ -294,7 +294,7 @@ class DDPMRunner(BaseRunner):
         self.model.train()
         return decoded
 
-    def evaluate(self, epoch):
+    def evaluate(self, epoch, evaluate_probing: bool = True, no_save: bool = False):
         """Execute evaluation pipeline and log results."""
         eval_steps = getattr(self.cfg.validation, "eval_sample_steps", None)
         sample_fn = partial(self.sample, steps=eval_steps) if eval_steps else self.sample
@@ -309,7 +309,8 @@ class DDPMRunner(BaseRunner):
             loss_val_min=self.loss_val_min,
             sample_fn=sample_fn,
             trainloader=self.trainloader,
-            evaluate_probing=True,
+            evaluate_probing=evaluate_probing,
+            no_save=no_save,
         )
 
 
