@@ -17,6 +17,7 @@ from neugk.dataset.cyclone import (
 from neugk.dataset.cyclone_diff import (
     CycloneAEDataset,
     CycloneVAEDataset,
+    CycloneVQVAEDataset,
     CycloneSimSiamDataset,
     CycloneAESample,
 )
@@ -66,22 +67,27 @@ def check_partial_holdouts(dataset_cfg):
     return
 
 
-def _is_vae_checkpoint(cfg) -> bool:
+def _ae_model_name(cfg) -> str:
     ckp_path = getattr(cfg, "ae_checkpoint", None)
     if not ckp_path or not os.path.exists(ckp_path):
-        return False
-
+        return ""
     cfg_path = os.path.join(str(ckp_path), "config.yaml")
     if not os.path.exists(cfg_path):
-        return False
-
+        return ""
     try:
         ae_cfg = OmegaConf.load(cfg_path)
     except Exception:
-        return False
+        return ""
+    return str(getattr(ae_cfg.model, "name", "")).lower()
 
-    model_name = str(getattr(ae_cfg.model, "name", "")).lower()
-    return "vae" in model_name
+
+def _is_vqvae_checkpoint(cfg) -> bool:
+    return "vqvae" in _ae_model_name(cfg)
+
+
+def _is_vae_checkpoint(cfg) -> bool:
+    name = _ae_model_name(cfg)
+    return "vae" in name and "vqvae" not in name
 
 
 def get_data(cfg, rank: int = 0):
@@ -111,14 +117,14 @@ def get_data(cfg, rank: int = 0):
         )
         # exclude fields not in dataset
         # input_fields = input_fields.intersection({"df", "phi", "flux"})
-        if input_fields.union({"df", "phi", "flux"}) != {"df", "phi", "flux"}:
+        if not input_fields.issubset({"df", "phi", "flux", "fluxavg"}):
             raise ValueError(f"{input_fields} contains unknown values")
         if cfg.model.name in ["pointnet", "transolver", "transformer"]:
             input_fields.add("position")
         assert not (
             "flux" in input_fields and "fluxavg" in input_fields
         ), "Cannot predict both fluxavg and flux..."
-        train_input_fields = val_input_fields = input_fields
+        train_input_fields = val_input_fields = sorted(input_fields)
         # NOTE: for autoregressive evaluation, crop end of trajectory
         train_kwargs = {}
         val_kwargs = {"tail_offset": cfg.validation.n_eval_steps}
@@ -150,9 +156,15 @@ def get_data(cfg, rank: int = 0):
         train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
 
+        use_vqvae_latents = _is_vqvae_checkpoint(cfg)
         use_vae_latents = _is_vae_checkpoint(cfg)
 
-        dataset_class = CycloneVAEDataset if use_vae_latents else CycloneAEDataset
+        if use_vqvae_latents:
+            dataset_class = CycloneVQVAEDataset
+        elif use_vae_latents:
+            dataset_class = CycloneVAEDataset
+        else:
+            dataset_class = CycloneAEDataset
         train_kwargs = {"conditions": sorted(cfg.model.conditioning)}
         val_kwargs = {"conditions": sorted(cfg.model.conditioning)}
 
@@ -167,7 +179,9 @@ def get_data(cfg, rank: int = 0):
             val_kwargs["latent_sampling_mode"] = val_latent_sampling_mode
 
         if rank == 0:
-            latent_type = "VAE" if use_vae_latents else "AE"
+            latent_type = (
+                "VQVAE" if use_vqvae_latents else "VAE" if use_vae_latents else "AE"
+            )
             print(f"Diffusion latent dataset mode: {latent_type}")
 
         # load AE cfg for normalization stats
@@ -420,5 +434,6 @@ __all__ = [
     "CycloneSample",
     "CycloneAEDataset",
     "CycloneVAEDataset",
+    "CycloneVQVAEDataset",
     "CycloneAESample",
 ]

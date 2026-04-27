@@ -701,6 +701,39 @@ def get_linear_burn_in_fn(
     return func
 
 
+def get_cyclical_annealing_fn(
+    start: float,
+    end: float,
+    start_fraction: float,
+    end_fraction: float,
+    n_cycles: int = 4,
+    ratio: float = 0.5,
+):
+    """Cyclical annealing schedule (Fu et al., NAACL 2019).
+
+    Repeats a linear ramp from ``start`` to ``end`` for ``n_cycles`` times
+    within the [start_fraction, end_fraction] training window.  Each cycle
+    spends ``ratio`` of its length ramping up and ``1 - ratio`` holding at
+    ``end``.  Before ``start_fraction`` the value is ``start``; after
+    ``end_fraction`` it is ``end``.
+    """
+
+    def func(progress_remaining: float) -> float:
+        progress = 1.0 - progress_remaining  # 0 → 1
+        if progress < start_fraction:
+            return start
+        if progress > end_fraction:
+            return end
+        # normalise to [0, 1] within the active window
+        active = (progress - start_fraction) / (end_fraction - start_fraction)
+        cycle_progress = (active * n_cycles) % 1.0
+        if cycle_progress < ratio:
+            return start + (end - start) * (cycle_progress / ratio)
+        return end
+
+    return func
+
+
 def remainig_progress(cur_step, total_steps):
     """Compute remaining progress fraction."""
     return 1.0 - (cur_step / total_steps)

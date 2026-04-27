@@ -14,6 +14,7 @@ from neugk.utils import (
     ddp_setup,
     setup_logging,
     get_linear_burn_in_fn,
+    get_cyclical_annealing_fn,
     remainig_progress,
     set_seed,
     get_scheduler,
@@ -83,7 +84,9 @@ class BaseRunner:
         if self.use_deepspeed:
             self.scaler = None
         else:
-            self.scaler = torch.amp.GradScaler(device=self.device, enabled=self.use_amp)
+            self.scaler = torch.amp.GradScaler(
+                device=self.device, enabled=self.use_amp and not self.use_bf16
+            )
 
         self.setup_data()
         if not rank:
@@ -115,8 +118,6 @@ class BaseRunner:
             self.trainloader, self.valloaders = dataloaders
             self.valloaders = [self.valloaders]
 
-        self.total_steps = self.cfg.training.n_epochs * len(self.trainloader)
-
     def setup_common_losses(self, weights_cfg):
         """Configure loss weights and their respective schedulers."""
         weights = dict(weights_cfg.loss_weights) | dict(weights_cfg.extra_loss_weights)
@@ -128,12 +129,23 @@ class BaseRunner:
                 and weights_cfg.loss_scheduler[key]
             ):
                 sp = getattr(weights_cfg.loss_scheduler, key)
-                self.loss_scheduler_dict[key] = get_linear_burn_in_fn(
-                    sp.start,
-                    end=sp.end,
-                    start_fraction=sp.start_fraction,
-                    end_fraction=sp.end_fraction,
-                )
+                sched_type = getattr(sp, "type", "linear")
+                if sched_type == "cyclical":
+                    self.loss_scheduler_dict[key] = get_cyclical_annealing_fn(
+                        sp.start,
+                        end=sp.end,
+                        start_fraction=sp.start_fraction,
+                        end_fraction=sp.end_fraction,
+                        n_cycles=getattr(sp, "n_cycles", 4),
+                        ratio=getattr(sp, "ratio", 0.5),
+                    )
+                else:
+                    self.loss_scheduler_dict[key] = get_linear_burn_in_fn(
+                        sp.start,
+                        end=sp.end,
+                        start_fraction=sp.start_fraction,
+                        end_fraction=sp.end_fraction,
+                    )
         if self.cfg.dataset.augment.mask_modes.active:
             weights["df_delta"] = self.cfg.dataset.augment.mask_modes.df_delta_weight
         if self.cfg.dataset.augment.vicreg_variance.active:
@@ -144,6 +156,11 @@ class BaseRunner:
 
     def setup_scheduler(self):
         """Initialize learning rate scheduler."""
+        # LR/loss-schedule span covers only the remaining epochs, so a warm-start
+        # finetune gets a full warmup+decay over its own epoch budget rather than
+        # the absolute n_epochs (which would land mid-warmup for a late start).
+        remaining_epochs = self.cfg.training.n_epochs - self.start_epoch
+        self.total_steps = remaining_epochs * len(self.trainloader)
         if self.cfg.training.scheduler is not None:
             kwargs = {}
             # scheduler specific parameters

@@ -70,6 +70,7 @@ class PINCRunner(BaseRunner):
             augmentations=augmentations,
             dataset=self.trainset,
             integral_precision=getattr(self.cfg.training, "integral_precision", "float64"),
+            free_bits=getattr(model_cfg, "free_bits", 0.0),
         )
 
         self.model = get_autoencoder(

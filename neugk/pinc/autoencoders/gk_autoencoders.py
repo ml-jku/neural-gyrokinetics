@@ -202,9 +202,10 @@ class Swin5DAE(Swin5DUnet):
 
 
 class Swin5DVAE(Swin5DAE):
-    def __init__(self, beta_vae: float = 1.0, *args, **kwargs):
+    def __init__(self, beta_vae: float = 1.0, logvar_clamp: float = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.beta_vae = beta_vae
+        self.logvar_clamp = logvar_clamp
 
         if self.normalized_latent:
             del self.pre_z_norm
@@ -256,17 +257,21 @@ class Swin5DVAE(Swin5DAE):
 
         zdf = self.middle_pre(zdf, **kwcond)
         mu, logvar = torch.chunk(self.middle_vae_downproj(zdf), 2, dim=-1)
+        if self.logvar_clamp is not None:
+            logvar = torch.clamp(logvar, min=-self.logvar_clamp, max=self.logvar_clamp)
         z = self.reparameterize(mu, logvar)
 
         self._mu = mu
         self._logvar = logvar
         return z, pad_axes
 
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, return_latent: bool = False):
         zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["mu"] = self._mu
         outputs["logvar"] = self._logvar
+        if return_latent:
+            outputs["latent"] = zdf
         return outputs
 
     def compute_kl_loss(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
@@ -313,7 +318,7 @@ class Swin5DVQVAE(Swin5DAE):
             "input_shape": list(self.base_resolution),
             "input_channels": self.problem_dim,
             "latent_shape": list(self.bottleneck_grid_size),
-            "latent_channels": self.vq.embedding_dim,
+            "latent_channels": self.vq.dim,
             "rate": rate,
             "type": "vqvae",
         }
@@ -374,6 +379,25 @@ class Swin5DVQVAE(Swin5DAE):
 
         return {"df": self.patch_decode(zdf, pad_axes, **kwcond)}
 
+    def decode_from_indices(
+        self,
+        indices: torch.Tensor,
+        pad_axes: Optional[List] = None,
+        condition: Optional[torch.Tensor] = None,
+    ):
+        """Decode from discrete VQ indices back to 5D fields.
+
+        Args:
+            indices: (B, seq_len) int64 token indices.
+            pad_axes: optional pad axes (defaults to base_resolution pad).
+            condition: optional decoder conditioning.
+        """
+        B = indices.shape[0]
+        codebook = self.vq.codebook.detach()  # (codebook_size, dim)
+        z = torch.nn.functional.embedding(indices, codebook)  # (B, seq_len, dim)
+        z = z.view(B, *self.bottleneck_grid_size, -1)
+        return self.decode(z, pad_axes=pad_axes, condition=condition)
+
     def get_codebook_usage(self) -> torch.Tensor:
         if hasattr(self, "_vq_indices") and self._vq_indices is not None:
             return self._vq_indices.unique().numel() / self.vq.codebook_size
@@ -391,11 +415,13 @@ class Swin5DVQVAE(Swin5DAE):
             return self._vq_indices
         raise RuntimeError("no vq indices available. run encode() or forward() first.")
 
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None):
+    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, return_latent: bool = False):
         zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["vq_commit_loss"] = self._vq_commit_loss
         outputs["vq_indices"] = self._vq_indices
+        if return_latent:
+            outputs["z"] = zdf
         return outputs
 
 
