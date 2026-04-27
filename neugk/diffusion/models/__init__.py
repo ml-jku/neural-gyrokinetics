@@ -51,6 +51,28 @@ def get_diffusion_model(cfg, autoencoder, dataset=None):
     if n_cond > 0:
         cond_fn = ContinuousConditionEmbed(32, n_cond)
 
+    if "ar" in diff_cfg.model_type:
+        from neugk.diffusion.models.ar_transformer import ARTransformer
+        import numpy as np
+
+        seq_len = int(np.prod(autoencoder.bottleneck_grid_size))
+        vocab_size = autoencoder.vq.codebook_size
+        ar_cfg = diff_cfg.get("ar", {})
+        _depth = diff_cfg.vit.depth
+        _heads = diff_cfg.vit.num_heads
+
+        model = ARTransformer(
+            vocab_size=vocab_size,
+            dim=diff_cfg.latent_dim,
+            seq_len=seq_len,
+            depth=_depth if isinstance(_depth, int) else sum(_depth),
+            num_heads=_heads if isinstance(_heads, int) else sum(_heads),
+            cond_embed=cond_fn,
+            dropout=diff_cfg.vit.drop_path,
+            label_smoothing=ar_cfg.get("label_smoothing", 0.0),
+            conditioning_mode=ar_cfg.get("conditioning_mode", "cls"),
+        )
+
     if "dit" in diff_cfg.model_type:
         model = DiT(
             space=5 - int(autoencoder.decouple_mu),

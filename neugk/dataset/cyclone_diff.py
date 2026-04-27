@@ -653,7 +653,6 @@ class CycloneVAEDataset(CycloneAEDataset):
         phi = sample["phi"]
         flux = sample["flux"]
         timestep = sample["timestep"]
-        geom = sample["geometry"]
 
         avg_flux = self.get_avg_flux(file_index)
 
@@ -704,7 +703,6 @@ class CycloneVAEDataset(CycloneAEDataset):
             avg_flux=torch.as_tensor(avg_flux, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
-            geometry=tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             conditioning=conditioning,
         )
@@ -1082,3 +1080,277 @@ class CycloneSimSiamDataset(CycloneAEDataset):
             timestep_index=stack_batch(batch, "timestep_index"),
             conditioning=stack_batch(batch, "conditioning"),
         )
+
+
+class CycloneVQVAEDataset(CycloneAEDataset):
+    """Dataset that precomputes and serves discrete VQVAE token indices."""
+
+    def __getitem__(
+        self, index: int, get_normalized: bool = True, override_latens: bool = False
+    ) -> CycloneAESample:
+        file_index, t_index = self.flat_index_to_file_and_tstep[index]
+
+        if (
+            getattr(self, "precomputed_latents", None) is not None
+            and not override_latens
+        ):
+            sample = self.precomputed_latents[(file_index, t_index)]
+            if "_sample" in sample:
+                return sample["_sample"]
+            x = sample["x"]  # already flattened int64 indices
+        else:
+            with self.backend.open(self.files[file_index]) as f:
+                sample = self._load_data(f, file_index, t_index)
+            x = sample["x"]
+            if x is not None and self.separate_zf:
+                x = separate_zf_fn(x, dim=0)
+
+        phi = sample.get("phi")
+        flux = sample["flux"]
+        timestep = sample["timestep"]
+        avg_flux = self.get_avg_flux(file_index)
+
+        conditioning = None
+        if self.conditions is not None and len(self.conditions) > 0:
+            cond_list = []
+            for k in self.conditions:
+                val = sample[k]
+                if isinstance(val, torch.Tensor):
+                    cond_list.append(val.to(dtype=self.dtype))
+                else:
+                    cond_list.append(torch.tensor(val, dtype=self.dtype))
+            conditioning = torch.stack(cond_list, dim=-1)
+
+        # for precomputed indices: x is already int64, skip normalization
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        if x is not None and x.dtype not in (torch.long, torch.int64, torch.int32):
+            # not precomputed — normalize like parent
+            if get_normalized and (self.precomputed_latents is None or override_latens):
+                x, _, _ = self.normalize(file_index, df=x)
+            x = torch.as_tensor(x, dtype=self.dtype)
+        else:
+            x = x.long() if x is not None else x
+
+        phi_out = None
+        if phi is not None:
+            if get_normalized:
+                phi, _, _ = self.normalize(file_index, phi=phi)
+            if phi.ndim == 3:
+                phi = (
+                    phi.unsqueeze(0)
+                    if isinstance(phi, torch.Tensor)
+                    else np.expand_dims(phi, 0)
+                )
+            phi_out = (
+                torch.tensor(phi, dtype=self.dtype)
+                if not isinstance(phi, torch.Tensor)
+                else phi.to(dtype=self.dtype)
+            )
+
+        return CycloneAESample(
+            df=x,
+            phi=phi_out,
+            flux=torch.as_tensor(flux, dtype=self.dtype),
+            avg_flux=torch.as_tensor(avg_flux, dtype=self.dtype),
+            file_index=torch.tensor(file_index, dtype=torch.long),
+            timestep_index=torch.tensor(t_index, dtype=torch.long),
+            timestep=torch.as_tensor(timestep, dtype=self.dtype),
+            conditioning=conditioning,
+        )
+
+    @torch.no_grad()
+    def precompute_latents(
+        self,
+        rank: int,
+        dataloader: DataLoader,
+        autoencoder: torch.nn.Module,
+        device: torch.device = "cuda",
+        latent_stats: Optional[RunningMeanStd] = None,
+    ):
+        self.autoencoder = autoencoder
+
+        ae_checkpoint_path = str(
+            getattr(autoencoder, "checkpoint_path", "")
+            or getattr(autoencoder, "_checkpoint_path", "")
+        )
+
+        file_basenames = sorted(os.path.basename(f) for f in self.files)
+        file_hash = hashlib.sha256("".join(file_basenames).encode()).hexdigest()[:12]
+
+        tmu = "mu" if self.decouple_mu else ""
+        offset = self.offsets[0]
+        filter_tag = (
+            f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
+        )
+        vqvae_tag = (
+            "vqvae" + ae_checkpoint_path.split("_")[-1]
+            if ae_checkpoint_path
+            else ""
+        )
+
+        segments = [
+            "diff",
+            f"{self.split}_indices",
+            f"offset{offset}",
+            tmu,
+            filter_tag,
+            file_hash,
+            "indices",
+            vqvae_tag,
+        ]
+        indices_dump_pkl = os.path.join(
+            self.dir, "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
+        )
+
+        if os.path.exists(indices_dump_pkl):
+            if rank == 0:
+                print(f"loading precomputed VQ indices from {indices_dump_pkl}")
+            with open(indices_dump_pkl, "rb") as f:
+                self.precomputed_latents = pickle.load(f)
+            if dist.is_initialized():
+                dist.barrier()
+        else:
+            tmp_loader = dataloader
+            autoencoder.eval()
+            autoencoder.to(device)
+            latents_dict = {}
+            desc = f"precomputing {self.split} VQ indices (rank:{rank})"
+
+            for batch in tqdm(tmp_loader, desc=desc):
+                df = batch.df.to(device)
+                cond = (
+                    batch.conditioning.to(device)
+                    if hasattr(batch, "conditioning") and batch.conditioning is not None
+                    else None
+                )
+                # encode to get VQ indices
+                _z, _ = autoencoder.encode(df, condition=cond)
+                indices = autoencoder.get_indices()  # (B, *grid_size)
+                indices_flat = indices.view(indices.shape[0], -1).cpu()  # (B, seq_len)
+
+                for i in range(len(batch.file_index)):
+                    f_idx = batch.file_index[i].item()
+                    t_idx = batch.timestep_index[i].item()
+
+                    sample = {"x": indices_flat[i].numpy().astype(np.int64)}
+
+                    if batch.phi is not None:
+                        phi_i = batch.phi[i]
+                        sample["phi"] = (
+                            phi_i.cpu().numpy()
+                            if isinstance(phi_i, torch.Tensor)
+                            else np.asarray(phi_i)
+                        )
+                    else:
+                        sample["phi"] = None
+
+                    flux_i = batch.flux[i]
+                    sample["flux"] = (
+                        flux_i.cpu().numpy()
+                        if isinstance(flux_i, torch.Tensor)
+                        else np.asarray(flux_i)
+                    )
+
+                    ts_i = batch.timestep[i]
+                    sample["timestep"] = (
+                        ts_i.cpu().numpy()
+                        if isinstance(ts_i, torch.Tensor)
+                        else np.asarray(ts_i)
+                    )
+
+                    if batch.conditioning is not None:
+                        cond_i = batch.conditioning[i]
+                        if isinstance(cond_i, torch.Tensor):
+                            cond_i = cond_i.cpu().numpy()
+                        for j, key in enumerate(self.conditions):
+                            sample[key] = cond_i[j]
+
+                    latents_dict[(f_idx, t_idx)] = sample
+
+            if dist.is_initialized():
+                gathered_dict = [None for _ in range(dist.get_world_size())]
+                dist.all_gather_object(gathered_dict, latents_dict)
+                full_latents_dict = {}
+                for d in gathered_dict:
+                    full_latents_dict.update(d)
+                self.precomputed_latents = full_latents_dict
+            else:
+                self.precomputed_latents = latents_dict
+
+            if rank == 0:
+                with open(indices_dump_pkl, "wb") as f:
+                    pickle.dump(self.precomputed_latents, f)
+                print(f"saved precomputed VQ indices to {indices_dump_pkl}")
+            if dist.is_initialized():
+                dist.barrier()
+
+        # store dummy latent stats (discrete tokens don't need normalization)
+        self.latent_stats = RunningMeanStd(shape=(1,))
+        self.latent_stats.update(
+            np.zeros((1,)), np.ones((1,)), np.zeros((1,)), np.ones((1,))
+        )
+        self.seq_len = next(iter(self.precomputed_latents.values()))["x"].shape[0]
+
+        if rank == 0:
+            print(
+                f"VQ indices: seq_len={self.seq_len}, "
+                f"codebook_size={autoencoder.vq.codebook_size}"
+            )
+
+        if isinstance(self.backend, KvikIOBackend):
+            self.backend = KvikIOBackend(self.rank, use_kvikio=False)
+
+        self._tensorize_latents()
+
+    def _tensorize_latents(self):
+        """Pre-build CycloneAESample objects with int64 index tensors."""
+        if self.precomputed_latents is None:
+            return
+        avg_flux_cache = {}
+        for f_id in self.metadata:
+            fluxes = self.metadata[f_id]["flux"]
+            avg_flux_cache[f_id] = torch.tensor(
+                float(np.mean(fluxes[-80:])), dtype=self.dtype
+            )
+
+        for (file_index, t_index), sample in self.precomputed_latents.items():
+            x = sample["x"]
+            if isinstance(x, np.ndarray):
+                x = torch.from_numpy(x).long()
+            elif isinstance(x, torch.Tensor):
+                x = x.long()
+
+            flux = sample["flux"]
+            if isinstance(flux, np.ndarray):
+                flux = torch.as_tensor(flux, dtype=self.dtype)
+            elif not isinstance(flux, torch.Tensor):
+                flux = torch.tensor(flux, dtype=self.dtype)
+
+            timestep = sample["timestep"]
+            if isinstance(timestep, np.ndarray):
+                timestep = torch.as_tensor(timestep, dtype=self.dtype)
+            elif not isinstance(timestep, torch.Tensor):
+                timestep = torch.tensor(timestep, dtype=self.dtype)
+
+            conditioning = None
+            if self.conditions:
+                cond_vals = []
+                for k in self.conditions:
+                    val = sample[k]
+                    if isinstance(val, torch.Tensor):
+                        cond_vals.append(val.to(dtype=self.dtype))
+                    else:
+                        cond_vals.append(torch.tensor(val, dtype=self.dtype))
+                conditioning = torch.stack(cond_vals, dim=-1)
+
+            sample["_sample"] = CycloneAESample(
+                df=x,
+                phi=None,
+                flux=flux,
+                avg_flux=avg_flux_cache.get(file_index, torch.tensor(0.0)),
+                file_index=torch.tensor(file_index, dtype=torch.long),
+                timestep_index=torch.tensor(t_index, dtype=torch.long),
+                timestep=timestep,
+                conditioning=conditioning,
+            )
