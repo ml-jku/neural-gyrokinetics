@@ -14,11 +14,22 @@ from neugk.integrals import FluxIntegral
 from neugk.utils import recombine_zf
 
 
+def set_seed(seed):
+    """Seed python random, numpy, and torch (CPU + CUDA) for reproducibility."""
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def to_model_space(df_spectral, separate_zf=True):
     """Complex128 spectral -> float32 model-space (with optional separate_zf)."""
     from neugk.utils import separate_zf as _separate_zf
 
-    df_np = np.fft.ifftshift(np.array(df_spectral), axes=(3,))
+    # match preprocessing convention: fftshift before ifft (see preprocess.py:261, augment.py:46)
+    df_np = np.fft.fftshift(np.array(df_spectral), axes=(3,))
     df_real = np.fft.ifftn(df_np, axes=(3, 4), norm="forward")
     out = np.stack([df_real.real, df_real.imag]).astype(np.float32)
     if separate_zf:
@@ -34,7 +45,8 @@ def from_model_space(df_model, separate_zf=True):
         df_model = recombine_zf(df_model, dim=0)
     df_complex = (df_model[0] + 1j * df_model[1]).astype(np.complex128)
     df_spectral = np.fft.fftn(df_complex, axes=(3, 4), norm="forward")
-    return jnp.asarray(np.fft.fftshift(df_spectral, axes=(3,)), dtype=jnp.complex128)
+    # inverse of preprocessing's fftshift is ifftshift (see augment.py:reverse_ifft)
+    return jnp.asarray(np.fft.ifftshift(df_spectral, axes=(3,)), dtype=jnp.complex128)
 
 
 def compute_statistics(samples, reg=1e-6):
@@ -55,35 +67,177 @@ def compute_fid(mu1, sigma1, mu2, sigma2):
     return float(diff @ diff + np.trace(sigma1 + sigma2 - 2 * covmean))
 
 
+def gyroswin_has_flux_head(model):
+    """True if the loaded GyroSwin model exposes a usable flux_head."""
+    m = model.module if hasattr(model, "module") else model
+    return hasattr(m, "flux_head") and m.flux_head is not None
+
+
 @torch.no_grad()
-def extract_gyroswin_latents(model, df_batch, device="cuda", condition=None, **kwargs):
-    """Bottleneck features from GyroSwin encoder."""
+def extract_gyroswin_latents(
+    model,
+    df_batch,
+    device="cuda",
+    condition=None,
+    source="bottleneck",
+    cond_keys=None,
+    default_timestep=150.0,
+    flux_head_level=None,
+    decoder_level=None,
+    **kwargs,
+):
+    """Extract feature vectors from a GyroSwin model for FID / MMD.
+
+    source:
+      "bottleneck"  — df_unet encoder middle-block activations (flat, high-D).
+                      Existing default; does not need a flux_head.
+      "flux_head"   — multiscale pre-MLP flux_head latents (one pooled vector
+                      per resolution level). Physics-targeted: these are the
+                      features the model uses to regress the transport flux.
+                      Pass ``flux_head_level=None`` (default) to concatenate
+                      all levels; pass an integer index ``k`` to return only
+                      level ``k`` (level 0 = bottleneck mix, level 1 = first
+                      decoder up-block, level 2 = next, ...).
+      "decoder"     — df_unet decoder up-block activations, captured via a
+                      forward hook on ``df_unet.up_blocks[decoder_level]``.
+                      Pythonic indexing: ``decoder_level=-1`` (default) is
+                      the last up-block — i.e. the df features one level
+                      before the final 5D output (analogue of InceptionV3
+                      pool3 in classic FID). ``decoder_level=-2`` is two
+                      levels before the 5D output, ``decoder_level=0`` is
+                      the first up-block, etc.
+
+    For source in {'flux_head', 'decoder'}, the full model.forward runs and
+    a hook captures the chosen activation. `condition` is expected as a
+    (B, len(cond_keys)) tensor whose columns correspond to `cond_keys`; if
+    `cond_keys` omits 'timestep' we fill it with `default_timestep`.
+    """
     model.eval()
     x = df_batch.to(device)
-
     m = model.module if hasattr(model, "module") else model
-    unet = m.df_unet if hasattr(m, "df_unet") else m
 
-    embed = unet.cond_embed if hasattr(unet, "cond_embed") else None
-    if condition is None:
-        raise ValueError("condition must be provided for GyroSwin feature extraction")
-    c = condition.to(device)
-    if embed is not None:
-        if c.shape[-1] < embed.n_cond:
-            ts = torch.empty(c.shape[0], embed.n_cond - c.shape[-1], device=device).uniform_(100, 200)
-            c = torch.cat([c, ts], dim=-1)
-        cond = {"condition": embed(c)}
+    if source == "bottleneck":
+        unet = m.df_unet if hasattr(m, "df_unet") else m
+        embed = unet.cond_embed if hasattr(unet, "cond_embed") else None
+        if condition is None:
+            raise ValueError("condition must be provided for GyroSwin feature extraction")
+        c = condition.to(device)
+        if embed is not None:
+            if c.shape[-1] < embed.n_cond:
+                ts = torch.empty(c.shape[0], embed.n_cond - c.shape[-1], device=device).uniform_(100, 200)
+                c = torch.cat([c, ts], dim=-1)
+            cond = {"condition": embed(c)}
+        else:
+            cond = {}
+
+        x, _ = unet.patch_encode(x)
+        for blk in unet.down_blocks:
+            x, _ = blk(x, **cond)
+        if hasattr(unet, "middle_pe"):
+            x = unet.middle_pe(x)
+        x = unet.middle(x, **cond)
+        return x.flatten(1).cpu().numpy()
+
+    elif source == "flux_head":
+        if not gyroswin_has_flux_head(m):
+            raise RuntimeError("model has no flux_head; cannot use source='flux_head'")
+        if condition is None or cond_keys is None:
+            raise ValueError("source='flux_head' requires both `condition` and `cond_keys`")
+        c = condition.to(device)
+        n_keys = len(cond_keys)
+        cols = c.shape[-1]
+        if cols == n_keys:
+            # no timestep in the tensor — fill with default
+            cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
+            cond_kwargs.setdefault(
+                "timestep",
+                torch.full((c.shape[0],), float(default_timestep), device=device, dtype=c.dtype),
+            )
+        elif cols == n_keys + 1:
+            # caller appended timestep as the last column
+            cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
+            cond_kwargs["timestep"] = c[:, -1]
+        else:
+            raise ValueError(
+                f"condition has {cols} cols; expected {n_keys} or {n_keys + 1} "
+                f"(cond_keys = {list(cond_keys)}, optional trailing timestep)"
+            )
+
+        captured = {}
+
+        def _hook(_mod, inputs, _output):
+            captured["lats"] = inputs[0]
+
+        handle = m.flux_head.register_forward_hook(_hook)
+        try:
+            _ = m(x, **cond_kwargs)
+            lats = captured.get("lats")
+            if lats is None:
+                raise RuntimeError("forward pass did not invoke flux_head")
+            flat_per_level = [l.reshape(l.shape[0], -1) for l in lats]
+            if flux_head_level is None:
+                flat = torch.cat(flat_per_level, dim=-1)
+            else:
+                if not 0 <= flux_head_level < len(flat_per_level):
+                    raise IndexError(
+                        f"flux_head_level={flux_head_level} out of range "
+                        f"[0, {len(flat_per_level)})"
+                    )
+                flat = flat_per_level[flux_head_level]
+            return flat.cpu().numpy()
+        finally:
+            handle.remove()
+
+    elif source == "decoder":
+        if condition is None or cond_keys is None:
+            raise ValueError("source='decoder' requires both `condition` and `cond_keys`")
+        c = condition.to(device)
+        n_keys = len(cond_keys)
+        cols = c.shape[-1]
+        if cols == n_keys:
+            cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
+            cond_kwargs.setdefault(
+                "timestep",
+                torch.full((c.shape[0],), float(default_timestep), device=device, dtype=c.dtype),
+            )
+        elif cols == n_keys + 1:
+            cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
+            cond_kwargs["timestep"] = c[:, -1]
+        else:
+            raise ValueError(
+                f"condition has {cols} cols; expected {n_keys} or {n_keys + 1} "
+                f"(cond_keys = {list(cond_keys)}, optional trailing timestep)"
+            )
+
+        up_blocks = m.df_unet.up_blocks
+        n_up = len(up_blocks)
+        lvl = -1 if decoder_level is None else decoder_level
+        if not -n_up <= lvl < n_up:
+            raise IndexError(
+                f"decoder_level={lvl} out of range for {n_up} up_blocks"
+            )
+        target = up_blocks[lvl]
+
+        captured = {}
+
+        def _hook(_mod, _inputs, output):
+            feat = output[0] if isinstance(output, (tuple, list)) else output
+            captured["feat"] = feat
+
+        handle = target.register_forward_hook(_hook)
+        try:
+            _ = m(x, **cond_kwargs)
+            feat = captured.get("feat")
+            if feat is None:
+                raise RuntimeError(f"forward pass did not invoke up_blocks[{lvl}]")
+            return feat.flatten(1).cpu().numpy()
+        finally:
+            handle.remove()
+
     else:
-        cond = {}
-
-    x, _ = unet.patch_encode(x)
-    for blk in unet.down_blocks:
-        x, _ = blk(x, **cond)
-    if hasattr(unet, "middle_pe"):
-        x = unet.middle_pe(x)
-    x = unet.middle(x, **cond)
-
-    return x.flatten(1).cpu().numpy()
+        raise ValueError(
+            f"unknown source: {source!r} (use 'bottleneck', 'flux_head', or 'decoder')"
+        )
 
 
 def compute_fid_on_latents(
@@ -125,6 +279,122 @@ def compute_fid_on_latents(
     return fid, real_feats, gen_feats
 
 
+def run_trajectories(
+    df_gt,
+    df_warms,
+    geometry,
+    params,
+    pre,
+    state_init,
+    n_steps=1000,
+    labels=None,
+    chunk_size=1,
+    backend="cuda",
+    mixed_precision=True,
+    print_every=500,
+    log_every=1,
+):
+    """Run GT once and multiple warm-start trajectories.
+
+    Parameters
+    ----------
+    df_gt : array
+        Ground-truth spectral distribution function.
+    df_warms : list of arrays
+        Warm-start ICs to compare against GT.
+    labels : list of str, optional
+        Names for each warm-start (for printing). Defaults to ["warm_0", ...].
+
+    Returns
+    -------
+    log_gt : dict
+    log_warms : list of dict  (same order as df_warms)
+    """
+    import jax.numpy as jnp
+    import dataclasses
+    from gyaradax.solver import GKState, mode_amplitude
+    from gyaradax.simulate import _compute_phi_for_init, gksolve
+    from gyaradax.integrals import get_integrals
+    from gyaradax.diag import get_diagnostics
+
+    params = dataclasses.replace(params, backend=backend, mixed_precision=mixed_precision)
+
+    nky = len(geometry["krho"])
+    t_start = float(state_init.time)
+    n_warm = len(df_warms)
+    if labels is None:
+        labels = [f"warm_{i}" for i in range(n_warm)]
+
+    def _make_state(df_init):
+        phi0 = _compute_phi_for_init(df_init, geometry, params)
+        amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
+        return GKState(
+            time=jnp.array(t_start, dtype=jnp.float64),
+            step=jnp.array(0, dtype=jnp.int32),
+            accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+            window_start_amp=amp0,
+            last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+        )
+
+    # index 0 = GT, 1..N = warm-starts
+    dfs = [df_gt] + list(df_warms)
+    states = [_make_state(df) for df in dfs]
+    ntraj = 1 + n_warm
+    logs = [{"time": [], "kx_spec": [], "ky_spec": [], "eflux": []} for _ in range(ntraj)]
+
+    for b in range(ntraj):
+        phi, fluxes = get_integrals(
+            dfs[b],
+            geometry,
+            params=params,
+            pre=pre,
+            adiabatic_electrons=params.adiabatic_electrons,
+        )
+        diags = get_diagnostics(phi, fluxes, states[b])
+        for k in logs[b]:
+            logs[b][k].append(np.array(diags[k]))
+
+    steps_done = 0
+    while steps_done < n_steps:
+        n = min(chunk_size, n_steps - steps_done)
+        for b in range(ntraj):
+            dfs[b], (phi, fluxes), states[b] = gksolve(dfs[b], geometry, params, states[b], n_steps=n, pre=pre)
+        steps_done += n
+
+        if steps_done % log_every == 0 or steps_done == n_steps:
+            for b in range(ntraj):
+                phi_b, fluxes_b = get_integrals(
+                    dfs[b],
+                    geometry,
+                    params=params,
+                    pre=pre,
+                    adiabatic_electrons=params.adiabatic_electrons,
+                )
+                diags = get_diagnostics(phi_b, fluxes_b, states[b])
+                for k in logs[b]:
+                    logs[b][k].append(np.array(diags[k]))
+
+        if steps_done % print_every == 0 or steps_done == n_steps:
+            q_gt = float(logs[0]["eflux"][-1])
+            t_now = float(states[0].time)
+            parts = [f"Q_gt={q_gt:.4e}"]
+            ky_gt = np.log10(np.maximum(logs[0]["ky_spec"][-1], 1e-30))
+            for w in range(n_warm):
+                q_w = float(logs[1 + w]["eflux"][-1])
+                ky_w = np.log10(np.maximum(logs[1 + w]["ky_spec"][-1], 1e-30))
+                r_ky = pearsonr(ky_w, ky_gt)[0] if len(ky_gt) > 1 else 0.0
+                parts.append(f"Q_{labels[w]}={q_w:.4e} r={r_ky:.3f}")
+            print(f"  {steps_done}/{n_steps}  t={t_now:.3f}  " + "  ".join(parts))
+
+    out_logs = []
+    for b in range(ntraj):
+        log = {k: np.array(v) for k, v in logs[b].items()}
+        log["df_final"] = np.array(dfs[b])
+        out_logs.append(log)
+
+    return out_logs[0], out_logs[1:]
+
+
 def run_trajectory_pair(
     df_gt,
     df_warm,
@@ -140,84 +410,14 @@ def run_trajectory_pair(
     print_every=500,
     log_every=1,
 ):
-    """Run GT and warm-start trajectories, return (log_gt, log_warm)."""
-    import jax.numpy as jnp
-    import dataclasses
-    from gyaradax.solver import GKState, mode_amplitude
-    from gyaradax.simulate import _compute_phi_for_init, gksolve
-    from gyaradax.integrals import get_integrals
-    from gyaradax.diag import get_diagnostics
-
-    params = dataclasses.replace(params, backend=backend, mixed_precision=mixed_precision)
-
-    nky = len(geometry["krho"])
-    t_start = float(state_init.time)
-
-    def _make_state(df_init):
-        phi0 = _compute_phi_for_init(df_init, geometry, params)
-        amp0 = mode_amplitude(phi0, geometry, params.norm_eps)
-        return GKState(
-            time=jnp.array(t_start, dtype=jnp.float64),
-            step=jnp.array(0, dtype=jnp.int32),
-            accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
-            window_start_amp=amp0,
-            last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
-        )
-
-    dfs = [df_gt, df_warm]
-    states = [_make_state(df_gt), _make_state(df_warm)]
-    logs = [{"time": [], "kx_spec": [], "ky_spec": [], "eflux": []} for _ in range(2)]
-
-    for b in range(2):
-        phi, fluxes = get_integrals(
-            dfs[b],
-            geometry,
-            params=params,
-            pre=pre,
-            adiabatic_electrons=params.adiabatic_electrons,
-        )
-        diags = get_diagnostics(phi, fluxes, states[b])
-        for k in logs[b]:
-            logs[b][k].append(np.array(diags[k]))
-
-    steps_done = 0
-    while steps_done < n_steps:
-        n = min(chunk_size, n_steps - steps_done)
-        for b in range(2):
-            dfs[b], (phi, fluxes), states[b] = gksolve(dfs[b], geometry, params, states[b], n_steps=n, pre=pre)
-        steps_done += n
-
-        if steps_done % log_every == 0 or steps_done == n_steps:
-            for b in range(2):
-                phi_b, fluxes_b = get_integrals(
-                    dfs[b],
-                    geometry,
-                    params=params,
-                    pre=pre,
-                    adiabatic_electrons=params.adiabatic_electrons,
-                )
-                diags = get_diagnostics(phi_b, fluxes_b, states[b])
-                for k in logs[b]:
-                    logs[b][k].append(np.array(diags[k]))
-
-        if steps_done % print_every == 0 or steps_done == n_steps:
-            q_gt = float(logs[0]["eflux"][-1])
-            q_warm = float(logs[1]["eflux"][-1])
-            t_now = float(states[0].time)
-            ky_gt = np.log10(np.maximum(logs[0]["ky_spec"][-1], 1e-30))
-            ky_w = np.log10(np.maximum(logs[1]["ky_spec"][-1], 1e-30))
-            r_ky = pearsonr(ky_w, ky_gt)[0] if len(ky_gt) > 1 else 0.0
-            print(
-                f"  [{label}] {steps_done}/{n_steps}  t={t_now:.3f}"
-                f"  Q_gt={q_gt:.4e}  Q_warm={q_warm:.4e}"
-                f"  r(ky)={r_ky:.3f}"
-            )
-
-    log_gt = {k: np.array(v) for k, v in logs[0].items()}
-    log_warm = {k: np.array(v) for k, v in logs[1].items()}
-    log_gt["df_final"] = np.array(dfs[0])
-    log_warm["df_final"] = np.array(dfs[1])
-    return log_gt, log_warm
+    """Run GT and a single warm-start trajectory. Convenience wrapper around run_trajectories."""
+    log_gt, log_warms = run_trajectories(
+        df_gt, [df_warm], geometry, params, pre, state_init,
+        n_steps=n_steps, labels=[label], chunk_size=chunk_size,
+        backend=backend, mixed_precision=mixed_precision,
+        print_every=print_every, log_every=log_every,
+    )
+    return log_gt, log_warms[0]
 
 
 def run_trajectory(
@@ -580,7 +780,283 @@ def remap_gyroswin_checkpoint(old_sd, new_model, encoder_only=True, verbose=True
     return mapped
 
 
-COND_META_MAP = {"itg": "ion_temp_grad", "dg": "density_grad"}
+COND_META_MAP = {"itg": "ion_temp_grad", "dg": "density_grad", "s_hat": "s_hat", "q": "q"}
+
+# gyaradax params attribute name for each conditioning key
+COND_PARAM_MAP = {"itg": "rlt", "dg": "rln", "s_hat": "shat", "q": "q"}
+
+
+def cond_from_params(params, cond_keys):
+    """Extract conditioning vector from gyaradax params object.
+
+    Returns 1-D numpy array of shape (len(cond_keys),).
+    """
+    return np.array([float(getattr(params, COND_PARAM_MAP[k])) for k in cond_keys])
+
+
+def build_train_cond_index(runner, verbose=True):
+    """Build normalised conditioning matrix from the training set.
+
+    Applies training_cond_filters from the runner config and returns a dict
+    that can be passed to :func:`find_nearest_nn`.
+
+    Returns
+    -------
+    dict with keys:
+        cond_keys   : list[str]
+        train_conds : (N, C) raw conditioning values
+        train_conds_norm : (N, C) std-normalised conditioning
+        train_conds_std  : (1, C) per-key std used for normalisation
+        train_file_ids   : list[int] — f_id in runner.trainset for each row
+    """
+    from omegaconf import OmegaConf
+
+    cond_keys = sorted(runner.cfg.model.conditioning)
+    cfg_filters = OmegaConf.to_container(
+        runner.cfg.dataset.training_cond_filters or {}, resolve=True
+    )
+    cond_thresh = runner.cfg.dataset.offset if runner.cfg.dataset.offset > 0 else 80
+
+    def _passes_filter(meta):
+        for filter_key, rng in cfg_filters.items():
+            parts = filter_key.split("_", 1)
+            where, field = (parts[0], parts[1]) if len(parts) == 2 else (None, parts[0])
+            if field not in meta:
+                continue
+            val = meta[field]
+            if field == "flux":
+                val = float(np.mean(val[:cond_thresh] if where == "first" else val[-cond_thresh:]))
+            rng = [rng] if not isinstance(rng[0], (list, tuple)) else rng
+            if not any(lo <= val <= hi for lo, hi in rng):
+                return False
+        return True
+
+    n_files = len(runner.trainset.metadata)
+    valid_ids = [f_id for f_id in range(n_files) if _passes_filter(runner.trainset.metadata[f_id])]
+
+    train_conds = np.zeros((len(valid_ids), len(cond_keys)))
+    train_file_ids = []
+    for row, f_id in enumerate(valid_ids):
+        meta = runner.trainset.metadata[f_id]
+        for j, k in enumerate(cond_keys):
+            train_conds[row, j] = float(np.squeeze(meta[COND_META_MAP[k]]))
+        train_file_ids.append(f_id)
+
+    train_conds_std = train_conds.std(axis=0, keepdims=True) + 1e-8
+    train_conds_norm = train_conds / train_conds_std
+
+    if verbose:
+        print(f"Training trajectories: {n_files} total, {len(valid_ids)} pass flux filter")
+        print(f"  filters: {cfg_filters}")
+        print(f"  cond keys ({len(cond_keys)}): {cond_keys}")
+
+    return dict(
+        cond_keys=cond_keys,
+        train_conds=train_conds,
+        train_conds_norm=train_conds_norm,
+        train_conds_std=train_conds_std,
+        train_file_ids=train_file_ids,
+    )
+
+
+def ic_single_diffusion(runner, params, cond_keys, n_steps=10):
+    """Sample one diffusion IC, return denormalised raw model-space array."""
+    cond = torch.tensor(
+        [cond_from_params(params, cond_keys)],
+        dtype=torch.float32, device=runner.device,
+    )
+    runner.model.eval()
+    with torch.no_grad():
+        df = runner.sample(cond, latent_only=False, steps=n_steps)["df"][0].cpu().numpy()
+    s, sh = runner.trainset._get_scale_shift(0, "df", torch.tensor(df))
+    return df * s.numpy() + sh.numpy()
+
+
+def ic_repr_diffusion(runner, params, cond_keys, geometry, pre, state_init,
+                      n_samples=8, n_steps=10, verbose=True):
+    """Sample N diffusion candidates; return the one whose initial eflux is closest
+    to the batch mean. Returns (df_model, info_dict)."""
+    import dataclasses
+    import jax.numpy as jnp
+    from gyaradax.solver import GKState, mode_amplitude
+    from gyaradax.simulate import _compute_phi_for_init
+    from gyaradax.integrals import get_integrals
+    from gyaradax.diag import get_diagnostics
+
+    params_jax = dataclasses.replace(params, backend="jax", mixed_precision=True)
+    nky = len(geometry["krho"])
+    t_start = float(state_init.time)
+    cond = torch.tensor(
+        [cond_from_params(params, cond_keys)],
+        dtype=torch.float32, device=runner.device,
+    )
+
+    dfs, efluxes = [], []
+    runner.model.eval()
+    with torch.no_grad():
+        for i in range(n_samples):
+            df = runner.sample(cond, latent_only=False, steps=n_steps)["df"][0].cpu().numpy()
+            s, sh = runner.trainset._get_scale_shift(0, "df", torch.tensor(df))
+            df = df * s.numpy() + sh.numpy()
+            df_spec = from_model_space(df)
+            phi0 = _compute_phi_for_init(df_spec, geometry, params_jax)
+            amp0 = mode_amplitude(phi0, geometry, params_jax.norm_eps)
+            state = GKState(
+                time=jnp.array(t_start, dtype=jnp.float64),
+                step=jnp.array(0, dtype=jnp.int32),
+                accumulated_norm_factor=jnp.ones(nky, dtype=jnp.float64),
+                window_start_amp=amp0,
+                last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
+            )
+            phi, fluxes = get_integrals(
+                df_spec, geometry, params=params_jax, pre=pre,
+                adiabatic_electrons=params_jax.adiabatic_electrons,
+            )
+            diags = get_diagnostics(phi, fluxes, state)
+            efluxes.append(float(diags["eflux"]))
+            dfs.append(df)
+            if verbose:
+                print(f"    [{i+1}/{n_samples}] eflux={efluxes[-1]:.4e}")
+
+    mean_eflux = float(np.mean(efluxes))
+    best_idx = int(np.argmin(np.abs(np.array(efluxes) - mean_eflux)))
+    if verbose:
+        print(f"    mean={mean_eflux:.4e}, repr_idx={best_idx} (eflux={efluxes[best_idx]:.4e})")
+    return dfs[best_idx], dict(efluxes=efluxes, mean_eflux=mean_eflux, best_idx=best_idx, n_samples=n_samples)
+
+
+def plot_method_comparison(results, methods=None, method_styles=None):
+    """Flux + ky-spectrum comparison across warmstart methods.
+
+    Parameters
+    ----------
+    results : dict[iteration] -> {log_gt, ref_mean, ref_std, methods: {name: {log_warm, ttc_flux, ...}}}
+    methods : list[str] | None
+        Which method names to plot (default: all present in the first iteration).
+    method_styles : dict[name] -> dict of matplotlib kwargs (color, ls, lw, ...)
+    """
+    default_styles = {
+        "diffusion":      dict(color="#9c27b0", ls="-.", lw=1.1, label_prefix="diffusion (single)"),
+        "repr_diffusion": dict(color="#2196f3", ls="-",  lw=1.4, label_prefix="repr-diffusion"),
+        "nn":             dict(color="#e76f51", ls="--", lw=1.1, label_prefix="NN train"),
+    }
+    styles = {**default_styles, **(method_styles or {})}
+
+    iterations = list(results.keys())
+    if methods is None:
+        methods = list(results[iterations[0]]["methods"].keys())
+
+    n = len(iterations)
+    fig, axes = plt.subplots(n, 2, figsize=(14, 4 * n), squeeze=False)
+
+    for row, it in enumerate(iterations):
+        res = results[it]
+        lg = res["log_gt"]
+        t = lg["time"]
+        ref_mean, ref_std = res["ref_mean"], res["ref_std"]
+
+        # flux panel
+        ax = axes[row, 0]
+        ax.plot(t, lg["eflux"], "k", lw=0.8, alpha=0.45, label="GT")
+        for m in methods:
+            if m not in res["methods"]:
+                continue
+            mres = res["methods"][m]
+            st = styles.get(m, dict(lw=1.1, label_prefix=m))
+            lbl = f"{st.get('label_prefix', m)}  TTC={mres['ttc_flux']:.1f}"
+            ax.plot(t, mres["log_warm"]["eflux"],
+                    color=st.get("color"), ls=st.get("ls", "-"), lw=st.get("lw", 1.1),
+                    label=lbl)
+        ax.axhspan(ref_mean - ref_std, ref_mean + ref_std, color="k", alpha=0.07, label="ref ±1σ")
+        ax.axhline(ref_mean, color="k", ls=":", lw=0.8)
+        ax.set_title(f"iter {it}: flux"); ax.legend(fontsize=6); ax.grid(True, alpha=0.15)
+        ax.set_xlabel(r"time $[v_{th}/R]$")
+
+        # ky spectrum (final snapshot)
+        ax = axes[row, 1]
+        ky_gt = np.log10(np.maximum(lg["ky_spec"][-1], 1e-30))
+        ax.plot(ky_gt, "k", lw=1, alpha=0.55, label="GT")
+        for m in methods:
+            if m not in res["methods"]:
+                continue
+            mres = res["methods"][m]
+            st = styles.get(m, dict(lw=1.1, label_prefix=m))
+            ky = np.log10(np.maximum(mres["log_warm"]["ky_spec"][-1], 1e-30))
+            ax.plot(ky, color=st.get("color"), ls=st.get("ls", "-"), lw=st.get("lw", 1.1),
+                    label=st.get("label_prefix", m))
+        ax.set_title(f"iter {it}: $k_y$ spectrum (final)"); ax.legend(fontsize=6); ax.grid(True, alpha=0.15)
+        ax.set_xlabel("$k_y$ mode")
+
+    fig.tight_layout()
+    return fig
+
+
+def find_nearest_nn(params, cond_index, runner, saturated_phase_start=120, seed=42, iteration=0, verbose=True):
+    """Find nearest-neighbour training trajectory and sample a saturated-phase IC.
+
+    Parameters
+    ----------
+    params : gyaradax params object
+    cond_index : dict returned by :func:`build_train_cond_index`
+    runner : diffusion runner (for trainset access)
+    saturated_phase_start : minimum absolute h5 timestep index for IC sampling
+    seed : base RNG seed (combined with iteration)
+    iteration : evaluation iteration (for seed offset and printing)
+
+    Returns
+    -------
+    dict with keys:
+        df_model : np.ndarray — raw model-space IC (not normalised)
+        nn_file  : str — path to the NN training file
+        nn_cond  : np.ndarray — conditioning of the NN file
+        nn_dist  : float — normalised L2 distance
+        orig_t   : int — original h5 timestep index of the sampled IC
+        flat_idx : int — flat index in runner.trainset
+    """
+    cond_keys = cond_index["cond_keys"]
+    eval_cond = cond_from_params(params, cond_keys).reshape(1, -1)
+    eval_cond_norm = eval_cond / cond_index["train_conds_std"]
+    dists = np.linalg.norm(cond_index["train_conds_norm"] - eval_cond_norm, axis=1)
+
+    nn_row = int(np.argmin(dists))
+    nn_idx = cond_index["train_file_ids"][nn_row]
+    nn_file = runner.trainset.files[nn_idx]
+    nn_cond = cond_index["train_conds"][nn_row]
+
+    # Collect flat indices in the saturated phase
+    offset = runner.trainset.offsets[nn_idx]
+    sat_t_min = max(0, saturated_phase_start - offset)
+    sat_flat_indices = [
+        flat_idx
+        for flat_idx, (fi, ti) in runner.trainset.flat_index_to_file_and_tstep.items()
+        if fi == nn_idx and ti >= sat_t_min
+    ]
+    assert len(sat_flat_indices) > 0, (
+        f"No saturated-phase samples for file {nn_idx} (offset={offset}, sat_t_min={sat_t_min})"
+    )
+
+    rng = np.random.default_rng(seed=seed + iteration)
+    chosen_flat_idx = int(rng.choice(sat_flat_indices))
+    chosen_fi, chosen_ti = runner.trainset.flat_index_to_file_and_tstep[chosen_flat_idx]
+    orig_ti = chosen_ti + offset
+
+    sample = runner.trainset.__getitem__(chosen_flat_idx, get_normalized=False, override_latens=True)
+    df_model = sample.df.numpy()
+
+    if verbose:
+        print(f"  NN file   : {os.path.basename(nn_file)}")
+        print(f"  NN cond   : {dict(zip(cond_keys, nn_cond.round(4)))}")
+        print(f"  L2 dist (normalised): {dists[nn_row]:.4f}")
+        print(f"  Sampled t_index={chosen_ti} (original h5 index={orig_ti})")
+
+    return dict(
+        df_model=df_model,
+        nn_file=nn_file,
+        nn_cond=nn_cond,
+        nn_dist=float(dists[nn_row]),
+        orig_t=orig_ti,
+        flat_idx=chosen_flat_idx,
+    )
 
 
 def collect_latents(precomputed_latents, cond_keys):
@@ -915,3 +1391,165 @@ def plot_correlation_grid(extended_metrics, metric_names=None, x_axes=None):
 
     fig.tight_layout()
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Shared aggregate-metric API used by pinc_generate / gyroswin_generate /
+# diff_generate_table notebooks. One source of truth so the ID/OOD tables
+# from each notebook are 1-to-1 comparable.
+#
+# Convention (matches the existing _agg_metrics_avg / avg_flux_rmse pattern):
+#   per traj :  pred_mean = gen[key]['all'].mean(axis=0)        # collapse axis 0
+#               diff      = pred_mean - gt[key]['mean']
+#               sq_err    = diff ** 2                            # scalar or (D,)
+#   pool     :  concat sq_err across trajectories
+#   final    :  RMSE = sqrt(mean(pool))
+#   R^2      :  per traj  1 - bias^2 / Var(gt full series); mean across trajs
+#
+# Both `gen[key]` and `gt[key]` may be either a dict ({all,mean,std[,full]})
+# or a raw tensor / ndarray -- see `_extract_pred` / `_extract_gt` below.
+# ---------------------------------------------------------------------------
+
+
+def _to_tensor(x):
+    if x is None:
+        return None
+    if isinstance(x, torch.Tensor):
+        return x.float()
+    return torch.as_tensor(np.asarray(x), dtype=torch.float32)
+
+
+def _extract_pred(gen_entry):
+    """Predictions: (N, ...) where axis 0 is the sample / time axis."""
+    if gen_entry is None:
+        return None
+    if isinstance(gen_entry, dict):
+        return _to_tensor(gen_entry.get("all"))
+    return _to_tensor(gen_entry)
+
+
+def _extract_gt_mean(gt_entry):
+    """Per-trajectory reference: scalar or (D,)."""
+    if gt_entry is None:
+        return None
+    if isinstance(gt_entry, dict):
+        return _to_tensor(gt_entry.get("mean"))
+    return _to_tensor(gt_entry)
+
+
+def _extract_gt_full(gt_entry):
+    """Full GT time series for SS_tot in R^2; falls back to ['all']."""
+    if gt_entry is None or not isinstance(gt_entry, dict):
+        return None
+    return _to_tensor(gt_entry.get("full", gt_entry.get("all")))
+
+
+def aggregate_metric(group, get_pred, get_gt, get_gt_full=None):
+    """Core: avg_flux_rmse-style aggregation over a {traj: {gen, gt}} group.
+
+    Args:
+        group: dict mapping trajectory name -> {'gen': ..., 'gt': ...}.
+        get_pred(gen_dict) -> tensor (N, ...) | None      predictions per traj
+        get_gt(gt_dict)    -> tensor (...)    | None      per-traj reference
+        get_gt_full(gt_dict) -> tensor (T,...) | None     for R^2 SS_tot
+
+    Returns:
+        {"RMSE": float, "R2": float, "n_trajs": int}
+    """
+    sq_errs = []
+    r2_vals = []
+    for res in group.values():
+        gen, gt = res.get("gen", {}), res.get("gt", {})
+        pred = get_pred(gen)
+        target = get_gt(gt)
+        if pred is None or target is None:
+            continue
+        pred_mean = pred.mean(dim=0)
+        diff = (pred_mean - target).flatten()
+        sq_errs.append(diff.pow(2))
+
+        if get_gt_full is not None:
+            gt_full = get_gt_full(gt)
+            if gt_full is not None:
+                ss_tot = (gt_full - gt_full.mean()).pow(2).sum()
+                if ss_tot > 0:
+                    r2_vals.append(1.0 - diff.pow(2).sum() / ss_tot)
+
+    if not sq_errs:
+        return {"RMSE": float("nan"), "R2": float("nan"), "n_trajs": 0}
+
+    rmse = float(torch.cat(sq_errs).mean().sqrt())
+    r2 = (
+        float(torch.stack([torch.as_tensor(r) for r in r2_vals]).mean())
+        if r2_vals
+        else float("nan")
+    )
+    return {"RMSE": rmse, "R2": r2, "n_trajs": len(sq_errs)}
+
+
+def _resolve_key(k):
+    """`k` is either a string (use it for both pred and gt) or a tuple
+    (pred_key, gt_key). Returns (pred_key, gt_key, column_name)."""
+    if isinstance(k, tuple):
+        return k[0], k[1], k[0]
+    return k, k, k
+
+
+def print_aggregate_metrics(
+    group,
+    label=None,
+    scalar_keys=("eflux",),
+    spec_keys=("kxspec", "kyspec"),
+    extra_keys=(),
+):
+    """Compute + print avg_flux_rmse-style metrics for the standard layout
+    used by all three ID/OOD notebooks.
+
+    Each entry in `scalar_keys` / `spec_keys` / `extra_keys` is either a string
+    (used as both pred_key and gt_key) or a (pred_key, gt_key) tuple. The
+    tuple form is for probe predictions whose name differs from the GT field
+    (e.g. ('probe_flux_ae', 'eflux'), or ('probe_kyspec_ae', 'meta_kyspec_mean')).
+
+    For each key:
+      * predictions  = gen[pred_key]['all']  (or gen[pred_key] if a raw array)
+      * gt reference = gt[gt_key]['mean']    (or gt[gt_key] if a raw value)
+      * R^2 SS_tot   = gt[gt_key]['full']    (or gt[gt_key]['all'] as fallback,
+                                              only computed for scalar_keys)
+
+    Returns dict {f"{pred_key}_RMSE": float, "{pred_key}_R2": float (scalar only), ...}.
+    """
+    if label:
+        print(f"\n{'=' * 60}")
+        print(f"  {label}  (avg_flux_rmse aggregate, n_trajs={len(group)})")
+        print(f"{'=' * 60}")
+
+    out = {}
+    for is_scalar, keys in (
+        (True, scalar_keys),
+        (False, spec_keys),
+        (False, extra_keys),
+    ):
+        for k in keys:
+            pred_key, gt_key, col = _resolve_key(k)
+            m = aggregate_metric(
+                group,
+                get_pred=lambda gen, p=pred_key: _extract_pred(gen.get(p)),
+                get_gt=lambda gt, g=gt_key: _extract_gt_mean(gt.get(g)),
+                get_gt_full=(
+                    (lambda gt, g=gt_key: _extract_gt_full(gt.get(g)))
+                    if is_scalar
+                    else None
+                ),
+            )
+            out[f"{col}_RMSE"] = m["RMSE"]
+            if is_scalar:
+                out[f"{col}_R2"] = m["R2"]
+            if label:
+                r2_str = (
+                    f"  R2={m['R2']:.6g}" if is_scalar and m["n_trajs"] else ""
+                )
+                print(
+                    f"  {col:>20s}  RMSE = {m['RMSE']:.6g}"
+                    f"   (n_trajs={m['n_trajs']}){r2_str}"
+                )
+    return out
