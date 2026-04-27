@@ -379,6 +379,7 @@ class SwinNDUnet(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         gated_attention: bool = False,
+        cosine_attn: bool = False,
         qk_norm: bool = False,
         mid_norm_learnable: bool = True,
     ):
@@ -407,6 +408,7 @@ class SwinNDUnet(nn.Module):
         self.use_rpb = use_rpb
         self.use_rope = use_rope
         self.gated_attention = gated_attention
+        self.cosine_attn = cosine_attn
 
         if isinstance(num_heads, int):
             num_heads = [num_heads] * num_layers
@@ -464,6 +466,7 @@ class SwinNDUnet(nn.Module):
                 use_rpb=use_rpb,
                 use_rope=use_rope,
                 gated_attention=gated_attention,
+                cosine_attn=cosine_attn,
                 qk_norm=qk_norm,
             )
             if swin_bottleneck:
@@ -473,6 +476,7 @@ class SwinNDUnet(nn.Module):
                     use_rpb=use_rpb,
                     use_rope=use_rope,
                     gated_attention=gated_attention,
+                    cosine_attn=cosine_attn,
                     qk_norm=qk_norm,
                 )
             else:
@@ -781,7 +785,11 @@ class SwinNDUnet(nn.Module):
 
 
 class Swin5DUnet(SwinNDUnet):
-    def __init__(self, decouple_mu: bool = False, **kwargs):
+    def __init__(
+        self,
+        decouple_mu: bool = False,
+        **kwargs,
+    ):
         full_in_channels = kwargs["in_channels"]
         kwargs["space"] = 5
         full_resolution = list(kwargs["base_resolution"])

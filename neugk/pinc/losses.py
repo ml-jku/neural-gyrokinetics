@@ -55,6 +55,7 @@ class PINCLossWrapper(LossWrapper):
         augmentations: Optional[List[str]] = None,
         dataset: Optional[Any] = None,
         integral_precision: str = "float64",
+        free_bits: float = 0.0,
     ):
         augmentations = augmentations or []
         masked_mode_modeling = "mask_modes" in augmentations
@@ -69,6 +70,7 @@ class PINCLossWrapper(LossWrapper):
             masked_mode_modeling=masked_mode_modeling,
         )
 
+        self.free_bits = free_bits
         self._augmentation_losses: List[str] = []
         self.augmentations = augmentations
         self._register_augmentation_losses()
@@ -365,12 +367,17 @@ class PINCLossWrapper(LossWrapper):
     def compute_vae_loss(self, preds):
         if "mu" not in preds or "logvar" not in preds:
             return {}
-        return {
-            "beta_vae": -0.5
-            * torch.mean(
-                1 + preds["logvar"] - preds["mu"].pow(2) - preds["logvar"].exp()
-            )
-        }
+        kl_elementwise = -0.5 * (
+            1 + preds["logvar"] - preds["mu"].pow(2) - preds["logvar"].exp()
+        )
+        if self.free_bits > 0:
+            # Free bits (Kingma et al., 2016): clamp per-dimension KL to a
+            # minimum of free_bits so every latent channel stays active
+            # Average over batch first, clamp per latent dim, then average
+            kl_per_dim = kl_elementwise.mean(0)
+            kl_per_dim = torch.clamp(kl_per_dim, min=self.free_bits)
+            return {"beta_vae": kl_per_dim.mean()}
+        return {"beta_vae": kl_elementwise.mean()}
 
     def compute_vqvae_loss(self, preds):
         return {"vq_commit": preds.get("vq_commit_loss")}

@@ -1,4 +1,4 @@
-diffusion_checkpoint_dir: /projects/u6eb/outputs/20260408_213033_442
+diffusion_checkpoint_dir: /projects/u6eb/outputs/20260412_180101_948
 model_snapshot: best.pth
 
 # data_path: if set, overrides the checkpoint config dataset.path for both
@@ -15,12 +15,15 @@ inference:
 
 generation:
   trajectories:
-    - iteration_8.h5
-    - iteration_115.h5
-    - iteration_135.h5
-    - iteration_148.h5
-    - iteration_232.h5
-    - iteration_262.h5
+    - iteration_13.h5
+    - iteration_100.h5
+    - iteration_200.h5
+    # - iteration_8.h5
+    # - iteration_115.h5
+    # - iteration_135.h5
+    # - iteration_148.h5
+    # - iteration_232.h5
+    # - iteration_262.h5
 
   output_dir: /projects/u6eb/outputs/generated_samples
   output_prefix: generated
@@ -31,6 +34,6 @@ generation:
   #   flow - Euler integration steps
   #   edm  - Heun solver steps
   #   ddpm - denoising steps
-  steps: 50
+  steps: 20
 
   calculate_mse_metrics: true

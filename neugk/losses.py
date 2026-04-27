@@ -33,7 +33,7 @@ def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
     diff = x - y
     diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
     y_norms = torch.linalg.norm(y, ord=2, dim=-1)
-    eps = 1e-8
+    eps = 1e-4
     if squared:
         diff_norms, y_norms = diff_norms**2, y_norms**2
     # finalize loss
@@ -181,7 +181,7 @@ class LossWrapper(nn.Module):
                     losses[k] = zf_loss + other_loss
                 else:
                     if preds[k].shape != tgts[k].shape and k == "phi":
-                        preds[k] = preds[k].unsqueeze(0)
+                        tgts[k] = tgts[k].squeeze(1)
                     losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
                 if self.training:

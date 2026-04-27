@@ -1,0 +1,404 @@
+"""Helpers for FID across multiple GyroSwin latent sources.
+
+Builds the diffusion runner + the GyroSwin checkpoint side-by-side, samples
+real validation snapshots and matched diffusion samples once, then re-uses the
+same df batches to evaluate FID under several latent-extraction choices
+(bottleneck, full multiscale flux_head, individual flux_head levels, ...).
+"""
+from __future__ import annotations
+
+import os
+import re
+import sys
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Sequence
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch
+from sklearn.decomposition import PCA
+from tqdm import tqdm
+
+from notebooks.neurips_diff_eval import (
+    compute_fid,
+    compute_statistics,
+    extract_gyroswin_latents,
+    gyroswin_has_flux_head,
+)
+from notebooks.neurips_generate_table1 import (
+    COND_META_MAP,
+    _build_diff_runner,
+    _traj_basename,
+    free_cuda,
+)
+
+
+# ---------------------------------------------------------------------------
+# Latent-source spec
+# ---------------------------------------------------------------------------
+@dataclass
+class LatentSource:
+    """One latent-extraction recipe to evaluate.
+
+    name  : short label used in plots and the table
+    source: 'bottleneck', 'flux_head', or 'decoder'
+    level : interpretation depends on `source`
+        * 'bottleneck' — ignored
+        * 'flux_head'  — multiscale level index (0 = bottleneck mix, 1+ = decoder
+                         up-blocks). None -> concat all levels (default).
+        * 'decoder'    — Pythonic up-block index. None -> -1 (last up-block,
+                         one level before the 5D output, à la InceptionV3 pool3).
+    """
+    name: str
+    source: str
+    level: Optional[int] = None
+
+    def kwargs(self):
+        kw = {"source": self.source}
+        if self.source == "flux_head" and self.level is not None:
+            kw["flux_head_level"] = self.level
+        elif self.source == "decoder":
+            kw["decoder_level"] = -1 if self.level is None else self.level
+        return kw
+
+
+# ---------------------------------------------------------------------------
+# Setup
+# ---------------------------------------------------------------------------
+def setup(
+    diff_ckpt_dir,
+    ae_checkpoint,
+    data_path,
+    gyroswin_checkpoint,
+    valid_traj_h5_names,
+    device,
+    model_snapshot="best.pth",
+):
+    """Build the diffusion runner and load the GyroSwin checkpoint with its
+    `flux_head` exposed (so source='flux_head' works)."""
+    runner = _build_diff_runner(
+        diff_ckpt_dir, ae_checkpoint, data_path,
+        valid_traj_h5_names, model_snapshot, device,
+    )
+
+    # Lazy import: the loader rewrites sys.path / sys.modules to load the old
+    # codebase bundled with the checkpoint, so import only when needed.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from neurips_gyroswin_eval import load_gyroswin_model
+
+    gs_model, gs_cfg, _ = load_gyroswin_model(
+        gyroswin_checkpoint, dataset=runner.trainset, device=device,
+    )
+    if not gyroswin_has_flux_head(gs_model):
+        raise RuntimeError(
+            f"GyroSwin checkpoint at {gyroswin_checkpoint} has no flux_head; "
+            "only source='bottleneck' will work."
+        )
+    gs_cond_keys = sorted(list(gs_cfg.model.conditioning))
+    return runner, gs_model, gs_cfg, gs_cond_keys
+
+
+# ---------------------------------------------------------------------------
+# Sample collection
+# ---------------------------------------------------------------------------
+def _traj_label(fpath):
+    m = re.search(r"iteration_(\d+)", fpath)
+    return f"iter_{m.group(1)}" if m else os.path.basename(fpath)
+
+
+def collect_real(runner, n_per_traj=None, max_total=None, seed=0):
+    """Stratified pick of validation snapshots: up to `n_per_traj` evenly
+    spaced snapshots per trajectory, optionally capped at `max_total`.
+
+    Returns a dict keyed by file index `fi` with:
+        df         : list[Tensor]   normalized model-space df, ready for forward
+        flat_idx   : list[int]      flat valset index for each entry
+        label      : str            "iter_<id>" label
+    """
+    valset = runner.valsets[0]
+    by_fi = defaultdict(list)
+    for idx in range(len(valset)):
+        fi, _ = valset.flat_index_to_file_and_tstep[idx]
+        by_fi[fi].append(idx)
+
+    sel_per_fi = {}
+    for fi, idxs in by_fi.items():
+        if n_per_traj is None or len(idxs) <= n_per_traj:
+            sel_per_fi[fi] = list(idxs)
+        else:
+            step = len(idxs) / n_per_traj
+            sel_per_fi[fi] = [idxs[int(k * step)] for k in range(n_per_traj)]
+
+    if max_total is not None:
+        flat = [(fi, i) for fi in sel_per_fi for i in sel_per_fi[fi]]
+        if len(flat) > max_total:
+            rng = np.random.default_rng(seed)
+            keep = rng.choice(len(flat), size=max_total, replace=False)
+            keep_set = {flat[k] for k in keep}
+            sel_per_fi = {fi: [i for i in sel_per_fi[fi] if (fi, i) in keep_set]
+                          for fi in sel_per_fi}
+
+    out = {}
+    for fi, idxs in sorted(sel_per_fi.items()):
+        if not idxs:
+            continue
+        out[fi] = {
+            "df": [valset[i].df for i in idxs],
+            "flat_idx": list(idxs),
+            "label": _traj_label(valset.files[fi]),
+        }
+    n_total = sum(len(v["df"]) for v in out.values())
+    print(f"  real samples: {n_total} across {len(out)} trajs "
+          f"({ {fi: len(v['df']) for fi, v in out.items()} })")
+    return out
+
+
+def split_by_traj_set(by_fi, runner, trajectories_id, trajectories_ood):
+    """Partition a `{fi: ...}` dict (real or gen) into ID vs OOD subsets,
+    matching basenames against the trajectory lists.
+
+    Returns ``{"ID": {fi: entry}, "OOD": {fi: entry}}``. Trajectories that
+    match neither list are dropped (with a warning).
+    """
+    valset = runner.valsets[0]
+    id_bases  = {t.replace("_ifft_realpotens", "") for t in trajectories_id}
+    ood_bases = {t.replace("_ifft_realpotens", "") for t in trajectories_ood}
+    out = {"ID": {}, "OOD": {}}
+    skipped = []
+    for fi, entry in by_fi.items():
+        base = _traj_basename(valset.files[fi])
+        if base in id_bases:
+            out["ID"][fi] = entry
+        elif base in ood_bases:
+            out["OOD"][fi] = entry
+        else:
+            skipped.append(base)
+    if skipped:
+        print(f"  [split] dropped {len(skipped)} unmatched trajectories: {skipped}")
+    print(f"  [split] ID: {len(out['ID'])} trajs | OOD: {len(out['OOD'])} trajs")
+    return out
+
+
+@torch.no_grad()
+def generate_diff(runner, real_by_fi, n_denoising_steps=15, batch_size=32):
+    """For each trajectory in `real_by_fi`, sample as many diffusion samples as
+    real ones (using that trajectory's conditioning). Returns the same dict
+    layout but with key 'df' holding the decoded gen df tensors (cpu)."""
+    valset = runner.valsets[0]
+    cond_keys = sorted(runner.cfg.model.conditioning)
+
+    out = {}
+    for fi, entry in real_by_fi.items():
+        meta = valset.metadata[fi]
+        cond_vals = [float(np.squeeze(meta[COND_META_MAP.get(k, k)])) for k in cond_keys]
+        cond_t = torch.tensor(cond_vals, dtype=torch.float32, device=runner.device)
+        n = len(entry["df"])
+
+        gen_dfs = []
+        for i in range(0, n, batch_size):
+            bs = min(batch_size, n - i)
+            c = cond_t.unsqueeze(0).expand(bs, -1)
+            decoded = runner.sample(c, steps=n_denoising_steps, latent_only=False)
+            gen_dfs.extend(decoded["df"][b].cpu() for b in range(bs))
+        out[fi] = {"df": gen_dfs, "label": entry["label"]}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Feature extraction
+# ---------------------------------------------------------------------------
+def _trajectory_condition(runner, keys, fi, n):
+    """Build the (n, len(keys)) per-trajectory conditioning tensor.
+
+    `keys` should NOT include 'timestep' — that's a per-snapshot scalar that
+    `extract_gyroswin_latents` fills from `default_timestep` when absent.
+    """
+    meta = runner.valsets[0].metadata[fi]
+    vals = [float(np.squeeze(meta[COND_META_MAP.get(k, k)])) for k in keys]
+    return torch.tensor(vals, dtype=torch.float32).unsqueeze(0).expand(n, -1).contiguous()
+
+
+@torch.no_grad()
+def extract_features(
+    gs_model, by_fi, runner, gs_cond_keys, latent_source: LatentSource,
+    batch_size=8, device="cuda", desc="extract",
+):
+    """Run all df samples through the GyroSwin extractor for one latent source.
+
+    Returns dict: fi -> {'feats': (n, D) np.ndarray, 'label': str}.
+    """
+    # 'timestep' is a per-snapshot scalar pulled from a different metadata
+    # field (`meta["timesteps"]`); drop it from the per-trajectory condition
+    # vector and let extract_gyroswin_latents fill it with default_timestep.
+    nontime_keys = [k for k in gs_cond_keys if k != "timestep"]
+
+    out = {}
+    extractor_kw = latent_source.kwargs()
+    for fi, entry in by_fi.items():
+        dfs = entry["df"]
+        n = len(dfs)
+        cond_t = _trajectory_condition(runner, nontime_keys, fi, n)
+        feats = []
+        for i in range(0, n, batch_size):
+            batch_df = torch.stack(dfs[i:i+batch_size])
+            batch_cond = cond_t[i:i+batch_size]
+            f = extract_gyroswin_latents(
+                gs_model, batch_df, device=device, condition=batch_cond,
+                cond_keys=nontime_keys, **extractor_kw,
+            )
+            feats.append(f)
+        out[fi] = {"feats": np.concatenate(feats, axis=0), "label": entry["label"]}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# FID matrices
+# ---------------------------------------------------------------------------
+def _fit_pca(feats_dict, n_components):
+    pooled = np.concatenate([v["feats"] for v in feats_dict.values()], axis=0)
+    n = min(n_components, pooled.shape[0], pooled.shape[1])
+    pca = PCA(n_components=n).fit(pooled)
+    return pca, pooled.shape[1]
+
+
+def compute_fid_set(real_feats, gen_feats, n_components=64):
+    """Compute global FID, GT-vs-GT pairwise FID, and GT-vs-Pred pairwise FID.
+
+    PCA is fit on the pooled real+gen features so all matrices share a
+    common reduction.
+    """
+    fis = sorted(real_feats.keys())
+    labels = [real_feats[fi]["label"] for fi in fis]
+    n_traj = len(fis)
+
+    # shared PCA over real+gen so all FIDs are on the same axes
+    combined = {f"r{fi}": real_feats[fi] for fi in fis}
+    combined.update({f"g{fi}": gen_feats[fi] for fi in fis})
+    pca, raw_dim = _fit_pca(combined, n_components)
+
+    real_pca = {fi: pca.transform(real_feats[fi]["feats"]) for fi in fis}
+    gen_pca  = {fi: pca.transform(gen_feats[fi]["feats"])  for fi in fis}
+
+    # Global: pool everything
+    real_all = np.concatenate([real_pca[fi] for fi in fis], axis=0)
+    gen_all  = np.concatenate([gen_pca[fi]  for fi in fis], axis=0)
+    mu_r, sig_r = compute_statistics(real_all)
+    mu_g, sig_g = compute_statistics(gen_all)
+    fid_global = compute_fid(mu_r, sig_r, mu_g, sig_g)
+
+    # Per-traj stats
+    stats_real = {fi: compute_statistics(real_pca[fi]) for fi in fis}
+    stats_gen  = {fi: compute_statistics(gen_pca[fi])  for fi in fis}
+
+    fid_gt_gt = np.full((n_traj, n_traj), np.nan)
+    fid_gt_diff = np.full((n_traj, n_traj), np.nan)
+    for i, fi in enumerate(fis):
+        mu_ri, cov_ri = stats_real[fi]
+        for j, fj in enumerate(fis):
+            mu_rj, cov_rj = stats_real[fj]
+            mu_gj, cov_gj = stats_gen[fj]
+            fid_gt_gt[i, j]   = compute_fid(mu_ri, cov_ri, mu_rj, cov_rj)
+            fid_gt_diff[i, j] = compute_fid(mu_ri, cov_ri, mu_gj, cov_gj)
+
+    return {
+        "labels": labels,
+        "fid_global": fid_global,
+        "fid_gt_gt": fid_gt_gt,
+        "fid_gt_diff": fid_gt_diff,
+        "raw_dim": raw_dim,
+        "pca_dim": pca.n_components_,
+        "explained_var": float(pca.explained_variance_ratio_.sum()),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Plotting
+# ---------------------------------------------------------------------------
+def _draw_heatmap(ax, M, labels, title, fmt="{:.1f}"):
+    n = len(labels)
+    vmax = np.nanmax(M) if np.isfinite(M).any() else 1.0
+    im = ax.imshow(M, cmap="YlOrRd", vmin=0, vmax=vmax)
+    ax.set_xticks(range(n)); ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(range(n)); ax.set_yticklabels(labels, fontsize=8)
+    for i in range(n):
+        for j in range(n):
+            if np.isfinite(M[i, j]):
+                color = "white" if M[i, j] > 0.6 * vmax else "black"
+                weight = "bold" if i == j else "normal"
+                ax.text(j, i, fmt.format(M[i, j]), ha="center", va="center",
+                        fontsize=8, fontweight=weight, color=color)
+    ax.set_title(title, fontsize=10)
+    plt.colorbar(im, ax=ax, fraction=0.046, label="FID")
+
+
+def _result_label(key):
+    """Render a result-dict key as a short string for plot/table labels.
+    Accepts either a plain str or a (latent, split) tuple."""
+    if isinstance(key, tuple):
+        return f"{key[0]} ({key[1]})"
+    return str(key)
+
+
+def plot_heatmap_grid(results, title=None):
+    """Plot a 2-column grid: rows = latent sources (or (latent, split) keys),
+    col 0 = GT-vs-GT, col 1 = GT-vs-Diff."""
+    n_rows = len(results)
+    fig, axes = plt.subplots(n_rows, 2, figsize=(13, 6 * n_rows), squeeze=False)
+    for r, (key, res) in enumerate(results.items()):
+        name = _result_label(key)
+        labels = res["labels"]
+        _draw_heatmap(
+            axes[r, 0], res["fid_gt_gt"], labels,
+            f"{name}: GT vs GT  (raw dim={res['raw_dim']}, "
+            f"pca={res['pca_dim']}, var={res['explained_var']:.0%})",
+        )
+        _draw_heatmap(
+            axes[r, 1], res["fid_gt_diff"], labels,
+            f"{name}: GT vs Diff  (global FID = {res['fid_global']:.2f})",
+        )
+        axes[r, 1].set_xlabel("Diff (col traj conditioning)", fontsize=9)
+        axes[r, 1].set_ylabel("GT (row traj)", fontsize=9)
+    if title:
+        fig.suptitle(title, fontsize=12, y=1.001)
+    fig.tight_layout()
+    return fig
+
+
+def build_table(results):
+    """Per-(latent, split) summary table: global FID, mean diagonal, mean
+    off-diagonal. Keys may be plain str or (latent, split) tuples; the
+    output index reflects that structure."""
+    rows = []
+    has_split = any(isinstance(k, tuple) for k in results)
+    for key, res in results.items():
+        gt_diff = res["fid_gt_diff"]
+        n = gt_diff.shape[0]
+        diag = np.diag(gt_diff)
+        off = gt_diff.copy(); np.fill_diagonal(off, np.nan)
+        gt_gt = res["fid_gt_gt"]
+        gt_gt_off = gt_gt.copy(); np.fill_diagonal(gt_gt_off, np.nan)
+
+        if isinstance(key, tuple):
+            latent, split = key
+        else:
+            latent, split = key, None
+
+        rows.append({
+            "latent":                 latent,
+            "split":                  split,
+            "raw_dim":                res["raw_dim"],
+            "pca_dim":                res["pca_dim"],
+            "var_explained":          res["explained_var"],
+            "global_FID":             res["fid_global"],
+            "diag_FID(GT_i,Diff_i)":  float(np.nanmean(diag)),
+            "off_FID(GT_i,Diff_j)":   float(np.nanmean(off))    if n > 1 else np.nan,
+            "GT-GT off-diag":         float(np.nanmean(gt_gt_off)) if n > 1 else np.nan,
+        })
+    df = pd.DataFrame(rows)
+    index_cols = ["latent", "split"] if has_split else ["latent"]
+    if not has_split:
+        df = df.drop(columns=["split"])
+    return df.set_index(index_cols)

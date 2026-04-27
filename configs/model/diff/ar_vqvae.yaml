@@ -1,0 +1,37 @@
+name: diffusion
+bundle_seq_length: 1
+model_type: latent_ar
+latent_dim: 512
+act_fn: GELU
+decouple_mu: true
+conditioning: ["itg", "dg", "s_hat", "q"]
+init_weights: "kaiming_uniform"
+patching_init_weights: "kaiming_uniform"
+cond_init_weights: "kaiming_uniform"
+
+loss_scheduler: null
+loss_weights:
+  df: 1.0
+extra_loss_weights:
+
+vit:
+  num_heads: 16
+  depth: 12
+  gradient_checkpoint: false
+  use_abs_pe: false
+  use_rpb: false
+  use_rope: false
+  gated_attention: false
+  drop_path: 0.1
+
+# autoregressive specific
+ar:
+  conditioning_mode: cls   # cls | film | dit
+  temperature: 1.0
+  top_k: null
+  label_smoothing: 0.1
+
+# diffusion block (formulation selects the runner)
+diffusion:
+  formulation: ar
+  scheduler: {}

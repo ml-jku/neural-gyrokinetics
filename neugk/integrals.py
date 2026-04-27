@@ -455,5 +455,11 @@ class FluxIntegral(nn.Module):
             vfwd = torch.vmap(self.forward_single, in_dims=(geom_keys, 0))
             return vfwd(geom, df)
         else:
-            vfwd = torch.vmap(self.forward_single, in_dims=(geom_keys, 0, 0, 0, 0))
+            in_dims = (
+                geom_keys, 0,
+                0 if phi is not None else None,
+                0 if apar is not None else None,
+                0 if bpar is not None else None,
+            )
+            vfwd = torch.vmap(self.forward_single, in_dims=in_dims)
             return vfwd(geom, df, phi, apar, bpar)

@@ -1,0 +1,84 @@
+name: gyroswin_multi
+bundle_seq_length: 1
+latent_dim: 1024
+num_layers: 1
+decouple_mu: true
+# v17: match the AE's stability architecture (configs/neurips26/ae.yaml),
+# which trains stably on the same heavy-tailed data at latent_dim=1024.
+# Four coherent changes vs. gyroswin_large:
+#   - norm_fn: LayerNorm -> RMSNorm       (drop-in, no mean-subtract)
+#   - modulation: film -> dit             (adaLN-Zero: block outputs ~0 at init)
+#   - gated_attention: false -> true      (multiplicative attenuator on head out)
+#   - num_heads: 64 -> 16 (head_dim 16->64; qk_norm operates on informative dim)
+# Everything else is held fixed to isolate architecture as the stability lever.
+conditioning: ["timestep", "itg", "dg", "s_hat", "q"]
+extra_zf_loss: false
+loss_scheduler:
+  df:
+    type: linear
+    start: 0
+    end: 0
+    start_fraction: 0
+    end_fraction: 1.0
+  phi:
+    type: linear
+    start: 0
+    end: 0
+    start_fraction: 0.5
+    end_fraction: 0.7
+  flux: null
+  fluxavg:
+    type: linear
+    start: 1
+    end: 1
+    start_fraction: 0.0
+    end_fraction: 1.0
+  phi_int: null
+  flux_int: null
+  phi_cross: null
+  flux_cross: null
+loss_weights:
+  df: 1.0
+  phi: 0.1
+  flux: 0.0
+  fluxavg: 0.0
+extra_loss_weights:
+  phi_int: 0.0
+  flux_int: 0.0
+  phi_cross: 0.0
+  flux_cross: 0.0
+
+swin:
+  patch_size: [ 4, 2, 4, 5, 4 ]
+  phi_patch_size: [5, 4, 4]
+  window_size: [ 4, 2, 2, 9, 4 ]
+  phi_window_size: [9, 2, 4]
+  num_heads: 32
+  depth: 4
+  gradient_checkpoint: false
+  merging_hidden_ratio: 4.0
+  unmerging_hidden_ratio: 8.0
+  c_multiplier: 2
+  norm_output: false
+  use_abs_pe: false
+  act_fn: GELU
+  patch_skip: true
+  modulation: "dit"
+  drop_path: 0.1
+  swin_bottleneck: true
+  latent_cross_attn: true
+  use_rpb: true
+  use_rope: false
+  detach_flux_latents: false
+  flux_reduce: "max"
+  flux_num_heads: 8
+  flux_depth: 1
+  flux_conditioning: false
+  qk_norm: true
+  cosine_attn: false
+  gated_attention: true
+  detach_phi_cross_latents: false
+  norm_fn: "RMSNorm"
+  init_weights: "kaiming_uniform"
+  patching_init_weights: "kaiming_uniform"
+  cond_init_weights: "normal_smallvar"
