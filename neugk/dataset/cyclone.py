@@ -130,7 +130,7 @@ class CycloneDataset(Dataset):
         self.stats = (
             normalization_stats
             if normalization_stats is not None
-            else {k: defaultdict(dict) for k in fields_to_load + (probe_targets or [])}
+            else {k: defaultdict(dict) for k in list(fields_to_load) + list(probe_targets or [])}
         )
         self.normalization_scope = normalization_scope
         self.cond_filters = cond_filters
@@ -590,6 +590,10 @@ class CycloneDataset(Dataset):
         timestep = sample["timestep"]
         itg, dg, s_hat, q = sample["itg"], sample["dg"], sample["s_hat"], sample["q"]
 
+        y_fluxavg = None
+        if "fluxavg" in self.fields_to_load:
+            y_fluxavg = np.array([self.get_avg_flux(file_index)], dtype=np.float32)
+
         if self.normalizers is not None and get_normalized:
             if x is not None:
                 x, shift, scale = self.normalize(file_index, df=x)
@@ -601,20 +605,23 @@ class CycloneDataset(Dataset):
                     y_phi = (y_phi - shift) / scale
             if flux is not None:
                 flux, *_ = self.normalize(file_index, flux=flux)
+            if y_fluxavg is not None:
+                y_fluxavg, *_ = self.normalize(file_index, fluxavg=y_fluxavg)
 
         return CycloneSample(
-            df=torch.as_tensor(x, self.dtype) if x is not None else None,
-            y_df=torch.as_tensor(gt, self.dtype) if gt is not None else None,
-            phi=torch.as_tensor(phi, self.dtype) if phi is not None else None,
-            y_phi=(torch.as_tensor(y_phi, self.dtype) if y_phi is not None else None),
-            y_flux=(torch.as_tensor(flux, self.dtype) if flux is not None else None),
-            timestep=torch.as_tensor(timestep, self.dtype),
-            file_index=torch.tensor(file_index, torch.long),
-            timestep_index=torch.tensor(t_index, torch.long),
-            itg=torch.as_tensor(itg, self.dtype),
-            dg=torch.as_tensor(dg, self.dtype),
-            s_hat=torch.as_tensor(s_hat, self.dtype),
-            q=torch.as_tensor(q, self.dtype),
+            df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
+            y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
+            phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
+            y_phi=(torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None),
+            y_flux=(torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None),
+            y_fluxavg=(torch.as_tensor(y_fluxavg, dtype=self.dtype).squeeze() if y_fluxavg is not None else None),
+            timestep=torch.as_tensor(timestep, dtype=self.dtype),
+            file_index=torch.tensor(file_index, dtype=torch.long),
+            timestep_index=torch.tensor(t_index, dtype=torch.long),
+            itg=torch.as_tensor(itg, dtype=self.dtype),
+            dg=torch.as_tensor(dg, dtype=self.dtype),
+            s_hat=torch.as_tensor(s_hat, dtype=self.dtype),
+            q=torch.as_tensor(q, dtype=self.dtype),
         )
 
     def _load_data(self, f: Any, file_index: int, t_index: int) -> dict:
@@ -718,6 +725,12 @@ class CycloneDataset(Dataset):
                 [meta["flux"][original_t_index]], dtype=np.float32
             )
 
+        if "fluxavg" in keys:
+            meta = self.metadata[file_index]
+            sample["fluxavg"] = np.array(
+                [float(np.mean(meta["flux"][-80:]))], dtype=np.float32
+            )
+
         return sample
 
     def normalize(
@@ -726,6 +739,7 @@ class CycloneDataset(Dataset):
         df: Optional[torch.Tensor] = None,
         phi: Optional[torch.Tensor] = None,
         flux: Optional[torch.Tensor] = None,
+        fluxavg: Optional[torch.Tensor] = None,
         return_stats: bool = True,
     ):
         if df is not None:
@@ -737,6 +751,9 @@ class CycloneDataset(Dataset):
         elif flux is not None:
             field = "flux"
             x = flux
+        elif fluxavg is not None:
+            field = "fluxavg"
+            x = fluxavg
         else:
             raise ValueError
 
@@ -752,6 +769,7 @@ class CycloneDataset(Dataset):
         df: Optional[torch.Tensor] = None,
         phi: Optional[torch.Tensor] = None,
         flux: Optional[torch.Tensor] = None,
+        fluxavg: Optional[torch.Tensor] = None,
     ):
         if df is not None:
             field = "df"
@@ -762,6 +780,9 @@ class CycloneDataset(Dataset):
         elif flux is not None:
             field = "flux"
             x = flux
+        elif fluxavg is not None:
+            field = "fluxavg"
+            x = fluxavg
         else:
             raise ValueError
 

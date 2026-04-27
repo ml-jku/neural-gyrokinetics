@@ -98,6 +98,7 @@ class DDPMRunner(BaseRunner):
             prediction_type=diff_cfg.get("prediction_type", "epsilon"),
         )
 
+        self.latent_shape = self.model.latent_shape # cache before DDP wraps the module
         if self.use_ddp:
             self.model = DDP(self.model, device_ids=[self.rank])
 
@@ -269,7 +270,7 @@ class DDPMRunner(BaseRunner):
         self.model.eval()
         bs = condition.shape[0]
         # start with noise
-        latents = torch.randn((bs, *self.model.latent_shape), device=self.device)
+        latents = torch.randn((bs, *self.latent_shape), device=self.device)
         n_steps = steps or self.noise_scheduler.config.num_train_timesteps
         self.noise_scheduler.set_timesteps(n_steps)
 
@@ -364,7 +365,7 @@ class StudentTRunner(DDPMRunner):
         self.model.eval()
         bs = condition.shape[0]
 
-        latents = self.distr.sample((bs, *self.model.latent_shape)).to(self.device)
+        latents = self.distr.sample((bs, *self.latent_shape)).to(self.device)
 
         # denoising loop
         self.noise_scheduler.set_timesteps(num_inference_steps)
@@ -461,7 +462,7 @@ class EDMRunner(DDPMRunner):
         sigmas = torch.cat([sigmas, torch.zeros_like(sigmas[:1])])
         # start with noise
         x = (
-            torch.randn((bs, *self.model.latent_shape), device=self.device)
+            torch.randn((bs, *self.latent_shape), device=self.device)
             * self.sigma_max
         )
         # iterate solver
@@ -568,7 +569,7 @@ class FlowMatchingRunner(DDPMRunner):
         """Generate samples by integrating the velocity field using Euler's method."""
         self.model.eval()
         bs = condition.shape[0]
-        x = self._get_prior((bs, *self.model.latent_shape)).to(self.device)
+        x = self._get_prior((bs, *self.latent_shape)).to(self.device)
         t_steps = torch.linspace(0.0, 1.0, steps + 1, device=self.device)
 
         # integrate ODE
@@ -660,7 +661,7 @@ class JiTRunner(DDPMRunner):
         n_train_steps = self.noise_scheduler.config.num_train_timesteps
 
         # start with pure noise
-        xt = torch.randn((bs, *self.model.latent_shape), device=self.device)
+        xt = torch.randn((bs, *self.latent_shape), device=self.device)
 
         # few-step iterative refinement
         t_indices = torch.linspace(n_train_steps - 1, 0, steps)
@@ -685,3 +686,137 @@ class JiTRunner(DDPMRunner):
             pred = self.autoencoder.decode(pred, condition=condition)
         self.model.train()
         return pred
+
+
+class ARRunner(DDPMRunner):
+    """Runner for autoregressive discrete-token prediction on VQVAE latents."""
+
+    def setup_components(self):
+        """Load VQVAE, precompute indices, build AR model and optimizer."""
+        ckp_path = self.cfg.ae_checkpoint
+        if not ckp_path or not os.path.exists(ckp_path):
+            raise ValueError(f"VQVAE checkpoint not found at {ckp_path}.")
+
+        self.autoencoder, _, _ = load_autoencoder(ckp_path, device=self.device)
+        self.autoencoder.checkpoint_path = os.path.abspath(str(ckp_path))
+
+        # precompute VQ indices (CycloneVQVAEDataset handles this)
+        precompute_loader = DataLoader(
+            self.trainset,
+            batch_size=self.cfg.training.batch_size,
+            num_workers=0,
+            shuffle=False,
+            collate_fn=self.trainset.collate,
+            pin_memory=False,
+            sampler=self.trainloader.sampler if self.use_ddp else None,
+            drop_last=getattr(self.trainloader, "drop_last", False),
+        )
+        self.trainset.precompute_latents(
+            self.rank,
+            dataloader=precompute_loader,
+            autoencoder=self.autoencoder,
+            device=self.device,
+        )
+        # discrete tokens — no latent scaling
+        self.latent_scale = 1.0
+
+        self.autoencoder.to(self.device)
+        self.autoencoder.eval()
+        self.autoencoder.requires_grad_(False)
+
+        # build AR model
+        self.model = get_diffusion_model(self.cfg, self.autoencoder, self.trainset)
+        self.model.to(self.device)
+
+        self.latent_shape = self.model.latent_shape
+        self.latent_grid_size = tuple(self.autoencoder.bottleneck_grid_size)
+        self.codebook_size = self.autoencoder.vq.codebook_size
+
+        ar_cfg = self.cfg.model.get("ar", {})
+        self.ar_temperature = ar_cfg.get("temperature", 1.0)
+        self.ar_top_k = ar_cfg.get("top_k", None)
+
+        if self.use_ddp:
+            self.model = DDP(self.model, device_ids=[self.rank])
+
+        # optimizer
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        exclude = getattr(self.cfg.training, "exclude_from_wd", [])
+        if exclude:
+            groups = exclude_from_weight_decay(
+                self.model, exclude, self.cfg.training.weight_decay
+            )
+            self.opt = torch.optim.AdamW(groups, lr=self.cfg.training.learning_rate)
+        else:
+            self.opt = torch.optim.AdamW(
+                params,
+                lr=self.cfg.training.learning_rate,
+                weight_decay=self.cfg.training.weight_decay,
+            )
+
+        self.input_fields = set(self.cfg.dataset.input_fields)
+        self.idx_keys = ["file_index", "timestep_index"]
+
+        # evaluator (reuse diffusion evaluation — decode back to 5D)
+        self.loss_wrap = LossWrapper(
+            denormalize_fn=self.valsets[0].denormalize,
+            separate_zf=self.cfg.dataset.separate_zf,
+            real_potens=self.cfg.dataset.real_potens,
+        )
+        self.evaluator = DiffusionEvaluator(
+            cfg=self.cfg,
+            valsets=self.valsets,
+            valloaders=self.valloaders,
+            loss_wrap=self.loss_wrap,
+        )
+
+    def forward_step_diffusion(self, sample: Dict[str, torch.Tensor], condition):
+        """Cross-entropy loss on next-token prediction of VQ indices."""
+        indices = sample["df"].long()
+        model = self.model
+        logits = model(indices, condition=condition)  # (B, S, V)
+        label_smoothing = getattr(
+            model.module if hasattr(model, "module") else model,
+            "label_smoothing",
+            0.0,
+        )
+        return F.cross_entropy(
+            logits.reshape(-1, self.codebook_size),
+            indices.reshape(-1),
+            label_smoothing=label_smoothing,
+        )
+
+    @torch.no_grad()
+    def sample(
+        self,
+        condition: torch.Tensor,
+        latent_only: bool = False,
+        steps: int = None,
+    ):
+        """Generate samples by autoregressive token prediction + VQVAE decode."""
+        self.model.eval()
+        raw_model = self.model.module if hasattr(self.model, "module") else self.model
+        indices = raw_model.generate(
+            condition=condition,
+            temperature=self.ar_temperature,
+            top_k=self.ar_top_k,
+            device=self.device,
+        )  # (B, seq_len) int64
+
+        if latent_only:
+            # return codebook embeddings for probing
+            codebook = self.autoencoder.vq.codebook.detach()
+            z = F.embedding(indices, codebook)
+            z = z.view(z.shape[0], *self.latent_grid_size, -1)
+            self.model.train()
+            return z
+
+        decoded = self.autoencoder.decode_from_indices(
+            indices, condition=condition
+        )
+        self.model.train()
+        return decoded
+
+    def evaluate(self, epoch, evaluate_probing: bool = True, no_save: bool = False):
+        """AR evaluation — probing disabled (generation too slow for full trainset)."""
+        return super().evaluate(epoch, evaluate_probing=False, no_save=no_save)

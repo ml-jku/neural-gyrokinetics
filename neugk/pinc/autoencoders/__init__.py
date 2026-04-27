@@ -78,6 +78,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         model_kwargs = {}
         if model_type == "vae":
             model_kwargs["beta_vae"] = getattr(ae_cfg, "beta_vae", 1.0)
+            model_kwargs["logvar_clamp"] = getattr(ae_cfg, "logvar_clamp", None)
         elif model_type == "vqvae":
             vq_config = {}
             if hasattr(ae_cfg, "vq"):
