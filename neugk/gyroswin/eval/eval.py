@@ -41,7 +41,7 @@ class GyroSwinEvaluator(BaseEvaluator):
         for key, val in tgts.items():
             if bundle_seq_length == 1:
                 tgts[key] = torch.stack(val, 0)
-            elif key == "flux":
+            elif key in ("flux", "fluxavg"):
                 tgts[key] = rearrange(torch.stack(val, 1), "b t -> t b")
             elif key == "phi":
                 tgts[key] = rearrange(torch.stack(val, 1), "b t ... -> t b ...")
@@ -85,6 +85,7 @@ class GyroSwinEvaluator(BaseEvaluator):
         ]
         tsteps = valset.get_timesteps(idx_data["file_index"], torch.tensor(ts_idxs))
         fluxes = []
+        fluxavgs = []
 
         # rollout loop
         with torch.no_grad():
@@ -94,6 +95,8 @@ class GyroSwinEvaluator(BaseEvaluator):
 
                 if "flux" in pred:
                     fluxes.append(pred.pop("flux").cpu())
+                if "fluxavg" in pred:
+                    fluxavgs.append(pred.pop("fluxavg").cpu())
 
                 if predict_delta:
                     for k in pred:
@@ -122,6 +125,8 @@ class GyroSwinEvaluator(BaseEvaluator):
 
         if fluxes:
             preds["flux"] = rearrange(torch.stack(fluxes, dim=-1), "b t -> t b")
+        if fluxavgs:
+            preds["fluxavg"] = rearrange(torch.stack(fluxavgs, dim=-1), "b t -> t b")
 
         return {k: p.to(dtype=torch.float32) for k, p in preds.items()}
 
@@ -253,14 +258,14 @@ class GyroSwinEvaluator(BaseEvaluator):
                     batch_idx = torch.randint(
                         0, len(idx_data["timestep_index"]), (1,)
                     ).item()
-                    rollout_plot = {k: v[:, batch_idx] for k, v in rollout.items()}
+                    rollout_plot = {k: v[0, batch_idx] for k, v in rollout.items()}
                     plot_gt = {k: v[0][batch_idx] for k, v in tgts.items()}
                     val_plots.update(
                         generate_val_plots(
                             rollout_plot,
                             plot_gt,
-                            conds["timestep"],
                             "random draw" if val_idx == 0 else "holdout samples",
+                            conds["timestep"],
                         )
                     )
 

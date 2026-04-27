@@ -85,6 +85,7 @@ def preprocess(
     separate_zf: bool = False,
     split_into_bands=None,
     root: str = "/restricteddata/ukaea/gyrokinetics",
+    raw_subdir: str = "raw",
     target_dir: str = "/local00/bioinf/galletti",
     position_queue: queue.Queue = None,
     metadata_only: bool = False,
@@ -99,7 +100,7 @@ def preprocess(
         ), "Need to perform IFFT to maintain shapes for separate_zf"
 
         target_dir = root if target_dir is None else target_dir
-        dir_in = f"{root}/raw/{filename}"
+        dir_in = f"{root}/{raw_subdir}/{filename}"
 
         if isinstance(backend, KvikIOBackend):
             dir_out = f"{target_dir}/preprocessed_kvikio"
@@ -392,13 +393,21 @@ if __name__ == "__main__":
     parser.add_argument(
         "--root", type=str, default="/restricteddata/ukaea/gyrokinetics"
     )
+    parser.add_argument(
+        "--raw_subdir", type=str, default="raw",
+        help="Subdirectory under root containing the raw simulation folders.",
+    )
+    parser.add_argument(
+        "--num_iterations", type=int, default=300,
+        help="Number of iterations to process (iteration_0 .. iteration_N-1).",
+    )
     args = parser.parse_args()
 
     IFFT = True
     separate_zf = False
     split_into_bands = None
 
-    datasets = [f"iteration_{i}" for i in range(300)]
+    datasets = [f"iteration_{i}" for i in range(args.num_iterations)]
 
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)
@@ -419,6 +428,7 @@ if __name__ == "__main__":
             separate_zf=separate_zf,
             split_into_bands=split_into_bands,
             root=args.root,
+            raw_subdir=args.raw_subdir,
             target_dir=args.target_dir,
             position_queue=position_queue,
             metadata_only=args.metadata_only,
@@ -454,6 +464,7 @@ if __name__ == "__main__":
                 separate_zf=separate_zf,
                 split_into_bands=split_into_bands,
                 root=args.root,
+                raw_subdir=args.raw_subdir,
                 target_dir=args.target_dir,
                 position_queue=None,
                 metadata_only=args.metadata_only,

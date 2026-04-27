@@ -17,6 +17,10 @@ from neugk.utils import (
 from neugk.dataset import CycloneSample
 from neugk.losses import LossWrapper, GradientBalancer
 from neugk.runner import BaseRunner
+from neugk.pinc.autoencoders.ae_utils import (
+    MuonWithAuxAdam,
+    SingleDeviceMuonWithAuxAdam,
+)
 
 from neugk.gyroswin.models import get_model
 from neugk.losses import get_pushforward_fn
@@ -33,7 +37,7 @@ class GyroSwinRunner(BaseRunner):
         if self.use_ddp:
             self.model = DDP(
                 self.model, device_ids=[self.local_rank],
-                find_unused_parameters=getattr(self.cfg.ddp, "find_unused_parameters", False),
+                find_unused_parameters=getattr(self.cfg.ddp, "find_unused_parameters", True),
             )
 
         # load checkpoints
@@ -42,35 +46,42 @@ class GyroSwinRunner(BaseRunner):
             self.model, ckpt_dict = load_model_and_config(
                 ckpt_path, self.model, self.device, for_ddp=self.use_ddp
             )
-            # handle parameter freezing
+            # handle parameter freezing: keep trainable iff the name matches
+            # any key (OR); the previous nested-loop form was an AND and froze
+            # everything when more than one key was given.
             if self.cfg.training.params_to_include:
+                keys = self.cfg.training.params_to_include
                 for n, p in self.model.named_parameters():
-                    for key in self.cfg.training.params_to_include:
-                        if key not in n:
-                            p.requires_grad = False
+                    if not any(key in n for key in keys):
+                        p.requires_grad = False
             self.start_epoch = ckpt_dict.get("epoch", 0)
-            self.cur_update_step = self.start_epoch * len(self.trainloader)
+            self.cur_update_step = 0
 
             # optimizer state loading happens after opt init
             self._ckpt_dict = ckpt_dict  # temp store
 
-        # setup parameters for optimizer
-        if self.cfg.training.exclude_from_wd is not None:
-            params = exclude_from_weight_decay(
-                self.model,
-                self.cfg.training.exclude_from_wd,
-                weight_decay=self.cfg.training.weight_decay,
-            )
-        else:
-            params = self.model.parameters()
-
         # optimizer setup
-        self.opt = torch.optim.Adam(
-            params,
-            lr=self.cfg.training.learning_rate,
-            weight_decay=self.cfg.training.weight_decay,
-            betas=(0.9, 0.95),
-        )
+        is_muon = getattr(self.cfg.training, "optimizer", "adam") == "muon"
+        if is_muon:
+            param_groups = self._split_muon_param_groups(self.model)
+            opt_cls = MuonWithAuxAdam if self.use_ddp else SingleDeviceMuonWithAuxAdam
+            self.opt = opt_cls(param_groups)
+            self.opt.defaults = {"lr": self.cfg.training.learning_rate}
+        else:
+            if self.cfg.training.exclude_from_wd is not None:
+                params = exclude_from_weight_decay(
+                    self.model,
+                    self.cfg.training.exclude_from_wd,
+                    weight_decay=self.cfg.training.weight_decay,
+                )
+            else:
+                params = self.model.parameters()
+            self.opt = torch.optim.Adam(
+                params,
+                lr=self.cfg.training.learning_rate,
+                weight_decay=self.cfg.training.weight_decay,
+                betas=(0.9, 0.95),
+            )
 
         # restore optimizer state
         if hasattr(self, "_ckpt_dict"):
@@ -137,6 +148,71 @@ class GyroSwinRunner(BaseRunner):
             valloaders=self.valloaders,
             loss_wrap=self.loss_wrap,
         )
+
+    def _split_muon_param_groups(self, model):
+        """Split parameters into Muon (2D hidden weights) and Adam (everything else).
+
+        Muon orthogonalizes gradient updates via Newton-Schulz iterations, which
+        benefits 2D weight matrices in hidden layers (attention, MLPs, mixing).
+        Embeddings, output heads, and 1D params (biases, norms) use Adam instead,
+        as they have different optimization dynamics.
+        """
+        muon_params, adam_decay, adam_no_decay = [], [], []
+        exclude_wd = getattr(self.cfg.training, "exclude_from_wd", []) or []
+
+        # Params whose names contain these are not suitable for Muon even if 2D:
+        # embed/unpatch = input/output projections, head = task heads, cond = conditioning
+        adam_keywords = ["embed", "unpatch", "head", "pos_embed", "cls_token", "cond"]
+
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            is_hidden_matrix = (
+                param.ndim >= 2
+                and not any(kw in name.lower() for kw in adam_keywords)
+            )
+            if is_hidden_matrix:
+                muon_params.append(param)
+            elif any(x in name.lower() for x in exclude_wd):
+                adam_no_decay.append(param)
+            else:
+                adam_decay.append(param)
+
+        lr = self.cfg.training.learning_rate
+        wd = self.cfg.training.weight_decay
+        muon_lr_mult = getattr(self.cfg.training, "muon_lr_multiplier", 100)
+        groups = [
+            {
+                "params": muon_params,
+                "use_muon": True,
+                "lr": lr * muon_lr_mult,
+                "weight_decay": wd,
+                "momentum": 0.95,
+            },
+            {
+                "params": adam_decay,
+                "use_muon": False,
+                "lr": lr,
+                "betas": (0.9, 0.95),
+                "weight_decay": wd,
+            },
+        ]
+        if adam_no_decay:
+            groups.append(
+                {
+                    "params": adam_no_decay,
+                    "use_muon": False,
+                    "lr": lr,
+                    "betas": (0.9, 0.95),
+                    "weight_decay": 0.0,
+                }
+            )
+        if not self.rank:
+            print(
+                f"Muon optimizer: {len(muon_params)} Muon params, "
+                f"{len(adam_decay)} Adam (decay), {len(adam_no_decay)} Adam (no decay)"
+            )
+        return groups
 
     def train_epoch(self, epoch):
         """Run one training epoch with multitasking and pushforward updates."""

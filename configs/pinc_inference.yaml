@@ -1,0 +1,17 @@
+root: /projects/u6eb/gyrokinetics/preprocessed_kvikio
+device: cuda
+n_samples: 8
+batch_size: 8
+use_amp: false
+trajectories:
+  - iteration_262_ifft_realpotens
+  - iteration_135_ifft_realpotens
+  - iteration_8_ifft_realpotens
+  - iteration_232_ifft_realpotens
+  - iteration_148_ifft_realpotens
+  - iteration_115_ifft_realpotens
+  # - ood_iteration_0_ifft_realpotens
+  # - ood_iteration_1_ifft_realpotens
+  # - ood_iteration_2_ifft_realpotens
+  # - ood_iteration_3_ifft_realpotens
+  # - ood_iteration_4_ifft_realpotens

@@ -9,6 +9,8 @@ weight_decay: 1e-6
 exclude_from_wd: ["cond"]
 predict_delta: false
 scheduler: "cosine"
+optimizer: "adam"  # "adam" or "muon"
+muon_lr_multiplier: 100  # Muon group lr = learning_rate * this
 clip_grad: true
 clip_to: 1.0
 gradnorm_balancer: "none"  # "none", "full", "pseudo"

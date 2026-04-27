@@ -289,13 +289,23 @@ class WindowAttention(nn.Module):
             else:
                 x = F.scaled_dot_product_attention(q, k, v, mask, attn_drop)
         if self.cosine_attn:
-            # swinv2 cosine similarity attention
-            attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
+            # swinv2 cosine similarity attention via sdpa:
+            # pre-normalize q,k then absorb per-head logit_scale into q so we
+            # can call F.scaled_dot_product_attention with scale=1.0 and get
+            # flash/efficient kernels instead of materializing [B,H,N,N].
             logit_scale = torch.clamp(self.logit_scale, max=self.max_logits).exp()
-            attn = attn * logit_scale
-            attn = attn + mask
-            attn = self.attn_drop(F.softmax(attn, dim=-1))
-            x = attn @ v
+            q_n = F.normalize(q, dim=-1) * logit_scale
+            k_n = F.normalize(k, dim=-1)
+            attn_drop = self.attn_drop.p if self.training else 0.0
+            if dist.is_initialized():
+                with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                    x = F.scaled_dot_product_attention(
+                        q_n, k_n, v, attn_mask=mask, dropout_p=attn_drop, scale=1.0
+                    )
+            else:
+                x = F.scaled_dot_product_attention(
+                    q_n, k_n, v, attn_mask=mask, dropout_p=attn_drop, scale=1.0
+                )
 
         if self.gated_attention:
             # gated headwise attention before readout (https://arxiv.org/pdf/2505.06708)
@@ -354,6 +364,7 @@ class SwinTransformerBlock(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         gated_attention: bool = False,
+        cosine_attn: bool = False,
     ):
         super().__init__()
         self.space = space
@@ -388,6 +399,7 @@ class SwinTransformerBlock(nn.Module):
             use_rpb=use_rpb,
             use_rope=use_rope,
             gated_attention=gated_attention,
+            cosine_attn=cosine_attn,
         )
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -600,6 +612,7 @@ class SwinLayer(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         gated_attention: bool = False,
+        cosine_attn: bool = False,
         depth_shifts: bool = False,
         TransformerBlockType: Type[nn.Module] = SwinTransformerBlock,
     ):
@@ -643,6 +656,7 @@ class SwinLayer(nn.Module):
         self.use_rpb = use_rpb
         self.use_rope = use_rope
         self.gated_attention = gated_attention
+        self.cosine_attn = cosine_attn
 
         assert dim % num_heads == 0
 
@@ -668,6 +682,7 @@ class SwinLayer(nn.Module):
                 use_rpb=use_rpb,
                 use_rope=use_rope,
                 gated_attention=gated_attention,
+                cosine_attn=cosine_attn,
             )
             blocks.append(swin)
         self.blocks = nn.ModuleList(blocks)

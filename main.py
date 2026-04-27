@@ -142,6 +142,10 @@ def main(config: DictConfig):
         ), "Output path does not contain checkpoint"
 
         loaded_conf = OmegaConf.load(f"{config.output_path}/config.yaml")
+        # `choices` is Hydra defaults metadata saved by fresh runs (see a few
+        # lines above); it is not part of the main config schema, so merging it
+        # into a struct-mode config raises ConfigKeyError.
+        loaded_conf.pop("choices", None)
         filter_cli_priority(sys.argv[1:], loaded_conf)
         config = OmegaConf.merge(config, loaded_conf)
 
