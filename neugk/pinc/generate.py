@@ -226,7 +226,7 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
     # Get conditioning and geometry for this trajectory
     model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
     model_cfg = getattr(cfg, model_key)
-    decoder_conds = list(model_cfg.decoder_conditioning)
+    decoder_conds = sorted(set(model_cfg.decoder_conditioning) | set(getattr(model_cfg, "encoder_conditioning", [])))
 
     condition = (
         get_conditioning(decoder_conds, metadata, device)
