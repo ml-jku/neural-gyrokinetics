@@ -84,13 +84,18 @@ def extract_gyroswin_latents(
     default_timestep=150.0,
     flux_head_level=None,
     decoder_level=None,
+    pool=None,
     **kwargs,
 ):
     """Extract feature vectors from a GyroSwin model for FID / MMD.
 
     source:
-      "bottleneck"  — df_unet encoder middle-block activations (flat, high-D).
-                      Existing default; does not need a flux_head.
+      "bottleneck"  — df_unet encoder middle-block activations.
+                      Returns the flattened (B, C*spatial) tensor by default
+                      (high-D, ~5e5 for an XXL model). Pass `pool="amax"` or
+                      `pool="mean"` to spatially pool first → (B, C), the same
+                      reduction flux_head uses; that's what you want for FID
+                      with limited samples.
       "flux_head"   — multiscale pre-MLP flux_head latents (one pooled vector
                       per resolution level). Physics-targeted: these are the
                       features the model uses to regress the transport flux.
@@ -136,7 +141,13 @@ def extract_gyroswin_latents(
         if hasattr(unet, "middle_pe"):
             x = unet.middle_pe(x)
         x = unet.middle(x, **cond)
-        return x.flatten(1).cpu().numpy()
+        # Optional spatial pool (analogue of flux_head's amax/mean reduction).
+        # x is (B, ...spatial..., C); reduce over spatial axes 1..ndim-1.
+        if pool == "amax":
+            x = x.amax(axis=list(range(1, x.ndim - 1)))
+        elif pool == "mean":
+            x = x.mean(axis=list(range(1, x.ndim - 1)))
+        return x.reshape(x.shape[0], -1).cpu().numpy()
 
     elif source == "flux_head":
         if not gyroswin_has_flux_head(m):
@@ -185,6 +196,113 @@ def extract_gyroswin_latents(
                     )
                 flat = flat_per_level[flux_head_level]
             return flat.cpu().numpy()
+        finally:
+            handle.remove()
+
+    elif source == "skip":
+        if condition is None or cond_keys is None:
+            raise ValueError("source='skip' requires both `condition` and `cond_keys`")
+        c = condition.to(device)
+        n_keys = len(cond_keys)
+        cols = c.shape[-1]
+        if cols == n_keys:
+            cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
+            cond_kwargs.setdefault(
+                "timestep",
+                torch.full((c.shape[0],), float(default_timestep), device=device, dtype=c.dtype),
+            )
+        elif cols == n_keys + 1:
+            cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
+            cond_kwargs["timestep"] = c[:, -1]
+        else:
+            raise ValueError(
+                f"condition has {cols} cols; expected {n_keys} or {n_keys + 1}"
+            )
+
+        # Capture skip connection from `df_unet.down_blocks[level]`. Down-block
+        # forward returns `(x_down, x_pre)` — the second element is the skip
+        # routed to the matching up-block; that's what the U-Net uses.
+        down_blocks = m.df_unet.down_blocks
+        n_down = len(down_blocks)
+        # Default to the **deepest** skip (closest to the bottleneck).
+        lvl = (n_down - 1) if decoder_level is None else decoder_level
+        if not -n_down <= lvl < n_down:
+            raise IndexError(
+                f"skip level={lvl} out of range for {n_down} down_blocks"
+            )
+        target = down_blocks[lvl]
+
+        captured = {}
+
+        def _hook(_mod, _inputs, output):
+            # Down block returns (x_down, x_pre); take x_pre, the actual skip.
+            if isinstance(output, (tuple, list)) and len(output) >= 2:
+                captured["feat"] = output[1]
+            else:
+                captured["feat"] = output[0] if isinstance(output, (tuple, list)) else output
+
+        handle = target.register_forward_hook(_hook)
+        try:
+            _ = m(x, **cond_kwargs)
+            feat = captured.get("feat")
+            if feat is None:
+                raise RuntimeError(f"forward pass did not invoke down_blocks[{lvl}]")
+            if pool == "amax":
+                feat = feat.amax(axis=list(range(1, feat.ndim - 1)))
+            elif pool == "mean":
+                feat = feat.mean(axis=list(range(1, feat.ndim - 1)))
+            return feat.reshape(feat.shape[0], -1).cpu().numpy()
+        finally:
+            handle.remove()
+
+    elif source == "phi":
+        if condition is None or cond_keys is None:
+            raise ValueError("source='phi' requires both `condition` and `cond_keys`")
+        c = condition.to(device)
+        n_keys = len(cond_keys)
+        cols = c.shape[-1]
+        if cols == n_keys:
+            cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
+            cond_kwargs.setdefault(
+                "timestep",
+                torch.full((c.shape[0],), float(default_timestep), device=device, dtype=c.dtype),
+            )
+        elif cols == n_keys + 1:
+            cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
+            cond_kwargs["timestep"] = c[:, -1]
+        else:
+            raise ValueError(
+                f"condition has {cols} cols; expected {n_keys} or {n_keys + 1}"
+            )
+
+        # Aggregated phi latents: capture the phi-bottleneck activation
+        # (`phi_middle` in SwinXNetMultitask). Spatial-pool by default to
+        # avoid the huge flat dim — same `pool` kwarg as `bottleneck`.
+        target = None
+        for attr in ("phi_middle", "phi_middle_post"):
+            if hasattr(m, attr):
+                target = getattr(m, attr); break
+        if target is None and hasattr(m, "phi_unet"):
+            target = getattr(m.phi_unet, "middle", None)
+        if target is None:
+            raise RuntimeError("model exposes no phi-middle module to hook")
+
+        captured = {}
+
+        def _hook(_mod, _inputs, output):
+            captured["feat"] = output[0] if isinstance(output, (tuple, list)) else output
+
+        handle = target.register_forward_hook(_hook)
+        try:
+            _ = m(x, **cond_kwargs)
+            feat = captured.get("feat")
+            if feat is None:
+                raise RuntimeError("forward pass did not invoke phi_middle")
+            if pool == "amax":
+                feat = feat.amax(axis=list(range(1, feat.ndim - 1)))
+            elif pool == "mean":
+                feat = feat.mean(axis=list(range(1, feat.ndim - 1)))
+            return feat.reshape(feat.shape[0], -1).cpu().numpy()
         finally:
             handle.remove()
 
@@ -484,11 +602,289 @@ def run_trajectory(
 
 def load_reference_flux(gkw_dir, iteration):
     """Heat flux stats from GKW fluxes.dat (last 240 steps)."""
+    samples = load_reference_flux_samples(gkw_dir, iteration)
+    return float(np.mean(samples)), float(np.std(samples))
+
+
+def load_reference_flux_samples(gkw_dir, iteration, n_tail=240):
+    """Raw GKW heat-flux samples (last `n_tail` steps of fluxes.dat).
+
+    Used by the stationary-distribution divergences below as the reference
+    sample $\\{Q_\\text{GKW}\\}$.
+    """
     path = os.path.join(gkw_dir, f"iteration_{iteration}", "fluxes.dat")
     data = np.loadtxt(path)
     eflux = data[:, 1]
-    tail = eflux[-80 * 3 :]
-    return float(np.mean(tail)), float(np.std(tail))
+    return np.asarray(eflux[-n_tail:], dtype=np.float64)
+
+
+# ---------------------------------------------------------------------------
+# Stationary-distribution divergences (paper §5.2 lines 630–639).
+#
+# All metrics operate on two 1-D samples drawn from the *stationary window* of
+# each trajectory. Vector spectra are handled by `spec_divergence` below,
+# which broadcasts a 1-D metric across modes.
+# ---------------------------------------------------------------------------
+
+def stationary_window(x, frac=0.5):
+    """Return the last `frac` fraction of a 1-D series (the post-saturation
+    window we feed to the two-sample tests). frac=0.5 → second half."""
+    x = np.asarray(x).ravel()
+    if x.size == 0:
+        return x
+    k = max(1, int(round(frac * x.size)))
+    return x[-k:]
+
+
+# --- 1-D scalar divergences (flux) -----------------------------------------
+
+def flux_ks_pvalue(x_warm, x_ref):
+    """Two-sample Kolmogorov–Smirnov p-value. Higher = more indistinguishable
+    from the reference distribution. Paper's primary $\\tau_Q$ test."""
+    from scipy.stats import ks_2samp
+    return float(ks_2samp(np.asarray(x_warm), np.asarray(x_ref)).pvalue)
+
+
+def flux_ad_statistic(x_warm, x_ref):
+    """Anderson–Darling k-sample statistic (k=2). Heavier tails of $Q$ get
+    higher weight than under KS — paper alternative."""
+    from scipy.stats import anderson_ksamp
+    try:
+        return float(anderson_ksamp([np.asarray(x_warm), np.asarray(x_ref)]).statistic)
+    except Exception:
+        # ad raises if either sample has < 2 distinct values
+        return np.nan
+
+
+def flux_wasserstein(x_warm, x_ref):
+    """1-D Wasserstein-1 distance (Earth-mover). Calibrated divergence
+    alternative to the KS p-value."""
+    from scipy.stats import wasserstein_distance
+    return float(wasserstein_distance(np.asarray(x_warm), np.asarray(x_ref)))
+
+
+def gelman_rubin_R(x_warm, x_ref):
+    """Two-chain Gelman–Rubin $\\hat R$ on the full window. < 1.1 ≈ converged.
+
+    Standard MCMC mixing diagnostic with the warm-started run and the
+    long cold-started GKW reference treated as the two chains."""
+    chains = [np.asarray(x_warm, dtype=np.float64), np.asarray(x_ref, dtype=np.float64)]
+    n = min(len(c) for c in chains)
+    if n < 2:
+        return np.nan
+    chains = np.stack([c[-n:] for c in chains])  # (m, n)
+    means = chains.mean(axis=1)
+    grand = means.mean()
+    B = n * np.sum((means - grand) ** 2) / (chains.shape[0] - 1)
+    W = np.mean(np.var(chains, axis=1, ddof=1))
+    if W <= 0:
+        return np.nan
+    var_hat = (n - 1) / n * W + B / n
+    return float(np.sqrt(var_hat / W))
+
+
+def gelman_rubin_t_curve(x_warm, x_ref):
+    """$\\hat R(t)$ as a function of trajectory length (paper-stated, used
+    for the convergence-time interpretation $\\hat R(t) < 1.1$).
+
+    Returns an array of $\\hat R$ computed on prefixes of length 8, 16, ...,
+    up to min(len(warm), len(ref)).
+    """
+    n = min(len(x_warm), len(x_ref))
+    ts = []
+    Rs = []
+    t = 8
+    while t <= n:
+        Rs.append(gelman_rubin_R(np.asarray(x_warm)[-t:], np.asarray(x_ref)[-t:]))
+        ts.append(t)
+        t = min(n, t * 2) if t * 2 <= n else n + 1
+    return np.asarray(ts), np.asarray(Rs)
+
+
+def flux_autocorr(x, max_lag=40):
+    """Centered autocorrelation $C_Q(\\tau) = \\langle Q(t)Q(t+\\tau)\\rangle - \\langle Q\\rangle^2$
+    for $\\tau = 0, \\dots, \\text{max\\_lag}$ (normalized by the variance)."""
+    x = np.asarray(x, dtype=np.float64)
+    x = x - x.mean()
+    var = x.var()
+    if var <= 0 or len(x) <= max_lag + 1:
+        return np.full(max_lag + 1, np.nan)
+    out = np.empty(max_lag + 1)
+    for tau in range(max_lag + 1):
+        out[tau] = np.mean(x[: len(x) - tau] * x[tau:]) / var
+    return out
+
+
+def flux_struct_fn(x, max_lag=40):
+    """Second-order structure function $S_2(\\tau) = \\langle (Q(t+\\tau) - Q(t))^2 \\rangle$."""
+    x = np.asarray(x, dtype=np.float64)
+    if len(x) <= max_lag + 1:
+        return np.full(max_lag + 1, np.nan)
+    out = np.empty(max_lag + 1)
+    for tau in range(max_lag + 1):
+        out[tau] = np.mean((x[tau:] - x[: len(x) - tau]) ** 2)
+    return out
+
+
+def autocorr_l1(x_warm, x_ref, max_lag=40, kind="autocorr"):
+    """L1 distance between warm and reference correlation/structure curves
+    (paper random-walk-consistency check)."""
+    fn = flux_autocorr if kind == "autocorr" else flux_struct_fn
+    a = fn(x_warm, max_lag)
+    b = fn(x_ref, max_lag)
+    if np.any(~np.isfinite(a)) or np.any(~np.isfinite(b)):
+        return np.nan
+    return float(np.mean(np.abs(a - b)))
+
+
+def sliced_wasserstein(X_warm, X_ref, n_projections=64, seed=0):
+    """Sliced Wasserstein-1 between two multivariate samples by averaging
+    1-D $W_1$ over `n_projections` random unit directions."""
+    rng = np.random.default_rng(seed)
+    X_warm = np.asarray(X_warm)
+    X_ref = np.asarray(X_ref)
+    if X_warm.ndim == 1:
+        X_warm = X_warm[:, None]
+        X_ref = X_ref[:, None]
+    d = X_warm.shape[1]
+    P = rng.standard_normal((d, n_projections))
+    P /= np.linalg.norm(P, axis=0, keepdims=True) + 1e-12
+    proj_w = X_warm @ P  # (n_warm, n_proj)
+    proj_r = X_ref @ P
+    from scipy.stats import wasserstein_distance
+    vals = [wasserstein_distance(proj_w[:, i], proj_r[:, i]) for i in range(n_projections)]
+    return float(np.mean(vals))
+
+
+# --- vector divergences (spectra) ------------------------------------------
+
+def _per_mode_apply(metric_fn, X_warm, X_ref):
+    """Apply a 1-D metric per mode-axis column. Returns an array of length
+    K (number of spectral modes)."""
+    X_warm = np.asarray(X_warm)
+    X_ref = np.asarray(X_ref)
+    if X_warm.ndim == 1:
+        return np.asarray([metric_fn(X_warm, X_ref)])
+    K = X_warm.shape[-1]
+    out = np.empty(K)
+    for k in range(K):
+        out[k] = metric_fn(X_warm[..., k], X_ref[..., k])
+    return out
+
+
+_SPEC_METRIC_TABLE = {
+    "ks": flux_ks_pvalue,
+    "ad": flux_ad_statistic,
+    "w1": flux_wasserstein,
+}
+
+
+def spec_divergence(X_warm, X_ref, kind="wasserstein"):
+    """Per-mode 1-D divergence aggregated over a vector spectrum.
+
+    Returns ``{"per_mode": (K,) array, "mean", "median", "frac_indistinguishable"}``.
+    The last field is the fraction of modes with KS p-value ≥ 0.05 — only
+    populated when `kind == "ks"`, otherwise NaN.
+    """
+    if kind not in _SPEC_METRIC_TABLE:
+        raise ValueError(f"unknown kind: {kind!r}; choose from {list(_SPEC_METRIC_TABLE)}")
+    per_mode = _per_mode_apply(_SPEC_METRIC_TABLE[kind], X_warm, X_ref)
+    finite = per_mode[np.isfinite(per_mode)]
+    return {
+        "per_mode": per_mode,
+        "mean":     float(np.mean(finite)) if finite.size else np.nan,
+        "median":   float(np.median(finite)) if finite.size else np.nan,
+        "frac_indistinguishable": (
+            float(np.mean(per_mode >= 0.05)) if kind == "ks" else np.nan
+        ),
+    }
+
+
+# --- driver: compute everything for a (warm, ref) pair ---------------------
+
+_FLUX_SCALAR_DIVERGENCES = {
+    "flux_ks_p":            flux_ks_pvalue,
+    "flux_ad":              flux_ad_statistic,
+    "flux_w1":              flux_wasserstein,
+    "flux_R":               gelman_rubin_R,
+}
+
+
+def compute_distribution_divergences(
+    log_run, log_gt, *, ref_flux_samples=None, frac=0.5, max_lag=40,
+    spec_keys=("ky_spec", "kx_spec", "fluxspec"),
+):
+    """Compute every flux + spectra divergence for one trajectory pair.
+
+    Parameters
+    ----------
+    log_run : dict
+        Output of `run_trajectory_pair` for the warm (or cold) run. Must
+        contain ``eflux`` and at least one of `spec_keys`.
+    log_gt : dict
+        GT-side log from the same call (its late-time window is the spectra
+        reference).
+    ref_flux_samples : np.ndarray or None
+        Reference flux samples, e.g. from `load_reference_flux_samples`. If
+        None, falls back to `stationary_window(log_gt["eflux"], frac)`.
+    frac : float
+        Stationary-window fraction (default 0.5 = second half).
+
+    Returns
+    -------
+    dict
+        Flat metric dict ready to drop into `warm_results[iter][run_label]`.
+        Keys: `flux_<metric>` (scalars), `<spec>_<metric>_{mean,median,frac}`.
+    """
+    out = {}
+    flux_warm = stationary_window(log_run["eflux"], frac)
+    flux_ref = (
+        np.asarray(ref_flux_samples)
+        if ref_flux_samples is not None
+        else stationary_window(log_gt["eflux"], frac)
+    )
+
+    for name, fn in _FLUX_SCALAR_DIVERGENCES.items():
+        try:
+            out[name] = float(fn(flux_warm, flux_ref))
+        except Exception as e:
+            out[name] = np.nan
+            out[f"{name}_error"] = repr(e)
+    try:
+        out["flux_autocorr_L1"] = float(autocorr_l1(flux_warm, flux_ref, max_lag=max_lag, kind="autocorr"))
+        out["flux_struct_L1"]   = float(autocorr_l1(flux_warm, flux_ref, max_lag=max_lag, kind="struct"))
+    except Exception as e:
+        out["flux_autocorr_L1"] = np.nan
+        out["flux_struct_L1"] = np.nan
+        out["flux_autocorr_L1_error"] = repr(e)
+
+    for spec_key in spec_keys:
+        if spec_key not in log_run or spec_key not in log_gt:
+            continue
+        Xw = stationary_window_2d(np.asarray(log_run[spec_key]), frac)
+        Xr = stationary_window_2d(np.asarray(log_gt[spec_key]), frac)
+        if Xw.size == 0 or Xr.size == 0:
+            continue
+        for kind in ("ks", "ad", "w1"):
+            d = spec_divergence(Xw, Xr, kind=kind)
+            out[f"{spec_key}_{kind}_mean"] = d["mean"]
+            out[f"{spec_key}_{kind}_median"] = d["median"]
+            if kind == "ks":
+                out[f"{spec_key}_{kind}_frac"] = d["frac_indistinguishable"]
+        out[f"{spec_key}_sliced_w1"] = sliced_wasserstein(Xw, Xr)
+    return out
+
+
+def stationary_window_2d(X, frac=0.5):
+    """Last `frac` fraction along the time axis (axis 0) of a 2-D (T, K) array."""
+    X = np.asarray(X)
+    if X.ndim == 1:
+        return stationary_window(X, frac)
+    if X.size == 0:
+        return X
+    T = X.shape[0]
+    k = max(1, int(round(frac * T)))
+    return X[-k:]
 
 
 def time_to_convergence(
