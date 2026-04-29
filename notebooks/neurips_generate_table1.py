@@ -243,7 +243,7 @@ def _run_ar_trajectories(ar_model, ae_model, ar_cfg, norm_stats, trajectories,
                           batch_size=batch_size, device=str(device))
     inf_cfg = load_inference_config(inference_cfg, cli)
     sep_zf = ar_cfg.dataset.separate_zf
-    cond_keys = list(ar_cfg.model.conditioning)
+    cond_keys = sorted(ar_cfg.model.conditioning)
     print(f"  n_samples={n_samples} bs={batch_size} ({len(inf_cfg['trajectories'])} trajs)")
     results = {}
     for traj in inf_cfg["trajectories"]:
