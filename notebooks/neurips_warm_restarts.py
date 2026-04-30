@@ -122,7 +122,6 @@ def run_trajectories(
     print_every=500,
     log_every=1,
     log_resolved_spectra=True,
-    latent_extractor=None,
 ):
     """Run GT once and multiple warm-start trajectories. Returns
     (log_gt, [log_warm, ...])."""
@@ -158,9 +157,6 @@ def run_trajectories(
     if log_resolved_spectra:
         log_keys += ["fluxspec"]
     logs = [{k: [] for k in log_keys} for _ in range(ntraj)]
-    if latent_extractor is not None:
-        for d in logs:
-            d["latents_by_step"] = []
 
     gt_cached = pre["geom_tensors"] if (pre is not None and "geom_tensors" in pre) else None
     if log_resolved_spectra and gt_cached is None:
@@ -179,14 +175,6 @@ def run_trajectories(
         else:
             logs[b]["kx_spec"].append(np.array(diags["kx_spec"]))
             logs[b]["ky_spec"].append(np.array(diags["ky_spec"]))
-        if latent_extractor is not None:
-            try:
-                lat = latent_extractor(df_now)
-                logs[b]["latents_by_step"].append(
-                    {k: np.asarray(v).reshape(-1) for k, v in lat.items()}
-                )
-            except Exception as e:
-                logs[b]["latents_by_step"].append({"_error": repr(e)})
 
     for b in range(ntraj):
         phi, fluxes = get_integrals(
@@ -224,12 +212,7 @@ def run_trajectories(
 
     out_logs = []
     for b in range(ntraj):
-        log = {}
-        for k, v in logs[b].items():
-            if k == "latents_by_step":
-                log[k] = v   # keep list-of-dicts as-is
-            else:
-                log[k] = np.array(v)
+        log = {k: np.array(v) for k, v in logs[b].items()}
         log["df_final"] = np.array(dfs[b])
         out_logs.append(log)
     return out_logs[0], out_logs[1:]
@@ -240,7 +223,6 @@ def run_trajectory_pair(
     n_steps=1000, label="", chunk_size=1, backend="cuda",
     mixed_precision=True, print_every=500, log_every=1,
     log_resolved_spectra=True,
-    latent_extractor=None,
 ):
     """Run GT and a single warm-start trajectory."""
     log_gt, log_warms = run_trajectories(
@@ -249,7 +231,6 @@ def run_trajectory_pair(
         backend=backend, mixed_precision=mixed_precision,
         print_every=print_every, log_every=log_every,
         log_resolved_spectra=log_resolved_spectra,
-        latent_extractor=latent_extractor,
     )
     return log_gt, log_warms[0]
 
@@ -259,7 +240,6 @@ def run_trajectory(
     n_steps=1000, label="", chunk_size=1, backend="cuda",
     mixed_precision=True, print_every=500, log_every=1,
     log_resolved_spectra=True,
-    latent_extractor=None,
 ):
     """Run a single trajectory."""
     import jax.numpy as jnp
@@ -285,9 +265,6 @@ def run_trajectory(
     if log_resolved_spectra:
         log_keys += ["fluxspec"]
     log = {k: [] for k in log_keys}
-    if latent_extractor is not None:
-        # Per-timestep dict of {level_name: (D,) feature vector}.
-        log["latents_by_step"] = []
 
     gt_cached = pre["geom_tensors"] if (pre is not None and "geom_tensors" in pre) else None
     if log_resolved_spectra and gt_cached is None:
@@ -306,14 +283,6 @@ def run_trajectory(
         else:
             log["kx_spec"].append(np.array(diags["kx_spec"]))
             log["ky_spec"].append(np.array(diags["ky_spec"]))
-        if latent_extractor is not None:
-            try:
-                lat = latent_extractor(df_now)
-                log["latents_by_step"].append(
-                    {k: np.asarray(v).reshape(-1) for k, v in lat.items()}
-                )
-            except Exception as e:
-                log["latents_by_step"].append({"_error": repr(e)})
 
     phi, fluxes = get_integrals(
         df_init, geometry, params=params, pre=pre,
@@ -333,12 +302,7 @@ def run_trajectory(
         if steps_done % print_every == 0 or steps_done == n_steps:
             print(f"  [{label}] {steps_done}/{n_steps}  t={float(state.time):.3f}  "
                   f"Q={float(log['eflux'][-1]):.4e}")
-    out = {}
-    for k, v in log.items():
-        if k == "latents_by_step":
-            out[k] = v  # list of {level_name: (D,)} dicts; keep as Python list
-        else:
-            out[k] = np.array(v)
+    out = {k: np.array(v) for k, v in log.items()}
     return out
 
 
@@ -869,15 +833,17 @@ CANONICAL_METRICS = {
 
 
 def compute_distribution_divergences(
-    log_run, log_gt, *, ref_flux_samples=None, warm_frac=1.0, max_lag=40,
-    spec_keys=("ky_spec", "fluxspec"),
+    log_run, log_gt, *, ref_flux_samples=None, warm_frac=0.95,
+    max_lag=40, spec_keys=("ky_spec", "fluxspec"),
 ):
     """Divergences between a warm-started run and the GT saturated reference.
 
-    The warm trajectory is short by construction (it starts already in
-    saturation), so by default we use the **entire** warm run (`warm_frac=1.0`)
-    rather than discarding a transient. Pass `warm_frac<1.0` to drop the
-    leading portion if needed. Compared against the GT saturated reference. The GT side is provided
+    Two-sample distributional tests on each mode's time-series: the (short)
+    warm trajectory and the (long) GT saturated tail are both treated as
+    samples from a stationary distribution; per-mode KS/AD/W1/MMD score
+    whether they come from the same one. Sample counts may differ.
+
+    Warm side: drop the leading `1 - warm_frac` (default 5%); keep the rest. The GT side is provided
     *pre-sliced* in `log_gt` (and `ref_flux_samples` for the flux), so the
     caller picks the right tail (e.g. last 80 GKW snapshots for spectra,
     last 240 fluxes.dat rows for flux).
