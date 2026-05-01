@@ -843,7 +843,15 @@ def compute_distribution_divergences(
     samples from a stationary distribution; per-mode KS/AD/W1/MMD score
     whether they come from the same one. Sample counts may differ.
 
-    Warm side: drop the leading `1 - warm_frac` (default 5%); keep the rest. The GT side is provided
+    Warm side: drop the leading `1 - warm_frac` (default 5%); keep the rest.
+    If `log_run` carries `<k>_per_restart` arrays (R, T, ...) — produced by
+    the multi-restart solver path — the warm sample is **pooled across the
+    R restarts** to give a single (R*T', ...) sample for the headline metric
+    keys (e.g. `flux_ad`, `ky_spec_ad_mean`). In that case we additionally
+    report the **per-restart spread** under three companion keys per metric:
+    `<metric>_per_restart` (length-R list), `<metric>_per_restart_mean`,
+    `<metric>_per_restart_std`. Use the std as a within-traj error bar on
+    FID-vs-metric scatter plots. The GT side is provided
     *pre-sliced* in `log_gt` (and `ref_flux_samples` for the flux), so the
     caller picks the right tail (e.g. last 80 GKW snapshots for spectra,
     last 240 fluxes.dat rows for flux).
@@ -874,7 +882,19 @@ def compute_distribution_divergences(
         Flat metric dict.
     """
     out = {}
-    flux_warm = stationary_window(log_run["eflux"], warm_frac)
+
+    # ---- flux ------------------------------------------------------------
+    if "eflux_per_restart" in log_run:
+        e_pr = np.asarray(log_run["eflux_per_restart"])  # (R, T)
+        T = e_pr.shape[1]
+        keep = max(1, int(round(warm_frac * T)))
+        e_pr_kept = e_pr[:, T - keep:]                   # (R, T')
+        flux_warm_pooled = e_pr_kept.reshape(-1)         # (R*T',)
+        flux_per_restart = [e_pr_kept[r] for r in range(e_pr.shape[0])]
+    else:
+        flux_warm_pooled = stationary_window(log_run["eflux"], warm_frac)
+        flux_per_restart = [flux_warm_pooled]
+
     if ref_flux_samples is not None:
         flux_ref = np.asarray(ref_flux_samples)
     elif "eflux" in log_gt:
@@ -884,35 +904,78 @@ def compute_distribution_divergences(
 
     if flux_ref is not None:
         for name, fn in CANONICAL_METRICS.items():
+            # headline = pooled
             try:
-                out[f"flux_{name}"] = float(fn(flux_warm, flux_ref))
+                out[f"flux_{name}"] = float(fn(flux_warm_pooled, flux_ref))
             except Exception as e:
                 out[f"flux_{name}"] = np.nan
                 out[f"flux_{name}_error"] = repr(e)
+            # per-restart spread
+            if len(flux_per_restart) > 1:
+                vals = []
+                for arr in flux_per_restart:
+                    try:
+                        vals.append(float(fn(arr, flux_ref)))
+                    except Exception:
+                        vals.append(np.nan)
+                v = np.asarray(vals, dtype=float)
+                out[f"flux_{name}_per_restart"]      = v.tolist()
+                out[f"flux_{name}_per_restart_mean"] = float(np.nanmean(v))
+                out[f"flux_{name}_per_restart_std"]  = float(np.nanstd(v, ddof=0))
 
+    # ---- spectra ---------------------------------------------------------
     for spec_key in spec_keys:
-        if spec_key not in log_run or spec_key not in log_gt:
+        per_restart_key = f"{spec_key}_per_restart"
+        if per_restart_key in log_run:
+            X_pr = np.asarray(log_run[per_restart_key])  # (R, T, K)
+            T = X_pr.shape[1]
+            keep = max(1, int(round(warm_frac * T)))
+            X_pr_kept = X_pr[:, T - keep:]               # (R, T', K)
+            Xw_pooled = X_pr_kept.reshape(-1, X_pr_kept.shape[-1])
+            X_per_restart = [X_pr_kept[r] for r in range(X_pr.shape[0])]
+        elif spec_key in log_run:
+            Xw_pooled = stationary_window_2d(np.asarray(log_run[spec_key]), warm_frac)
+            X_per_restart = [Xw_pooled]
+        else:
             continue
-        Xw = stationary_window_2d(np.asarray(log_run[spec_key]), warm_frac)
-        Xr = np.asarray(log_gt[spec_key])  # caller already tail-sliced
-        if Xw.size == 0 or Xr.size == 0:
+        if spec_key not in log_gt:
             continue
+        Xr = np.asarray(log_gt[spec_key])
+        if Xw_pooled.size == 0 or Xr.size == 0:
+            continue
+
         for name, fn in CANONICAL_METRICS.items():
+            metric_key = (f"{spec_key}_r2_meanlog" if name == "r2_hist"
+                            else f"{spec_key}_{name}_mean")
+            # headline = pooled
             try:
                 if name == "r2_hist":
-                    # spectra: use R² of mean-log spectrum across modes instead
-                    # of histogram (more meaningful for a vector spectrum).
-                    out[f"{spec_key}_r2_meanlog"] = spec_r2_meanlog(Xw, Xr)
+                    out[metric_key] = spec_r2_meanlog(Xw_pooled, Xr)
                 else:
-                    per_mode = _per_mode_apply(fn, Xw, Xr)
-                    finite = per_mode[np.isfinite(per_mode)]
-                    out[f"{spec_key}_{name}_mean"] = (
-                        float(np.mean(finite)) if finite.size else np.nan
-                    )
+                    pm = _per_mode_apply(fn, Xw_pooled, Xr)
+                    f_ = pm[np.isfinite(pm)]
+                    out[metric_key] = float(np.mean(f_)) if f_.size else np.nan
             except Exception as e:
-                k = f"{spec_key}_{'r2_meanlog' if name == 'r2_hist' else name + '_mean'}"
-                out[k] = np.nan
-                out[f"{k}_error"] = repr(e)
+                out[metric_key] = np.nan
+                out[f"{metric_key}_error"] = repr(e)
+            # per-restart spread
+            if len(X_per_restart) > 1:
+                vals = []
+                for X_r_arr in X_per_restart:
+                    try:
+                        if name == "r2_hist":
+                            vals.append(float(spec_r2_meanlog(X_r_arr, Xr)))
+                        else:
+                            pm = _per_mode_apply(fn, X_r_arr, Xr)
+                            f_ = pm[np.isfinite(pm)]
+                            vals.append(float(np.mean(f_)) if f_.size else float("nan"))
+                    except Exception:
+                        vals.append(float("nan"))
+                v = np.asarray(vals, dtype=float)
+                out[f"{metric_key}_per_restart"]      = v.tolist()
+                out[f"{metric_key}_per_restart_mean"] = float(np.nanmean(v))
+                out[f"{metric_key}_per_restart_std"]  = float(np.nanstd(v, ddof=0))
+
     return out
 
 
