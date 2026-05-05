@@ -178,6 +178,11 @@ def get_data(cfg, rank: int = 0):
             train_kwargs["latent_sampling_mode"] = latent_sampling_mode
             val_kwargs["latent_sampling_mode"] = val_latent_sampling_mode
 
+        # latent_scaling_mode: "global", "per_channel", "per_token"
+        latent_scaling_mode = getattr(cfg.dataset, "latent_scaling_mode", "global")
+        train_kwargs["latent_scaling_mode"] = latent_scaling_mode
+        val_kwargs["latent_scaling_mode"] = latent_scaling_mode
+
         if rank == 0:
             latent_type = (
                 "VQVAE" if use_vqvae_latents else "VAE" if use_vae_latents else "AE"
