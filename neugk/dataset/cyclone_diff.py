@@ -36,6 +36,25 @@ class CycloneAESample:
         return self
 
 
+_VALID_LATENT_SCALING_MODES = ("global", "per_channel", "per_token")
+
+def _latent_norm_axes(mode: str, ndim: int) -> tuple:
+    """Reduction axes used to derive the latent_scale stats from one sample.
+
+    Per-sample latents have no batch axis (shape `(C, *spatial)`).
+        - global       -> reduce over all dims  -> stats shape (1, 1, ...)  scalar broadcast
+        - per_channel  -> keep channel axis 0   -> stats shape (C, 1, ...)
+        - per_token    -> reduce nothing        -> stats shape (C, *spatial) (per-element)
+    """
+    if mode == "global":
+        return tuple(range(0, ndim))
+    if mode == "per_channel":
+        return tuple(range(1, ndim))
+    if mode == "per_token":
+        return ()
+    raise ValueError(f"latent_scaling_mode must be one of {_VALID_LATENT_SCALING_MODES}, got '{mode}'")
+
+
 class CycloneAEDataset(CycloneDataset):
     def __init__(
         self,
@@ -44,12 +63,19 @@ class CycloneAEDataset(CycloneDataset):
         precomputed_latents: Optional[Dict] = None,
         autoencoder: Optional[torch.nn.Module] = None,
         ae_cfg=None,
+        latent_scaling_mode: str = "global",
         **kwargs,
     ):
+        if latent_scaling_mode not in _VALID_LATENT_SCALING_MODES:
+            raise ValueError(
+                f"latent_scaling_mode must be one of {_VALID_LATENT_SCALING_MODES}, "
+                f"got '{latent_scaling_mode}'"
+            )
         self.conditions = conditions
         self.precomputed_latents = precomputed_latents
         self.autoencoder = autoencoder
         self._ae_cfg = ae_cfg
+        self.latent_scaling_mode = latent_scaling_mode
         super().__init__(*args, **kwargs)
 
     def _recompute_stats(
@@ -521,18 +547,29 @@ class CycloneAEDataset(CycloneDataset):
             l2_norms = []
             for sample in self.precomputed_latents.values():
                 x = sample["x"]
-                norm_axes = tuple(range(0, x.ndim))
-                x_mean = np.mean(x, axis=norm_axes, keepdims=True)
-                x_var = np.var(x, axis=norm_axes, keepdims=True)
-                x_min = np.min(x, axis=norm_axes, keepdims=True)
-                x_max = np.max(x, axis=norm_axes, keepdims=True)
-                l2_norms.append(np.sqrt(np.sum(x**2, axis=norm_axes, keepdims=True)))
+                norm_axes = _latent_norm_axes(self.latent_scaling_mode, x.ndim)
+                if norm_axes:
+                    x_mean = np.mean(x, axis=norm_axes, keepdims=True)
+                    x_var = np.var(x, axis=norm_axes, keepdims=True)
+                    x_min = np.min(x, axis=norm_axes, keepdims=True)
+                    x_max = np.max(x, axis=norm_axes, keepdims=True)
+                    l2_norms.append(np.sqrt(np.sum(x**2, axis=norm_axes, keepdims=True)))
+                else:
+                    # per_token: per-element stats; one sample contributes (mean=x, var=0)
+                    x_f = x.astype(np.float32, copy=False)
+                    x_mean = x_f.copy()
+                    x_var = np.zeros_like(x_f)
+                    x_min = x_f.copy()
+                    x_max = x_f.copy()
+                    l2_norms.append(np.abs(x_f))
                 if stats is None:
                     stats = RunningMeanStd(shape=x_mean.shape)
                 stats.update(x_mean, x_var, x_min, x_max)
             self.latent_stats = stats
             l2_norm = np.mean(l2_norms, axis=0)
             if rank == 0:
+                print(f"latent_scaling_mode: {self.latent_scaling_mode}")
+                print(f"latent stats shape: {stats.mean.shape}")
                 print(f"latent mean: {np.squeeze(stats.mean)}")
                 print(f"latent var: {np.squeeze(stats.var)}")
                 print(f"latent l2 norm: {np.squeeze(l2_norm)}")
@@ -852,27 +889,45 @@ class CycloneVAEDataset(CycloneAEDataset):
                     else np.asarray(sample["var"])
                 )
                 var = np.clip(var, 1e-12, None)
-                norm_axes = tuple(range(0, mu.ndim))
+                norm_axes = _latent_norm_axes(self.latent_scaling_mode, mu.ndim)
 
                 if self.latent_sampling_mode == "stochastic":
-                    x_mean = np.mean(mu, axis=norm_axes, keepdims=True)
-                    mu2_mean = np.mean(mu**2, axis=norm_axes, keepdims=True)
-                    var_mean = np.mean(var, axis=norm_axes, keepdims=True)
-                    x_var = var_mean + mu2_mean - x_mean**2
-                    std = np.sqrt(var)
-                    x_min = np.min(mu - 3.0 * std, axis=norm_axes, keepdims=True)
-                    x_max = np.max(mu + 3.0 * std, axis=norm_axes, keepdims=True)
-                    l2_norms.append(
-                        np.sqrt(np.sum(mu**2 + var, axis=norm_axes, keepdims=True))
-                    )
+                    if norm_axes:
+                        x_mean = np.mean(mu, axis=norm_axes, keepdims=True)
+                        mu2_mean = np.mean(mu**2, axis=norm_axes, keepdims=True)
+                        var_mean = np.mean(var, axis=norm_axes, keepdims=True)
+                        x_var = var_mean + mu2_mean - x_mean**2
+                        std = np.sqrt(var)
+                        x_min = np.min(mu - 3.0 * std, axis=norm_axes, keepdims=True)
+                        x_max = np.max(mu + 3.0 * std, axis=norm_axes, keepdims=True)
+                        l2_norms.append(
+                            np.sqrt(np.sum(mu**2 + var, axis=norm_axes, keepdims=True))
+                        )
+                    else:
+                        # per_token: x = mu + eps*sqrt(var) -> per-element E[x]=mu, Var[x]=var
+                        x_mean = mu.astype(np.float32, copy=False).copy()
+                        x_var = var.astype(np.float32, copy=False).copy()
+                        std = np.sqrt(var)
+                        x_min = (mu - 3.0 * std).astype(np.float32, copy=False)
+                        x_max = (mu + 3.0 * std).astype(np.float32, copy=False)
+                        l2_norms.append(np.sqrt(mu**2 + var).astype(np.float32, copy=False))
                 else:
-                    x_mean = np.mean(mu, axis=norm_axes, keepdims=True)
-                    x_var = np.var(mu, axis=norm_axes, keepdims=True)
-                    x_min = np.min(mu, axis=norm_axes, keepdims=True)
-                    x_max = np.max(mu, axis=norm_axes, keepdims=True)
-                    l2_norms.append(
-                        np.sqrt(np.sum(mu**2, axis=norm_axes, keepdims=True))
-                    )
+                    if norm_axes:
+                        x_mean = np.mean(mu, axis=norm_axes, keepdims=True)
+                        x_var = np.var(mu, axis=norm_axes, keepdims=True)
+                        x_min = np.min(mu, axis=norm_axes, keepdims=True)
+                        x_max = np.max(mu, axis=norm_axes, keepdims=True)
+                        l2_norms.append(
+                            np.sqrt(np.sum(mu**2, axis=norm_axes, keepdims=True))
+                        )
+                    else:
+                        # per_token deterministic: one sample per element -> mean=mu, var=0
+                        mu_f = mu.astype(np.float32, copy=False)
+                        x_mean = mu_f.copy()
+                        x_var = np.zeros_like(mu_f)
+                        x_min = mu_f.copy()
+                        x_max = mu_f.copy()
+                        l2_norms.append(np.abs(mu_f))
 
                 if stats is None:
                     stats = RunningMeanStd(shape=x_mean.shape)
@@ -881,6 +936,8 @@ class CycloneVAEDataset(CycloneAEDataset):
             self.latent_stats = stats
             l2_norm = np.mean(l2_norms, axis=0)
             if rank == 0:
+                print(f"latent_scaling_mode: {self.latent_scaling_mode}")
+                print(f"latent stats shape: {stats.mean.shape}")
                 print(f"latent mean: {np.squeeze(stats.mean)}")
                 print(f"latent var: {np.squeeze(stats.var)}")
                 print(f"latent l2 norm: {np.squeeze(l2_norm)}")

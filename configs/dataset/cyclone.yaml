@@ -72,3 +72,4 @@ timestep_std_offset: 80
 # diffusion-specific:
 latent_sampling_mode: stochastic  # stochastic, deterministic (used for diffusion with VAE latents)
 val_latent_sampling_mode: deterministic  # separate sampling mode for validation (null to use same as training)
+latent_scaling_mode: global  # global, per_channel, per_token (latent normalization granularity for diffusion)
