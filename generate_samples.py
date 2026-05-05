@@ -72,7 +72,14 @@ def generate(gen_cfg_path: str) -> None:
         runner.latent_scale = float(latent_scale_override)
         print(f"latent_scale overridden to {runner.latent_scale:.6f}")
     else:
-        print(f"latent_scale = {runner.latent_scale:.6f}  (computed from training set)")
+        ls = runner.latent_scale
+        if isinstance(ls, torch.Tensor):
+            print(
+                f"latent_scale tensor shape={tuple(ls.shape)} "
+                f"mean={ls.mean().item():.6f} (computed from training set)"
+            )
+        else:
+            print(f"latent_scale = {ls:.6f}  (computed from training set)")
 
     # load checkpoint weights
     snapshot = gen_cfg.get("model_snapshot", "best.pth")
