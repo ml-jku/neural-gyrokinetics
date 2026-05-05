@@ -18,6 +18,7 @@ from typing import Optional, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import pickle
 import torch
 from sklearn.decomposition import PCA
 from tqdm import tqdm
@@ -31,9 +32,12 @@ from notebooks.neurips_diff_eval import (
 from notebooks.neurips_generate_table1 import (
     COND_META_MAP,
     _build_diff_runner,
+    _notebook_safe,
     _traj_basename,
     free_cuda,
 )
+from neugk.dataset import get_data
+from neugk.utils import expand_as
 
 
 # ---------------------------------------------------------------------------
@@ -44,17 +48,24 @@ class LatentSource:
     """One latent-extraction recipe to evaluate.
 
     name  : short label used in plots and the table
-    source: 'bottleneck', 'flux_head', or 'decoder'
+    source: 'bottleneck', 'flux_head', 'decoder', 'skip', or 'phi'
     level : interpretation depends on `source`
-        * 'bottleneck' — ignored
+        * 'bottleneck' / 'phi' — ignored
         * 'flux_head'  — multiscale level index (0 = bottleneck mix, 1+ = decoder
                          up-blocks). None -> concat all levels (default).
         * 'decoder'    — Pythonic up-block index. None -> -1 (last up-block,
                          one level before the 5D output, à la InceptionV3 pool3).
+        * 'skip'       — Pythonic down-block skip index. None -> deepest skip.
+    pool  : optional spatial reduction passed to extract_gyroswin_latents
+            for sources that accept it ('bottleneck', 'skip', 'phi'). Use
+            'amax' or 'mean' to collapse the 5D activation to a per-channel
+            vector — strongly recommended at low sample counts (FID with
+            K~64 vs raw flattened activations is under-determined).
     """
     name: str
     source: str
     level: Optional[int] = None
+    pool: Optional[str] = None
 
     def kwargs(self):
         kw = {"source": self.source}
@@ -62,43 +73,153 @@ class LatentSource:
             kw["flux_head_level"] = self.level
         elif self.source == "decoder":
             kw["decoder_level"] = -1 if self.level is None else self.level
+        elif self.source == "skip" and self.level is not None:
+            kw["decoder_level"] = self.level
+        if self.pool is not None:
+            kw["pool"] = self.pool
         return kw
 
 
 # ---------------------------------------------------------------------------
 # Setup
 # ---------------------------------------------------------------------------
+def _load_old_gyroswin(checkpoint_dir, trainset, device):
+    """Load the legacy monkey-patched GyroSwin checkpoint."""
+    sys.path.insert(0, str(Path(__file__).parent))
+    from neurips_gyroswin_eval import load_gyroswin_model
+    gs_model, gs_cfg, _ = load_gyroswin_model(
+        checkpoint_dir, dataset=trainset, device=device,
+    )
+    return gs_model, gs_cfg
+
+
+def _load_new_gyroswin(checkpoint_dir, trainset, device, model_snapshot="best.pth"):
+    """Load a current-codebase GyroSwin via `neugk.gyroswin.models.get_model`.
+    Reuses the diffusion runner's trainset (matching `active_keys` /
+    `resolution`); GyroSwin-specific knobs come from the checkpoint cfg."""
+    import omegaconf
+    from neugk.gyroswin.models import get_model as get_gyroswin_model
+    cfg = omegaconf.OmegaConf.load(os.path.join(checkpoint_dir, "config.yaml"))
+    gs_model = get_gyroswin_model(cfg, dataset=trainset).to(device).eval()
+    ckpt = torch.load(os.path.join(checkpoint_dir, model_snapshot),
+                      map_location=device, weights_only=False)
+    gs_model.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=True)
+    return gs_model, cfg
+
+
+def _load_old_gs_norm_stats(checkpoint_dir):
+    """Old GyroSwin checkpoints bundle `normalization_stats.pkl` directly."""
+    path = os.path.join(checkpoint_dir, "normalization_stats.pkl")
+    with open(path, "rb") as f:
+        stats = pickle.load(f)
+    # Expected layout: stats[<field>]["full"]["mean"|"std"] (numpy arrays).
+    return stats
+
+
+def _load_new_gs_norm_stats(checkpoint_dir, data_path):
+    """New (current-codebase) GyroSwin checkpoint: build its trainset just to
+    read the stats pkl that the dataset normalizer auto-loads. The trainset
+    is dropped immediately afterwards."""
+    import omegaconf
+    cfg = _notebook_safe(omegaconf.OmegaConf.load(
+        os.path.join(checkpoint_dir, "config.yaml"),
+    ))
+    cfg.dataset.path = str(data_path)
+    cfg.dataset.gds_override = True
+    print(f"  loading GS norm stats for new ckpt ({checkpoint_dir}) ...")
+    datasets, _, _ = get_data(cfg, rank=0)
+    trainset = datasets[0]
+    stats = {
+        "df": {"full": {
+            "mean": np.asarray(trainset.stats["df"]["full"]["mean"]),
+            "std":  np.asarray(trainset.stats["df"]["full"]["std"]),
+        }}
+    }
+    del datasets, trainset
+    free_cuda()
+    return stats
+
+
+def _gs_stats_to_tensors(gs_stats, ref_tensor):
+    """Convert GS df stats into (mean, std) tensors broadcast-compatible with
+    `ref_tensor`. `ref_tensor` is just used for dtype/device; the shapes follow
+    the underlying numpy arrays in `gs_stats` and `expand_as` prepends size-1
+    dims to match `ref_tensor`'s rank.
+    """
+    mean = torch.as_tensor(
+        np.asarray(gs_stats["df"]["full"]["mean"]),
+        dtype=ref_tensor.dtype, device=ref_tensor.device,
+    )
+    std = torch.as_tensor(
+        np.asarray(gs_stats["df"]["full"]["std"]),
+        dtype=ref_tensor.dtype, device=ref_tensor.device,
+    )
+    return expand_as(mean, ref_tensor), expand_as(std, ref_tensor)
+
+
 def setup(
     diff_ckpt_dir,
     ae_checkpoint,
     data_path,
-    gyroswin_checkpoint,
     valid_traj_h5_names,
     device,
+    *,
+    gyroswin_checkpoint=None,       # legacy (monkey-patched) checkpoint
+    gyroswin_checkpoint_new=None,   # current-codebase checkpoint
     model_snapshot="best.pth",
 ):
-    """Build the diffusion runner and load the GyroSwin checkpoint with its
-    `flux_head` exposed (so source='flux_head' works)."""
+    """Build the diffusion runner and load 1-2 GyroSwin variants for FID.
+
+    Returns
+    -------
+    runner : diffusion runner used to collect real + matched-diff df samples.
+    gyroswins : dict[str, dict] keyed by variant ('old' for the monkey-patched
+        legacy checkpoint, 'new' for the current-codebase checkpoint). Each
+        value is ``{"model": nn.Module, "cfg": DictConfig, "cond_keys": [...]}``.
+        Variants whose checkpoint is None are omitted; at least one is required.
+    """
+    if not gyroswin_checkpoint and not gyroswin_checkpoint_new:
+        raise ValueError(
+            "supply at least one of gyroswin_checkpoint / gyroswin_checkpoint_new"
+        )
+
     runner = _build_diff_runner(
         diff_ckpt_dir, ae_checkpoint, data_path,
         valid_traj_h5_names, model_snapshot, device,
     )
 
-    # Lazy import: the loader rewrites sys.path / sys.modules to load the old
-    # codebase bundled with the checkpoint, so import only when needed.
-    sys.path.insert(0, str(Path(__file__).parent))
-    from neurips_gyroswin_eval import load_gyroswin_model
-
-    gs_model, gs_cfg, _ = load_gyroswin_model(
-        gyroswin_checkpoint, dataset=runner.trainset, device=device,
-    )
-    if not gyroswin_has_flux_head(gs_model):
-        raise RuntimeError(
-            f"GyroSwin checkpoint at {gyroswin_checkpoint} has no flux_head; "
-            "only source='bottleneck' will work."
+    gyroswins = {}
+    if gyroswin_checkpoint:
+        gs_model, gs_cfg = _load_old_gyroswin(
+            gyroswin_checkpoint, runner.trainset, device,
         )
-    gs_cond_keys = sorted(list(gs_cfg.model.conditioning))
-    return runner, gs_model, gs_cfg, gs_cond_keys
+        if not gyroswin_has_flux_head(gs_model):
+            raise RuntimeError(
+                f"GyroSwin (old) at {gyroswin_checkpoint} has no flux_head; "
+                "only source='bottleneck' will work."
+            )
+        gyroswins["old"] = {
+            "model": gs_model, "cfg": gs_cfg,
+            "cond_keys": sorted(list(gs_cfg.model.conditioning)),
+            "norm_stats": _load_old_gs_norm_stats(gyroswin_checkpoint),
+        }
+    if gyroswin_checkpoint_new:
+        gs_model, gs_cfg = _load_new_gyroswin(
+            gyroswin_checkpoint_new, runner.trainset, device, model_snapshot,
+        )
+        if not gyroswin_has_flux_head(gs_model):
+            raise RuntimeError(
+                f"GyroSwin (new) at {gyroswin_checkpoint_new} has no flux_head."
+            )
+        gyroswins["new"] = {
+            "model": gs_model, "cfg": gs_cfg,
+            "cond_keys": sorted(list(gs_cfg.model.conditioning)),
+            "norm_stats": _load_new_gs_norm_stats(
+                gyroswin_checkpoint_new,
+                data_path=runner.cfg.dataset.path,
+            ),
+        }
+    return runner, gyroswins
 
 
 # ---------------------------------------------------------------------------
@@ -109,14 +230,28 @@ def _traj_label(fpath):
     return f"iter_{m.group(1)}" if m else os.path.basename(fpath)
 
 
-def collect_real(runner, n_per_traj=None, max_total=None, seed=0):
+def _denormalize_with_dataset(dataset, fi, df_norm):
+    """Convert a per-fi normalized df tensor into physical units using the
+    dataset's stored scale/shift -- bypasses any AE decode the Cyclone-AE
+    valset does in `denormalize` (we already have a 5D df, not a latent)."""
+    scale, shift = dataset._get_scale_shift(fi, "df", df_norm)
+    return df_norm * scale + shift
+
+
+def collect_real(runner, n_per_traj=None, max_total=None, seed=0,
+                 physical=False):
     """Stratified pick of validation snapshots: up to `n_per_traj` evenly
     spaced snapshots per trajectory, optionally capped at `max_total`.
 
     Returns a dict keyed by file index `fi` with:
-        df         : list[Tensor]   normalized model-space df, ready for forward
+        df         : list[Tensor]   model-space df (normalized, ready for forward)
+                                    or physical-space df if `physical=True`
         flat_idx   : list[int]      flat valset index for each entry
         label      : str            "iter_<id>" label
+
+    Pass `physical=True` if you intend to feed `extract_features` a
+    `gs_norm_stats` argument so it can renormalize into the GyroSwin
+    checkpoint's space.
     """
     valset = runner.valsets[0]
     by_fi = defaultdict(list)
@@ -145,28 +280,39 @@ def collect_real(runner, n_per_traj=None, max_total=None, seed=0):
     for fi, idxs in sorted(sel_per_fi.items()):
         if not idxs:
             continue
+        dfs = [valset[i].df for i in idxs]
+        if physical:
+            dfs = [_denormalize_with_dataset(valset, fi, t) for t in dfs]
         out[fi] = {
-            "df": [valset[i].df for i in idxs],
+            "df": dfs,
             "flat_idx": list(idxs),
             "label": _traj_label(valset.files[fi]),
         }
     n_total = sum(len(v["df"]) for v in out.values())
     print(f"  real samples: {n_total} across {len(out)} trajs "
-          f"({ {fi: len(v['df']) for fi, v in out.items()} })")
+          f"({ {fi: len(v['df']) for fi, v in out.items()} })  "
+          f"[{'physical' if physical else 'AE-normalized'}]")
     return out
 
 
-def split_by_traj_set(by_fi, runner, trajectories_id, trajectories_ood):
-    """Partition a `{fi: ...}` dict (real or gen) into ID vs OOD subsets,
+def split_by_traj_set(by_fi, runner, trajectories_id, trajectories_ood,
+                      trajectories_test=None):
+    """Partition a `{fi: ...}` dict (real or gen) into ID/OOD/TEST subsets,
     matching basenames against the trajectory lists.
 
-    Returns ``{"ID": {fi: entry}, "OOD": {fi: entry}}``. Trajectories that
-    match neither list are dropped (with a warning).
+    Returns ``{"ID": {fi: entry}, "OOD": ..., "TEST": ...}``. Splits whose
+    trajectory list is empty are still emitted as empty dicts so downstream
+    code can rely on the keys. Trajectories that match no list are dropped
+    (with a warning).
+
+    Backward-compatible: callers passing only ID + OOD get the same two
+    splits as before, plus an empty ``"TEST"`` entry.
     """
     valset = runner.valsets[0]
-    id_bases  = {t.replace("_ifft_realpotens", "") for t in trajectories_id}
-    ood_bases = {t.replace("_ifft_realpotens", "") for t in trajectories_ood}
-    out = {"ID": {}, "OOD": {}}
+    id_bases   = {t.replace("_ifft_realpotens", "") for t in (trajectories_id or [])}
+    ood_bases  = {t.replace("_ifft_realpotens", "") for t in (trajectories_ood or [])}
+    test_bases = {t.replace("_ifft_realpotens", "") for t in (trajectories_test or [])}
+    out = {"ID": {}, "OOD": {}, "TEST": {}}
     skipped = []
     for fi, entry in by_fi.items():
         base = _traj_basename(valset.files[fi])
@@ -174,19 +320,27 @@ def split_by_traj_set(by_fi, runner, trajectories_id, trajectories_ood):
             out["ID"][fi] = entry
         elif base in ood_bases:
             out["OOD"][fi] = entry
+        elif base in test_bases:
+            out["TEST"][fi] = entry
         else:
             skipped.append(base)
     if skipped:
         print(f"  [split] dropped {len(skipped)} unmatched trajectories: {skipped}")
-    print(f"  [split] ID: {len(out['ID'])} trajs | OOD: {len(out['OOD'])} trajs")
+    print(f"  [split] ID: {len(out['ID'])} trajs | OOD: {len(out['OOD'])} trajs"
+          f" | TEST: {len(out['TEST'])} trajs")
     return out
 
 
 @torch.no_grad()
-def generate_diff(runner, real_by_fi, n_denoising_steps=15, batch_size=32):
+def generate_diff(runner, real_by_fi, n_denoising_steps=15, batch_size=32,
+                  physical=False):
     """For each trajectory in `real_by_fi`, sample as many diffusion samples as
     real ones (using that trajectory's conditioning). Returns the same dict
-    layout but with key 'df' holding the decoded gen df tensors (cpu)."""
+    layout but with key 'df' holding the decoded gen df tensors (cpu).
+
+    Pass `physical=True` to denormalize the decoded df via the diffusion
+    runner's trainset stats; combine with `extract_features(...,
+    gs_norm_stats=...)` to evaluate FID in GyroSwin-checkpoint space."""
     valset = runner.valsets[0]
     cond_keys = sorted(runner.cfg.model.conditioning)
 
@@ -202,7 +356,11 @@ def generate_diff(runner, real_by_fi, n_denoising_steps=15, batch_size=32):
             bs = min(batch_size, n - i)
             c = cond_t.unsqueeze(0).expand(bs, -1)
             decoded = runner.sample(c, steps=n_denoising_steps, latent_only=False)
-            gen_dfs.extend(decoded["df"][b].cpu() for b in range(bs))
+            for b in range(bs):
+                t = decoded["df"][b].cpu()
+                if physical:
+                    t = _denormalize_with_dataset(valset, fi, t)
+                gen_dfs.append(t)
         out[fi] = {"df": gen_dfs, "label": entry["label"]}
     return out
 
@@ -225,8 +383,15 @@ def _trajectory_condition(runner, keys, fi, n):
 def extract_features(
     gs_model, by_fi, runner, gs_cond_keys, latent_source: LatentSource,
     batch_size=8, device="cuda", desc="extract",
+    gs_norm_stats=None,
 ):
     """Run all df samples through the GyroSwin extractor for one latent source.
+
+    If `gs_norm_stats` is given, `by_fi` is assumed to hold **physical-space**
+    df tensors and they are renormalized into GyroSwin-checkpoint space
+    (`(df - gs_mean) / gs_std`) right before the forward pass — i.e. fed to
+    GyroSwin in the exact normalization it was trained on. If `gs_norm_stats`
+    is None we feed `by_fi` through as-is (legacy behaviour).
 
     Returns dict: fi -> {'feats': (n, D) np.ndarray, 'label': str}.
     """
@@ -244,6 +409,9 @@ def extract_features(
         feats = []
         for i in range(0, n, batch_size):
             batch_df = torch.stack(dfs[i:i+batch_size])
+            if gs_norm_stats is not None:
+                gs_mean, gs_std = _gs_stats_to_tensors(gs_norm_stats, batch_df)
+                batch_df = (batch_df - gs_mean) / gs_std
             batch_cond = cond_t[i:i+batch_size]
             f = extract_gyroswin_latents(
                 gs_model, batch_df, device=device, condition=batch_cond,
