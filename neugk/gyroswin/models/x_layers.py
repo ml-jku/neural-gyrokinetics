@@ -155,10 +155,7 @@ class LatentMixingTransformer(nn.Module):
 class _CondLatentMixingTransformer(nn.Module):
     """FiLM-conditioned LatentMixingTransformer.
 
-    Matches the architecture used to train the OLD
-    `gyroswin_xxl_fluxavg_cond_nodrop_l1` checkpoint (the loader at
-    `notebooks/neurips_gyroswin_eval.py` reverse-engineered this layout):
-    a per-block `ContinuousConditionEmbed` produces a conditioning vector
+    Per-block `ContinuousConditionEmbed` produces a conditioning vector
     that FiLM-modulates `left` before each `MixingBlock`. Only the last
     block's output is returned (matches the OLD code's loop semantics —
     typically benign because `flux_depth: 1` is the in-use setting).
