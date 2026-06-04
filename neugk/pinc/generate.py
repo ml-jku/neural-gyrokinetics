@@ -200,13 +200,18 @@ def denormalize(df, norm_stats):
 # Main evaluation loop
 # ---------------------------------------------------------------------------
 
-def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, device, integrator, vq_prior=None):
+def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, device, integrator, vq_prior=None, *, timing_out=None):
     """Generate samples for a single trajectory and return averaged physics results.
 
     Samples are generated from the prior (VAE) or random codebook indices (VQ-VAE),
     decoded, denormalized using the trajectory's statistics, and then physics
     integrals (flux, spectra) are computed.
+
+    If `timing_out` is a dict, the cumulative wall time of the sample+decode
+    block (excluding physics integrals) is added under "gen_time_s" and the
+    total sample count under "n_samples".
     """
+    import time as _time
     is_vae = isinstance(model, Swin5DVAE)
     is_vqvae = isinstance(model, Swin5DVQVAE)
     if not (is_vae or is_vqvae):
@@ -241,6 +246,10 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
     while remaining > 0:
         bs = min(batch_size, remaining)
 
+        if timing_out is not None and torch.cuda.is_available() and device.type == "cuda":
+            torch.cuda.synchronize()
+        _t0 = _time.perf_counter()
+
         with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp and device.type == "cuda"):
             if is_vae:
                 mean = 0.0
@@ -260,13 +269,19 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
             else:
                 gen_df = sample_vqvae_random(model, bs, condition, pad_axes, device, prior=vq_prior)
 
-        gen_df = gen_df.float() 
+        gen_df = gen_df.float()
 
         # Denormalize each sample using the trajectory's statistics
         denorm_dfs = []
         for b in range(bs):
             denorm_dfs.append(denormalize(df=gen_df[b], norm_stats=norm_stats))
         gen_df_denorm = torch.stack(denorm_dfs)
+
+        if timing_out is not None:
+            if torch.cuda.is_available() and device.type == "cuda":
+                torch.cuda.synchronize()
+            timing_out["gen_time_s"] = timing_out.get("gen_time_s", 0.0) + (_time.perf_counter() - _t0)
+            timing_out["n_samples"]  = timing_out.get("n_samples", 0) + bs
 
         # Add batch dim and expand to match batch size; keep on CPU because
         # integrators use float64 Bessel functions that need NVRTC on CUDA.

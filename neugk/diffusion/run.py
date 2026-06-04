@@ -63,13 +63,30 @@ class DDPMRunner(BaseRunner):
             )
             # compute scale
             latent_var = np.asarray(self.trainset.latent_stats.var, dtype=np.float64)
-            latent_std = float(np.sqrt(np.maximum(np.mean(latent_var), 1e-12)))
-            self.latent_scale = 1.0 / latent_std
-            if self.rank == 0:
-                print(
-                    f"latent stats -> mean(var): {float(np.mean(latent_var)):.6e}, "
-                    f"latent_scale: {self.latent_scale:.6f}"
+            scaling_mode = getattr(self.trainset, "latent_scaling_mode", "global")
+            if scaling_mode == "global":
+                latent_std = float(np.sqrt(np.maximum(np.mean(latent_var), 1e-12)))
+                self.latent_scale = 1.0 / latent_std
+                if self.rank == 0:
+                    print(
+                        f"latent stats -> mean(var): {float(np.mean(latent_var)):.6e}, "
+                        f"latent_scale [global]: {self.latent_scale:.6f}"
+                    )
+            else:
+                # per-sample stats shape (e.g. (C,1,...) or (C,*spatial)); add batch dim
+                latent_std = np.sqrt(np.maximum(latent_var, 1e-12)).astype(np.float32)
+                scale = (1.0 / latent_std).astype(np.float32)
+                self.latent_scale = (
+                    torch.from_numpy(scale).unsqueeze(0).to(self.device)
                 )
+                if self.rank == 0:
+                    s = self.latent_scale
+                    print(
+                        f"latent stats -> mean(var): {float(np.mean(latent_var)):.6e}, "
+                        f"latent_scale [{scaling_mode}]: shape={tuple(s.shape)}, "
+                        f"mean={s.mean().item():.6f}, "
+                        f"min={s.min().item():.6f}, max={s.max().item():.6f}"
+                    )
         else:
             # pixel-space
             self.autoencoder = DummyAE()

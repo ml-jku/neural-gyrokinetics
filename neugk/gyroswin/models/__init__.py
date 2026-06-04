@@ -131,10 +131,11 @@ def get_model(cfg, dataset):
         n_cond = len(conditioning)
         if n_cond > 0:
             cond_fn = ContinuousConditionEmbed(128, n_cond)
-            if cfg.model.swin.flux_conditioning:
-                flux_cond_fn = ContinuousConditionEmbed(128, n_cond)
-            else:
-                flux_cond_fn = None
+        flux_n_cond = (
+            n_cond
+            if (n_cond > 0 and getattr(cfg.model.swin, "flux_conditioning", False))
+            else 0
+        )
 
         if cfg.model.bundle_seq_length > 1:
             raise NotImplementedError
@@ -176,7 +177,8 @@ def get_model(cfg, dataset):
             flux_reduce=flux_reduce,
             flux_num_heads=flux_num_heads,
             flux_depth=flux_depth,
-            flux_cond_embed=flux_cond_fn,
+            flux_n_cond=flux_n_cond,
+            flux_cond_embed_dim=128,
             norm_layer=norm_layer,
             qk_norm=qk_norm,
             cosine_attn=cosine_attn,

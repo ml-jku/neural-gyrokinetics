@@ -56,7 +56,8 @@ class GyroSwin(nn.Module):
         flux_reduce: str = "max",
         flux_num_heads: int = 8,
         flux_depth: int = 1,
-        flux_cond_embed: Optional[nn.Module] = None,
+        flux_n_cond: int = 0,
+        flux_cond_embed_dim: int = 128,
         norm_layer: Type[nn.Module] = nn.LayerNorm,
         qk_norm: bool = False,
         cosine_attn: bool = False,
@@ -179,7 +180,8 @@ class GyroSwin(nn.Module):
                 detach_latents=detach_flux_latents,
                 init_weights=init_weights,
                 reduction=flux_reduce,
-                cond_embed=flux_cond_embed,
+                n_cond=flux_n_cond,
+                cond_embed_dim=flux_cond_embed_dim,
             )
 
         if latent_cross_attn:
@@ -559,8 +561,19 @@ class GyroSwinMultitask(GyroSwin):
         df = self.df_unet.middle(df, **df_cond)
         phi = self.phi_middle(phi, **phi_cond)
 
+        flux_cond = None
+        if (
+            hasattr(self, "flux_head")
+            and self.flux_head is not None
+            and getattr(self.flux_head, "use_cond", False)
+        ):
+            cond_keys = self.df_unet.condition_keys
+            flux_cond = torch.cat(
+                [kwargs[k].reshape(-1, 1) for k in cond_keys], dim=-1
+            )
+
         if hasattr(self, "flux_head") and self.flux_head is not None:
-            flux_lats.append(self.flux_head.mix(0, phi, df, **kwargs))
+            flux_lats.append(self.flux_head.mix(0, phi, df, cond=flux_cond))
 
         df = self.df_unet.middle_upscale(df)
         phi = self.phi_middle_upscale(phi)
@@ -581,7 +594,7 @@ class GyroSwinMultitask(GyroSwin):
                 phi_ = phi
             # multiscale flux latents
             if self.flux_head is not None:
-                flux_lats.append(self.flux_head.mix(i + 1, phi_, df_, **kwargs))
+                flux_lats.append(self.flux_head.mix(i + 1, phi_, df_, cond=flux_cond))
 
         # expand to original
         if self.patch_skip:
