@@ -102,6 +102,134 @@ def setup(
 
 
 # ---------------------------------------------------------------------------
+# Sanity checks
+# ---------------------------------------------------------------------------
+def _build_cond_kwargs(meta, valset, fi, t_idx, cond_keys, device):
+    """Mirror the conditioning construction used by `neurips_diff_eval.ipynb`'s
+    GyroSwin recon cell: per-key scalars from metadata, with `timestep`
+    pulled from the trajectory's per-snapshot time array."""
+    nontime = [k for k in cond_keys if k != "timestep"]
+    vals = {k: float(np.squeeze(meta[COND_META_MAP.get(k, k)])) for k in nontime}
+    if "timestep" in cond_keys:
+        offset = valset.offsets[fi] if hasattr(valset, "offsets") else 0
+        vals["timestep"] = float(meta["timesteps"][t_idx + offset])
+    return {
+        k: torch.tensor([v], dtype=torch.float32, device=device)
+        for k, v in vals.items()
+    }
+
+
+@torch.no_grad()
+def gyroswin_recon_sanity(
+    gs_model, runner, gs_cond_keys, device,
+    *, fi: int = 0, t_idx: int = 30, rel_l2_threshold: float = 0.5, plot: bool = True,
+):
+    """Forward one validation sample through GyroSwin, plot the 5D recon and
+    report the relative L2 error. Loud-warns if rel L2 > `rel_l2_threshold`,
+    which usually means weights didn't load or the input normalization
+    doesn't match what GyroSwin was trained on.
+
+    Returns the (gt_df, pred_df, rel_l2, mse) tuple so callers can inspect it.
+    """
+    valset = runner.valsets[0]
+    flat_idx_map = {(f, t): idx for idx, (f, t) in valset.flat_index_to_file_and_tstep.items()}
+    if (fi, t_idx) not in flat_idx_map or (fi, t_idx + 1) not in flat_idx_map:
+        # fall back to the first available (fi, t) with a t+1 neighbour.
+        for k in flat_idx_map:
+            if (k[0], k[1] + 1) in flat_idx_map:
+                fi, t_idx = k
+                break
+    meta = valset.metadata[fi]
+    sample_in   = valset[flat_idx_map[(fi, t_idx)]]
+    sample_next = valset[flat_idx_map[(fi, t_idx + 1)]]
+    df_in = sample_in.df.unsqueeze(0).to(device)
+
+    cond_kwargs = _build_cond_kwargs(meta, valset, fi, t_idx, gs_cond_keys, device)
+    gs_model.eval()
+    out = gs_model(df_in, **cond_kwargs)
+    pred_df = out["df"][0].detach().cpu()
+    gt_df = sample_next.df.detach().cpu()  # autoregressive: target is df(t+1)
+
+    diff = gt_df - pred_df
+    rel_l2 = float(diff.norm() / (gt_df.norm() + 1e-12))
+    mse = float(diff.pow(2).mean())
+
+    print(f"  GyroSwin AR recon @ (fi={fi}, t_idx={t_idx} -> t_idx+1)")
+    print(f"  input shape:   {tuple(sample_in.df.shape)}")
+    print(f"  output shape:  {tuple(pred_df.shape)}")
+    print(f"  rel L2 (df(t+1)): {rel_l2:.4f}")
+    print(f"  MSE:              {mse:.6e}")
+    if rel_l2 > rel_l2_threshold:
+        print(
+            f"  !! WARNING rel L2 = {rel_l2:.3f} > {rel_l2_threshold}.\n"
+            "     Likely causes: (a) checkpoint weights did not actually load,\n"
+            "     (b) input normalization mismatch (the diff valset is\n"
+            "         normalized for the AE, GyroSwin was trained on its own\n"
+            "         channel-zscore normalization — see neurips_diff_eval.ipynb\n"
+            "         cell `08379936` for how to build a `gs_valset`),\n"
+            "     (c) flux_head condition_keys / metadata mismatch."
+        )
+
+    if plot:
+        try:
+            from neugk.plot_utils import plot_nd
+            fig = plot_nd(gt_df, pred_df, to_wandb=False)
+            if hasattr(fig, "suptitle"):
+                fig.suptitle(
+                    f"GyroSwin recon: input (left) vs output (right) "
+                    f"— rel L2 = {rel_l2:.3f}",
+                    fontsize=11, y=1.01,
+                )
+        except Exception as e:
+            print(f"  (plot_nd skipped: {e})")
+
+    return gt_df, pred_df, rel_l2, mse
+
+
+@torch.no_grad()
+def latent_extraction_sanity(
+    gs_model, runner, gs_cond_keys, latent_sources, device,
+    *, fi: int = 0, batch_size: int = 2,
+):
+    """Run a 2-sample mini-batch through every entry in `latent_sources` and
+    print the resulting feature shape + basic stats. Catches silent shape
+    mismatches and missing flux_head before the full extraction loop runs.
+    """
+    valset = runner.valsets[0]
+    by_fi = defaultdict(list)
+    for idx in range(len(valset)):
+        f, _ = valset.flat_index_to_file_and_tstep[idx]
+        if f == fi:
+            by_fi[f].append(idx)
+    if fi not in by_fi:
+        fi = next(iter(by_fi)) if by_fi else None
+        if fi is None:
+            print("  (no validation samples available, skipping latent sanity)")
+            return
+    idxs = by_fi[fi][:batch_size]
+    dfs = torch.stack([valset[i].df for i in idxs]).to(device)
+
+    nontime_keys = [k for k in gs_cond_keys if k != "timestep"]
+    meta = valset.metadata[fi]
+    vals = [float(np.squeeze(meta[COND_META_MAP.get(k, k)])) for k in nontime_keys]
+    cond = torch.tensor(vals, dtype=torch.float32, device=device).unsqueeze(0).expand(len(idxs), -1).contiguous()
+
+    print("\n  -- latent extraction sanity --")
+    for ls in latent_sources:
+        try:
+            feats = extract_gyroswin_latents(
+                gs_model, dfs, device=device, condition=cond,
+                cond_keys=nontime_keys, **ls.kwargs(),
+            )
+            mean, std = float(feats.mean()), float(feats.std())
+            nz = float((feats != 0).mean())
+            print(f"  {ls.name:20s}  shape={feats.shape}  mean={mean:+.3e}  "
+                  f"std={std:.3e}  nz={nz:.2%}")
+        except Exception as e:
+            print(f"  {ls.name:20s}  FAILED: {type(e).__name__}: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Sample collection
 # ---------------------------------------------------------------------------
 def _traj_label(fpath):

@@ -355,13 +355,67 @@ def flux_ks_pvalue(x_warm, x_ref):
     return float(ks_2samp(np.asarray(x_warm), np.asarray(x_ref)).pvalue)
 
 
+def flux_ks_statistic(x_warm, x_ref):
+    """KS two-sample statistic D = sup_x |F_w(x) - F_r(x)| in [0, 1].
+    Lower = more similar. Sample-size-invariant in interpretation, unlike
+    the p-value which collapses to 0 once nm/(n+m) is large."""
+    from scipy.stats import ks_2samp
+    return float(ks_2samp(np.asarray(x_warm), np.asarray(x_ref)).statistic)
+
+
+def flux_diff_ks_statistic(x_warm, x_ref):
+    """KS_d on first differences ΔX(t) = X(t+1) − X(t).
+    Differencing decorrelates the slow trend that dominates raw saturated
+    turbulence time-series, so 240-step windows behave near-IID and the
+    KS test recovers statistical resolution. Sensitive to dynamics: a
+    constant trajectory at the right mean has Δ ≡ 0 → degenerate Δ-distribution
+    that fails the test, unlike pure marginal-shape metrics."""
+    from scipy.stats import ks_2samp
+    a = np.diff(np.asarray(x_warm).ravel())
+    b = np.diff(np.asarray(x_ref).ravel())
+    if a.size < 2 or b.size < 2:
+        return float("nan")
+    return float(ks_2samp(a, b).statistic)
+
+
+def flux_diff_mmd_rbf(x_warm, x_ref):
+    """MMD-RBF² on first differences. Same dynamics-aware logic as
+    `flux_diff_ks_statistic`."""
+    a = np.diff(np.asarray(x_warm).ravel())
+    b = np.diff(np.asarray(x_ref).ravel())
+    if a.size < 2 or b.size < 2:
+        return float("nan")
+    return float(flux_mmd_rbf(a, b))
+
+
+def flux_diff_ad_statistic(x_warm, x_ref):
+    """Anderson–Darling 2-sample statistic on first differences. Same
+    dynamics-aware logic as `flux_diff_ks_statistic`."""
+    a = np.diff(np.asarray(x_warm).ravel())
+    b = np.diff(np.asarray(x_ref).ravel())
+    if a.size < 2 or b.size < 2:
+        return float("nan")
+    return float(flux_ad_statistic(a, b))
+
+
 def flux_ad_statistic(x_warm, x_ref):
-    """Anderson–Darling 2-sample statistic (heavier tail weighting than KS)."""
+    """Anderson–Darling 2-sample statistic (heavier tail weighting than KS).
+    The associated p-value is interpolated from a small table; scipy emits
+    `p-value floored/capped` UserWarnings when the true p falls outside it.
+    Those warnings concern the *p-value* only -- the statistic is unaffected
+    -- so we silence them at the call site to keep the run log clean."""
+    import warnings
     from scipy.stats import anderson_ksamp
     try:
-        return float(anderson_ksamp(
-            [np.asarray(x_warm), np.asarray(x_ref)],
-        ).statistic)
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"p-value (floored|capped):.*",
+                category=UserWarning,
+            )
+            return float(anderson_ksamp(
+                [np.asarray(x_warm), np.asarray(x_ref)],
+            ).statistic)
     except Exception:
         return np.nan
 
@@ -420,6 +474,47 @@ def flux_mmd_rbf(x_warm, x_ref, sigma=None):
     Kyy = _k(b, b); np.fill_diagonal(Kyy, 0.0)
     Kxy = _k(a, b)
     n, m = a.size, b.size
+    return float(
+        Kxx.sum() / (n * (n - 1))
+        + Kyy.sum() / (m * (m - 1))
+        - 2.0 * Kxy.mean()
+    )
+
+
+def vector_mmd_rbf(X_warm, X_ref, n_max=600, rng=None):
+    """Joint-over-modes MMD²: each row of (X_warm, X_ref) is a K-dimensional
+    spectrum vector; the RBF kernel sees the *full* mode profile, so cross-
+    mode correlations enter the metric (unlike `flux_mmd_rbf` mapped over
+    the mode axis, which treats modes independently). Bandwidth set by the
+    median of the pooled vector L2 distances. Both samples are sub-sampled
+    to ``n_max`` rows to keep the kernel matrix tractable.
+
+    Use case: a single per-(traj, family) summary that captures cross-mode
+    structure, complementing the per-mode KS/MMD/AD/W1 in `CANONICAL_METRICS`.
+    """
+    rng = rng if rng is not None else np.random.default_rng(0)
+    Xw = np.asarray(X_warm, dtype=np.float64)
+    Xr = np.asarray(X_ref,  dtype=np.float64)
+    if Xw.ndim != 2 or Xr.ndim != 2 or Xw.size == 0 or Xr.size == 0:
+        return np.nan
+    if Xw.shape[0] > n_max:
+        Xw = Xw[rng.choice(Xw.shape[0], n_max, replace=False)]
+    if Xr.shape[0] > n_max:
+        Xr = Xr[rng.choice(Xr.shape[0], n_max, replace=False)]
+    K = min(Xw.shape[-1], Xr.shape[-1])
+    Xw, Xr = Xw[:, :K], Xr[:, :K]
+    XX = ((Xw[:, None, :] - Xw[None, :, :]) ** 2).sum(-1)
+    YY = ((Xr[:, None, :] - Xr[None, :, :]) ** 2).sum(-1)
+    XY = ((Xw[:, None, :] - Xr[None, :, :]) ** 2).sum(-1)
+    pooled = np.concatenate([np.sqrt(XX[XX > 0]), np.sqrt(YY[YY > 0])])
+    if pooled.size == 0:
+        return np.nan
+    sigma = max(float(np.median(pooled)), 1e-12)
+    g = 1.0 / (2 * sigma * sigma)
+    Kxx = np.exp(-g * XX); np.fill_diagonal(Kxx, 0.0)
+    Kyy = np.exp(-g * YY); np.fill_diagonal(Kyy, 0.0)
+    Kxy = np.exp(-g * XY)
+    n, m = Xw.shape[0], Xr.shape[0]
     return float(
         Kxx.sum() / (n * (n - 1))
         + Kyy.sum() / (m * (m - 1))
@@ -823,18 +918,28 @@ def running_mean_drift(x_warm, x_ref):
 # are the ONLY metrics the driver emits — extra helpers above remain available
 # for direct use but are deliberately excluded from the default output.
 CANONICAL_METRICS = {
-    "w1":       flux_wasserstein,
-    "mmd":      flux_mmd_rbf,
-    "ks_p":     flux_ks_pvalue,
-    "ad":       flux_ad_statistic,
-    "arima_l2": flux_arima_param_l2,
-    "r2_hist":  flux_r2_histogram,
+    "w1":         flux_wasserstein,
+    "mmd":        flux_mmd_rbf,
+    "ks_d":       flux_ks_statistic,
+    "ad":         flux_ad_statistic,
 }
+
+
+def _normalize_modewise(X, eps=1e-30):
+    """Per-row sum-to-1 normalisation along the last axis. For signed spectra
+    (e.g. fluxspec, where Q_k can flip sign) we divide by the L1 norm so that
+    the result is interpretable as a fractional energy distribution while
+    preserving sign. Each row sums to ±1 in absolute value."""
+    X = np.asarray(X, dtype=np.float64)
+    denom = np.abs(X).sum(axis=-1, keepdims=True)
+    denom = np.where(denom < eps, 1.0, denom)
+    return X / denom
 
 
 def compute_distribution_divergences(
     log_run, log_gt, *, ref_flux_samples=None, warm_frac=0.95,
     max_lag=40, spec_keys=("ky_spec", "fluxspec"),
+    normalize_spectra=False,
 ):
     """Divergences between a warm-started run and the GT saturated reference.
 
@@ -920,8 +1025,9 @@ def compute_distribution_divergences(
                         vals.append(np.nan)
                 v = np.asarray(vals, dtype=float)
                 out[f"flux_{name}_per_restart"]      = v.tolist()
-                out[f"flux_{name}_per_restart_mean"] = float(np.nanmean(v))
-                out[f"flux_{name}_per_restart_std"]  = float(np.nanstd(v, ddof=0))
+                _vf = v[np.isfinite(v)]
+                out[f"flux_{name}_per_restart_mean"] = float(_vf.mean()) if _vf.size else float("nan")
+                out[f"flux_{name}_per_restart_std"]  = float(_vf.std(ddof=0)) if _vf.size else float("nan")
 
     # ---- spectra ---------------------------------------------------------
     for spec_key in spec_keys:
@@ -944,17 +1050,41 @@ def compute_distribution_divergences(
         if Xw_pooled.size == 0 or Xr.size == 0:
             continue
 
+        # Optional per-row sum-to-1 normalisation (interprets each timestep's
+        # spectrum as the fraction of energy per mode). Decouples shape from
+        # absolute amplitude before per-mode divergences are computed.
+        if normalize_spectra:
+            Xw_pooled = _normalize_modewise(Xw_pooled)
+            Xr        = _normalize_modewise(Xr)
+            X_per_restart = [_normalize_modewise(X) for X in X_per_restart]
+
+        # --- joint-over-modes MMD (single number per family) ---------------
+        # Captures cross-mode correlations that the per-mode `*_mmd_mean`
+        # in CANONICAL_METRICS cannot see. Stored under `<spec_key>_mmd2d`
+        # so any consumer (e.g. fid_landscape) can read it from div_warm.
+        try:
+            out[f"{spec_key}_mmd2d"] = float(vector_mmd_rbf(Xw_pooled, Xr))
+        except Exception as e:
+            out[f"{spec_key}_mmd2d"]       = np.nan
+            out[f"{spec_key}_mmd2d_error"] = repr(e)
+        if len(X_per_restart) > 1:
+            vals = []
+            for X_r_arr in X_per_restart:
+                try:    vals.append(float(vector_mmd_rbf(X_r_arr, Xr)))
+                except Exception: vals.append(np.nan)
+            v = np.asarray(vals, dtype=float)
+            out[f"{spec_key}_mmd2d_per_restart"]      = v.tolist()
+            _vf = v[np.isfinite(v)]
+            out[f"{spec_key}_mmd2d_per_restart_mean"] = float(_vf.mean()) if _vf.size else float("nan")
+            out[f"{spec_key}_mmd2d_per_restart_std"]  = float(_vf.std(ddof=0)) if _vf.size else float("nan")
+
         for name, fn in CANONICAL_METRICS.items():
-            metric_key = (f"{spec_key}_r2_meanlog" if name == "r2_hist"
-                            else f"{spec_key}_{name}_mean")
+            metric_key = f"{spec_key}_{name}_mean"
             # headline = pooled
             try:
-                if name == "r2_hist":
-                    out[metric_key] = spec_r2_meanlog(Xw_pooled, Xr)
-                else:
-                    pm = _per_mode_apply(fn, Xw_pooled, Xr)
-                    f_ = pm[np.isfinite(pm)]
-                    out[metric_key] = float(np.mean(f_)) if f_.size else np.nan
+                pm = _per_mode_apply(fn, Xw_pooled, Xr)
+                f_ = pm[np.isfinite(pm)]
+                out[metric_key] = float(np.mean(f_)) if f_.size else np.nan
             except Exception as e:
                 out[metric_key] = np.nan
                 out[f"{metric_key}_error"] = repr(e)
@@ -963,18 +1093,16 @@ def compute_distribution_divergences(
                 vals = []
                 for X_r_arr in X_per_restart:
                     try:
-                        if name == "r2_hist":
-                            vals.append(float(spec_r2_meanlog(X_r_arr, Xr)))
-                        else:
-                            pm = _per_mode_apply(fn, X_r_arr, Xr)
-                            f_ = pm[np.isfinite(pm)]
-                            vals.append(float(np.mean(f_)) if f_.size else float("nan"))
+                        pm = _per_mode_apply(fn, X_r_arr, Xr)
+                        f_ = pm[np.isfinite(pm)]
+                        vals.append(float(np.mean(f_)) if f_.size else float("nan"))
                     except Exception:
                         vals.append(float("nan"))
                 v = np.asarray(vals, dtype=float)
                 out[f"{metric_key}_per_restart"]      = v.tolist()
-                out[f"{metric_key}_per_restart_mean"] = float(np.nanmean(v))
-                out[f"{metric_key}_per_restart_std"]  = float(np.nanstd(v, ddof=0))
+                _vf = v[np.isfinite(v)]
+                out[f"{metric_key}_per_restart_mean"] = float(_vf.mean()) if _vf.size else float("nan")
+                out[f"{metric_key}_per_restart_std"]  = float(_vf.std(ddof=0)) if _vf.size else float("nan")
 
     return out
 

@@ -564,33 +564,74 @@ class FlowMatchingRunner(DDPMRunner):
 
     @torch.no_grad()
     def sample(
-        self, condition: torch.Tensor, steps: int = 50, latent_only: bool = False
+        self,
+        condition: torch.Tensor,
+        steps: int = 50,
+        latent_only: bool = False,
+        solver: str = "euler",
+        rtol: float = 1e-3,
+        atol: float = 1e-4,
     ):
-        """Generate samples by integrating the velocity field using Euler's method."""
+        """Integrate the learned velocity field 0 -> 1 to produce samples.
+
+        Parameters
+        ----------
+        steps : int
+            Step count for the fixed-grid Euler solver. For adaptive solvers
+            this becomes the number of *output points* on the [0, 1] grid;
+            the solver internally takes as many sub-steps as needed.
+        solver : str
+            ``"euler"`` (default) for the original fixed-step integration, or
+            any torchdiffeq method (``"dopri5"``, ``"rk4"``, ``"adaptive_heun"``,
+            ``"bosh3"``, ...). Adaptive methods require ``continuous_time=True``
+            because they evaluate the velocity field at arbitrary t.
+        rtol, atol : float
+            Adaptive-solver tolerances forwarded to ``torchdiffeq.odeint``.
+            Ignored by ``"euler"`` and other fixed-step methods.
+        """
         self.model.eval()
         bs = condition.shape[0]
         x = self._get_prior((bs, *self.latent_shape)).to(self.device)
-        t_steps = torch.linspace(0.0, 1.0, steps + 1, device=self.device)
+        continuous = getattr(self.cfg.model, "continuous_time", True)
 
-        # integrate ODE
-        for i in range(steps):
-            t_curr = t_steps[i]
-            t_next = t_steps[i + 1]
-            dt = t_next - t_curr
-
-            if getattr(self.cfg.model, "continuous_time", True):
-                t_batch = torch.full((bs,), t_curr.item(), device=self.device)
-            else:
-                n_train_steps = self.noise_scheduler.config.num_train_timesteps
-                t_batch = torch.full(
-                    (bs,),
-                    int(t_curr.item() * (n_train_steps - 1)),
-                    device=self.device,
-                    dtype=torch.long,
+        if solver == "euler":
+            t_steps = torch.linspace(0.0, 1.0, steps + 1, device=self.device)
+            for i in range(steps):
+                t_curr = t_steps[i]
+                t_next = t_steps[i + 1]
+                dt = t_next - t_curr
+                if continuous:
+                    t_batch = torch.full((bs,), t_curr.item(), device=self.device)
+                else:
+                    n_train_steps = self.noise_scheduler.config.num_train_timesteps
+                    t_batch = torch.full(
+                        (bs,),
+                        int(t_curr.item() * (n_train_steps - 1)),
+                        device=self.device,
+                        dtype=torch.long,
+                    )
+                v_pred = self.model(x, tstep=t_batch.to(x.dtype), condition=condition)
+                x = x + v_pred * dt
+        else:
+            if not continuous:
+                raise ValueError(
+                    f"solver={solver!r} needs continuous_time=True; the discrete "
+                    "scheduler can only be integrated by 'euler'."
                 )
+            try:
+                from torchdiffeq import odeint
+            except ImportError as e:
+                raise ImportError(
+                    f"solver={solver!r} requires torchdiffeq. `pip install torchdiffeq`."
+                ) from e
 
-            v_pred = self.model(x, tstep=t_batch.to(x.dtype), condition=condition)
-            x = x + v_pred * dt
+            def _velocity(t_scalar, x_state):
+                t_batch = t_scalar.expand(bs).to(x_state.dtype)
+                return self.model(x_state, tstep=t_batch, condition=condition)
+
+            t_grid = torch.linspace(0.0, 1.0, max(steps, 2), device=self.device)
+            traj = odeint(_velocity, x, t_grid, method=solver, rtol=rtol, atol=atol)
+            x = traj[-1]
 
         # decode
         pred = x / getattr(self, "latent_scale", 1.0)
