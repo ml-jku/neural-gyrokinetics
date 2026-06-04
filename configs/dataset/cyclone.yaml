@@ -28,16 +28,15 @@ num_workers: 10
 active_keys: ["re", "im"]
 input_fields: ["df"]
 training_trajectories: "iteration_{0-7,9-12,14-64,67-99,101-114,116-130,132-147,149-199,201-234,236-261,263-299}.h5"
-# validation_trajectories: ["iteration_13.h5", "iteration_100.h5", "iteration_200.h5"]
-validation_trajectories: [
-  # "iteration_13.h5", "iteration_100.h5", "iteration_200.h5",
-  "iteration_8.h5",
-  "iteration_135.h5",
-  "iteration_115.h5",
-  "iteration_148.h5",
-  "iteration_232.h5",
-  "iteration_262.h5",
-]
+validation_trajectories: ["iteration_13.h5", "iteration_100.h5", "iteration_200.h5"]
+# validation_trajectories: [
+#   "iteration_8.h5",
+#   "iteration_135.h5",
+#   "iteration_115.h5",
+#   "iteration_148.h5",
+#   "iteration_232.h5",
+#   "iteration_262.h5",
+# ]
 partial_holdouts:
 training_cond_filters:
   last_flux: [1., .inf]
@@ -72,3 +71,4 @@ timestep_std_offset: 80
 # diffusion-specific:
 latent_sampling_mode: stochastic  # stochastic, deterministic (used for diffusion with VAE latents)
 val_latent_sampling_mode: deterministic  # separate sampling mode for validation (null to use same as training)
+latent_scaling_mode: global  # global, per_channel, per_token (latent normalization granularity for diffusion)

@@ -1,0 +1,56 @@
+name: vqvae
+model_type: vqvae
+bundle_seq_length: 1
+latent_dim: 1024
+act_fn: GELU
+norm_fn: RMSNorm
+decouple_mu: true
+encoder_conditioning: []
+decoder_conditioning: ["itg", "dg", "s_hat", "q"]
+extra_zf_loss: false
+init_weights: "kaiming_uniform"
+patching_init_weights: "kaiming_uniform"
+cond_init_weights: "normal_smallvar"
+
+vq:
+  codebook_size: 8192
+  embedding_dim: 256
+  commitment_weight: 0.25
+  codebook_type: "euclidean"
+  ema_decay: 0.99
+  entropy_loss_weight: 0.01
+  threshold_ema_dead_code: 2
+
+loss_scheduler: {}
+loss_weights:
+  df: 1.0
+  vq_commit: 1.0
+extra_loss_weights: {}
+
+patch:
+  patch_size: [ 4, 0, 4, 5, 4 ]
+  window_size: [ 4, 0, 4, 9, 4 ]
+  merging_depth: 2
+  unmerging_depth: 2
+  merging_hidden_ratio: 1.0
+  unmerging_hidden_ratio: 1.0
+  c_multiplier: 1.0
+
+vit:
+  num_heads: [16]
+  depth: [8]
+  gradient_checkpoint: false
+  use_abs_pe: false
+  use_rpb: true
+  use_rope: false
+  gated_attention: true
+  modulation: dit
+  drop_path: 0.1
+  qk_norm: true
+
+bottleneck:
+  dim: 256
+  norm_learnable: false
+  normalized_latent: false
+  num_heads: 4
+  depth: 2
