@@ -1,0 +1,38 @@
+# @package _global_
+# PINC revival: continuous AE at ~1000x compression.
+# Same grid [4,2,9,4]=288 tokens as 200x, narrower bottleneck.dim 154.
+# MEASURED CR = 1005x (empirical, one forward at real resolution).
+# Run:  python main.py experiment=pinc_revival/ae_1000x
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/ae
+  - override /logging: no_logging
+  - override /validation: default
+
+experiment_id: pinc_revival_ae_1000x
+workflow: pinc_autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+model:
+  patch:
+    patch_size: [4, 0, 4, 5, 4]
+  vit:
+    num_heads: [16]
+    depth: [8]
+  bottleneck:
+    dim: 154
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true

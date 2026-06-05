@@ -1,0 +1,38 @@
+# @package _global_
+# Ablation: VQ-VAE with Lookup-Free Quantization (LFQ, MAGVIT-v2). Binary/sign
+# quantization of each latent dim with an entropy penalty; scales to large
+# codebooks without a lookup table. IN-TRAINING (STE on the sign), not post-hoc.
+#
+# REQUIRES CODE: add an LFQ branch (lucidrains `LFQ`) selected by vq.quantizer.
+# Until then this config falls back to the euclidean codebook.
+# Run:  python main.py experiment=pinc_revival/vqvae_lfq
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: no_logging
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_lfq
+workflow: pinc_autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+
+model:
+  vq:
+    quantizer: lfq               # NEW interface knob (see note above)
+    codebook_size: 8192          # must be a power of 2 for LFQ
+    entropy_loss_weight: 0.1
+    diversity_gamma: 1.0
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true

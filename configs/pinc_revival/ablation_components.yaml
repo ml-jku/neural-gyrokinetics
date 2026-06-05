@@ -1,0 +1,59 @@
+# PINC component-contribution ablation (paper table).
+# Grid sweep over `physical_losses`: density-only and data-only baselines, the
+# full PINC objective, and leave-one-out (drop int / diag / mono) to attribute
+# each physics term. `df` stays in every PINC variant as the reconstruction
+# anchor (dropping it causes catastrophic forgetting). Ranked by training-eval
+# metrics -> grid_search_mlp_pinc.csv (df/phi psnr, flux loss per combo).
+#
+# Run:  python -m neugk.pinc.nf_main config=configs/pinc_revival/ablation_components.yaml
+# (override `gpus` to whatever is free, e.g. gpus=[0,6,7])
+mode: grid
+ckp_path: nf_ckps_ablation/
+
+path: /local00/bioinf/galletti/preprocessed_kvikio
+backend: gds
+normalization: zscore
+norm_axes: [-4]
+use_flux_fields: false
+
+epochs: 20
+lr: 7e-3
+batch_size: 4096
+density_eval_every: 0
+pinc_epochs: 100
+pinc_lr: 5e-4
+pinc_lr_sched: true
+min_lr: 1e-8
+pinc_eval_every: 2
+
+# best PINC-paper neural field
+name: mlp
+dim: 64
+n_layers: 5
+skips: true
+embed_type: discrete
+act_fn: silu
+
+gpus: [0, 3, 4, 5, 6, 7]
+throttling: 2
+
+# small validation subset for a fast, fair ablation: 10 trajectories, 1 snapshot each
+timesteps: [200]
+trajectory: [
+  iteration_0.h5, iteration_8.h5, iteration_20.h5, iteration_36.h5, iteration_41.h5,
+  iteration_48.h5, iteration_55.h5, iteration_65.h5, iteration_73.h5, iteration_79.h5,
+]
+
+# grid axis: each inner list is one ablation row (a ListConfig of lists -> swept).
+#   []                    density only (no PINC phase)
+#   [df]                  data anchor only (no physics terms)
+#   [df,int,diag,mono]    full PINC
+#   leave-one-out:        drop int / diag / mono in turn
+physical_losses: [
+  [],
+  [df],
+  [df, int, diag, mono],
+  [df, diag, mono],
+  [df, int, mono],
+  [df, int, diag],
+]

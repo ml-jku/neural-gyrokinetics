@@ -1,0 +1,42 @@
+# @package _global_
+# PINC revival: VQ-VAE at ~1000x compression.
+# VQ-VAE CR = (prod(base_resolution_4d) * in_channels * 4 bytes) /
+#             (num_tokens * codes_per_token * 2 bytes)   [int16 index accounting].
+# CR is INDEPENDENT of bottleneck.dim / codebook_size; it is set purely by the
+# number of tokens (= prod(bottleneck_grid)) and codes/token (1 here; num_quantizers for RVQ).
+# Minimal downsampling (patch_size [1,0,1,1,1], one vit layer) -> 88064 tokens.
+# MEASURED CR = 1012x (empirical, one forward at real resolution).
+# Run:  python main.py experiment=pinc_revival/vqvae_1000x
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: no_logging
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_1000x
+workflow: pinc_autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+model:
+  vq:
+    codebook_type: euclidean
+  patch:
+    patch_size: [1, 0, 1, 1, 1]
+  vit:
+    num_heads: [8]
+    depth: [4]
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
