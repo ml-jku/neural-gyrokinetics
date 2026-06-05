@@ -1,4 +1,4 @@
-root: /projects/u6eb/gyrokinetics/preprocessed_kvikio
+root: /local00/bioinf/galletti/preprocessed_kvikio
 device: cuda
 n_samples: 8
 batch_size: 8

@@ -568,9 +568,7 @@ class GyroSwinMultitask(GyroSwin):
             and getattr(self.flux_head, "use_cond", False)
         ):
             cond_keys = self.df_unet.condition_keys
-            flux_cond = torch.cat(
-                [kwargs[k].reshape(-1, 1) for k in cond_keys], dim=-1
-            )
+            flux_cond = torch.cat([kwargs[k].reshape(-1, 1) for k in cond_keys], dim=-1)
 
         if hasattr(self, "flux_head") and self.flux_head is not None:
             flux_lats.append(self.flux_head.mix(0, phi, df, cond=flux_cond))

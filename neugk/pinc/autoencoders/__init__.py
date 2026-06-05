@@ -167,7 +167,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             print(f"VQ-VAE parameters: {params_m:.1f}M")
         else:
             print(f"AE parameters: {params_m:.1f}M")
-            
+
         if hasattr(ae, "get_compression_info"):
             c_info = ae.get_compression_info()
             print(

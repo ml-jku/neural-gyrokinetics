@@ -528,12 +528,16 @@ class BaseEvaluator:
                 sizes = [int(s) for s in probe_cfg["sizes"]]
                 pred_splits = torch.split(y_val_pred, sizes, dim=1)
                 target_splits = torch.split(y_val, sizes, dim=1)
-                for name, pred, target in zip(probe_targets, pred_splits, target_splits):
+                for name, pred, target in zip(
+                    probe_targets, pred_splits, target_splits
+                ):
                     if name in ["fluxspec", "kyspec"]:
                         pred = torch.expm1(pred)
                         target = torch.expm1(target)
                     val_rmse = torch.sqrt(torch.mean((pred - target) ** 2))
-                    log_metric_dict[f"{valname}/probe_{name}_val_rmse"] = val_rmse.item()
+                    log_metric_dict[f"{valname}/probe_{name}_val_rmse"] = (
+                        val_rmse.item()
+                    )
             else:
                 # single-target: overall RMSE
                 val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val) ** 2))
@@ -541,7 +545,11 @@ class BaseEvaluator:
 
             # t-SNE plots for first validation set
             if val_idx == 0:
-                tsne_targets = list(probe_cfg.get("tsne_targets", ["flux"])) if probe_cfg is not None else None
+                tsne_targets = (
+                    list(probe_cfg.get("tsne_targets", ["flux"]))
+                    if probe_cfg is not None
+                    else None
+                )
                 if tsne_targets is not None and probe_targets is not None:
                     sizes = [int(s) for s in probe_cfg["sizes"]]
                     offsets = [sum(sizes[:i]) for i in range(len(sizes))]
@@ -550,9 +558,12 @@ class BaseEvaluator:
                             continue
                         idx = probe_targets.index(tsne_tgt)
                         col_start = offsets[idx]
-                        y_color = y_val[:, col_start:col_start + sizes[idx]].mean(dim=1)
+                        y_color = y_val[:, col_start : col_start + sizes[idx]].mean(
+                            dim=1
+                        )
                         val_plots[f"latent_tsne_{tsne_tgt}"] = plot_latent_tsne(
-                            x_val, y_color,
+                            x_val,
+                            y_color,
                             title=f"t-SNE colored by {tsne_tgt} (Epoch {epoch})",
                         )
                 else:

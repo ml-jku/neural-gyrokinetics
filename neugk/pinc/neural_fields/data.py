@@ -1,18 +1,14 @@
-from typing import Tuple, Sequence, Optional, Union
-
 import os
-import pickle
+from math import exp
+from typing import Optional, Sequence, Tuple, Union
 
-import h5py
 import numpy as np
 import torch
 from einops import rearrange
-from math import exp
-
 from torch.utils.data import Dataset
 
-from neugk.integrals import FluxIntegral
-from neugk.pinc.neural_fields.nf_utils import df_fft, df_ifft
+from neugk.dataset.backend import H5Backend, KvikIOBackend
+from neugk.physics.integrals import FluxIntegral
 
 
 class CycloneNFDataset(Dataset):
@@ -24,10 +20,9 @@ class CycloneNFDataset(Dataset):
         realpotens: bool = False,
         normalize: Optional[str] = None,
         normalize_coords: bool = False,
+        norm_axes: Sequence[int] = (-4,),
         beta1: float = 1.0,
         beta2: float = 0.0,
-        spatial_fft: bool = False,
-        separate_ky_modes: Optional[Sequence[int]] = None,
         flux_fields: bool = False,
         flux_fields_train: bool = False,
         backend: str = "gds",
@@ -35,8 +30,10 @@ class CycloneNFDataset(Dataset):
         super().__init__()
 
         self.normalize = normalize
+        # field axes to keep separate stats along, counted from the end:
+        # vpar=-5, mu=-4, s=-3, x=-2, y=-1 (channel axis 0 is always kept).
+        self.norm_axes = tuple(norm_axes)
         self.flux_fields = flux_fields
-        self.spatial_fft = spatial_fft
         self.flux_fields_train = flux_fields and flux_fields_train
         self.realpotens = realpotens
         self.beta1 = beta1
@@ -49,19 +46,14 @@ class CycloneNFDataset(Dataset):
             timesteps = [timesteps]
         self.timesteps = timesteps
 
-        # load all samples
-        if backend == "kvikio":
-            kvikio_dir = f"{path}/{trajectory}_ifft{'_realpotens' if realpotens else ''}"
-            self.raw_path = kvikio_dir
-            self.df, self.phi, self.flux, self.geom = self._load_gkw_data_kvikio(
-                kvikio_dir, timesteps, separate_ky_modes
-            )
-        else:
-            self.raw_path = f"{path}/{trajectory}"
-            h5_file = f"{path}/{trajectory}_ifft{'_realpotens' if realpotens else ''}.h5"
-            self.df, self.phi, self.flux, self.geom = self._load_gkw_data(
-                h5_file, timesteps, separate_ky_modes
-            )
+        # load via the shared neugk/dataset backends (kvikio/GDS or h5)
+        self._backend = (
+            KvikIOBackend(use_kvikio=(backend == "gds"))
+            if backend in ("kvikio", "gds")
+            else H5Backend()
+        )
+        self.raw_path = os.path.join(path, trajectory)
+        self.df, self.phi, self.flux, self.geom = self._load(self.raw_path, timesteps)
 
         grid = torch.meshgrid(
             [torch.arange(d) for d in self.df.shape[1:]], indexing="ij"
@@ -77,112 +69,96 @@ class CycloneNFDataset(Dataset):
             norm_ndim = torch.tensor(1.0)
         self.grid = self.grid / norm_ndim
         self.norm_ndim = norm_ndim
-        self.f_df = rearrange(self.df, "c ... -> c (...)")
         self.f_grid = rearrange(self.grid, "... d -> (...) d")
-        if self.flux_fields_train:
-            self.f_flux = rearrange(self.flux, "c ... -> c (...)")
 
-        self._get_norm_stats()
+        # per-sample normalization, reducing the spatial dims but keeping the
+        # velocity structure (C, [t,] vpar, mu); helps the INR fit. The raw
+        # self.df is kept intact (full_df / CR stay in physical units).
+        self.scale, self.shift = {}, {}
+        self.f_df, self.scale["df"], self.shift["df"] = self._norm_field(self.df)
+        if self.flux_fields_train:
+            self.f_flux, self.scale["flux"], self.shift["flux"] = self._norm_field(
+                self.flux
+            )
 
         # strip _Lin or similar suffixes to find raw trajectory name
-        raw_traj = trajectory.split("_Lin")[0].split("_ifft")[0]
-        raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{raw_traj}"
-        if not os.path.isdir(raw_path):
-            raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{trajectory}"
-        sgrid = np.loadtxt(f"{raw_path}/sgrid")
-        self.ds = sgrid[1] - sgrid[0]
+        # parallel-grid spacing: prefer metadata, fall back to the raw sgrid file
+        if getattr(self, "_meta_ds", None) is not None:
+            self.ds = self._meta_ds
+        else:
+            raw_traj = trajectory.split("_Lin")[0].split("_ifft")[0]
+            raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{raw_traj}"
+            if not os.path.isdir(raw_path):
+                raw_path = f"/restricteddata/ukaea/gyrokinetics/raw/{trajectory}"
+            sgrid = np.loadtxt(f"{raw_path}/sgrid")
+            self.ds = float(sgrid[1] - sgrid[0])
 
-    def _load_gkw_data(
-        self,
-        h5_file: str,
-        timesteps: Sequence[int],
-        separate_ky_modes: Optional[Sequence[int]] = None,
-    ):
+    def _resolve_path(self, traj_path: str) -> str:
+        """Try the formatted path first, then fall back to the bare path.
+
+        ``format_path`` appends ``_ifft_realpotens`` (or similar) when
+        ``spatial_ifft=True``. If the data was preprocessed without that
+        suffix, the directory (KvikIO) or file (H5) won't exist.  Fall back to
+        the original path so the eval runner works on both naming conventions.
+        """
+        be = self._backend
+        formatted = be.format_path(
+            traj_path, spatial_ifft=True, real_potens=self.realpotens
+        )
+        if be.exists(formatted):
+            return formatted
+        # try the bare path (already IFFT / real-potens on disk)
+        if hasattr(be, "_strip_h5"):
+            bare = be._strip_h5(traj_path)
+        else:
+            # H5Backend: keep .h5 extension
+            bare = traj_path
+        if be.exists(bare):
+            return bare
+        raise FileNotFoundError(
+            f"Cannot find trajectory data for {traj_path!r}. "
+            f"Tried: {formatted!r}, {bare!r}"
+        )
+
+    def _load(self, traj_path: str, timesteps: Sequence[int]):
+        be = self._backend
+        path = self._resolve_path(traj_path)
+        meta = be.read_metadata(path, input_fields=["df"])
+        self._meta_ds = float(meta["ds"]) if "ds" in meta else None
+
+        res = tuple(int(x) for x in meta["resolution"])  # (nvpar, nmu, ns, nkx, nky)
+        df_shape = (2, *res)
+        phi_shape = tuple(meta["phi_mean"].shape) if "phi_mean" in meta else res[2:]
+        flux_arr = meta["flux"] if "flux" in meta else meta["fluxes"]
+        active = np.array([0, 1])
+
         dfs, phis, fluxes = [], [], []
-
-        with h5py.File(h5_file, "r") as data:
-            geom = {k: np.array(v[()]) for k, v in data["geometry"].items()}
+        with be.open(path) as f:
             for t in timesteps:
-                dfs.append(data[f"data/timestep_{str(t).zfill(5)}"][:])
-                phis.append(data[f"data/poten_{str(t).zfill(5)}"][:])
-                fluxes.append(data["metadata/fluxes"][t])
+                ts = str(t).zfill(5)
+                df = torch.as_tensor(be.read_df(f, ts, df_shape, active)).float().cpu()
+                phi = torch.as_tensor(be.read_phi(f, ts, phi_shape)).float().cpu()
+                if phi.shape[0] != 2:
+                    phi = torch.stack([phi, torch.zeros_like(phi)], dim=0)
+                dfs.append(df.reshape(df_shape))
+                phis.append(phi)
+                fluxes.append(float(flux_arr[t]))
 
-        dfs = torch.from_numpy(np.stack(dfs, 0)).squeeze(0)
-        phis = torch.from_numpy(np.stack(phis, 0)).squeeze(0)
-        fluxes = torch.from_numpy(np.stack(fluxes, 0)).squeeze(0)
-        geom = {k: torch.from_numpy(g).squeeze(0) for k, g in geom.items()}
-        if len(timesteps) > 1:
-            dfs = rearrange(dfs, "t c ... -> c t ...")
+        dfs = torch.stack(dfs, 0).squeeze(0)
+        phis = torch.stack(phis, 0).squeeze(0)
+        fluxes = torch.tensor(fluxes).squeeze(0)
+        geom = {
+            k: torch.as_tensor(np.array(v)).squeeze(0)
+            for k, v in meta["geometry"].items()
+        }
 
-        if self.flux_fields or self.realpotens:
-            geom_ = {k: g[None] for k, g in geom.items()}
-            dfs_ = dfs.clone()
-            if len(timesteps) == 1:
-                dfs_ = dfs_[:, None]
-            phis_int, fluxes_int = [], []
-            for t in range(len(timesteps)):
-                assert dfs_[:, t].shape[0] == 2
-                integrator = FluxIntegral(flux_fields=self.flux_fields)
-                phi_t, (_, fluxes_t, _) = integrator(geom_, df=dfs_[None, :, t])
-                fluxes_int.append(fluxes_t.squeeze(0))
-                phis_int.append(phi_t.squeeze(0))
-            if self.flux_fields:
-                fluxes = torch.stack(fluxes_int, 0).squeeze(0)
-            if self.realpotens:
-                # replace potentials (realpotens incompatible with losses)
-                phis = torch.stack(phis_int, 0).squeeze(0)
-
-        if len(timesteps) > 1:
-            phis = rearrange(phis, "t c ... -> c t ...")
-            if self.flux_fields:
-                fluxes = rearrange(fluxes, "t c ... -> c t ...")
-
-        if self.spatial_fft or separate_ky_modes is not None:
-            dfs = self._split_into_bands(dfs, self.spatial_fft, separate_ky_modes)
-
-        return dfs, phis, fluxes, geom
-
-    def _load_gkw_data_kvikio(
-        self,
-        kvikio_dir: str,
-        timesteps: Sequence[int],
-        separate_ky_modes: Optional[Sequence[int]] = None,
-    ):
-        with open(os.path.join(kvikio_dir, "metadata.pkl"), "rb") as f:
-            meta = pickle.load(f)
-
-        geom = {k: np.array(v) for k, v in meta["geometry"].items()}
-        for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
-            if k not in geom:
-                geom[k] = np.array(1.0, dtype=np.float64)
-        resolution = tuple(meta["resolution"])  # (nvpar, nmu, ns, nkx, nky)
-        df_shape = (2, *resolution)
-        phi_shape = tuple(meta["phi_mean"].shape) if "phi_mean" in meta else resolution[2:]
-
-        dfs, phis, fluxes = [], [], []
-        for t in timesteps:
-            ts = str(t).zfill(5)
-            df_file = os.path.join(kvikio_dir, "data", f"timestep_{ts}.bin")
-            df = np.fromfile(df_file, dtype=np.float32).reshape(df_shape)
-            dfs.append(df)
-
-            phi_file = os.path.join(kvikio_dir, "data", f"poten_{ts}.bin")
-            if os.path.exists(phi_file):
-                phi = np.fromfile(phi_file, dtype=np.float32).reshape(phi_shape)
-                # ensure 2-channel format (re, im) for compatibility
-                if phi.ndim == len(resolution) - 2:
-                    phi = np.stack([phi, np.zeros_like(phi)], axis=0)
-            else:
-                phi = np.zeros((2, *resolution[2:]), dtype=np.float32)
-            phis.append(phi)
-
-            fluxes.append(meta["fluxes"][t])
-
-        dfs = torch.from_numpy(np.stack(dfs, 0)).squeeze(0)
-        phis = torch.from_numpy(np.stack(phis, 0)).squeeze(0)
-        fluxes = torch.from_numpy(np.stack(fluxes, 0)).squeeze(0)
-        geom = {k: torch.from_numpy(g).squeeze(0) for k, g in geom.items()}
-
+        # sanity: df should be non-trivial for turbulent trajectories
+        df_abs_mean = float(dfs.abs().mean())
+        if df_abs_mean < 1e-20:
+            raise RuntimeError(
+                f"Loaded df is all zeros (mean abs = {df_abs_mean:.2e}) from "
+                f"{path!r}. Check that the trajectory path and timesteps are correct."
+            )
         if len(timesteps) > 1:
             dfs = rearrange(dfs, "t c ... -> c t ...")
 
@@ -201,6 +177,7 @@ class CycloneNFDataset(Dataset):
             if self.flux_fields:
                 fluxes = torch.stack(fluxes_int, 0).squeeze(0)
             if self.realpotens:
+                # replace potentials (realpotens incompatible with losses)
                 phis = torch.stack(phis_int, 0).squeeze(0)
 
         if len(timesteps) > 1:
@@ -208,100 +185,27 @@ class CycloneNFDataset(Dataset):
             if self.flux_fields:
                 fluxes = rearrange(fluxes, "t c ... -> c t ...")
 
-        if self.spatial_fft or separate_ky_modes is not None:
-            dfs = self._split_into_bands(dfs, self.spatial_fft, separate_ky_modes)
-
         return dfs, phis, fluxes, geom
 
-    def _split_into_bands(
-        self,
-        df: np.ndarray,
-        spatial_fft: bool,
-        separate_ky_modes: Optional[Sequence[int]] = None,
-    ):
-        df = df_fft(df)
-        if separate_ky_modes is not None and len(separate_ky_modes) > 0:
-            # split modes
-            n_ky_modes = df.shape[-1]
-            filters = []
-            for mode in separate_ky_modes:
-                band = df.clone()
-                mask = torch.zeros_like(band)
-                mask[..., mode] = 1.0
-                band = band * mask
-                filters.append(band)
-            # every other frequency
-            residual = df.clone()
-            flat_selected = []
-            for group in separate_ky_modes:
-                flat_selected.extend([group] if isinstance(group, int) else group)
-            # modes left out
-            residual_modes = set(list(range(n_ky_modes)))
-            residual_modes = list(residual_modes.difference(set(flat_selected)))
-            if len(residual_modes) > 0:
-                residual = df.clone()
-                mask = torch.zeros_like(residual)
-                mask[..., residual_modes] = 1.0
-                residual = residual * mask
-                filters.append(residual)
-            if not spatial_fft:
-                filters = [df_ifft(f) for f in filters]
-            # concat modes on channels
-            df = torch.cat(filters, 0)
-        return df
-
-    def _get_norm_stats(self):
-        self.scale = {
-            "df": torch.ones((self.f_df.shape[0], 1)),
-            "phi": torch.ones((2, *[1] * (self.phi.ndim - 1))),
-        }
-        self.shift = {
-            "df": torch.zeros((self.f_df.shape[0], 1)),
-            "phi": torch.zeros((2, *[1] * (self.phi.ndim - 1))),
-        }
-        if self.flux_fields:
-            self.scale["flux"] = torch.ones((2, *[1] * (self.flux.ndim - 1)))
-            self.shift["flux"] = torch.zeros((2, *[1] * (self.flux.ndim - 1)))
-        if self.normalize is not None:
-            # distribution stats
-            if self.normalize == "minmax":
-                df_min, df_max = self.f_df.min(1).values, self.f_df.max(1).values
-                self.scale["df"] = (df_max - df_min) / self.beta1
-                self.shift["df"] = df_min + self.scale["df"] * self.beta2
-            if self.normalize == "zscore":
-                df_mean, df_std = self.f_df.mean(1), self.f_df.std(1)
-                self.scale["df"] = df_std / self.beta1
-                self.shift["df"] = df_mean + self.scale["df"] * self.beta2
-            self.scale["df"] = self.scale["df"][:, None]
-            self.shift["df"] = self.shift["df"][:, None]
-            # potential stats
-            if self.normalize == "minmax":
-                phi_min = self.phi.flatten(1, -1).min(1).values
-                phi_max = self.phi.flatten(1, -1).max(1).values
-                self.scale["phi"] = (phi_max - phi_min) / self.beta1
-                self.shift["phi"] = phi_min + self.scale["phi"] * self.beta2
-            if self.normalize == "zscore":
-                phi_mean = self.phi.flatten(1, -1).mean(1)
-                phi_std = self.phi.flatten(1, -1).std(1)
-                self.scale["phi"] = phi_std / self.beta1
-                self.shift["phi"] = phi_mean + self.scale["phi"] * self.beta2
-            self.scale["phi"] = self.scale["phi"][:, *[None] * (self.phi.ndim - 1)]
-            self.shift["phi"] = self.shift["phi"][:, *[None] * (self.phi.ndim - 1)]
-            if self.flux_fields:
-                # flux field stats
-                if self.normalize == "minmax":
-                    flux_min = self.flux.flatten(1, -1).min(1).values
-                    flux_max = self.flux.flatten(1, -1).max(1).values
-                    self.scale["flux"] = (flux_max - flux_min) / self.beta1
-                    self.shift["flux"] = flux_min + self.scale["flux"] * self.beta2
-                if self.normalize == "zscore":
-                    flux_mean = self.flux.flatten(1, -1).mean(1)
-                    flux_std = self.flux.flatten(1, -1).std(1)
-                    self.scale["flux"] = flux_std / self.beta1
-                    self.shift["flux"] = flux_mean + self.scale["flux"] * self.beta2
-                fndim = self.flux.ndim - 1
-                self.scale["flux"] = self.scale["flux"][:, *[None] * fndim]
-                self.shift["flux"] = self.shift["flux"][:, *[None] * fndim]
+    def _norm_field(self, field: torch.Tensor):
+        """Normalize keeping separate stats along the channel axis and
+        self.norm_axes (e.g. mu), reducing the rest. Returns the flattened
+        normalized field and broadcastable (scale, shift)."""
+        keep = {0} | {ax % field.ndim for ax in self.norm_axes}
+        dims = tuple(d for d in range(field.ndim) if d not in keep)
+        if self.normalize == "minmax":
+            lo, hi = field.amin(dims, keepdim=True), field.amax(dims, keepdim=True)
+            scale = (hi - lo) / self.beta1
+            shift = lo + scale * self.beta2
+        elif self.normalize == "zscore":
+            scale = field.std(dims, keepdim=True) / self.beta1
+            shift = field.mean(dims, keepdim=True) + scale * self.beta2
+        else:
+            shape = [1 if d in dims else s for d, s in enumerate(field.shape)]
+            scale, shift = torch.ones(shape), torch.zeros(shape)
+        scale = scale.clamp_min(1e-12)
+        fieldn = rearrange((field - shift) / scale, "c ... -> c (...)")
+        return fieldn, scale, shift
 
     def __len__(self):
         return self.indices.shape[0]
@@ -309,18 +213,14 @@ class CycloneNFDataset(Dataset):
     def __getitem__(self, index) -> Tuple[torch.Tensor, torch.Tensor]:
         if isinstance(index, int):
             index = [index]
-        if self.flux_fields_train:
-            flux, coords = self.f_flux[:, index], self.f_grid[index, :]
-            shift = self.shift["flux"].flatten(1, -1)
-            scale = self.scale["flux"].flatten(1, -1)
-            flux = (flux - shift) / scale
-            return flux.T, coords
-        else:
-            df, coords = self.f_df[:, index], self.f_grid[index, :]
-            df = (df - self.shift["df"]) / self.scale["df"]
-            return df.T, coords
+        f = self.f_flux if self.flux_fields_train else self.f_df
+        return f[:, index].T, self.f_grid[index, :]
 
     def to(self, device: torch.device):
+        # df/grid back the full_df ground truth and sample_field coords; without
+        # them on-device the eval's GT FluxIntegral silently runs on CPU (~5x).
+        self.df = self.df.to(device)
+        self.grid = self.grid.to(device)
         self.f_df = self.f_df.to(device)
         self.phi = self.phi.to(device)
         self.f_grid = self.f_grid.to(device)
@@ -335,7 +235,9 @@ class CycloneNFDataset(Dataset):
         return self
 
     def shuffle(self):
-        perm = torch.randperm(self.f_grid.shape[0])
+        # perm on the data's device: a CPU randperm here forces a host->device
+        # index copy + slow gather (~200ms for 11M points), vs ~2ms on-device.
+        perm = torch.randperm(self.f_grid.shape[0], device=self.f_df.device)
         self.f_df = self.f_df[:, perm]
         self.f_grid = self.f_grid[perm, :]
 
@@ -353,6 +255,10 @@ class CycloneNFDataset(Dataset):
     @property
     def nchannels(self) -> int:
         return self.df.shape[0]
+
+    @property
+    def grid_size(self) -> Tuple[int, ...]:
+        return tuple(self.df.shape[1:])
 
     @property
     def full_df(self) -> torch.Tensor:
@@ -381,8 +287,19 @@ class CycloneNFDataLoader:
         self.subsample = subsample
         self.prefetch_factor = prefetch_factor
         self.device = "cpu"
+        self._prebuilt = False
+
+    def _prebuild(self):
+        """Pre-build batch index ranges for O(1) iteration (avoids Python
+        slicing overhead on every ``__getitem__``)."""
+        n = int(len(self.dataset) * self.subsample)
+        bs = self.batch_size
+        self._batches = [(start, min(start + bs, n)) for start in range(0, n, bs)]
+        self._prebuilt = True
 
     def __len__(self):
+        if self._prebuilt:
+            return len(self._batches)
         return int(
             (len(self.dataset) + self.batch_size - 1)
             // self.batch_size
@@ -394,18 +311,17 @@ class CycloneNFDataLoader:
         return self._batch_size
 
     def __iter__(self):
+        if not self._prebuilt:
+            self._prebuild()
         if self.shuffle:
             self.dataset.shuffle()
 
-        indices = int(len(self.dataset) * self.subsample)
-        for start_idx in range(0, indices, self.batch_size):
-            dfs, coords = self.dataset[start_idx : start_idx + self.batch_size]
-
+        for start, end in self._batches:
+            dfs, coords = self.dataset[start:end]
             if self.pin_memory and dfs.device == "cpu":
                 dfs, coords = dfs.pin_memory(), coords.pin_memory()
             if not self.preload:
                 dfs, coords = dfs.to(self.device), coords.to(self.device)
-
             yield dfs, coords
 
     def to(self, device: torch.device):

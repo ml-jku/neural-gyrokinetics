@@ -59,7 +59,7 @@ class AutoencoderEvaluator(BaseEvaluator):
             for tgt_name in probe_targets:
                 v = meta[tgt_name]
                 # time-indexed arrays (e.g. fluxes) vs per-file scalars (e.g. itg)
-                if hasattr(v, '__len__') and len(v) > 1:
+                if hasattr(v, "__len__") and len(v) > 1:
                     v = v[ti]
                 stats = dataset.stats.get(tgt_name, {})
                 mean = 0.0
@@ -68,7 +68,9 @@ class AutoencoderEvaluator(BaseEvaluator):
                     mean = stats["full"]["mean"]
                     std = stats["full"]["std"]
                 else:
-                    warnings.warn(f"No stats found for probe target '{tgt_name}', skipping normalization.")
+                    warnings.warn(
+                        f"No stats found for probe target '{tgt_name}', skipping normalization."
+                    )
                 if tgt_name in ["fluxspec", "kyspec"]:
                     v = np.log1p(v)  # log-transform spectra for stability
                 v = (v - mean) / std  # normalize
@@ -265,6 +267,7 @@ class AutoencoderEvaluator(BaseEvaluator):
                         z, _ = model.module.encode(xs, condition=condition)
                     y = self._gather_probe_targets(sample, dataset, probe_targets)
                     return z, y
+
                 return encode_fn
 
             self.run_probing_evaluation(
@@ -280,7 +283,7 @@ class AutoencoderEvaluator(BaseEvaluator):
                 val_extraction_fns=[_make_encode_fn(vs) for vs in self.valsets],
                 dataset_for_stats=trainset,
             )
-                
+
         # save checkpoint
         loss_val_min = self._save_checkpoint(
             rank, model, opt, scheduler, epoch, log_metric_dict, loss_val_min

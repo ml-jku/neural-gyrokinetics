@@ -17,7 +17,7 @@ from neugk.utils import (
     poten_files,
     parse_input_dat,
 )
-from neugk.integrals import get_integrals
+from neugk.physics.integrals import get_integrals
 
 from neugk.dataset.backend import H5Backend, KvikIOBackend, DataBackend
 
@@ -188,6 +188,9 @@ def preprocess(
         metadata = {
             "timesteps": timesteps,
             "resolution": resolution,
+            "ds": float(
+                np.ravel(sgrid)[1] - np.ravel(sgrid)[0]
+            ),  # parallel-grid spacing
             "ion_temp_grad": np.array([ion_temp_grad]),
             "density_grad": np.array([density_grad]),
             "flux": fluxes,
@@ -394,11 +397,15 @@ if __name__ == "__main__":
         "--root", type=str, default="/restricteddata/ukaea/gyrokinetics"
     )
     parser.add_argument(
-        "--raw_subdir", type=str, default="raw",
+        "--raw_subdir",
+        type=str,
+        default="raw",
         help="Subdirectory under root containing the raw simulation folders.",
     )
     parser.add_argument(
-        "--num_iterations", type=int, default=300,
+        "--num_iterations",
+        type=int,
+        default=300,
         help="Number of iterations to process (iteration_0 .. iteration_N-1).",
     )
     args = parser.parse_args()

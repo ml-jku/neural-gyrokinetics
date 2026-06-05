@@ -21,7 +21,7 @@ from neugk.pinc.autoencoders.ae_utils import (
     train_step_peft,
     train_step_simsiam,
 )
-from neugk.pinc.peft_utils import setup_peft_stage
+from neugk.pinc.peft_utils import setup_peft_stage, PEFT_PARAM_KEYS
 
 
 class PINCRunner(BaseRunner):
@@ -34,11 +34,6 @@ class PINCRunner(BaseRunner):
         model_cfg = getattr(self.cfg, model_key)
 
         weights = self.setup_common_losses(model_cfg)
-        # dataset_stats = (
-        #     aggregate_dataset_stats(self.trainset.files)
-        #     if hasattr(self.trainset, "files")
-        #     else {}
-        # )
         dataset_stats = {}
         augmentations = [
             k
@@ -69,7 +64,9 @@ class PINCRunner(BaseRunner):
             ),
             augmentations=augmentations,
             dataset=self.trainset,
-            integral_precision=getattr(self.cfg.training, "integral_precision", "float64"),
+            integral_precision=getattr(
+                self.cfg.training, "integral_precision", "float64"
+            ),
             free_bits=getattr(model_cfg, "free_bits", 0.0),
         )
 
@@ -115,9 +112,7 @@ class PINCRunner(BaseRunner):
                 groups = exclude_from_weight_decay(
                     self.model, exclude, self.cfg.training.weight_decay
                 )
-                optimizer = torch.optim.Adam(
-                    groups, lr=self.cfg.training.learning_rate
-                )
+                optimizer = torch.optim.Adam(groups, lr=self.cfg.training.learning_rate)
             else:
                 optimizer = torch.optim.Adam(
                     params,
@@ -151,7 +146,9 @@ class PINCRunner(BaseRunner):
 
             if is_muon:
                 param_groups = self._split_muon_param_groups(self.model)
-                opt_cls = MuonWithAuxAdam if self.use_ddp else SingleDeviceMuonWithAuxAdam
+                opt_cls = (
+                    MuonWithAuxAdam if self.use_ddp else SingleDeviceMuonWithAuxAdam
+                )
                 self.opt = opt_cls(param_groups)
                 self.opt.defaults = {"lr": self.cfg.training.learning_rate}
             elif grad_mode == "pseudo":
@@ -185,11 +182,12 @@ class PINCRunner(BaseRunner):
             )
 
         # whether integral losses need geometry on GPU during training
-        int_spec_keys = set(self.loss_wrap._int_losses + self.loss_wrap._spectral_losses)
-        self._int_losses_active = (
-            any(self.loss_wrap.weights.get(k, 0.0) > 0 for k in int_spec_keys)
-            or any(k in self.loss_scheduler_dict for k in int_spec_keys)
+        int_spec_keys = set(
+            self.loss_wrap._int_losses + self.loss_wrap._spectral_losses
         )
+        self._int_losses_active = any(
+            self.loss_wrap.weights.get(k, 0.0) > 0 for k in int_spec_keys
+        ) or any(k in self.loss_scheduler_dict for k in int_spec_keys)
 
         # setup evaluator
         self.evaluator = AutoencoderEvaluator(
@@ -230,8 +228,11 @@ class PINCRunner(BaseRunner):
                     ckpt_path, model=self.model, device=self.device
                 )
                 print(f"loaded base ae from epoch {self.ae_ckpt_dict['epoch']}")
-                self.model, _ = setup_peft_stage(
-                    self.model, self.cfg, dataloader=self.trainloader
+                self.model, peft_info = setup_peft_stage(self.model, self.cfg)
+                print(
+                    f"attached {peft_info['peft_method']} adapters: "
+                    f"{peft_info['trainable_parameters']/1e6:.2f}M trainable "
+                    f"({peft_info['trainable_percentage']:.2f}%)"
                 )
                 self.start_epoch = 0
         elif ckpt_path and os.path.exists(ckpt_path):
@@ -251,10 +252,7 @@ class PINCRunner(BaseRunner):
             if not param.requires_grad:
                 continue
             if self.cfg.stage == "peft":
-                if (
-                    any(k in name for k in ["lora_A", "lora_B", "eva_"])
-                    and param.ndim >= 2
-                ):
+                if any(k in name for k in PEFT_PARAM_KEYS) and param.ndim >= 2:
                     muon.append(param)
                 else:
                     adam_decay.append(param)
@@ -328,11 +326,20 @@ class PINCRunner(BaseRunner):
         info_dict = defaultdict(list)
         t_start_data = perf_counter_ns()
 
+        # select the per-stage train step once; the autoencoder step needs the
+        # denormalize fn only when masked-mode modelling is active.
         step_fn = {
             "autoencoder": train_step_autoencoder,
             "peft": train_step_peft,
             "simsiam": train_step_simsiam,
         }[self.cfg.stage]
+        if (
+            self.cfg.stage == "autoencoder"
+            and self.cfg.dataset.augment.mask_modes.active
+        ):
+            step_fn = partial(
+                train_step_autoencoder, denormalize_fn=self.trainset.denormalize
+            )
 
         for sample in self.pbar:
             try:
@@ -365,22 +372,12 @@ class PINCRunner(BaseRunner):
             info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
             t_start_fwd = perf_counter_ns()
 
+            if self.cfg.stage == "simsiam":
+                xs["df_aug"] = getattr(sample, "df_aug").to(self.device)
+
             with torch.autocast(
                 str(self.device), dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                # dispatch to correct step function
-                if self.cfg.stage == "autoencoder":
-                    if self.cfg.dataset.augment.mask_modes.active:
-                        step_fn = partial(
-                            train_step_autoencoder,
-                            denormalize_fn=self.trainset.denormalize,
-                        )
-                    else:
-                        step_fn = train_step_autoencoder
-                if self.cfg.stage == "peft":
-                    step_fn = train_step_peft
-                if self.cfg.stage == "simsiam":
-                    xs["df_aug"] = getattr(sample, "df_aug").to(self.device)
                 loss, losses = step_fn(
                     self.cfg,
                     self.model,
@@ -430,7 +427,9 @@ class PINCRunner(BaseRunner):
             epoch=epoch,
             device=self.device,
             loss_val_min=self.loss_val_min,
-            trainloader=self.trainloader if self.cfg.validation.get("probe", None) else None,
+            trainloader=(
+                self.trainloader if self.cfg.validation.get("probe", None) else None
+            ),
             trainset=self.trainset if self.cfg.validation.get("probe", None) else None,
             probe_cfg=self.cfg.validation.get("probe", None),
             evaluate_recon=True,  # TODO adapt

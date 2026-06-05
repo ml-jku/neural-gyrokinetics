@@ -31,8 +31,6 @@ loss_scheduler:
     # end: 1.0
     # start_fraction: 0.5
     # end_fraction: 0.7
-  phi_cross: null
-  flux_cross: null
   vq_commit: null
 loss_weights:
   df: 1.0

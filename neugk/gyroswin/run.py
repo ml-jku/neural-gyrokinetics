@@ -36,8 +36,11 @@ class GyroSwinRunner(BaseRunner):
         self.model = get_model(self.cfg, dataset=self.trainset).to(self.device)
         if self.use_ddp:
             self.model = DDP(
-                self.model, device_ids=[self.local_rank],
-                find_unused_parameters=getattr(self.cfg.ddp, "find_unused_parameters", True),
+                self.model,
+                device_ids=[self.local_rank],
+                find_unused_parameters=getattr(
+                    self.cfg.ddp, "find_unused_parameters", True
+                ),
             )
 
         # load checkpoints
@@ -167,9 +170,8 @@ class GyroSwinRunner(BaseRunner):
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
-            is_hidden_matrix = (
-                param.ndim >= 2
-                and not any(kw in name.lower() for kw in adam_keywords)
+            is_hidden_matrix = param.ndim >= 2 and not any(
+                kw in name.lower() for kw in adam_keywords
             )
             if is_hidden_matrix:
                 muon_params.append(param)

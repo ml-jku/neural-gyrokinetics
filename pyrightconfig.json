@@ -1,0 +1,32 @@
+{
+  "typeCheckingMode": "basic",
+
+  "venvPath": "/system/apps/userenv/galletti",
+  "venv": "mhd",
+
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none",
+  "reportMissingTypeStubs": "none",
+
+  "reportAny": "none",
+  "reportExplicitAny": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownLambdaType": "none",
+
+  "reportAttributeAccessIssue": "none",
+  "reportArgumentType": "none",
+  "reportCallIssue": "warning",
+  "reportIndexIssue": "none",
+  "reportOptionalMemberAccess": "none",
+  "reportOptionalSubscript": "none",
+  "reportOptionalCall": "none",
+  "reportPrivateImportUsage": "none",
+  "reportRedeclaration": "none",
+  "reportImplicitOverride": "none",
+  "reportUnusedCallResult": "none",
+  "reportUnusedExpression": "none",
+  "reportUnusedImport": "none"
+}

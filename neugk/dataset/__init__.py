@@ -42,6 +42,7 @@ def bind_worker_to_numa_node():
     if local_rank is not None:
         try:
             import ctypes
+
             libnuma = ctypes.CDLL("libnuma.so.1", use_errno=True)
             if libnuma.numa_available() != -1:
                 libnuma.numa_set_preferred.argtypes = [ctypes.c_int]
@@ -398,7 +399,9 @@ def get_data(cfg, rank: int = 0):
                             if not cfg.dataset.augment.mask_modes.is_fourier
                             else None
                         ),
-                        per_sample=getattr(cfg.dataset.augment.mask_modes, "per_sample", False),
+                        per_sample=getattr(
+                            cfg.dataset.augment.mask_modes, "per_sample", False
+                        ),
                     )
                 )
             elif key in ["vicreg_variance", "vicreg_covariance", "logdet"]:

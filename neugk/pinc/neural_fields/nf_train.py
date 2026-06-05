@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from copy import deepcopy
+from contextlib import nullcontext
 from tqdm import tqdm
 from math import log10
 
@@ -16,7 +17,7 @@ from neugk.pinc.neural_fields import (
     sample_field,
 )
 from neugk.plot_utils import plot_nd, plot_diag
-from neugk.integrals import get_integrals
+from neugk.physics.integrals import get_integrals
 
 
 @torch.no_grad()
@@ -71,58 +72,59 @@ def train_density(
     field_subsamples: Optional[Sequence[float]] = None,
     use_tqdm: bool = True,
     use_print: bool = True,
+    eval_every: int = 2,
+    use_compile: bool = True,
+    use_amp: bool = False,  # bf16 autocast slows the small NF MLPs; on for large nets
 ):
     torch.set_float32_matmul_precision("high")
-    i = 0
-    best_loss, best_model, train_losses = -torch.inf, None, []
+    if use_compile:
+        model = torch.compile(model)
+        eval_model = model._orig_mod  # unwrap for eval (bessel/abs Blackwell-safe)
+    else:
+        eval_model = model
+    best_loss, best_model, best_e, train_losses = -torch.inf, None, 0, []
+    amp = lambda: torch.autocast("cuda", dtype=torch.bfloat16) if use_amp else nullcontext()
     data.to(device)
     loader.to(device)
     model.to(device)
     for e in range(n_epochs):
         model.train()
         losses = {}
-
         if field_subsamples is not None:
             loader.subsample = field_subsamples[e]
-
-        ll = []
         ploader = tqdm(loader, desc=f"Loss: {0.0:.6f}") if use_tqdm else loader
+        # accumulate on-device; one host sync per epoch instead of per batch
+        run_loss, n_batches = torch.zeros((), device=device), 0
+        optim.zero_grad()
         for f, coords in ploader:
-            pred_f = model(coords)
-
-            # neural field loss
-            loss = F.mse_loss(pred_f, f)
-
-            optim.zero_grad()
+            with amp():
+                pred_f = model(coords)
+                loss = F.mse_loss(pred_f, f)
             loss.backward()
             optim.step()
-            ll.append(loss.item())
-            i += 1
-            if i > 50 and use_tqdm:
-                ploader.set_description(f"Loss: {sum(ll) / len(ll):.6f}")
-                i = 0
-
-        losses["train/loss"] = sum(ll) / len(ll)
-
+            optim.zero_grad()
+            run_loss += loss.detach()
+            n_batches += 1
+            if use_tqdm and n_batches % 50 == 0:
+                ploader.set_description(f"Loss: {float(run_loss) / n_batches:.6f}")
+        losses["train/loss"] = float(run_loss) / max(n_batches, 1)
         if sched is not None:
             sched.step()
-
-        # evaluation
-        eval_losses = nf_eval(model, data, device=device, use_flux_fields=False)
-        losses.update({f"val/{k}": v for k, v in eval_losses.items()})
-
-        curr_loss = losses["val/df psnr"]
-
-        if curr_loss > best_loss:
-            best_loss, best_e = curr_loss, e
-            best_model = deepcopy(model)
-
+        # eval (sample_field + flux/spectral losses) is ~the cost of a train
+        # step, so only run it every eval_every epochs and on the last one.
+        # Sample with the compiled model (~1.7x); the bessel/Blackwell issue is
+        # in FluxIntegral, which nf_eval runs separately on the sampled tensors.
+        if e % eval_every == 0 or e == n_epochs - 1:
+            eval_losses = nf_eval(model, data, device=device, use_flux_fields=False)
+            losses.update({f"val/{k}": v for k, v in eval_losses.items()})
+            if losses["val/df psnr"] > best_loss:
+                best_loss, best_e = losses["val/df psnr"], e
+                best_model = deepcopy(eval_model)  # save uncompiled copy
         train_losses.append(losses)
         if use_print:
             str_losses = ", ".join([f"{k}: {float(v):.6f}" for k, v in losses.items()])
             print(f"[{e}] {str_losses}")
-
-    return model, best_model, train_losses, best_e
+    return eval_model, best_model, train_losses, best_e
 
 
 def train_pinc(
@@ -136,19 +138,19 @@ def train_pinc(
     pinc_loss_weight: Optional[Dict[str, float]] = None,
     use_print: bool = True,
     skip_eval: bool = False,
+    eval_every: int = 2,
 ):
     if pinc_loss_weight is None:
         print("`pinc_loss_weight` not specified. Skipping.")
         return model, model, [], -1
 
     torch.set_float32_matmul_precision("high")
-    best_loss, best_model, train_losses = -torch.inf, None, []
+    best_loss, best_model, best_e, train_losses = -torch.inf, None, 0, []
     data.to(device)
     model.to(device)
     for e in range(n_epochs):
         model.train()
         losses = {}
-        # pinc training
         if data.ndim == 6:
             timesteps = list(range(data.grid.shape[0]))
         else:
@@ -157,40 +159,23 @@ def train_pinc(
             pred_df = sample_field(model, data, device, timestep=t).to(device)
             gt_df = data.full_df[:, t] if t is not None else data.full_df
 
-            # spatial integral losses
             int_losses, (pred_phi, gt_phi), (pred_eflux, gt_eflux) = integral_losses(
-                pred_df,
-                gt_df,
-                geom=data.geom,
-                device=device,
-                use_flux_fields=use_flux_fields,
-                timestep=t,
-                return_fields=True,
-            )
+                pred_df, gt_df, geom=data.geom, device=device,
+                use_flux_fields=use_flux_fields, timestep=t, return_fields=True)
             int_losses = {
                 f"{k} loss": pinc_loss_weight[k] * int_losses[f"{k} loss"]
                 for k in pinc_loss_weight
-                if pinc_loss_weight[k] != 0 and f"{k} loss" in int_losses
-            }
+                if pinc_loss_weight[k] != 0 and f"{k} loss" in int_losses}
 
-            # spectral and diagnostics losses
             spec_losses, _ = spectra_losses(
-                pred_df=pred_df,
-                pred_phi=pred_phi,
-                pred_eflux=pred_eflux,
-                gt_df=gt_df,
-                gt_phi=gt_phi,
-                gt_eflux=gt_eflux,
-                ds=data.ds,
-            )
+                pred_df=pred_df, pred_phi=pred_phi, pred_eflux=pred_eflux,
+                gt_df=gt_df, gt_phi=gt_phi, gt_eflux=gt_eflux, ds=data.ds)
             spec_losses = {
                 f"{k} loss": pinc_loss_weight[k] * spec_losses[f"{k} loss"]
                 for k in pinc_loss_weight
-                if pinc_loss_weight[k] != 0 and f"{k} loss" in spec_losses
-            }
+                if pinc_loss_weight[k] != 0 and f"{k} loss" in spec_losses}
 
             aux_loss = sum(int_losses.values()) + sum(spec_losses.values())
-
             optim.zero_grad()
             aux_loss.backward()
             optim.step()
@@ -200,16 +185,12 @@ def train_pinc(
             losses.update({f"train/{k}": v.item() for k, v in int_losses.items()})
             losses.update({f"train/{k}": v.item() for k, v in spec_losses.items()})
 
-        # evaluation
-        if not skip_eval:
+        # evaluation (coarsened: ~as costly as a train step, see train_density)
+        if not skip_eval and (e % eval_every == 0 or e == n_epochs - 1):
             eval_losses = nf_eval(model, data, device=device, use_flux_fields=False)
             losses.update({f"val/{k}": v for k, v in eval_losses.items()})
-
-            # TODO different scales, phi dominates...
-            curr_loss = losses["val/phi psnr"]  # - 0.2 * losses["val/flux loss"]
-
-            if curr_loss > best_loss:
-                best_loss, best_e = curr_loss, e
+            if losses["val/phi psnr"] > best_loss:
+                best_loss, best_e = losses["val/phi psnr"], e
                 best_model = deepcopy(model)
 
         train_losses.append(losses)
@@ -235,13 +216,13 @@ def train_nf(
     aux_opt: torch.optim.Optimizer,
     aux_sched: torch.optim.lr_scheduler.LRScheduler,
     device: torch.device,
-    compile: bool = False,
     field_subsamples: Optional[Sequence[float]] = None,
     use_flux_fields: bool = False,
     use_tqdm: bool = True,
     pinc_loss_weight: Optional[Dict[str, float]] = None,
     use_print: bool = True,
     skip_eval: bool = False,
+    eval_every: int = 1,
 ):
     # density function training
     model_density, model_density_best, density_losses = train_density(
@@ -255,6 +236,7 @@ def train_nf(
         field_subsamples=field_subsamples,
         use_tqdm=use_tqdm,
         use_print=use_print,
+        eval_every=eval_every,
     )
     model_pinc = deepcopy(model_density)
     # update tracked params
@@ -267,7 +249,7 @@ def train_nf(
     optim = type(aux_opt)(model_pinc.parameters(), **opt_kwargs)
     sched = type(aux_sched)(aux_opt, **aux_sched.state_dict()["_hyperparam_defaults"])
     model_pinc, model_pinc_best, pinc_losses = train_pinc(
-        torch.compile(model_pinc) if compile else model_pinc,
+        model_pinc,
         n_epochs=n_pinc_epochs,
         data=data,
         optim=optim,
@@ -277,6 +259,7 @@ def train_nf(
         pinc_loss_weight=pinc_loss_weight,
         use_print=use_print,
         skip_eval=skip_eval,
+        eval_every=eval_every,
     )
     return (
         (model_density, model_pinc),

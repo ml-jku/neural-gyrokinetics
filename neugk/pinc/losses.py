@@ -11,7 +11,8 @@ import torch
 import torch.nn.functional as F
 
 from neugk.utils import recombine_zf
-from neugk.integrals import FluxIntegral
+from neugk.physics.integrals import FluxIntegral
+from neugk import physics
 from neugk.losses import LossWrapper, GradientBalancer
 
 
@@ -91,11 +92,15 @@ class PINCLossWrapper(LossWrapper):
         self._simsiam_losses = ["simsiam"]
 
         self.integrator = FluxIntegral(
-            real_potens=real_potens, flux_fields=False, spectral_df=False,
+            real_potens=real_potens,
+            flux_fields=False,
+            spectral_df=False,
             integral_precision=integral_precision,
         )
         self.integrator_spec = FluxIntegral(
-            real_potens=real_potens, flux_fields=True, spectral_df=True,
+            real_potens=real_potens,
+            flux_fields=True,
+            spectral_df=True,
             integral_precision=integral_precision,
         )
 
@@ -228,7 +233,9 @@ class PINCLossWrapper(LossWrapper):
 
         return per_mode
 
-    def compute_vicreg_variance(self, z: torch.Tensor, eps: float = 1e-8) -> Dict[str, torch.Tensor]:
+    def compute_vicreg_variance(
+        self, z: torch.Tensor, eps: float = 1e-8
+    ) -> Dict[str, torch.Tensor]:
         # flatten batch and spatial dimensions, keep latent dim
         z = z.reshape(-1, z.shape[-1])
         std = torch.sqrt(z.var(dim=0) + eps)
@@ -246,7 +253,9 @@ class PINCLossWrapper(LossWrapper):
         cov_loss = (off_diag**2).sum() / D
         return {"vicreg_covariance": cov_loss}
 
-    def compute_logdet(self, z: torch.Tensor, eps: float = 1e-8) -> Dict[str, torch.Tensor]:
+    def compute_logdet(
+        self, z: torch.Tensor, eps: float = 1e-8
+    ) -> Dict[str, torch.Tensor]:
         z = z.reshape(-1, z.shape[-1]).float()
         d = z.shape[-1]
         z_std = (z - z.mean(dim=0)) / (z.std(dim=0) + eps)
@@ -265,104 +274,30 @@ class PINCLossWrapper(LossWrapper):
         reduction: str = "mean",
     ) -> torch.Tensor:
         loss_type = loss_type or self._get_current_loss_types()["data"]
-
-        if loss_type == "mse":
-            return F.mse_loss(pred, target, reduction=reduction)
-        if loss_type == "l1":
-            return F.l1_loss(pred, target, reduction=reduction)
-        if loss_type == "huber":
-            return F.huber_loss(pred, target, reduction=reduction)
-        if loss_type == "smooth_l1":
-            return F.smooth_l1_loss(pred, target, reduction=reduction)
-        if loss_type == "relative_mse":
-            if reduction == "mean":
-                return torch.sum((pred - target) ** 2) / (torch.sum(target**2) + eps)
-            else:
-                return (pred - target) ** 2 / (target**2 + eps)
-        if loss_type == "relative_l1":
-            return (torch.abs(pred - target) / (torch.abs(target) + eps)).mean()
-        if loss_type == "log_error":
-            return F.mse_loss(
-                torch.log(torch.abs(pred) + eps),
-                torch.log(torch.abs(target) + eps),
-                reduction=reduction,
-            )
-        if loss_type == "log_l1_error":
-            return F.l1_loss(
-                torch.log(torch.abs(pred) + eps),
-                torch.log(torch.abs(target) + eps),
-                reduction=reduction,
-            )
-        if loss_type == "log_cosh":
-            return torch.log(torch.cosh(pred - target)).mean()
-        if "complex" in loss_type and self.complex_metrics:
-            p_c, t_c = (
-                self.complex_metrics.to_complex(pred),
-                self.complex_metrics.to_complex(target),
-            )
-            return (
-                self.complex_metrics.complex_mse(p_c, t_c).mean()
-                if "mse" in loss_type
-                else self.complex_metrics.complex_l1(p_c, t_c).mean()
-            )
-
-        raise ValueError(f"unknown data loss type: {loss_type}")
+        return physics.compute_data_loss(
+            pred,
+            target,
+            loss_type,
+            eps,
+            reduction,
+            complex_metrics=self.complex_metrics,
+        )
 
     def compute_integral_loss(
         self, pred, target, loss_type="mse", eps=1e-8, loss_name="flux_int"
     ):
-        if loss_type == "mse":
-            return F.mse_loss(pred, target)
-        if loss_type in ["relative_mse", "relative_l1", "log_error"]:
-            return self.compute_data_loss(pred, target, eps, loss_type=loss_type)
-
-        if loss_type == "adaptive_relative":
-            alpha = 0.01
-            attr = f"_target_ema_{loss_name.split('_')[0]}"
-            curr_mean = torch.abs(target).mean().item()
-
-            setattr(
-                self,
-                attr,
-                (
-                    curr_mean
-                    if not hasattr(self, attr)
-                    else alpha * curr_mean + (1 - alpha) * getattr(self, attr)
-                ),
-            )
-            return ((pred - target) / max(getattr(self, attr), eps)).pow(2).mean()
-
-        if loss_type in ["int_norm_mse", "int_norm_l1"]:
-            key = "flux_std" if "flux" in loss_name else "phi_std"
-            if key in self.dataset_stats:
-                norm_err = (pred - target) / max(float(self.dataset_stats[key]), eps)
-                return (
-                    norm_err.pow(2) if "mse" in loss_type else torch.abs(norm_err)
-                ).mean()
-            return self.compute_data_loss(pred, target, eps, loss_type=loss_type)
-
-        raise ValueError(f"unknown integral loss type: {loss_type}")
+        return physics.compute_integral_loss(
+            pred,
+            target,
+            loss_type,
+            eps,
+            loss_name,
+            dataset_stats=self.dataset_stats,
+            ema_state=self.__dict__.setdefault("_int_ema_state", {}),
+        )
 
     def compute_spectral_loss(self, pred, target, loss_type="l1", eps=1e-8):
-        if loss_type in ["l1", "mse", "relative_l1", "relative_mse"]:
-            return self.compute_data_loss(pred, target, eps, loss_type=loss_type)
-
-        if "normalized" in loss_type:
-            scale = torch.mean(torch.abs(target)) + eps
-            return (
-                F.l1_loss(pred / scale, target / scale)
-                if "l1" in loss_type
-                else F.mse_loss(pred / scale, target / scale)
-            )
-
-        if "log" in loss_type:
-            if "relative" in loss_type:
-                pred, target = pred / (pred.sum() + eps), target / (target.sum() + eps)
-            pl = torch.log(torch.abs(pred) + eps)
-            tl = torch.log(torch.abs(target) + eps)
-            return F.l1_loss(pl, tl) if "l1" in loss_type else F.mse_loss(pl, tl)
-
-        raise ValueError(f"unknown spectral loss type: {loss_type}")
+        return physics.compute_spectral_loss(pred, target, loss_type, eps)
 
     def compute_vae_loss(self, preds):
         if "mu" not in preds or "logvar" not in preds:
@@ -450,8 +385,10 @@ class PINCLossWrapper(LossWrapper):
 
         monitor = {
             "phi_int_mse": F.mse_loss(pphi_int, tgt_phi).detach(),
-            "flux_int_mse": (torch.abs(pflux).mean()
-            + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze())).detach(),
+            "flux_int_mse": (
+                torch.abs(pflux).mean()
+                + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze())
+            ).detach(),
         }
         int_losses = (
             {"flux_int": monitor["flux_int_mse"], "phi_int": monitor["phi_int_mse"]}
@@ -469,57 +406,6 @@ class PINCLossWrapper(LossWrapper):
 
         return int_losses, monitor, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
 
-    def phi_fft(self, phi, norm="forward"):
-        phi = phi.float()
-        phi_complex = (
-            torch.view_as_complex(phi.permute(0, 2, 3, 4, 1).contiguous())
-            if phi.shape[1] == 2
-            else phi.squeeze(1).to(torch.complex64)
-        )
-        return torch.fft.fftshift(
-            torch.fft.fftn(phi_complex, dim=(1, 3), norm=norm), dim=(1,)
-        )
-
-    def diagnostics(self, phi_fft, eflux_field, ds, zf_mode=0, aggregate="mean"):
-        diag = {}
-        nx, _, ny = phi_fft.shape[1:]
-
-        kxspec = torch.sum(torch.abs(phi_fft) ** 2, dim=(2, 3)) * ds
-        kyspec = torch.sum(torch.abs(phi_fft) ** 2, dim=(1, 2)) * ds
-
-        diag["kxspec"] = (
-            kxspec
-            if aggregate == "none"
-            else (
-                torch.sum(kxspec, dim=1)
-                if aggregate == "mean"
-                else kxspec[:, kxspec.shape[1] // 2]
-            )
-        )
-        diag["kyspec"] = (
-            kyspec
-            if aggregate == "none"
-            else (
-                torch.sum(kyspec, dim=1)
-                if aggregate == "mean"
-                else kyspec[:, kyspec.shape[1] // 2]
-            )
-        )
-
-        f_zf = phi_fft.clone()
-        f_zf[..., :zf_mode] = f_zf[..., zf_mode + 1 :] = 0.0
-        diag["phi_zf"] = torch.fft.irfftn(
-            torch.fft.fftshift(f_zf, dim=(1,)), dim=(1, 3), norm="forward", s=[nx, ny]
-        )
-
-        diag["qspec"] = eflux_field.sum(
-            (1, 2, 3, 4) if eflux_field.dim() == 6 else (0, 1, 2, 3)
-        )
-        if eflux_field.dim() == 5:
-            diag["qspec"] = diag["qspec"].unsqueeze(0)
-
-        return diag
-
     def compute_spectral_losses(self, preds, tgts, geometry):
         spec_losses = {}
         if self.ds is None or "df" not in preds or "df" not in tgts:
@@ -530,7 +416,6 @@ class PINCLossWrapper(LossWrapper):
         def prep(d):
             x = d["df"]
             if self.separate_zf and x.shape[1] > 2:
-                # generalized separate_zf recombination
                 x = torch.cat([x[:, 0::2].sum(1, True), x[:, 1::2].sum(1, True)], dim=1)
             return x.float(), d.get("phi")
 
@@ -540,14 +425,10 @@ class PINCLossWrapper(LossWrapper):
         p_phi, (_, p_ef, _) = self.integrator_spec(geometry, p_df, p_phi_raw)
         t_phi, (_, t_ef, _) = self.integrator_spec(geometry, t_df, t_phi_raw)
 
-        p_fft, t_fft = (
-            self.phi_fft(preds.get("phi", p_phi)),
-            self.phi_fft(tgts.get("phi", t_phi)),
-        )
-        p_diag, t_diag = (
-            self.diagnostics(p_fft, p_ef, self.ds),
-            self.diagnostics(t_fft, t_ef, self.ds),
-        )
+        p_fft = physics.phi_fft(preds.get("phi", p_phi))
+        t_fft = physics.phi_fft(tgts.get("phi", t_phi))
+        p_diag = physics.diagnostics(p_fft, p_ef, self.ds, aggregate="mean")
+        t_diag = physics.diagnostics(t_fft, t_ef, self.ds, aggregate="mean")
 
         for k in ["kxspec", "kyspec", "qspec", "phi_zf"]:
             if k in p_diag and k in t_diag:
@@ -555,49 +436,13 @@ class PINCLossWrapper(LossWrapper):
                     p_diag[k], t_diag[k], loss_type
                 )
 
-        p_diag_f, t_diag_f = (
-            self.diagnostics(p_fft, p_ef, self.ds, aggregate="none"),
-            self.diagnostics(t_fft, t_ef, self.ds, aggregate="none"),
-        )
+        # sort-based monotonicity on the un-aggregated spectra (shared with the NF path)
+        p_diag_f = physics.diagnostics(p_fft, p_ef, self.ds, aggregate="none")
+        mono = physics.monotonicity_loss(p_diag_f, keys=("qspec", "kyspec"))
+        for k in ("qspec", "kyspec"):
+            spec_losses[f"{k}_monotonicity"] = mono[f"{k} monotonicity loss"]
 
-        for k in ["qspec", "kyspec"]:
-            if k in p_diag_f and k in t_diag_f:
-                try:
-                    p_s = torch.nan_to_num(torch.log1p(p_diag_f[k]))
-                    t_s = torch.nan_to_num(torch.log1p(t_diag_f[k]))
-                    losses = [
-                        torch.mean(
-                            torch.clamp(
-                                (
-                                    p_s[b, torch.argmax(p_s[b]).item() :][1:]
-                                    - p_s[b, torch.argmax(p_s[b]).item() :][:-1]
-                                )
-                                - torch.clamp(
-                                    (
-                                        t_s[b, torch.argmax(p_s[b]).item() :][1:]
-                                        - t_s[b, torch.argmax(p_s[b]).item() :][:-1]
-                                    ).max(),
-                                    min=0,
-                                ),
-                                min=0,
-                            )
-                        )
-                        for b in range(p_s.shape[0])
-                        if len(p_s[b, torch.argmax(p_s[b]).item() :]) > 1
-                    ]
-                    spec_losses[f"{k}_monotonicity"] = (
-                        torch.stack(losses).mean()
-                        if losses
-                        else torch.tensor(0.0, device=p_s.device)
-                    )
-                except Exception:
-                    spec_losses[f"{k}_monotonicity"] = torch.tensor(
-                        0.0, device=p_diag_f[k].device
-                    )
-
-        spec_losses["mass"] = self.compute_spectral_loss(
-            p_df.sum(), t_df.sum(), "log_l1"
-        )
+        spec_losses["mass"] = physics.mass_loss(p_df, t_df)
         return spec_losses
 
     def forward(
@@ -647,7 +492,9 @@ class PINCLossWrapper(LossWrapper):
         if self.training:
             for name in self._augmentation_losses:
                 if "vicreg" in name and not "latent" in preds:
-                    warnings.warn(f"Latents not found in predictions for augmentation loss: {name}")
+                    warnings.warn(
+                        f"Latents not found in predictions for augmentation loss: {name}"
+                    )
                     continue
                 if name != "df_delta":
                     losses.update(getattr(self, f"compute_{name}")(preds["latent"]))

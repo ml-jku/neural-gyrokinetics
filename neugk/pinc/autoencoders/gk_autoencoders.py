@@ -185,7 +185,12 @@ class Swin5DAE(Swin5DUnet):
 
         return {"df": self.patch_decode(zdf, pad_axes, **kwcond)}
 
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, return_latent: bool = False):
+    def forward(
+        self,
+        df: torch.Tensor,
+        condition: Optional[torch.Tensor] = None,
+        return_latent: bool = False,
+    ):
         zdf, pad_axes = self.encode(df, condition=condition)
         out = self.decode(zdf, pad_axes, condition=condition)
         if return_latent:
@@ -202,7 +207,9 @@ class Swin5DAE(Swin5DUnet):
 
 
 class Swin5DVAE(Swin5DAE):
-    def __init__(self, beta_vae: float = 1.0, logvar_clamp: float = None, *args, **kwargs):
+    def __init__(
+        self, beta_vae: float = 1.0, logvar_clamp: float = None, *args, **kwargs
+    ):
         super().__init__(*args, **kwargs)
         self.beta_vae = beta_vae
         self.logvar_clamp = logvar_clamp
@@ -265,7 +272,12 @@ class Swin5DVAE(Swin5DAE):
         self._logvar = logvar
         return z, pad_axes
 
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, return_latent: bool = False):
+    def forward(
+        self,
+        df: torch.Tensor,
+        condition: Optional[torch.Tensor] = None,
+        return_latent: bool = False,
+    ):
         zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["mu"] = self._mu
@@ -415,7 +427,12 @@ class Swin5DVQVAE(Swin5DAE):
             return self._vq_indices
         raise RuntimeError("no vq indices available. run encode() or forward() first.")
 
-    def forward(self, df: torch.Tensor, condition: Optional[torch.Tensor] = None, return_latent: bool = False):
+    def forward(
+        self,
+        df: torch.Tensor,
+        condition: Optional[torch.Tensor] = None,
+        return_latent: bool = False,
+    ):
         zdf, pad_axes = self.encode(df, condition=condition)
         outputs = self.decode(zdf, pad_axes, condition=condition)
         outputs["vq_commit_loss"] = self._vq_commit_loss

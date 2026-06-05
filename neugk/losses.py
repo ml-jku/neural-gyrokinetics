@@ -15,7 +15,7 @@ from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
 
 from neugk.dataset.cyclone import CycloneDataset, CycloneSample
 from neugk.utils import recombine_zf
-from neugk.integrals import FluxIntegral
+from neugk.physics.integrals import FluxIntegral
 
 
 def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
@@ -64,7 +64,7 @@ class LossWrapper(nn.Module):
         if masked_mode_modeling:
             self._data_losses += ["df_delta"]
             self.weights["df_delta"] = self.weights.get("df_delta", 1.0)
-        self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
+        self._int_losses = ["flux_int", "phi_int"]
         self.integrator = FluxIntegral(real_potens=real_potens)
         self.denormalize_fn = denormalize_fn
         self.separate_zf = separate_zf
@@ -118,8 +118,6 @@ class LossWrapper(nn.Module):
         int_losses = {
             "phi_int": F.mse_loss(pphi_int.squeeze(), tgt_phi.squeeze()),
             "flux_int": (pflux**2).mean() + F.mse_loss(eflux, tgt_eflux),
-            "phi_cross": F.mse_loss(preds["phi"], pphi_int) if "phi" in preds else 0.0,
-            "flux_cross": F.mse_loss(preds["flux"], eflux) if "flux" in preds else 0.0,
         }
 
         return int_losses, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
@@ -158,8 +156,7 @@ class LossWrapper(nn.Module):
         )
 
         int_keys = [k for k in loss_keys if "int" in k]
-        cross_keys = [k for k in loss_keys if "cross" in k]
-        data_keys = list(set(loss_keys) - set(int_keys) - set(cross_keys))
+        data_keys = list(set(loss_keys) - set(int_keys))
 
         # validate inputs
         if not all([k in preds for k in data_keys]):
@@ -188,7 +185,7 @@ class LossWrapper(nn.Module):
                     losses[k] = F.l1_loss(preds[k], tgts[k].view_as(preds[k]))
                 else:
                     losses[k] = F.mse_loss(preds[k], tgts[k].view_as(preds[k]))
-        for k in int_keys + cross_keys:
+        for k in int_keys:
             if k in int_losses:
                 losses[k] = int_losses[k]
 
@@ -306,6 +303,7 @@ def get_pushforward_fn(
     device: str = None,
 ) -> Callable:
     _executor = ThreadPoolExecutor(max_workers=1)
+
     def _loss_fn(
         model: nn.Module,
         inputs: Dict,

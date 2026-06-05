@@ -38,6 +38,7 @@ class CycloneAESample:
 
 _VALID_LATENT_SCALING_MODES = ("global", "per_channel", "per_token")
 
+
 def _latent_norm_axes(mode: str, ndim: int) -> tuple:
     """Reduction axes used to derive the latent_scale stats from one sample.
 
@@ -52,7 +53,9 @@ def _latent_norm_axes(mode: str, ndim: int) -> tuple:
         return tuple(range(1, ndim))
     if mode == "per_token":
         return ()
-    raise ValueError(f"latent_scaling_mode must be one of {_VALID_LATENT_SCALING_MODES}, got '{mode}'")
+    raise ValueError(
+        f"latent_scaling_mode must be one of {_VALID_LATENT_SCALING_MODES}, got '{mode}'"
+    )
 
 
 class CycloneAEDataset(CycloneDataset):
@@ -86,7 +89,9 @@ class CycloneAEDataset(CycloneDataset):
         )
 
         if self._ae_cfg is None:
-            return super()._recompute_stats(keys, offset, prefix="diff", suffix=filter_tag)
+            return super()._recompute_stats(
+                keys, offset, prefix="diff", suffix=filter_tag
+            )
 
         # diffusion dataset may use different training_trajectories than the AE
         ae_ds = self._ae_cfg.dataset
@@ -100,25 +105,44 @@ class CycloneAEDataset(CycloneDataset):
 
         # build AE file list from config
         raw_ae_files = resolve_trajectories(self.dir, ae_ds.training_trajectories)
-        ae_files = sorted(set(
-            self.backend.format_path(
-                f, ae_ds.spatial_ifft, getattr(ae_ds, "split_into_bands", None), getattr(ae_ds, "real_potens", True)
+        ae_files = sorted(
+            set(
+                self.backend.format_path(
+                    f,
+                    ae_ds.spatial_ifft,
+                    getattr(ae_ds, "split_into_bands", None),
+                    getattr(ae_ds, "real_potens", True),
+                )
+                for f in raw_ae_files
             )
-            for f in raw_ae_files
-        ))
+        )
 
         # try agg cache with unfiltered files first (avoids NFS stat calls)
-        _unfiltered_hash = hashlib.sha256("".join(sorted(os.path.basename(f) for f in ae_files)).encode()).hexdigest()[:8]
+        _unfiltered_hash = hashlib.sha256(
+            "".join(sorted(os.path.basename(f) for f in ae_files)).encode()
+        ).hexdigest()[:8]
         _keys_list = sorted(keys if isinstance(keys, (list, tuple)) else [keys])
         _keys_tag = "_".join(_keys_list)
         _tmu = "mu" if ae_decouple_mu else ""
         _norm_tag = "_".join(
             f"{k}{''.join(str(a) for a in self.normalizers[k]['agg_axes'])}"
-            for k in _keys_list if self.normalizers[k]["agg_axes"]
+            for k in _keys_list
+            if self.normalizers[k]["agg_axes"]
         )
         for _h in [_unfiltered_hash]:
-            _segs = ["diff", _keys_tag, f"offset{ae_offset}", _tmu, ae_filter_tag, _h, _norm_tag, "agg_stats"]
-            _agg_path = os.path.join(self.dir, "_".join(filter(None, (str(s) for s in _segs))) + ".pkl")
+            _segs = [
+                "diff",
+                _keys_tag,
+                f"offset{ae_offset}",
+                _tmu,
+                ae_filter_tag,
+                _h,
+                _norm_tag,
+                "agg_stats",
+            ]
+            _agg_path = os.path.join(
+                self.dir, "_".join(filter(None, (str(s) for s in _segs))) + ".pkl"
+            )
             if os.path.exists(_agg_path):
                 print(f"loading aggregated stats from {_agg_path}")
                 with open(_agg_path, "rb") as f:
@@ -137,7 +161,9 @@ class CycloneAEDataset(CycloneDataset):
                 ae_threshold = ae_offset if ae_offset > 0 else 80
                 orig_cond_filters = self.cond_filters
                 self.cond_filters = ae_cond_filters
-                ae_files = [f for f in ae_files if self._conditioning_filter(f, ae_threshold)]
+                ae_files = [
+                    f for f in ae_files if self._conditioning_filter(f, ae_threshold)
+                ]
                 self.cond_filters = orig_cond_filters
 
         # build expected stats filename - use basenames
@@ -150,7 +176,15 @@ class CycloneAEDataset(CycloneDataset):
             for k in sorted(keys if isinstance(keys, (list, tuple)) else [keys])
             if self.normalizers[k]["agg_axes"]
         )
-        segments = ["diff", keys_tag, f"offset{ae_offset}", tmu, ae_filter_tag, file_hash, "stats"]
+        segments = [
+            "diff",
+            keys_tag,
+            f"offset{ae_offset}",
+            tmu,
+            ae_filter_tag,
+            file_hash,
+            "stats",
+        ]
         stats_filename = "_".join(filter(None, (str(s) for s in segments))) + ".pkl"
         stats_path = os.path.join(self.dir, stats_filename)
         self.raw_stats_path = stats_path
@@ -193,9 +227,12 @@ class CycloneAEDataset(CycloneDataset):
 
         # swap self state so the parent uses AE files/config for the hash + pkl
         saved = (
-            self.files, self.decouple_mu,
-            self.flat_index_to_file_and_tstep, self.length,
-            self.offsets, self.metadata,
+            self.files,
+            self.decouple_mu,
+            self.flat_index_to_file_and_tstep,
+            self.length,
+            self.offsets,
+            self.metadata,
         )
         self.files = ae_files
         self.decouple_mu = ae_decouple_mu
@@ -223,9 +260,12 @@ class CycloneAEDataset(CycloneDataset):
             )
         finally:
             (
-                self.files, self.decouple_mu,
-                self.flat_index_to_file_and_tstep, self.length,
-                self.offsets, self.metadata,
+                self.files,
+                self.decouple_mu,
+                self.flat_index_to_file_and_tstep,
+                self.length,
+                self.offsets,
+                self.metadata,
             ) = saved
 
         return result
@@ -446,7 +486,7 @@ class CycloneAEDataset(CycloneDataset):
         filter_tag = (
             f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         )
-        ae_tag = 'ae' + ae_checkpoint_path.split("_")[-1] if ae_checkpoint_path else ""
+        ae_tag = "ae" + ae_checkpoint_path.split("_")[-1] if ae_checkpoint_path else ""
 
         segments = [
             "diff",
@@ -506,15 +546,27 @@ class CycloneAEDataset(CycloneDataset):
                     # extract from batch instead of re-reading from disk
                     if batch.phi is not None:
                         phi_i = batch.phi[i]
-                        sample["phi"] = phi_i.cpu().numpy() if isinstance(phi_i, torch.Tensor) else np.asarray(phi_i)
+                        sample["phi"] = (
+                            phi_i.cpu().numpy()
+                            if isinstance(phi_i, torch.Tensor)
+                            else np.asarray(phi_i)
+                        )
                     else:
                         sample["phi"] = None
 
                     flux_i = batch.flux[i]
-                    sample["flux"] = flux_i.cpu().numpy() if isinstance(flux_i, torch.Tensor) else np.asarray(flux_i)
+                    sample["flux"] = (
+                        flux_i.cpu().numpy()
+                        if isinstance(flux_i, torch.Tensor)
+                        else np.asarray(flux_i)
+                    )
 
                     ts_i = batch.timestep[i]
-                    sample["timestep"] = ts_i.cpu().numpy() if isinstance(ts_i, torch.Tensor) else np.asarray(ts_i)
+                    sample["timestep"] = (
+                        ts_i.cpu().numpy()
+                        if isinstance(ts_i, torch.Tensor)
+                        else np.asarray(ts_i)
+                    )
 
                     if batch.conditioning is not None:
                         cond_i = batch.conditioning[i]
@@ -553,7 +605,9 @@ class CycloneAEDataset(CycloneDataset):
                     x_var = np.var(x, axis=norm_axes, keepdims=True)
                     x_min = np.min(x, axis=norm_axes, keepdims=True)
                     x_max = np.max(x, axis=norm_axes, keepdims=True)
-                    l2_norms.append(np.sqrt(np.sum(x**2, axis=norm_axes, keepdims=True)))
+                    l2_norms.append(
+                        np.sqrt(np.sum(x**2, axis=norm_axes, keepdims=True))
+                    )
                 else:
                     # per_token: per-element stats; one sample contributes (mean=x, var=0)
                     x_f = x.astype(np.float32, copy=False)
@@ -594,7 +648,9 @@ class CycloneAEDataset(CycloneDataset):
         avg_flux_cache = {}
         for f_id in self.metadata:
             fluxes = self.metadata[f_id]["flux"]
-            avg_flux_cache[f_id] = torch.tensor(float(np.mean(fluxes[-80:])), dtype=self.dtype)
+            avg_flux_cache[f_id] = torch.tensor(
+                float(np.mean(fluxes[-80:])), dtype=self.dtype
+            )
 
         for (file_index, t_index), sample in self.precomputed_latents.items():
             x = sample["x"]
@@ -652,9 +708,15 @@ class CycloneVAEDataset(CycloneAEDataset):
         mu: Union[torch.Tensor, np.ndarray],
         var: Union[torch.Tensor, np.ndarray],
     ) -> np.ndarray:
-        mu_np = mu.detach().cpu().numpy() if isinstance(mu, torch.Tensor) else np.asarray(mu)
+        mu_np = (
+            mu.detach().cpu().numpy()
+            if isinstance(mu, torch.Tensor)
+            else np.asarray(mu)
+        )
         var_np = (
-            var.detach().cpu().numpy() if isinstance(var, torch.Tensor) else np.asarray(var)
+            var.detach().cpu().numpy()
+            if isinstance(var, torch.Tensor)
+            else np.asarray(var)
         )
         var_np = np.clip(var_np, 1e-12, None)
         return mu_np + np.sqrt(var_np) * np.random.randn(*mu_np.shape)
@@ -776,7 +838,9 @@ class CycloneVAEDataset(CycloneAEDataset):
         filter_tag = (
             f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         )
-        vae_tag = 'vae' + vae_checkpoint_path.split("_")[-1] if vae_checkpoint_path else ""
+        vae_tag = (
+            "vae" + vae_checkpoint_path.split("_")[-1] if vae_checkpoint_path else ""
+        )
 
         segments = [
             "diff",
@@ -838,15 +902,27 @@ class CycloneVAEDataset(CycloneAEDataset):
 
                     if batch.phi is not None:
                         phi_i = batch.phi[i]
-                        sample["phi"] = phi_i.cpu().numpy() if isinstance(phi_i, torch.Tensor) else np.asarray(phi_i)
+                        sample["phi"] = (
+                            phi_i.cpu().numpy()
+                            if isinstance(phi_i, torch.Tensor)
+                            else np.asarray(phi_i)
+                        )
                     else:
                         sample["phi"] = None
 
                     flux_i = batch.flux[i]
-                    sample["flux"] = flux_i.cpu().numpy() if isinstance(flux_i, torch.Tensor) else np.asarray(flux_i)
+                    sample["flux"] = (
+                        flux_i.cpu().numpy()
+                        if isinstance(flux_i, torch.Tensor)
+                        else np.asarray(flux_i)
+                    )
 
                     ts_i = batch.timestep[i]
-                    sample["timestep"] = ts_i.cpu().numpy() if isinstance(ts_i, torch.Tensor) else np.asarray(ts_i)
+                    sample["timestep"] = (
+                        ts_i.cpu().numpy()
+                        if isinstance(ts_i, torch.Tensor)
+                        else np.asarray(ts_i)
+                    )
 
                     if batch.conditioning is not None:
                         cond_i = batch.conditioning[i]
@@ -910,7 +986,9 @@ class CycloneVAEDataset(CycloneAEDataset):
                         std = np.sqrt(var)
                         x_min = (mu - 3.0 * std).astype(np.float32, copy=False)
                         x_max = (mu + 3.0 * std).astype(np.float32, copy=False)
-                        l2_norms.append(np.sqrt(mu**2 + var).astype(np.float32, copy=False))
+                        l2_norms.append(
+                            np.sqrt(mu**2 + var).astype(np.float32, copy=False)
+                        )
                 else:
                     if norm_axes:
                         x_mean = np.mean(mu, axis=norm_axes, keepdims=True)
@@ -1241,9 +1319,7 @@ class CycloneVQVAEDataset(CycloneAEDataset):
             f"std{self.timestep_std_filter}" if self.timestep_std_filter else ""
         )
         vqvae_tag = (
-            "vqvae" + ae_checkpoint_path.split("_")[-1]
-            if ae_checkpoint_path
-            else ""
+            "vqvae" + ae_checkpoint_path.split("_")[-1] if ae_checkpoint_path else ""
         )
 
         segments = [

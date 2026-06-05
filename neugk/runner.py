@@ -20,7 +20,7 @@ from neugk.utils import (
     get_scheduler,
     cleanup,
     handle_signal,
-    memory_cleanup
+    memory_cleanup,
 )
 from neugk.dataset import get_data
 
@@ -50,10 +50,11 @@ class BaseRunner:
             self.device = torch.device("cpu")
 
         if self.use_deepspeed:
-            assert not cfg.ddp.enable, (
-                "Cannot enable both DDP and DeepSpeed. Set ddp.enable=false."
-            )
+            assert (
+                not cfg.ddp.enable
+            ), "Cannot enable both DDP and DeepSpeed. Set ddp.enable=false."
             import deepspeed
+
             deepspeed.init_distributed()
             self.use_ddp = False
         elif cfg.ddp.enable and world_size > 1:
@@ -93,14 +94,18 @@ class BaseRunner:
             with open("/proc/self/status") as _f:
                 for _l in _f:
                     if "VmRSS" in _l:
-                        print(f"[init] RSS after setup_data: {int(_l.split()[1])/1024/1024:.1f} GB")
+                        print(
+                            f"[init] RSS after setup_data: {int(_l.split()[1])/1024/1024:.1f} GB"
+                        )
                         break
         self.setup_components()
         if not rank:
             with open("/proc/self/status") as _f:
                 for _l in _f:
                     if "VmRSS" in _l:
-                        print(f"[init] RSS after setup_components: {int(_l.split()[1])/1024/1024:.1f} GB")
+                        print(
+                            f"[init] RSS after setup_components: {int(_l.split()[1])/1024/1024:.1f} GB"
+                        )
                         break
         self.setup_scheduler()
 
@@ -188,7 +193,7 @@ class BaseRunner:
                 num_training_steps=self.total_steps,
                 scheduler_specific_kwargs=kwargs,
             )
-    
+
     def _build_deepspeed_config(self):
         """Translate Hydra config into a DeepSpeed JSON config dict."""
         ds = self.cfg.deepspeed
@@ -244,7 +249,13 @@ class BaseRunner:
                 if "ms" in k and isinstance(v, (int, float))
             )
             epoch_str = str(epoch).zfill(len(str(int(self.cfg.training.n_epochs))))
-            logged = ", ".join([f"{k}: {v:.5f}" for k, v in epoch_logs.items() if isinstance(v, (int, float))])
+            logged = ", ".join(
+                [
+                    f"{k}: {v:.5f}"
+                    for k, v in epoch_logs.items()
+                    if isinstance(v, (int, float))
+                ]
+            )
             print(f"Epoch: {epoch_str}, {logged}, step time: {total_time:.2f}ms")
 
     @abstractmethod
@@ -325,7 +336,9 @@ class BaseRunner:
                 log_metric_dict, val_plots, self.loss_val_min = self.evaluate(epoch)
 
             # finalize logs
-            epoch_logs = {"epoch": epoch} | train_losses_dict | log_metric_dict | info_dict
+            epoch_logs = (
+                {"epoch": epoch} | train_losses_dict | log_metric_dict | info_dict
+            )
             if val_plots:
                 epoch_logs["val_plots"] = val_plots
             all_logs.append(epoch_logs)

@@ -10,3 +10,8 @@
 tmp/
 upload_changed_py.sh
 cache/
+.env
+# paper working directory (figures, drafts) excluded from git
+paper/
+paper_diff/
+paper_pinc/

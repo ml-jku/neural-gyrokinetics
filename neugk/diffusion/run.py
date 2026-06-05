@@ -76,9 +76,7 @@ class DDPMRunner(BaseRunner):
                 # per-sample stats shape (e.g. (C,1,...) or (C,*spatial)); add batch dim
                 latent_std = np.sqrt(np.maximum(latent_var, 1e-12)).astype(np.float32)
                 scale = (1.0 / latent_std).astype(np.float32)
-                self.latent_scale = (
-                    torch.from_numpy(scale).unsqueeze(0).to(self.device)
-                )
+                self.latent_scale = torch.from_numpy(scale).unsqueeze(0).to(self.device)
                 if self.rank == 0:
                     s = self.latent_scale
                     print(
@@ -115,7 +113,7 @@ class DDPMRunner(BaseRunner):
             prediction_type=diff_cfg.get("prediction_type", "epsilon"),
         )
 
-        self.latent_shape = self.model.latent_shape # cache before DDP wraps the module
+        self.latent_shape = self.model.latent_shape  # cache before DDP wraps the module
         if self.use_ddp:
             self.model = DDP(self.model, device_ids=[self.rank])
 
@@ -282,7 +280,9 @@ class DDPMRunner(BaseRunner):
         return loss_logs, info_dict
 
     @torch.no_grad()
-    def sample(self, condition: torch.Tensor, latent_only: bool = False, steps: int = None):
+    def sample(
+        self, condition: torch.Tensor, latent_only: bool = False, steps: int = None
+    ):
         """Generate samples from noise via iterative denoising."""
         self.model.eval()
         bs = condition.shape[0]
@@ -315,7 +315,9 @@ class DDPMRunner(BaseRunner):
     def evaluate(self, epoch, evaluate_probing: bool = True, no_save: bool = False):
         """Execute evaluation pipeline and log results."""
         eval_steps = getattr(self.cfg.validation, "eval_sample_steps", None)
-        sample_fn = partial(self.sample, steps=eval_steps) if eval_steps else self.sample
+        sample_fn = (
+            partial(self.sample, steps=eval_steps) if eval_steps else self.sample
+        )
         return self.evaluator(
             rank=self.rank,
             world_size=self.world_size,
@@ -478,10 +480,7 @@ class EDMRunner(DDPMRunner):
         ) ** self.rho
         sigmas = torch.cat([sigmas, torch.zeros_like(sigmas[:1])])
         # start with noise
-        x = (
-            torch.randn((bs, *self.latent_shape), device=self.device)
-            * self.sigma_max
-        )
+        x = torch.randn((bs, *self.latent_shape), device=self.device) * self.sigma_max
         # iterate solver
         for i in range(len(sigmas) - 1):
             sigma_hat = sigmas[i]
@@ -869,9 +868,7 @@ class ARRunner(DDPMRunner):
             self.model.train()
             return z
 
-        decoded = self.autoencoder.decode_from_indices(
-            indices, condition=condition
-        )
+        decoded = self.autoencoder.decode_from_indices(indices, condition=condition)
         self.model.train()
         return decoded
 
