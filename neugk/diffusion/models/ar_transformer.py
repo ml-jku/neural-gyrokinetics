@@ -23,7 +23,10 @@ class DiTCausalBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.self_attn = nn.MultiheadAttention(
-            dim, num_heads, dropout=dropout, batch_first=True,
+            dim,
+            num_heads,
+            dropout=dropout,
+            batch_first=True,
         )
         self.norm2 = nn.LayerNorm(dim)
         self.linear1 = nn.Linear(dim, ff_dim)
@@ -103,33 +106,47 @@ class ARTransformer(nn.Module):
         if conditioning_mode == "cls":
             if cond_embed is not None:
                 self.cond_proj = nn.Linear(cond_dim, dim)
-            self.layers = nn.ModuleList([
-                nn.TransformerEncoderLayer(
-                    d_model=dim, nhead=num_heads, dim_feedforward=dim * 4,
-                    dropout=dropout, batch_first=True, norm_first=True,
-                    activation="gelu",
-                )
-                for _ in range(depth)
-            ])
+            self.layers = nn.ModuleList(
+                [
+                    nn.TransformerEncoderLayer(
+                        d_model=dim,
+                        nhead=num_heads,
+                        dim_feedforward=dim * 4,
+                        dropout=dropout,
+                        batch_first=True,
+                        norm_first=True,
+                        activation="gelu",
+                    )
+                    for _ in range(depth)
+                ]
+            )
 
         elif conditioning_mode == "film":
             self.start_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
-            self.layers = nn.ModuleList([
-                nn.TransformerEncoderLayer(
-                    d_model=dim, nhead=num_heads, dim_feedforward=dim * 4,
-                    dropout=dropout, batch_first=True, norm_first=True,
-                    activation="gelu",
-                )
-                for _ in range(depth)
-            ])
+            self.layers = nn.ModuleList(
+                [
+                    nn.TransformerEncoderLayer(
+                        d_model=dim,
+                        nhead=num_heads,
+                        dim_feedforward=dim * 4,
+                        dropout=dropout,
+                        batch_first=True,
+                        norm_first=True,
+                        activation="gelu",
+                    )
+                    for _ in range(depth)
+                ]
+            )
             self.films = nn.ModuleList([Film(cond_dim, dim) for _ in range(depth)])
 
         elif conditioning_mode == "dit":
             self.start_token = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
-            self.layers = nn.ModuleList([
-                DiTCausalBlock(dim, num_heads, dim * 4, dropout, cond_dim)
-                for _ in range(depth)
-            ])
+            self.layers = nn.ModuleList(
+                [
+                    DiTCausalBlock(dim, num_heads, dim * 4, dropout, cond_dim)
+                    for _ in range(depth)
+                ]
+            )
 
         else:
             raise ValueError(f"Unknown conditioning_mode: {conditioning_mode}")

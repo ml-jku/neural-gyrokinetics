@@ -248,7 +248,10 @@ class KvikIOBackend(DataBackend):
         return path
 
     def read_metadata(
-        self, path: str, input_fields: Sequence[str] = ["df"], lightweight: bool = False,
+        self,
+        path: str,
+        input_fields: Sequence[str] = ["df"],
+        lightweight: bool = False,
     ) -> Dict[str, Any]:
         path = self._strip_h5(path)
 
@@ -263,10 +266,17 @@ class KvikIOBackend(DataBackend):
             with open(full_path, "rb") as mf:
                 meta = pickle.load(mf)
             if lightweight:
-                drop_keys = {"df_min", "df_max", "df_var", "df_mean", "df_std",
-                             "phi_min", "phi_max", "phi_var"}
-                light_meta = {k: v for k, v in meta.items()
-                              if k not in drop_keys}
+                drop_keys = {
+                    "df_min",
+                    "df_max",
+                    "df_var",
+                    "df_mean",
+                    "df_std",
+                    "phi_min",
+                    "phi_max",
+                    "phi_var",
+                }
+                light_meta = {k: v for k, v in meta.items() if k not in drop_keys}
                 try:
                     with open(light_path, "wb") as lf:
                         pickle.dump(light_meta, lf)

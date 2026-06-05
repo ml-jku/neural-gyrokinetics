@@ -77,7 +77,10 @@ def pca_recon(df: torch.Tensor, n_components: int = 2, level: int = 1):
         }
         compressed.append(compressed_version)
         compressed_size += (
-            transformed.nbytes + pca.mean_.nbytes + pca.explained_variance_.nbytes
+            transformed.nbytes
+            + pca.mean_.nbytes
+            + pca.explained_variance_.nbytes
+            + pca.components_.nbytes
         )
 
     pca_df = np.stack(pca_results, axis=0)
@@ -115,6 +118,33 @@ def pca_recon(df: torch.Tensor, n_components: int = 2, level: int = 1):
     # compression_ratio = df.nbytes / compressed_size
     # print(f"PCA compression ratio: {compression_ratio:.2f}x")
     return torch.from_numpy(pca_df), compressed, compressed_size
+
+
+def sz3_recon(df: torch.Tensor, error_bound: float = 2500.0):
+    try:
+        from pysz import sz, szConfig, szErrorBoundMode
+    except ImportError as e:
+        raise ImportError(
+            "sz3_recon requires the SZ3 python binding `pysz`. "
+            "Install it with `pip install pysz` (see https://pypi.org/project/pysz/)."
+        ) from e
+
+    vp, s = df.shape[1], df.shape[3]
+    df = rearrange(df, "c vp vm s x y -> c (vp vm) (s y) x").cpu().numpy()
+    df = np.ascontiguousarray(df, dtype=np.float32)
+
+    config = szConfig()
+    config.errorBoundMode = szErrorBoundMode.ABS
+    config.absErrorBound = error_bound
+
+    compressed, _ = sz.compress(df, config)
+    sz_df, _ = sz.decompress(compressed, np.float32, df.shape)
+    sz_df = rearrange(sz_df, "c (vp vm) (s y) x -> c vp vm s x y", vp=vp, s=s)
+
+    compressed_size = compressed.nbytes
+    # compression_ratio = df.nbytes / compressed_size
+    # print(f"SZ3 compression ratio: {compression_ratio:.2f}x")
+    return torch.from_numpy(sz_df), compressed, compressed_size
 
 
 def quantization_recon(df: torch.Tensor, num_bits: int = 8):

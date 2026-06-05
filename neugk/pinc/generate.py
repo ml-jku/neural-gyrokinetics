@@ -27,7 +27,7 @@ from tqdm import tqdm
 
 from neugk.pinc.autoencoders.ae_utils import load_autoencoder
 from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVAE, Swin5DVQVAE
-from neugk.integrals import FluxIntegral
+from neugk.physics.integrals import FluxIntegral
 from neugk.utils import recombine_zf
 from neugk.plot_utils import plot_nd
 
@@ -41,18 +41,37 @@ KEY_MAP = {
 # CLI
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Generative evaluation for PINC VAE / VQ-VAE autoencoders."
     )
-    parser.add_argument("--ckpt", required=True, help="Path to checkpoint directory or .pth file.")
-    parser.add_argument("--config", default="configs/pinc_inference.yaml", help="Inference config YAML.")
-    parser.add_argument("--trajectories", nargs="+", default=None, help="Override trajectory list.")
-    parser.add_argument("--n_samples", type=int, default=None, help="Override number of samples.")
-    parser.add_argument("--batch_size", type=int, default=None, help="Override batch size.")
+    parser.add_argument(
+        "--ckpt", required=True, help="Path to checkpoint directory or .pth file."
+    )
+    parser.add_argument(
+        "--config", default="configs/pinc_inference.yaml", help="Inference config YAML."
+    )
+    parser.add_argument(
+        "--trajectories", nargs="+", default=None, help="Override trajectory list."
+    )
+    parser.add_argument(
+        "--n_samples", type=int, default=None, help="Override number of samples."
+    )
+    parser.add_argument(
+        "--batch_size", type=int, default=None, help="Override batch size."
+    )
     parser.add_argument("--device", default=None)
-    parser.add_argument("--norm_stats", default=None, help="Path to dataset norm_stats .pkl file (RunningMeanStd dict).")
-    parser.add_argument("--output", default=None, help="Path to save results .pt file (default: <ckpt_dir>/generative_eval.pt).")
+    parser.add_argument(
+        "--norm_stats",
+        default=None,
+        help="Path to dataset norm_stats .pkl file (RunningMeanStd dict).",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Path to save results .pt file (default: <ckpt_dir>/generative_eval.pt).",
+    )
     parser.add_argument(
         "--vq_index_pkl",
         default=None,
@@ -101,13 +120,18 @@ def get_geometry(metadata, dtype=torch.float64):
 # Sampling
 # ---------------------------------------------------------------------------
 
+
 @torch.no_grad()
 def sample_vae_prior(model, batch_size, condition, pad_axes, device, mean=0.0, std=1.0):
     """Sample z ~ N(0, I) and decode."""
     grid_size = model.bottleneck_grid_size
     latent_dim = model.bottleneck_dim
     z = torch.randn(batch_size, *grid_size, latent_dim, device=device) * std + mean
-    cond = condition.unsqueeze(0).expand(batch_size, -1).to(device) if condition is not None else None
+    cond = (
+        condition.unsqueeze(0).expand(batch_size, -1).to(device)
+        if condition is not None
+        else None
+    )
     return model.decode(z, pad_axes, condition=cond)["df"]
 
 
@@ -142,15 +166,22 @@ def sample_vqvae_random(model, batch_size, condition, pad_axes, device, prior=No
 
     if prior is None:
         indices = torch.randint(
-            0, model.vq.codebook_size, (batch_size, num_tokens), device=device,
+            0,
+            model.vq.codebook_size,
+            (batch_size, num_tokens),
+            device=device,
         )
     else:
         indices = torch.multinomial(
-            prior.to(device), batch_size * num_tokens, replacement=True,
+            prior.to(device),
+            batch_size * num_tokens,
+            replacement=True,
         ).view(batch_size, num_tokens)
     codes = model.vq.get_codes_from_indices(indices)
     z = codes.view(batch_size, *grid_size, embedding_dim)
-    cond = condition.unsqueeze(0).expand(batch_size, -1) if condition is not None else None
+    cond = (
+        condition.unsqueeze(0).expand(batch_size, -1) if condition is not None else None
+    )
     return model.decode(z, pad_axes, condition=cond)["df"]
 
 
@@ -158,14 +189,13 @@ def sample_vqvae_random(model, batch_size, condition, pad_axes, device, prior=No
 # Physics integrals and spectra
 # ---------------------------------------------------------------------------
 
+
 def compute_spectra(phi_fft, eflux_field):
     """Compute kx, ky power spectra and heat-flux spectrum from integrated fields."""
     kxspec = torch.sum(torch.abs(phi_fft) ** 2, dim=(1, 3))
     kyspec = torch.sum(torch.abs(phi_fft) ** 2, dim=(1, 2))
 
-    qspec = eflux_field.sum(
-        (1, 2, 3, 4) if eflux_field.dim() == 6 else (0, 1, 2, 3)
-    )
+    qspec = eflux_field.sum((1, 2, 3, 4) if eflux_field.dim() == 6 else (0, 1, 2, 3))
     if qspec.dim() == 1:
         qspec = qspec.unsqueeze(0)
 
@@ -190,17 +220,32 @@ def compute_physics(df, geometry, separate_zf, integrator):
         **spectra,
     }
 
+
 def denormalize(df, norm_stats):
     """Denormalize a decoded distribution function using trajectory statistics."""
     mean = torch.tensor(norm_stats["df_mean"], device=df.device)
     std = torch.tensor(norm_stats["df_std"], device=df.device)
     return df * std + mean
 
+
 # ---------------------------------------------------------------------------
 # Main evaluation loop
 # ---------------------------------------------------------------------------
 
-def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, device, integrator, vq_prior=None, *, timing_out=None):
+
+def evaluate_generative(
+    model,
+    ckpt_dir,
+    cfg,
+    inf_cfg,
+    metadata,
+    norm_stats,
+    device,
+    integrator,
+    vq_prior=None,
+    *,
+    timing_out=None,
+):
     """Generate samples for a single trajectory and return averaged physics results.
 
     Samples are generated from the prior (VAE) or random codebook indices (VQ-VAE),
@@ -212,6 +257,7 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
     total sample count under "n_samples".
     """
     import time as _time
+
     is_vae = isinstance(model, Swin5DVAE)
     is_vqvae = isinstance(model, Swin5DVQVAE)
     if not (is_vae or is_vqvae):
@@ -231,12 +277,13 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
     # Get conditioning and geometry for this trajectory
     model_key = "autoencoder" if hasattr(cfg, "autoencoder") else "model"
     model_cfg = getattr(cfg, model_key)
-    decoder_conds = sorted(set(model_cfg.decoder_conditioning) | set(getattr(model_cfg, "encoder_conditioning", [])))
+    decoder_conds = sorted(
+        set(model_cfg.decoder_conditioning)
+        | set(getattr(model_cfg, "encoder_conditioning", []))
+    )
 
     condition = (
-        get_conditioning(decoder_conds, metadata, device)
-        if decoder_conds
-        else None
+        get_conditioning(decoder_conds, metadata, device) if decoder_conds else None
     )
     geometry = get_geometry(metadata)
     # Generate in batches
@@ -246,11 +293,17 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
     while remaining > 0:
         bs = min(batch_size, remaining)
 
-        if timing_out is not None and torch.cuda.is_available() and device.type == "cuda":
+        if (
+            timing_out is not None
+            and torch.cuda.is_available()
+            and device.type == "cuda"
+        ):
             torch.cuda.synchronize()
         _t0 = _time.perf_counter()
 
-        with torch.autocast("cuda", dtype=amp_dtype, enabled=use_amp and device.type == "cuda"):
+        with torch.autocast(
+            "cuda", dtype=amp_dtype, enabled=use_amp and device.type == "cuda"
+        ):
             if is_vae:
                 mean = 0.0
                 std = 1.0
@@ -262,12 +315,18 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
                     std = lat_stats["z_std"].to(device)
                 elif os.path.exists(old_stats_path):
                     train_lats = pickle.load(open(old_stats_path, "rb"))
-                    train_lats = np.concatenate([train_lats[k]["x"] for k in train_lats.keys()], axis=0)
+                    train_lats = np.concatenate(
+                        [train_lats[k]["x"] for k in train_lats.keys()], axis=0
+                    )
                     mean = torch.tensor(np.mean(train_lats, axis=0), device=device)
                     std = torch.tensor(np.std(train_lats, axis=0), device=device)
-                gen_df = sample_vae_prior(model, bs, condition, pad_axes, device, mean=mean, std=std)
+                gen_df = sample_vae_prior(
+                    model, bs, condition, pad_axes, device, mean=mean, std=std
+                )
             else:
-                gen_df = sample_vqvae_random(model, bs, condition, pad_axes, device, prior=vq_prior)
+                gen_df = sample_vqvae_random(
+                    model, bs, condition, pad_axes, device, prior=vq_prior
+                )
 
         gen_df = gen_df.float()
 
@@ -280,8 +339,10 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
         if timing_out is not None:
             if torch.cuda.is_available() and device.type == "cuda":
                 torch.cuda.synchronize()
-            timing_out["gen_time_s"] = timing_out.get("gen_time_s", 0.0) + (_time.perf_counter() - _t0)
-            timing_out["n_samples"]  = timing_out.get("n_samples", 0) + bs
+            timing_out["gen_time_s"] = timing_out.get("gen_time_s", 0.0) + (
+                _time.perf_counter() - _t0
+            )
+            timing_out["n_samples"] = timing_out.get("n_samples", 0) + bs
 
         # Add batch dim and expand to match batch size; keep on CPU because
         # integrators use float64 Bessel functions that need NVRTC on CUDA.
@@ -290,7 +351,10 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
             geometry,
         )
         physics = compute_physics(
-            gen_df_denorm.cpu(), geom_batch, separate_zf, integrator,
+            gen_df_denorm.cpu(),
+            geom_batch,
+            separate_zf,
+            integrator,
         )
         for k, v in physics.items():
             accum[k].append(v.cpu())
@@ -308,17 +372,18 @@ def evaluate_generative(model, ckpt_dir, cfg, inf_cfg, metadata, norm_stats, dev
         }
     return results
 
+
 def evaluate_ground_truth(metadata, trajectory, train_cfg, inf_cfg, device, integrator):
     """Compute physics integrals for the ground truth distribution function."""
     geometry = get_geometry(metadata)
     gt_path = os.path.join(inf_cfg["root"], trajectory, "data")
     timesteps = [f for f in sorted(os.listdir(gt_path)) if f.startswith("timestep")]
-    timesteps = timesteps[train_cfg.dataset.offset:]
+    timesteps = timesteps[train_cfg.dataset.offset :]
 
     df_batch = []
     for ts in tqdm(timesteps, desc=f"Loading GT for {trajectory}", unit="timestep"):
         df = np.fromfile(os.path.join(gt_path, ts), dtype=np.float32)
-        df = torch.from_numpy(df).reshape((2,32,8,16,85,32)).unsqueeze(0)
+        df = torch.from_numpy(df).reshape((2, 32, 8, 16, 85, 32)).unsqueeze(0)
         df_batch.append(df)
 
     # GT physics runs on CPU (integrator uses float64 Bessel via NVRTC), so
@@ -332,7 +397,10 @@ def evaluate_ground_truth(metadata, trajectory, train_cfg, inf_cfg, device, inte
     )
 
     physics = compute_physics(
-        df_batch, geom_batch, separate_zf=False, integrator=integrator,
+        df_batch,
+        geom_batch,
+        separate_zf=False,
+        integrator=integrator,
     )
     results = {}
     for k, tensors in physics.items():
@@ -342,6 +410,7 @@ def evaluate_ground_truth(metadata, trajectory, train_cfg, inf_cfg, device, inte
             "all": tensors,
         }
     return results
+
 
 def print_comparison(all_results):
     """Compare generated vs ground-truth results aggregated across all trajectories."""
@@ -363,7 +432,9 @@ def print_comparison(all_results):
         # Per-sample RMSE (generated vs GT mean)
         per_sample_se = (gen_eflux - gt_eflux_mean.unsqueeze(0)).pow(2)
         if per_sample_se.dim() > 1:
-            per_sample_rmse = per_sample_se.mean(dim=tuple(range(1, per_sample_se.dim()))).sqrt()
+            per_sample_rmse = per_sample_se.mean(
+                dim=tuple(range(1, per_sample_se.dim()))
+            ).sqrt()
         else:
             per_sample_rmse = per_sample_se.sqrt()
         all_eflux_rmse.append(per_sample_rmse)
@@ -373,7 +444,9 @@ def print_comparison(all_results):
         if ss_tot > 0:
             per_sample_ss_res = (gen_eflux - gt_eflux_mean.unsqueeze(0)).pow(2)
             if per_sample_ss_res.dim() > 1:
-                per_sample_ss_res = per_sample_ss_res.sum(dim=tuple(range(1, per_sample_ss_res.dim())))
+                per_sample_ss_res = per_sample_ss_res.sum(
+                    dim=tuple(range(1, per_sample_ss_res.dim()))
+                )
             all_eflux_r2.append(1 - per_sample_ss_res / ss_tot)
 
         # Per-sample spectral RMSE
@@ -382,14 +455,16 @@ def print_comparison(all_results):
                 gt_spec = gt[spec_name]["mean"]
                 gen_spec_all = gen[spec_name]["all"]
                 per_sample_spec_se = (gen_spec_all - gt_spec.unsqueeze(0)).pow(2)
-                per_sample_spec_rmse = per_sample_spec_se.mean(dim=tuple(range(1, per_sample_spec_se.dim()))).sqrt()
+                per_sample_spec_rmse = per_sample_spec_se.mean(
+                    dim=tuple(range(1, per_sample_spec_se.dim()))
+                ).sqrt()
                 all_spec_rmse[spec_name].append(per_sample_spec_rmse)
 
     # Aggregate: concatenate all per-sample values, compute mean +/- SE
     all_eflux_rmse = torch.cat(all_eflux_rmse)
     n = len(all_eflux_rmse)
     eflux_rmse = all_eflux_rmse.mean().item()
-    eflux_se = (all_eflux_rmse.std() / (n ** 0.5)).item()
+    eflux_se = (all_eflux_rmse.std() / (n**0.5)).item()
     print(f"  eflux RMSE: {eflux_rmse:.6g} +/- {eflux_se:.6g} (SE, n={n})")
 
     if all_eflux_r2:
@@ -427,6 +502,7 @@ def print_comparison(all_results):
 # Entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     args = parse_args()
     inf_cfg = load_inference_config(args.config, args)
@@ -447,7 +523,8 @@ def main():
         # Auto-discover: look for a *_stats.pkl in the dataset root that starts with "df_"
         data_root = train_cfg.dataset.path
         candidates = sorted(
-            f for f in os.listdir(data_root)
+            f
+            for f in os.listdir(data_root)
             if f.startswith("df_") and f.endswith("_stats.pkl")
         )
         if not candidates:
@@ -463,7 +540,11 @@ def main():
     raw_stats = pickle.load(open(stats_path, "rb"))
     norm_axes = tuple(train_cfg.dataset.normalization.df.agg_axes)
     mean, var, *_ = raw_stats["df"].aggregate_stats(
-        raw_stats["df"].mean, raw_stats["df"].var, raw_stats["df"].min, raw_stats["df"].max, agg_axes=norm_axes
+        raw_stats["df"].mean,
+        raw_stats["df"].var,
+        raw_stats["df"].min,
+        raw_stats["df"].max,
+        agg_axes=norm_axes,
     )
     std = np.sqrt(var)
     stats = {
@@ -490,18 +571,36 @@ def main():
 
     # Determine trajectories
     trajectories = list(inf_cfg["trajectories"])
-    output_path = args.output if args.output else os.path.join(ckpt_dir, "generative_eval.pt")
+    output_path = (
+        args.output if args.output else os.path.join(ckpt_dir, "generative_eval.pt")
+    )
 
     if os.path.exists(output_path):
         print(f"Loading cached results from {output_path}")
         all_results = torch.load(output_path, weights_only=False)
     else:
         all_results = {}
-        integrator = FluxIntegral(flux_fields=True, spectral_df=False, spectral_potens=True)
+        integrator = FluxIntegral(
+            flux_fields=True, spectral_df=False, spectral_potens=True
+        )
         for traj in trajectories:
-            meta = pickle.load(open(os.path.join(inf_cfg["root"], traj, "metadata.pkl"), "rb"))
-            results = evaluate_generative(model, ckpt_dir, train_cfg, inf_cfg, meta, stats, device, integrator, vq_prior=vq_prior)
-            gt_res = evaluate_ground_truth(meta, traj, train_cfg, inf_cfg, device, integrator)
+            meta = pickle.load(
+                open(os.path.join(inf_cfg["root"], traj, "metadata.pkl"), "rb")
+            )
+            results = evaluate_generative(
+                model,
+                ckpt_dir,
+                train_cfg,
+                inf_cfg,
+                meta,
+                stats,
+                device,
+                integrator,
+                vq_prior=vq_prior,
+            )
+            gt_res = evaluate_ground_truth(
+                meta, traj, train_cfg, inf_cfg, device, integrator
+            )
             all_results[traj] = {"gen": results, "gt": gt_res}
 
         torch.save(all_results, output_path)

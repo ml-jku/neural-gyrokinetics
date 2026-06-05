@@ -99,7 +99,9 @@ class FluxIntegral(nn.Module):
         self.spectral_potens = spectral_potens
         self.flux_fields = flux_fields
         self.spectral_df = spectral_df
-        self.integral_dtype = torch.float64 if integral_precision == "float64" else torch.float32
+        self.integral_dtype = (
+            torch.float64 if integral_precision == "float64" else torch.float32
+        )
 
     def _geom_tensors(
         self, geometry: Dict[str, torch.Tensor], dtype: torch.dtype = torch.float32
@@ -151,17 +153,22 @@ class FluxIntegral(nn.Module):
         bessel = torch.sqrt(2.0 * geom_["mugr"] / geom_["bn"]) / geom_["signz"]
         vthrat = geom_["vthrat"]
         bessel = geom_["mas"] * vthrat * krloc * bessel
-        geom_["bessel"] = j0(bessel)
+        # torch.special.bessel_j0/j1 fail on Blackwell GPUs (nvrtc arch error).
+        # Compute on CPU then move back — geometry is fixed per trajectory so
+        # this cost is negligible.
+        _bessel_cpu = bessel.cpu()
+        geom_["bessel"] = j0(_bessel_cpu).to(bessel.device)
         geom_["bessel_bpar"] = torch.where(
-            torch.abs(bessel) < 1e-8,
-            torch.ones_like(bessel),
-            2.0 * j1(bessel) / bessel,
-        )
+            torch.abs(_bessel_cpu) < 1e-8,
+            torch.ones_like(_bessel_cpu),
+            2.0 * j1(_bessel_cpu) / _bessel_cpu,
+        ).to(bessel.device)
 
-        # scaled i0 for zonal response
+        # scaled i0 for zonal response (also Blackwell-affected)
         gamma = geom_["mas"] * vthrat * krloc
         gamma = 0.5 * (gamma / (geom_["signz"] * geom_["bn"])) ** 2
-        geom_["gamma"] = i0(gamma) * torch.exp(-gamma)
+        _gamma_cpu = gamma.cpu()
+        geom_["gamma"] = (i0(_gamma_cpu) * torch.exp(-_gamma_cpu)).to(gamma.device)
         return tree_map(lambda g: g.to(dtype=dtype), geom_)
 
     def _df_fft(self, df: torch.Tensor, norm: str = "forward"):
@@ -255,24 +262,40 @@ class FluxIntegral(nn.Module):
         apar = broadcast_field(apar)
         bpar = broadcast_field(bpar)
 
-        # generalized potential chi
-        # chi_gyro = J0*phi - 2*vth*vpar*J0*apar + 2*mu*T/Z*(2J1/z)*bpar
-        chi_gyro_conj = (
-            bessel * torch.conj(phi)
-            - 2.0 * geom["vthrat"] * vpgr * bessel * torch.conj(apar)
-            + 2.0 * mugr * geom["tmp"] / geom["signz"] * bessel_bpar * torch.conj(bpar)
-        )
+        # Real-valued arithmetic on the (re, im) parts instead of complex tensors:
+        # complex elementwise *backward* hits torch's nvrtc jiterator, which fails
+        # to compile on Blackwell (sm_100). dum1/dum2 only need the imaginary part,
+        # so we never materialize the complex products. Results match bit-for-bit.
+        def parts(f):
+            if isinstance(f, torch.Tensor) and f.is_complex():
+                return f.real, f.imag
+            return f, 0.0  # absent field -> broadcast_field returned 0.0
+
+        df_re, df_im = parts(df)
+        phi_re, phi_im = parts(phi)
+        apar_re, apar_im = parts(apar)
+        bpar_re, bpar_im = parts(bpar)
+
+        # generalized potential chi = J0*phi - 2*vth*vpar*J0*apar + 2*mu*T/Z*(2J1/z)*bpar
+        cb = 2.0 * geom["vthrat"] * vpgr * bessel
+        cc = 2.0 * mugr * geom["tmp"] / geom["signz"] * bessel_bpar
+        chi_re = bessel * phi_re - cb * apar_re + cc * bpar_re
+        chi_im = bessel * phi_im - cb * apar_im + cc * bpar_im
+        # conjugate: negate the imaginary part
+        chi_conj_re, chi_conj_im = chi_re, -chi_im
 
         if magnitude:
-            df = -1j * torch.abs(df)
-            chi_gyro_conj = torch.abs(chi_gyro_conj)
+            df_mag = torch.sqrt(df_re**2 + df_im**2)
+            df_re, df_im = torch.zeros_like(df_mag), -df_mag  # df -> -i|df|
+            chi_mag = torch.sqrt(chi_conj_re**2 + chi_conj_im**2)
+            chi_conj_re, chi_conj_im = chi_mag, torch.zeros_like(chi_mag)
 
-        dum = parseval * ints * (efun * krho) * df
-        dum1 = dum * chi_gyro_conj
+        k = parseval * ints * (efun * krho)
+        dum_re, dum_im = k * df_re, k * df_im
+        # dum1 = imag(dum * chi_conj); dum2 = imag(dum * chi_conj * bn) = bn * dum1
+        dum1 = dum_re * chi_conj_im + dum_im * chi_conj_re
         dum2 = dum1 * bn
         d3v = ints * d2X * intmu * bn * intvp
-        dum1 = torch.imag(dum1)
-        dum2 = torch.imag(dum2)
 
         # physical normalizations (matched to GKW internal units)
         pflux = d3v * dum1 * geom["de"]
@@ -456,7 +479,8 @@ class FluxIntegral(nn.Module):
             return vfwd(geom, df)
         else:
             in_dims = (
-                geom_keys, 0,
+                geom_keys,
+                0,
                 0 if phi is not None else None,
                 0 if apar is not None else None,
                 0 if bpar is not None else None,

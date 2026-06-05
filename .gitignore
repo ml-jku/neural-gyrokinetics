@@ -10,3 +10,5 @@
 tmp/
 upload_changed_py.sh
 cache/
+.env
+paper_pinc/

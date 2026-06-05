@@ -155,19 +155,19 @@ def _sample_strategy(
 
 
 def mask_modes(
-        mask_ratio: float,
-        strategy: str | MaskStrategy = MaskStrategy.RANDOM,
-        is_fourier: bool = False,
-        zf_separated: bool = False,
-        weights: Optional[torch.Tensor] = None,
-        rescale: bool = True,
-        mask_zero_mode: bool = True,
-        cutoff: Optional[int] = None,
-        mix_weights: Optional[Dict[str | MaskStrategy, float]] = None,
-        denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
-        per_sample: bool = True,
-    ):
+    mask_ratio: float,
+    strategy: str | MaskStrategy = MaskStrategy.RANDOM,
+    is_fourier: bool = False,
+    zf_separated: bool = False,
+    weights: Optional[torch.Tensor] = None,
+    rescale: bool = True,
+    mask_zero_mode: bool = True,
+    cutoff: Optional[int] = None,
+    mix_weights: Optional[Dict[str | MaskStrategy, float]] = None,
+    denormalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    normalize_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
+    per_sample: bool = True,
+):
     assert 0.0 <= mask_ratio <= 1.0, "mask_ratio must be in [0, 1]"
     if weights is not None and not isinstance(weights, torch.Tensor):
         weights = torch.from_numpy(weights).to(device)
@@ -202,19 +202,21 @@ def mask_modes(
         chosen_list = _sample_strategy(strategy, _mix, n_strategies)
 
         # build masks and stack along batch dim
-        masks_1d = torch.stack([
-            _build_mask(
-                nky=nky,
-                strategy=s,
-                mask_ratio=mask_ratio,
-                weights=weights,
-                mask_zero_mode=mask_zero_mode,
-                rescale=rescale,
-                cutoff=_cutoff,
-                device=device,
-            )
-            for s in chosen_list
-        ])  # (B, nky) if per_sample else (1, nky)
+        masks_1d = torch.stack(
+            [
+                _build_mask(
+                    nky=nky,
+                    strategy=s,
+                    mask_ratio=mask_ratio,
+                    weights=weights,
+                    mask_zero_mode=mask_zero_mode,
+                    rescale=rescale,
+                    cutoff=_cutoff,
+                    device=device,
+                )
+                for s in chosen_list
+            ]
+        )  # (B, nky) if per_sample else (1, nky)
         if not per_sample:
             masks_1d = masks_1d.expand(batch_size, -1)
             chosen_list = chosen_list * batch_size
@@ -228,7 +230,9 @@ def mask_modes(
             if zf_separated:
                 x_masked = separate_zf(x_masked)
             if normalize_fn is not None:
-                x_masked = de_normalize(x_masked, file_idx, partial(normalize_fn, return_stats=False))
+                x_masked = de_normalize(
+                    x_masked, file_idx, partial(normalize_fn, return_stats=False)
+                )
         return x_masked, x_tgt, mask, chosen_list
 
     return _mask

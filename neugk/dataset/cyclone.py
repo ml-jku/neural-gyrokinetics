@@ -130,7 +130,10 @@ class CycloneDataset(Dataset):
         self.stats = (
             normalization_stats
             if normalization_stats is not None
-            else {k: defaultdict(dict) for k in list(fields_to_load) + list(probe_targets or [])}
+            else {
+                k: defaultdict(dict)
+                for k in list(fields_to_load) + list(probe_targets or [])
+            }
         )
         self.normalization_scope = normalization_scope
         self.cond_filters = cond_filters
@@ -157,7 +160,9 @@ class CycloneDataset(Dataset):
         # with specified files / pattern
         if trajectories is not None:
             if split == "val" and partial_holdouts:
-                self.files = [os.path.join(self.dir, key) for key in partial_holdouts.keys()]
+                self.files = [
+                    os.path.join(self.dir, key) for key in partial_holdouts.keys()
+                ]
             else:
                 self.files = resolve_trajectories(self.dir, trajectories)
 
@@ -215,24 +220,35 @@ class CycloneDataset(Dataset):
         per_file_t_indexes = []
         stats: Dict[str, RunningMeanStd] = {}
 
-        import time as _time; _init_t0 = _time.time()
-        _use_lightweight = (
-            normalization_scope == "dataset"
-            and (offset > 0 or separate_zf)
+        import time as _time
+
+        _init_t0 = _time.time()
+        _use_lightweight = normalization_scope == "dataset" and (
+            offset > 0 or separate_zf
         )
 
         from concurrent.futures import ThreadPoolExecutor
+
         def _load_meta(f_path):
-            return self.backend.read_metadata(f_path, self.fields_to_load, lightweight=_use_lightweight)
+            return self.backend.read_metadata(
+                f_path, self.fields_to_load, lightweight=_use_lightweight
+            )
 
         _all_meta = {}
         with ThreadPoolExecutor(max_workers=min(16, num_workers or 4)) as ex:
-            for _fi, (f_path, meta) in enumerate(zip(self.files, ex.map(_load_meta, self.files))):
+            for _fi, (f_path, meta) in enumerate(
+                zip(self.files, ex.map(_load_meta, self.files))
+            ):
                 _all_meta[f_path] = meta
                 if rank == 0:
-                    print(f"    metadata {_fi+1}/{len(self.files)} ({_time.time()-_init_t0:.1f}s)", end="\r")
+                    print(
+                        f"    metadata {_fi+1}/{len(self.files)} ({_time.time()-_init_t0:.1f}s)",
+                        end="\r",
+                    )
         if rank == 0:
-            print(f"    metadata: {len(self.files)} files in {_time.time()-_init_t0:.1f}s (lightweight={_use_lightweight})")
+            print(
+                f"    metadata: {len(self.files)} files in {_time.time()-_init_t0:.1f}s (lightweight={_use_lightweight})"
+            )
 
         for f_path in self.files:
             meta = _all_meta[f_path]
@@ -256,7 +272,9 @@ class CycloneDataset(Dataset):
                             skip = True
                             break
                     else:
-                        raise UserWarning(f"`{cond_name}` not found in metadata {f_path}.")
+                        raise UserWarning(
+                            f"`{cond_name}` not found in metadata {f_path}."
+                        )
                 if skip:
                     continue
 
@@ -316,7 +334,11 @@ class CycloneDataset(Dataset):
                         stats[k] = RunningMeanStd()
 
                     if k in self.fields_to_load:
-                        norm_type = self.normalizers[k]["type"] if self.normalizers.get(k) else "zscore"
+                        norm_type = (
+                            self.normalizers[k]["type"]
+                            if self.normalizers.get(k)
+                            else "zscore"
+                        )
                         if norm_type == "minmax":
                             traj_min = meta[f"{k}_min"]
                             traj_max = meta[f"{k}_max"]
@@ -324,7 +346,7 @@ class CycloneDataset(Dataset):
                             var = ((traj_max - traj_min) / 2) ** 2
                         elif f"{k}_mean" in meta:
                             mean = meta[f"{k}_mean"]
-                            var = meta[f"{k}_std"]**2
+                            var = meta[f"{k}_std"] ** 2
                             traj_min = np.zeros_like(mean)
                             traj_max = np.ones_like(mean)
                         else:
@@ -336,7 +358,7 @@ class CycloneDataset(Dataset):
                             var = np.var(np.log1p(meta[k][offset:]), axis=0)
                             traj_min = np.min(np.log1p(meta[k][offset:]), axis=0)
                             traj_max = np.max(np.log1p(meta[k][offset:]), axis=0)
-                        elif k  == "fluxavg":
+                        elif k == "fluxavg":
                             # spectra, log-transform for stability
                             mean = np.mean(meta["flux"][offset:])
                             self.metadata[f_id]["fluxavg"] = mean
@@ -350,7 +372,10 @@ class CycloneDataset(Dataset):
                             traj_min = mean
                             traj_max = mean
 
-                    if self.normalizers.get(k, False) and self.normalizers[k]["agg_axes"]:
+                    if (
+                        self.normalizers.get(k, False)
+                        and self.normalizers[k]["agg_axes"]
+                    ):
                         # aggregate along specified dimensions
                         mean, var, traj_min, traj_max = stats[k].aggregate_stats(
                             mean,
@@ -365,12 +390,12 @@ class CycloneDataset(Dataset):
                     self.stats[k][f_id]["min"] = traj_min
                     self.stats[k][f_id]["max"] = traj_max
                     stats[k].update(mean, var, traj_min, traj_max, count=len(timesteps))
-                    
+
                     if normalization_scope == "dataset" and k not in probe_targets:
-                         # delete stats from metadata to save memory
+                        # delete stats from metadata to save memory
                         for suffix in ["_mean", "_std", "_min", "_max"]:
                             meta.pop(f"{k}{suffix}", None)
-                   
+
         self.files = filtered_files
         self.cumulative_samples = np.cumsum([0] + self.file_num_samples)
         self.length = self.cumulative_samples[-1]
@@ -612,9 +637,17 @@ class CycloneDataset(Dataset):
             df=torch.as_tensor(x, dtype=self.dtype) if x is not None else None,
             y_df=torch.as_tensor(gt, dtype=self.dtype) if gt is not None else None,
             phi=torch.as_tensor(phi, dtype=self.dtype) if phi is not None else None,
-            y_phi=(torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None),
-            y_flux=(torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None),
-            y_fluxavg=(torch.as_tensor(y_fluxavg, dtype=self.dtype).squeeze() if y_fluxavg is not None else None),
+            y_phi=(
+                torch.as_tensor(y_phi, dtype=self.dtype) if y_phi is not None else None
+            ),
+            y_flux=(
+                torch.as_tensor(flux, dtype=self.dtype) if flux is not None else None
+            ),
+            y_fluxavg=(
+                torch.as_tensor(y_fluxavg, dtype=self.dtype).squeeze()
+                if y_fluxavg is not None
+                else None
+            ),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             file_index=torch.tensor(file_index, dtype=torch.long),
             timestep_index=torch.tensor(t_index, dtype=torch.long),
