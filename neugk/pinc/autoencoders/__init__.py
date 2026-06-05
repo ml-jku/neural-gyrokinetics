@@ -80,9 +80,9 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             model_kwargs["beta_vae"] = getattr(ae_cfg, "beta_vae", 1.0)
             model_kwargs["logvar_clamp"] = getattr(ae_cfg, "logvar_clamp", None)
         elif model_type == "vqvae":
-            vq_config = {}
             if hasattr(ae_cfg, "vq"):
                 vq_config = {
+                    "quantizer": getattr(ae_cfg.vq, "quantizer", "vq"),
                     "codebook_size": getattr(ae_cfg.vq, "codebook_size", 8192),
                     "embedding_dim": getattr(ae_cfg.vq, "embedding_dim", 256),
                     "commitment_weight": getattr(ae_cfg.vq, "commitment_weight", 0.25),
@@ -91,9 +91,19 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
                     "threshold_ema_dead_code": getattr(
                         ae_cfg.vq, "threshold_ema_dead_code", 2
                     ),
+                    # FSQ
+                    "levels": list(getattr(ae_cfg.vq, "levels", [8, 8, 8, 5, 5, 5])),
+                    # LFQ
+                    "entropy_loss_weight": getattr(
+                        ae_cfg.vq, "entropy_loss_weight", 0.1
+                    ),
+                    "diversity_gamma": getattr(ae_cfg.vq, "diversity_gamma", 1.0),
+                    # RVQ
+                    "num_quantizers": getattr(ae_cfg.vq, "num_quantizers", 4),
                 }
             else:
                 vq_config = {
+                    "quantizer": "vq",
                     "codebook_size": 8192,
                     "embedding_dim": 256,
                     "commitment_weight": 0.25,

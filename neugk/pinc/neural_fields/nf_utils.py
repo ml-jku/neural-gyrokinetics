@@ -138,7 +138,7 @@ def compress_weights(
     return model_compressed, original_size, compressed_size
 
 
-def load_nf(path: str, device):
+def load_nf(path: str, device, grid_size=None):
     from neugk.pinc.neural_fields.models.utils import get_lora_neural_field
     from neugk.pinc.neural_fields.models.siren import SIREN
     from neugk.pinc.neural_fields.models.wire import WIRE
@@ -148,6 +148,10 @@ def load_nf(path: str, device):
     cfg = ckp["cfg"]
     ndim = 5
     nchannels = 2 if getattr(cfg, "ky_filter", "base") == "base" else 10
+    # discrete / sincos_discrete embeddings size their tables from grid_size;
+    # it is not in cfg, so take it from the caller (falls back to cfg if present).
+    if grid_size is None:
+        grid_size = tuple(cfg.grid_size) if hasattr(cfg, "grid_size") else None
 
     if cfg.name == "siren":
         model = SIREN(
@@ -161,6 +165,7 @@ def load_nf(path: str, device):
             skips=cfg.skips,
             embed_type=cfg.embed_type,
             clip_out=False,
+            grid_size=grid_size,
         )
     if cfg.name == "wire":
         model = WIRE(
@@ -172,6 +177,7 @@ def load_nf(path: str, device):
             real_out=False,
             skips=cfg.skips,
             learnable_w0_s0=True,
+            grid_size=grid_size,
         )
     if cfg.name == "mlp":
         model = MLPNF(
@@ -183,6 +189,7 @@ def load_nf(path: str, device):
             use_checkpoint=False,
             skips=cfg.skips,
             embed_type=cfg.embed_type,
+            grid_size=grid_size,
         )
 
     if getattr(cfg, "use_lora", False) and "int" in path:

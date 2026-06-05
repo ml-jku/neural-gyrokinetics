@@ -8,7 +8,12 @@ import torch.nn as nn
 
 from neugk.models.layers import MLP
 from neugk.models.gk_unet import Swin5DUnet
-from neugk.pinc.autoencoders.vector_quantize import VectorQuantize
+from neugk.pinc.autoencoders.vector_quantize import (
+    VectorQuantize,
+    FSQ,
+    LFQ,
+    ResidualVQ,
+)
 from neugk.models.nd_vit.vit_layers import ViTLayer
 from neugk.models.nd_vit.positional import APE
 from neugk.gyroswin.models.x_layers import FluxDecoder
@@ -300,38 +305,85 @@ class Swin5DVQVAE(Swin5DAE):
             del self.post_z_norm
             self.normalized_latent = False
 
+        # quantizer flavor selector (default "vq" = lucidrains VectorQuantize).
+        # all flavors are in-training (quantization in the forward with a STE).
+        self.quantizer_type = vq_config.get("quantizer", "vq")
         embedding_dim = vq_config.get("embedding_dim", 256)
-        self.vq = VectorQuantize(
-            dim=embedding_dim,
-            codebook_size=vq_config.get("codebook_size", 8192),
-            commitment_weight=vq_config.get("commitment_weight", 0.25),
-            decay=vq_config.get("ema_decay", 0.99),
-            use_cosine_sim=(vq_config.get("codebook_type", "euclidean") == "cosine"),
-            threshold_ema_dead_code=vq_config.get("threshold_ema_dead_code", 2),
-        )
+
+        if self.quantizer_type == "vq":
+            self.vq = VectorQuantize(
+                dim=embedding_dim,
+                codebook_size=vq_config.get("codebook_size", 8192),
+                commitment_weight=vq_config.get("commitment_weight", 0.25),
+                decay=vq_config.get("ema_decay", 0.99),
+                use_cosine_sim=(
+                    vq_config.get("codebook_type", "euclidean") == "cosine"
+                ),
+                threshold_ema_dead_code=vq_config.get("threshold_ema_dead_code", 2),
+            )
+            quantizer_in_dim = embedding_dim
+            self.codebook_size = self.vq.codebook_size
+        elif self.quantizer_type == "fsq":
+            levels = list(vq_config.get("levels", [8, 8, 8, 5, 5, 5]))
+            self.vq = FSQ(levels=levels)
+            # FSQ operates directly on len(levels) scalar dims
+            quantizer_in_dim = self.vq.dim
+            self.codebook_size = self.vq.codebook_size
+        elif self.quantizer_type == "lfq":
+            self.vq = LFQ(
+                codebook_size=vq_config.get("codebook_size", 8192),
+                entropy_loss_weight=vq_config.get("entropy_loss_weight", 0.1),
+                diversity_gamma=vq_config.get("diversity_gamma", 1.0),
+                commitment_weight=vq_config.get("commitment_weight", 0.0),
+            )
+            # LFQ operates on log2(codebook_size) sign dims
+            quantizer_in_dim = self.vq.dim
+            self.codebook_size = self.vq.codebook_size
+        elif self.quantizer_type == "rvq":
+            self.vq = ResidualVQ(
+                dim=embedding_dim,
+                num_quantizers=vq_config.get("num_quantizers", 4),
+                codebook_size=vq_config.get("codebook_size", 1024),
+                use_cosine_sim=(
+                    vq_config.get("codebook_type", "euclidean") == "cosine"
+                ),
+                decay=vq_config.get("ema_decay", 0.99),
+                commitment_weight=vq_config.get("commitment_weight", 0.25),
+                threshold_ema_dead_code=vq_config.get("threshold_ema_dead_code", 2),
+            )
+            quantizer_in_dim = embedding_dim
+            self.codebook_size = self.vq.codebook_size
+        else:
+            raise ValueError(f"Unknown vq.quantizer: {self.quantizer_type}")
 
         del self.middle_downproj
         del self.middle_upproj
-        self.middle_vq_downproj = nn.Linear(self.middle_dim, embedding_dim)
-        self.middle_vq_upproj = nn.Linear(embedding_dim, self.middle_dim)
+        self.middle_vq_downproj = nn.Linear(self.middle_dim, quantizer_in_dim)
+        self.middle_vq_upproj = nn.Linear(quantizer_in_dim, self.middle_dim)
 
     def get_compression_info(self):
         """Returns a dictionary with compression-related information."""
         import numpy as np
 
         input_elements = np.prod(self.base_resolution) * self.problem_dim
-        latent_elements = np.prod(self.bottleneck_grid_size)
-        bits_per_index = np.ceil(np.log2(self.vq.codebook_size))
-        # depends on bits for indices
-        rate = (input_elements * 8) / (latent_elements * bits_per_index)
+        num_tokens = np.prod(self.bottleneck_grid_size)
+        # codes stored as int16 (2 bytes) in eval; RVQ stores num_quantizers codes
+        # per token. Compute CR consistently with the eval accounting.
+        n_codes_per_token = getattr(self.vq, "num_quantizers", 1)
+        index_bytes = 2  # int16, matches eval reconstructors
+        latent_bytes = num_tokens * n_codes_per_token * index_bytes
+        rate = (input_elements * 4) / latent_bytes
         return {
             "input_elements": int(input_elements),
-            "latent_elements": int(latent_elements),
+            "latent_elements": int(num_tokens * n_codes_per_token),
             "input_shape": list(self.base_resolution),
             "input_channels": self.problem_dim,
             "latent_shape": list(self.bottleneck_grid_size),
             "latent_channels": self.vq.dim,
-            "rate": rate,
+            "codebook_size": int(self.codebook_size),
+            "quantizer": self.quantizer_type,
+            "num_codes_per_token": int(n_codes_per_token),
+            "rate": float(rate),
             "type": "vqvae",
         }
 
@@ -360,8 +412,15 @@ class Swin5DVQVAE(Swin5DAE):
             z_continuous.view(orig_shape[0], -1, orig_shape[-1])
         )
 
-        self._vq_indices = indices.view((orig_shape[0],) + orig_shape[1:-1])
+        # indices: (B, tokens) for vq/fsq/lfq, (B, tokens, num_quantizers) for rvq.
+        # reshape back to (B, *grid[, num_quantizers]).
+        grid = orig_shape[1:-1]
+        if indices.dim() == 2:
+            self._vq_indices = indices.view((orig_shape[0],) + grid)
+        else:
+            self._vq_indices = indices.view((orig_shape[0],) + grid + (-1,))
         self._vq_commit_loss = commit_loss
+        # z_quantized last dim == quantizer_in_dim == orig_shape[-1]
         return z_quantized.view(orig_shape), pad_axes
 
     def decode(
@@ -405,14 +464,21 @@ class Swin5DVQVAE(Swin5DAE):
             condition: optional decoder conditioning.
         """
         B = indices.shape[0]
-        codebook = self.vq.codebook.detach()  # (codebook_size, dim)
-        z = torch.nn.functional.embedding(indices, codebook)  # (B, seq_len, dim)
+        if self.quantizer_type == "vq":
+            codebook = self.vq.codebook.detach()  # (codebook_size, dim)
+            z = torch.nn.functional.embedding(indices, codebook)
+        elif self.quantizer_type in ("fsq", "lfq"):
+            z = self.vq.indices_to_codes(indices)
+        else:
+            raise NotImplementedError(
+                f"decode_from_indices not supported for quantizer {self.quantizer_type}"
+            )
         z = z.view(B, *self.bottleneck_grid_size, -1)
         return self.decode(z, pad_axes=pad_axes, condition=condition)
 
     def get_codebook_usage(self) -> torch.Tensor:
         if hasattr(self, "_vq_indices") and self._vq_indices is not None:
-            return self._vq_indices.unique().numel() / self.vq.codebook_size
+            return self._vq_indices.unique().numel() / self.codebook_size
         return torch.tensor(0.0)
 
     def get_codebook_vectors(self) -> torch.Tensor:

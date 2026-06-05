@@ -12,6 +12,7 @@ Modes:
 
 import os
 import sys
+import glob
 import time
 import itertools
 from typing import Dict, Optional, Sequence, Tuple
@@ -95,13 +96,20 @@ def pinc_loss_weights(cfg: DictConfig) -> Optional[Dict[str, float]]:
 
     No `physical_losses` key -> all terms active. Empty -> disabled (None).
     Otherwise keep the terms whose group is listed in `cfg.physical_losses`.
+    Per-term weights default to 1.0 but can be overridden via `cfg.pinc_weights`,
+    e.g. to anchor the data term against the larger physics losses:
+        pinc_weights: {df: 30}
+    Keeping `df` in `physical_losses` is what prevents the PINC phase from
+    catastrophically forgetting the reconstruction.
     """
     if not hasattr(cfg, "physical_losses"):
-        return {k: 1.0 for g in PINC_LOSS_GROUPS.values() for k in g}
-    if not cfg.physical_losses:
+        keep = [k for g in PINC_LOSS_GROUPS.values() for k in g]
+    elif not cfg.physical_losses:
         return None
-    keep = [k for g, ks in PINC_LOSS_GROUPS.items() if g in cfg.physical_losses for k in ks]
-    return {k: 1.0 for k in keep} or None
+    else:
+        keep = [k for g, ks in PINC_LOSS_GROUPS.items() if g in cfg.physical_losses for k in ks]
+    overrides = getattr(cfg, "pinc_weights", {}) or {}
+    return {k: float(overrides.get(k, 1.0)) for k in keep} or None
 
 
 def density_phase(cfg, model, data, loader, device, verbose):
@@ -110,6 +118,9 @@ def density_phase(cfg, model, data, loader, device, verbose):
     return train_density(
         model, n_epochs=cfg.epochs, data=data, loader=loader, optim=opt, sched=sched,
         device=device, field_subsamples=np.linspace(0.2, 1.0, cfg.epochs),
+        # density is an MSE warmup; skip its (expensive) eval by default and let
+        # the PINC phase do the physics-aware model selection.
+        eval_every=getattr(cfg, "density_eval_every", 0),
         use_tqdm=False, use_print=verbose,
     )
 
@@ -131,13 +142,41 @@ def pinc_phase(cfg, model, data, device, weights, verbose):
         model, n_epochs=cfg.pinc_epochs, data=data, optim=opt, sched=sched,
         device=device, use_flux_fields=cfg.use_flux_fields,
         pinc_loss_weight=weights, use_print=verbose,
+        eval_every=getattr(cfg, "pinc_eval_every", 2),
+        use_config=getattr(cfg, "use_config", False),
+        config_op=getattr(cfg, "config_op", "config"),
+        config_length=getattr(cfg, "config_length", "projection"),
+        config_lstsq=getattr(cfg, "config_lstsq", True),
+        config_weights=OmegaConf.to_container(cfg.config_weights)
+        if getattr(cfg, "config_weights", None) else None,
+        config_clip=getattr(cfg, "config_clip", None),
+        select=getattr(cfg, "pinc_select", "phi"),
+    )
+
+
+CKPT_PREFIXES = ("", "best_", "int_", "best_int_")  # density {final,best}, pinc {final,best}
+
+
+def _ckpt_fname(cfg, trajectory, timestep):
+    fname = trajectory.replace("_ifft", "").replace("_realpotens", "").split(".")[0]
+    return f"{cfg.name.lower()}_{fname}_t{timestep}"
+
+
+def is_complete(cfg, trajectory, timestep):
+    """True if all 4 checkpoints already exist for this (trajectory, timestep).
+
+    The CR suffix (x<ratio>) is wildcarded so the check is config-agnostic. Used
+    to make the sweep resumable: existing complete dumps are skipped.
+    """
+    base = _ckpt_fname(cfg, trajectory, timestep)
+    return all(
+        glob.glob(os.path.join(cfg.ckp_path, f"{p}{base}_x*.pt")) for p in CKPT_PREFIXES
     )
 
 
 def save_checkpoints(cfg, trajectory, timestep, compression, state_dicts: Dict[str, dict]):
     os.makedirs(cfg.ckp_path, exist_ok=True)
-    fname = trajectory.replace("_ifft", "").replace("_realpotens", "").split(".")[0]
-    base = f"{cfg.name.lower()}_{fname}_t{timestep}_x{int(compression)}"
+    base = f"{_ckpt_fname(cfg, trajectory, timestep)}_x{int(compression)}"
     for prefix, sd in state_dicts.items():
         torch.save({"state_dict": sd, "cfg": cfg}, f"{cfg.ckp_path}/{prefix}{base}.pt")
 
@@ -205,33 +244,42 @@ def worker(cfg: DictConfig, traj: str, timesteps: Sequence, gpu: int):
         else None
     )
     for t in timesteps:
-        train_run(cfg, traj, [int(t)], torch.device(f"cuda:{gpu}"),
-                  save=True, verbose=False, shared_init=shared_init)
+        if is_complete(cfg, traj, int(t)):  # resumable: skip already-finished dumps
+            continue
+        try:
+            train_run(cfg, traj, [int(t)], torch.device(f"cuda:{gpu}"),
+                      save=True, verbose=False, shared_init=shared_init)
+        except Exception as e:  # a missing snapshot must not kill the whole chunk
+            print(f"[skip] {traj} t={t}: {type(e).__name__}: {e}")
 
 
 def main(cfg: DictConfig):
     timesteps = _timesteps(cfg)
     ctx = mp.get_context("spawn")
+    # one worker per trajectory (compile warms up once per worker, not per
+    # timestep). `throttling` workers share each GPU -> gpus * throttling slots,
+    # so the queue must hold that many tokens (each GPU repeated `throttling`).
     gpu_queue: Queue = Queue()
     for gpu in cfg.gpus:
-        gpu_queue.put(gpu)
+        for _ in range(cfg.throttling):
+            gpu_queue.put(gpu)
+    slots = len(cfg.gpus) * cfg.throttling
 
     active = []
-    pbar = tqdm(total=len(cfg.trajectory) * len(timesteps), desc="training")
+    pbar = tqdm(total=len(cfg.trajectory), desc="training (trajectories)")
     for traj in cfg.trajectory:
-        for t_chunk in np.array_split(timesteps, cfg.throttling):
-            while len(active) >= len(cfg.gpus) * cfg.throttling:
-                for p, gpu in active:
-                    if not p.is_alive():
-                        p.join()
-                        pbar.update()
-                        gpu_queue.put(gpu)
-                active = [(p, gpu) for p, gpu in active if p.is_alive()]
-                time.sleep(1.0)
-            gpu = gpu_queue.get()
-            p = ctx.Process(target=worker, args=(cfg, traj, t_chunk, gpu))
-            p.start()
-            active.append((p, gpu))
+        while len(active) >= slots:
+            for p, gpu in active:
+                if not p.is_alive():
+                    p.join()
+                    pbar.update()
+                    gpu_queue.put(gpu)
+            active = [(p, gpu) for p, gpu in active if p.is_alive()]
+            time.sleep(1.0)
+        gpu = gpu_queue.get()
+        p = ctx.Process(target=worker, args=(cfg, traj, timesteps, gpu))
+        p.start()
+        active.append((p, gpu))
 
     for p, _ in active:
         p.join()
@@ -272,8 +320,9 @@ def grid(cfg: DictConfig):
 
     return_dict = mp.get_context("spawn").Manager().dict()
     gpu_queue: Queue = Queue()
-    for gpu in cfg.gpus:
-        gpu_queue.put(gpu)
+    for gpu in cfg.gpus:  # `throttling` concurrent combos per GPU
+        for _ in range(cfg.throttling):
+            gpu_queue.put(gpu)
 
     active = []
     pbar = tqdm(total=len(combinations), desc="grid search")
