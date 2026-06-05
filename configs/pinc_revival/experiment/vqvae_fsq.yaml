@@ -4,11 +4,9 @@
 # has no codebook collapse and no commitment/EMA. IN-TRAINING quantizer (the
 # rounding-with-STE is part of the forward pass), not a post-hoc step.
 #
-# REQUIRES CODE: neugk/pinc/autoencoders/vector_quantize.py only implements the
-# euclidean/cosine codebooks. Add an FSQ branch (lucidrains `FSQ`) selected by
-# vq.quantizer, projecting the bottleneck to len(levels) dims. Until then this
-# config will fall back to the euclidean codebook.
-# Run:  python main.py experiment=pinc_revival/vqvae_fsq
+# Implemented as FSQ in neugk/pinc/autoencoders/vector_quantize.py, selected by
+# vq.quantizer=fsq; the bottleneck is projected to len(levels) scalar dims.
+# Run:  python main.py --config-dir configs/pinc_revival experiment=vqvae_fsq
 defaults:
   - override /dataset: pinc
   - override /model: pinc/vqvae
@@ -24,8 +22,8 @@ device: cuda
 
 model:
   vq:
-    quantizer: fsq               # NEW interface knob (see note above)
-    levels: [8, 8, 8, 5, 5, 5]   # ~8000 implied codes, matches codebook_size 8192
+    quantizer: fsq               # vq.quantizer selector
+    levels: [8, 8, 8, 5, 5, 5]   # implicit codebook = prod(levels) = 64000
 
 training:
   n_epochs: 400

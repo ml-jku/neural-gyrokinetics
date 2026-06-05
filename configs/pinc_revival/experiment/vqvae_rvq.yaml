@@ -3,9 +3,9 @@
 # residual of the previous, giving finer reconstruction at fixed codebook size
 # (bits = num_quantizers * log2(codebook_size)). IN-TRAINING, not post-hoc.
 #
-# REQUIRES CODE: add a ResidualVQ branch (lucidrains `ResidualVQ`) selected by
-# vq.quantizer. Until then this config falls back to the euclidean codebook.
-# Run:  python main.py experiment=pinc_revival/vqvae_rvq
+# Implemented as ResidualVQ in neugk/pinc/autoencoders/vector_quantize.py, selected
+# by vq.quantizer=rvq; stores num_quantizers codes per token (CR scales by 1/N).
+# Run:  python main.py --config-dir configs/pinc_revival experiment=vqvae_rvq
 defaults:
   - override /dataset: pinc
   - override /model: pinc/vqvae

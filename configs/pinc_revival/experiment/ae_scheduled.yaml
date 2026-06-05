@@ -9,10 +9,10 @@
 #
 # Run:  python main.py experiment=pinc_revival/ae_scheduled
 defaults:
-  - override /dataset: pinc
-  - override /model: pinc/ae
-  - override /logging: no_logging
-  - override /validation: default
+    - override /dataset: pinc
+    - override /model: pinc/ae
+    - override /logging: no_logging
+    - override /validation: default
 
 experiment_id: pinc_revival_ae_scheduled
 workflow: pinc_autoencoder
@@ -24,52 +24,52 @@ device: cuda
 load_ckpt: false
 
 model:
-  # physics terms must be present in the weight dict for the scheduler to drive them
-  loss_weights:
-    df: 1.0
-  extra_loss_weights:
-    phi_int: 1.0e-4
-    flux_int: 1.0e-4
-    qspec: 1.0e-3
-    kyspec: 1.0e-3
-  # keep physics at 0 for the first 50% of training, ramp to full by 70%
-  loss_scheduler:
-    phi_int:
-      type: linear
-      start: 0.0
-      end: 1.0e-4
-      start_fraction: 0.5
-      end_fraction: 0.7
-    flux_int:
-      type: linear
-      start: 0.0
-      end: 1.0e-4
-      start_fraction: 0.5
-      end_fraction: 0.7
-    qspec:
-      type: linear
-      start: 0.0
-      end: 1.0e-3
-      start_fraction: 0.5
-      end_fraction: 0.7
-    kyspec:
-      type: linear
-      start: 0.0
-      end: 1.0e-3
-      start_fraction: 0.5
-      end_fraction: 0.7
+    # physics terms must be present in the weight dict for the scheduler to drive them
+    loss_weights:
+        df: 1.0
+    extra_loss_weights:
+        phi_int: 1.0e-4
+        flux_int: 1.0e-4
+        qspec: 1.0e-3
+        kyspec: 1.0e-3
+    # keep physics at 0 for the first 50% of training, ramp to full by 70%
+    loss_scheduler:
+        phi_int:
+            type: linear
+            start: 0.0
+            end: 1.0e-4
+            start_fraction: 0.5
+            end_fraction: 0.7
+        flux_int:
+            type: linear
+            start: 0.0
+            end: 1.0e-4
+            start_fraction: 0.5
+            end_fraction: 0.7
+        qspec:
+            type: linear
+            start: 0.0
+            end: 1.0e-3
+            start_fraction: 0.7
+            end_fraction: 0.9
+        kyspec:
+            type: linear
+            start: 0.0
+            end: 1.0e-3
+            start_fraction: 0.7
+            end_fraction: 0.9
 
 training:
-  physics_mode: scheduled
-  n_epochs: 400
-  batch_size: 16
-  learning_rate: 3e-4
-  integral_loss_type: complex_mse
-  eval_loss_type: mse
+    physics_mode: scheduled
+    n_epochs: 400
+    batch_size: 16
+    learning_rate: 3e-4
+    integral_loss_type: complex_mse
+    eval_loss_type: mse
 
 amp:
-  enable: false   # integrals/FFT in the physics losses need full precision
+    enable: false # integrals/FFT in the physics losses need full precision
 
 # physics integrals require phi + flux targets from the dataset
 dataset:
-  input_fields: ["df", "phi", "flux"]
+    input_fields: ["df", "phi", "flux"]

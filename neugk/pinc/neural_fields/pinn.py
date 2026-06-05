@@ -11,7 +11,9 @@ exposed to torch as a REAL-valued autograd.Function via dlpack (zero-copy) +
 jax.vjp. Keeping the complex math in JAX also sidesteps the Blackwell (sm_100)
 nvrtc failure on torch complex autograd.
 """
+
 import os
+from functools import lru_cache
 
 os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", ".2")
@@ -30,9 +32,18 @@ try:
     import jax
     import jax.numpy as jnp
     from gyaradax import gk_from_gkw_dir
-    from gyaradax.solver import g_to_f, _compute_fields
     from gyaradax.backends import create_ops
+    from gyaradax.solver import _compute_fields, g_to_f
 
+    # persistent on-disk XLA cache: the ~30s RHS compile is reused across worker
+    # processes (and runs). Requires the jit to be shape-keyed (geometry/params
+    # are passed as args below, so the HLO is identical across same-shape trajs).
+    jax.config.update(
+        "jax_compilation_cache_dir",
+        os.environ.get("PINN_JAX_CACHE", os.path.expanduser("~/.cache/pinn_jax")),
+    )
+    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
     _GYARADAX_ERR = None
 except Exception as _e:  # ImportError, or a JAX/CUDA init failure
     jax = jnp = None
@@ -49,6 +60,7 @@ def _require_gyaradax():
             f"{_GYARADAX_ERR!r}"
         )
 
+
 RAW_ROOT = "/restricteddata/ukaea/gyrokinetics/raw"
 
 
@@ -60,8 +72,16 @@ def _resolve_raw_dir(trajectory: str) -> str:
     raise FileNotFoundError(f"no GKW run dir for {trajectory} under {RAW_ROOT}")
 
 
+@lru_cache(maxsize=8)
 def load_gk_rhs(trajectory: str):
-    """Gyrokinetic RHS operator for a trajectory: rhs(f_spectral_jax) -> jax array."""
+    """Gyrokinetic RHS operator for a trajectory: rhs(f_spectral_jax) -> jax array.
+
+    Cached per trajectory (operator is timestep-independent), so the compile is
+    amortized over all of a trajectory's snapshots in a worker. `create_ops` bakes
+    trajectory-specific constants into the operator, so the jit cannot be shared
+    across trajectories; the persistent on-disk cache still makes re-runs of the
+    SAME trajectory fast (~30s -> ~3s).
+    """
     _require_gyaradax()
     d = _resolve_raw_dir(trajectory)
     _, geometry, params, _, pre = gk_from_gkw_dir(d)
@@ -106,6 +126,7 @@ def make_residual_loss(rhs, gt_df):
 
 class _ResidualLoss(torch.autograd.Function):
     """Wrap the JAX real-scalar residual loss as a torch op (jax.vjp backward)."""
+
     @staticmethod
     def forward(ctx, df, loss_jax):
         v, ctx.vjp = jax.vjp(loss_jax, jax.dlpack.from_dlpack(df.detach().contiguous()))
@@ -126,17 +147,28 @@ def sobolev_loss(pred, gt):
 
 
 def train_pinn(
-    model, n_epochs, data, optim, sched, device, trajectory,
-    w_sobolev=1.0, w_residual=1.0, eval_every=2, use_print=True,
+    model,
+    n_epochs,
+    data,
+    optim,
+    sched,
+    device,
+    trajectory,
+    w_sobolev=1.0,
+    w_residual=1.0,
+    eval_every=2,
+    use_print=True,
 ):
     """PINN baseline: train the NF on the gyrokinetic RHS residual + Sobolev loss
     (no PINC integral/spectral losses). One snapshot (per-trajectory operator)."""
+    from neugk.pinc.neural_fields.nf_train import nf_eval  # same val metrics as PINC/density
+
     rhs, meta = load_gk_rhs(trajectory)
     data.to(device)
     model.to(device)
     gt_df = data.full_df.to(device).double()
     loss_jax = make_residual_loss(rhs, gt_df)
-    best_loss, best_model, best_e, losses = torch.inf, None, 0, []
+    best_psnr, best_model, best_e, losses = -torch.inf, None, 0, []
     for e in range(n_epochs):
         model.train()
         pred = sample_field(model, data, device).double()
@@ -150,11 +182,15 @@ def train_pinn(
             sched.step()
         rec = {"train/loss": float(loss), "train/sobolev": float(sob), "train/residual": float(res)}
         if eval_every > 0 and (e % eval_every == 0 or e == n_epochs - 1):
-            with torch.no_grad():
-                df_l1 = float((sample_field(model, data, device).double() - gt_df).abs().mean())
-            rec["val/df_l1"] = df_l1
-            if df_l1 < best_loss:
-                best_loss, best_e, best_model = df_l1, e, deepcopy(model)
+            # full physics eval (df/phi psnr, flux, spectra) — matches train_pinc/density
+            rec.update(
+                {
+                    f"val/{k}": v
+                    for k, v in nf_eval(model, data, device=device, use_flux_fields=False).items()
+                }
+            )
+            if rec["val/df psnr"] > best_psnr:
+                best_psnr, best_e, best_model = rec["val/df psnr"], e, deepcopy(model)
         losses.append(rec)
         if use_print:
             print(f"[{e}] " + ", ".join(f"{k}: {v:.5f}" for k, v in rec.items()))
