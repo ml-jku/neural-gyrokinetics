@@ -78,15 +78,8 @@ class NeuralField(Reconstructor):
         traj_key = traj.replace(".h5", "")
         for i, t in enumerate(timesteps):
             ckpt = self.weights[traj_key][t]
-            nf = load_nf(ckpt, device).to(device)
-            if self.hybrid == "zfp":
-                nf, _, nbytes = compress_weights(nf, method="zfp", tolerance=1e-3)
-                size += nbytes
-            elif self.hybrid == "zipnn":
-                nf, _, nbytes = compress_weights(nf, method="zipnn")
-                size += nbytes
-            else:
-                size += sum(p.nbytes for p in nf.parameters())
+            # build the dataset first so the field grid_size is known: discrete
+            # embeddings size their tables from it and load_nf needs it to rebuild.
             nf_data = CycloneNFDataset(
                 traj_key,
                 timesteps=t,
@@ -96,6 +89,15 @@ class NeuralField(Reconstructor):
                 normalize="zscore",
                 normalize_coords=False,
             )
+            nf = load_nf(ckpt, device, grid_size=nf_data.grid_size).to(device)
+            if self.hybrid == "zfp":
+                nf, _, nbytes = compress_weights(nf, method="zfp", tolerance=1e-3)
+                size += nbytes
+            elif self.hybrid == "zipnn":
+                nf, _, nbytes = compress_weights(nf, method="zipnn")
+                size += nbytes
+            else:
+                size += sum(p.nbytes for p in nf.parameters())
             dfs.append(sample_field(nf, nf_data, device).cpu())
             torch.cuda.empty_cache()
         return dfs, size

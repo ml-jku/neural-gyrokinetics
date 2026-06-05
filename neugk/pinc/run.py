@@ -27,6 +27,95 @@ from neugk.pinc.peft_utils import setup_peft_stage, PEFT_PARAM_KEYS
 class PINCRunner(BaseRunner):
     """PINCRunner class."""
 
+    # physics-loss term keys an AE may bring in (integral + spectral). Used to
+    # validate/route the training.physics_mode knob.
+    PHYSICS_LOSS_KEYS = (
+        "phi",
+        "flux",
+        "phi_int",
+        "flux_int",
+        "kxspec",
+        "kyspec",
+        "qspec",
+        "phi_zf",
+        "kxspec_monotonicity",
+        "kyspec_monotonicity",
+        "qspec_monotonicity",
+        "mass",
+    )
+
+    def _resolve_physics_mode(self, model_cfg):
+        """Validate the training.physics_mode knob and route accordingly.
+
+        Two ways to bring the PINC physics losses into the *generalizing* AE:
+
+        - ``two_stage``: stage 1 trains the AE on the df reconstruction loss only
+          (no physics weights active); stage 2 is the PEFT (LoRA/EVA) fine-tune
+          run with ``stage=peft`` + ``ae_checkpoint=...`` that adapts the frozen
+          AE to the physics losses. This method only sanity-checks the current
+          stage; the two stages are launched as two separate runs.
+
+        - ``scheduled``: a single ``stage=autoencoder`` run with NO fine-tuning.
+          The physics-loss weights are driven by the ``loss_scheduler`` block,
+          which keeps them at ``start`` (typically 0) until ``start_fraction`` of
+          training and then ramps them to ``end``. The scheduler machinery already
+          lives in ``setup_common_losses`` -> ``loss_scheduler_dict`` ->
+          ``PINCLossWrapper.schedulers``; this only asserts it is wired so the
+          mode actually drives the physics terms.
+
+        Default is ``scheduled`` (single-stage), which subsumes the legacy behavior
+        of "df-only unless a loss_scheduler is configured".
+        """
+        mode = getattr(self.cfg.training, "physics_mode", "scheduled")
+        if mode not in ("two_stage", "scheduled"):
+            raise ValueError(
+                f"training.physics_mode must be 'two_stage' or 'scheduled', got {mode!r}"
+            )
+
+        all_weights = {
+            **dict(model_cfg.loss_weights),
+            **dict(model_cfg.extra_loss_weights),
+        }
+        physics_in_weights = [
+            k for k in self.PHYSICS_LOSS_KEYS if all_weights.get(k, 0.0)
+        ]
+        physics_scheduled = [
+            k for k in self.PHYSICS_LOSS_KEYS if k in self.loss_scheduler_dict
+        ]
+
+        if mode == "two_stage":
+            if self.cfg.stage == "autoencoder" and physics_in_weights:
+                raise ValueError(
+                    "physics_mode=two_stage stage 1 (autoencoder) must train on the "
+                    "df reconstruction loss only; remove physics terms "
+                    f"{physics_in_weights} from loss_weights/extra_loss_weights "
+                    "(they are introduced in the stage-2 peft run)."
+                )
+            if self.cfg.stage == "peft" and self.rank in (0, None):
+                print(
+                    "[physics_mode=two_stage] stage 2: PEFT fine-tune of the frozen AE "
+                    f"against physics losses {physics_in_weights or '(none configured)'}"
+                )
+        else:  # scheduled
+            if self.cfg.stage != "autoencoder":
+                raise ValueError(
+                    f"physics_mode=scheduled is single-stage; expected stage="
+                    f"'autoencoder', got {self.cfg.stage!r}."
+                )
+            unscheduled = [k for k in physics_in_weights if k not in physics_scheduled]
+            if unscheduled and self.rank in (0, None):
+                print(
+                    f"[physics_mode=scheduled] WARNING: physics losses {unscheduled} "
+                    "have a nonzero weight but no loss_scheduler entry, so they are "
+                    "active from step 0 (not ramped in)."
+                )
+            if self.rank in (0, None):
+                print(
+                    f"[physics_mode=scheduled] ramping physics losses {physics_scheduled} "
+                    "via loss_scheduler over training."
+                )
+        return mode
+
     def setup_components(self):
         assert self.cfg.stage is not None, "stage is not set"
 
@@ -34,6 +123,7 @@ class PINCRunner(BaseRunner):
         model_cfg = getattr(self.cfg, model_key)
 
         weights = self.setup_common_losses(model_cfg)
+        self.physics_mode = self._resolve_physics_mode(model_cfg)
         dataset_stats = {}
         augmentations = [
             k
