@@ -1,0 +1,39 @@
+# @package _global_
+# Ablation: VQ-VAE with Finite Scalar Quantization (FSQ, Mentzer et al. 2023).
+# FSQ replaces the learned codebook with fixed per-dimension scalar levels, so it
+# has no codebook collapse and no commitment/EMA. IN-TRAINING quantizer (the
+# rounding-with-STE is part of the forward pass), not a post-hoc step.
+#
+# REQUIRES CODE: neugk/pinc/autoencoders/vector_quantize.py only implements the
+# euclidean/cosine codebooks. Add an FSQ branch (lucidrains `FSQ`) selected by
+# vq.quantizer, projecting the bottleneck to len(levels) dims. Until then this
+# config will fall back to the euclidean codebook.
+# Run:  python main.py experiment=pinc_revival/vqvae_fsq
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: no_logging
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_fsq
+workflow: pinc_autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+
+model:
+  vq:
+    quantizer: fsq               # NEW interface knob (see note above)
+    levels: [8, 8, 8, 5, 5, 5]   # ~8000 implied codes, matches codebook_size 8192
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true

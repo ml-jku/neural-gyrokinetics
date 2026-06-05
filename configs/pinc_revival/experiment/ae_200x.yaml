@@ -1,0 +1,40 @@
+# @package _global_
+# PINC revival: continuous AE at ~200x compression.
+# CR = prod(base_resolution_4d) * in_channels / (prod(bottleneck_grid) * bottleneck.dim).
+# in_channels = 4 (re/im + 2 zonal) folded with mu(8) -> 32 effective channels (decouple_mu).
+# Knobs: patch.patch_size + #vit layers set the bottleneck grid; bottleneck.dim sets latent width.
+# Here: grid [4,2,9,4]=288 tokens, bottleneck.dim 768. MEASURED CR = 201x (empirical, one forward).
+# Run:  python main.py experiment=pinc_revival/ae_200x
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/ae
+  - override /logging: no_logging
+  - override /validation: default
+
+experiment_id: pinc_revival_ae_200x
+workflow: pinc_autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+model:
+  patch:
+    patch_size: [4, 0, 4, 5, 4]
+  vit:
+    num_heads: [16]
+    depth: [8]
+  bottleneck:
+    dim: 768
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true

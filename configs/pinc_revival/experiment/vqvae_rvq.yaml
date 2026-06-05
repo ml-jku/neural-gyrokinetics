@@ -1,0 +1,38 @@
+# @package _global_
+# Ablation: Residual VQ-VAE (RVQ). A stack of codebooks each quantizing the
+# residual of the previous, giving finer reconstruction at fixed codebook size
+# (bits = num_quantizers * log2(codebook_size)). IN-TRAINING, not post-hoc.
+#
+# REQUIRES CODE: add a ResidualVQ branch (lucidrains `ResidualVQ`) selected by
+# vq.quantizer. Until then this config falls back to the euclidean codebook.
+# Run:  python main.py experiment=pinc_revival/vqvae_rvq
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: no_logging
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_rvq
+workflow: pinc_autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+
+model:
+  vq:
+    quantizer: rvq               # NEW interface knob (see note above)
+    num_quantizers: 4
+    codebook_size: 1024
+    codebook_type: euclidean
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
