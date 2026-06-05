@@ -154,6 +154,28 @@ def pinc_phase(cfg, model, data, device, weights, verbose):
     )
 
 
+def pinn_phase(cfg, model, data, device, trajectory, verbose):
+    """PINN baseline: gyrokinetic-RHS residual (gyaradax) + Sobolev, no PINC losses."""
+    from neugk.pinc.neural_fields.pinn import train_pinn  # pre-imported in train_run
+    opt = optim.AdamW(model.parameters(), cfg.pinc_lr, weight_decay=1e-12)
+    sched = (
+        get_scheduler(
+            "cosine_with_min_lr", optimizer=opt,
+            num_warmup_steps=cfg.pinc_epochs // 5, num_training_steps=cfg.pinc_epochs,
+            scheduler_specific_kwargs={"min_lr": getattr(cfg, "min_lr", 1e-8)},
+        )
+        if cfg.pinc_lr_sched
+        else None
+    )
+    return train_pinn(
+        model, n_epochs=cfg.pinc_epochs, data=data, optim=opt, sched=sched,
+        device=device, trajectory=trajectory,
+        w_sobolev=getattr(cfg, "w_sobolev", 1.0),
+        w_residual=getattr(cfg, "w_residual", 1.0),
+        eval_every=getattr(cfg, "pinc_eval_every", 2), use_print=verbose,
+    )
+
+
 CKPT_PREFIXES = ("", "best_", "int_", "best_int_")  # density {final,best}, pinc {final,best}
 
 
