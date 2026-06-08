@@ -561,8 +561,16 @@ class FlowMatchingRunner(DDPMRunner):
                 x0_flat = x0.view(bs, -1)
                 x1_flat = x1.view(bs, -1)
                 cost_matrix = torch.cdist(x0_flat, x1_flat).cpu().numpy()
-                row_ind, _ = scipy.optimize.linear_sum_assignment(cost_matrix)
-                x0 = x0[torch.tensor(row_ind, device=self.device)]
+                # scipy.optimize.linear_sum_assignment returns (row_ind, col_ind)
+                # where ``row_ind`` is always identity for a square cost
+                # matrix — ``x0[row_ind]`` was therefore a no-op, silently
+                # disabling minibatch OT for the whole training run. The
+                # optimal pairing is (i, col_ind[i]); reorder x0 so the new
+                # ``x0[i]`` is the OT-match for the original ``x1[i]``,
+                # which is ``x0[argsort(col_ind)]``.
+                _row_ind, col_ind = scipy.optimize.linear_sum_assignment(cost_matrix)
+                perm = np.argsort(col_ind)
+                x0 = x0[torch.tensor(perm, device=self.device)]
 
         # sample time
         if getattr(self.cfg.model.diffusion, "continuous_time", True):
