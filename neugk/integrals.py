@@ -121,7 +121,23 @@ class FluxIntegral(nn.Module):
         geom_["efun"] = rearrange(geometry["efun"], "s -> 1 1 s 1 1")
         geom_["rfun"] = rearrange(geometry["rfun"], "s -> 1 1 s 1 1")
         geom_["bt_frac"] = rearrange(geometry["bt_frac"], "s -> 1 1 s 1 1")
-        geom_["parseval"] = rearrange(geometry["parseval"], "y -> 1 1 1 1 y")
+        # parseval (Hermitian-symmetry factor for real spatial fields).
+        # The dataset metadata.pkl shipped ``parseval = [1, ny, ny, ...]``,
+        # which is ny/2 = 16× too large per non-DC mode; ``pev_fluxes``
+        # historically double-counted ``ints`` to cancel the overcount.
+        # Both bugs are now fixed: parseval is rebuilt here from krho with
+        # the standard ``[1, 2, 2, ...]`` Hermitian factor, and the extra
+        # ``ints`` factor in ``pev_fluxes:d3v`` is removed. Cross-checked
+        # against gyaradax (``gyaradax/geometry/geom.py:675``).
+        krho_flat = geometry["krho"]
+        if krho_flat.ndim > 1:
+            krho_flat = krho_flat.reshape(-1)
+        parseval_fixed = torch.where(
+            krho_flat.abs() < 1e-12,
+            torch.ones_like(krho_flat),
+            torch.full_like(krho_flat, 2.0),
+        )
+        geom_["parseval"] = rearrange(parseval_fixed, "y -> 1 1 1 1 y")
 
         def expand_scalar(t):
             # first dim for species
@@ -270,7 +286,12 @@ class FluxIntegral(nn.Module):
         dum = parseval * ints * (efun * krho) * df
         dum1 = dum * chi_gyro_conj
         dum2 = dum1 * bn
-        d3v = ints * d2X * intmu * bn * intvp
+        # ``d3v`` is the velocity-space + parallel volume element; ``ints``
+        # already lives in ``dum`` (the s-integration weight). The previous
+        # ``ints * d2X * intmu * bn * intvp`` was double-counting ``ints``
+        # and was being cancelled by the ny-scaled parseval; both bugs are
+        # fixed simultaneously — see ``_geom_tensors`` for the parseval side.
+        d3v = d2X * intmu * bn * intvp
         dum1 = torch.imag(dum1)
         dum2 = torch.imag(dum2)
 
