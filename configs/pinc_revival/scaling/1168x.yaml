@@ -1,6 +1,3 @@
-# PINC NF compression-ratio scan @ ~1168x (OG main operating point). dim/n_layers calibrated;
-# 5 layers preferred, dim floored at 8 (50000x keeps 4 layers). 60 trajs x 5 t.
-# Run: python -m neugk.pinc.nf_main config=configs/pinc_revival/scaling/1168x.yaml
 mode: default
 ckp_path: nf_ckps_scale/1168x/
 path: /local00/bioinf/galletti/preprocessed_kvikio
@@ -38,10 +35,9 @@ gpus:
 - 7
 throttling: 2
 timesteps:
-- 100
-- 140
-- 180
-- 220
+- 110
+- 160
+- 210
 - 260
 trajectory:
 - iteration_0.h5

@@ -1,17 +1,10 @@
-# PINC dataset config: three-way split (train / val / test).
-# - train:  235 trajectories (all 300 minus the 5 val and 60 test below).
-# - val:      5 trajectories for model selection / hyperparameter tuning during training.
-# - test:    60 held-out turbulent trajectories for final eval (~1080 snapshots, 10x downsample).
-#
-# The 5 val trajs (3, 50, 150, 225, 290) are removed from the training brace-expansion
-# below.  The 60 test trajs were never in training — they are the disjoint turbulent-only
-# evaluation split used by the pinc.eval scripts.
-#
-# Pretrained reference AEs/NFs (old h5 layout): https://huggingface.co/datasets/gerkone/pinc_gkw
+# PINC dataset config: three-way split (train/val/test); train: 235 trajs (300 - 5 val - 60 test); val: 5 trajs for model selection; test: 60 held-out turbulent trajs for final eval (~1080 snapshots, 10x downsample); val trajs (3, 50, 150, 225, 290) removed from training brace-expansion; test trajs disjoint, used by pinc.eval scripts; reference AEs/NFs: https://huggingface.co/datasets/gerkone/pinc_gkw
 name: cyclone
 path: /local00/bioinf/galletti/preprocessed_kvikio
 backend: gds
 gds_override: false
+# training serves uniform bf16 (fast bf16 shards if converted, f32 downcast otherwise); validation always f32; null -> f32 everywhere
+prefer_dtype: bf16
 normalization: 
   df: 
     type: zscore
@@ -58,11 +51,11 @@ test_trajectories: [  # turbulent-only test set, ~1080 snapshots, held out
 ]
 partial_holdouts:
 training_cond_filters:
-  last_fluxes: [1., .inf]
-  first_fluxes: [1., .inf]
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]
 eval_cond_filters:
-  last_fluxes: [1., .inf]
-  first_fluxes: [1., .inf]
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]
 
 augment:
   noise: 
@@ -76,6 +69,12 @@ augment:
     rescale: false
     mask_zero_mode: true
     df_delta_weight: 1.0
+  vicreg_variance:
+    active: false
+    weight: 1.0
+  logdet:
+    active: false
+    weight: 1.0
 
 offset: 80
 timestep_std_filter: null  # std-based timestep filtering threshold (null to disable)

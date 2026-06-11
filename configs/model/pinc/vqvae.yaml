@@ -16,10 +16,10 @@ vq:
   codebook_size: 8192
   embedding_dim: 256
   commitment_weight: 0.25
-  codebook_type: "euclidean" # "euclidean" or "cosine" 
+  codebook_type: "euclidean" # "euclidean" or "cosine"
   ema_decay: 0.99
-  entropy_loss_weight: 0.01
   threshold_ema_dead_code: 2
+  # entropy_loss_weight is lfq-only (ignored by vq/cosine/fsq/rvq); set it in the lfq experiment config
   
 loss_scheduler:
   df: null
@@ -42,6 +42,8 @@ extra_loss_weights:
 patch:
   patch_size: [ 4, 0, 2, 5, 4 ]
   window_size: [ 4, 0, 4, 9, 4 ]
+  merging_depth: 2
+  unmerging_depth: 2
   merging_hidden_ratio: 1.0
   unmerging_hidden_ratio: 1.0
   c_multiplier: 1.0
