@@ -27,6 +27,9 @@ class CycloneAESample:
     timestep_index: torch.Tensor
     timestep: torch.Tensor
     conditioning: torch.Tensor
+    # optional served GT turbulence spectra (per-timestep, per-mode)
+    kyspec: Optional[torch.Tensor] = None
+    fluxspec: Optional[torch.Tensor] = None
 
     def pin_memory(self):
         if self.df is not None:
@@ -347,6 +350,16 @@ class CycloneAEDataset(CycloneDataset):
             timestep_index=torch.tensor(t_index, dtype=torch.long),
             timestep=torch.as_tensor(timestep, dtype=self.dtype),
             conditioning=conditioning,
+            kyspec=(
+                torch.as_tensor(sample["kyspec"], dtype=self.dtype)
+                if "kyspec" in sample
+                else None
+            ),
+            fluxspec=(
+                torch.as_tensor(sample["fluxspec"], dtype=self.dtype)
+                if "fluxspec" in sample
+                else None
+            ),
         )
 
     def _load_data(self, f: Any, file_index: int, t_index: int) -> Dict:
@@ -407,6 +420,11 @@ class CycloneAEDataset(CycloneDataset):
         sample["dg"] = meta["density_grad"].squeeze()
         sample["s_hat"] = meta["s_hat"].squeeze()
         sample["q"] = meta["q"].squeeze()
+        # served GT spectra at the (input == reconstructed) timestep, gated by
+        # fields_to_load so default behaviour (df/phi/flux only) is unchanged.
+        for skey in self.SPECTRAL_KEYS:
+            if skey in self.fields_to_load and skey in meta:
+                sample[skey] = self.get_spectrum(file_index, original_t_index, skey)
         return sample
 
     def denormalize(
@@ -457,6 +475,8 @@ class CycloneAEDataset(CycloneDataset):
             file_index=stack_batch(batch, "file_index"),
             timestep_index=stack_batch(batch, "timestep_index"),
             conditioning=stack_batch(batch, "conditioning"),
+            kyspec=stack_batch(batch, "kyspec"),
+            fluxspec=stack_batch(batch, "fluxspec"),
         )
 
     @torch.no_grad()

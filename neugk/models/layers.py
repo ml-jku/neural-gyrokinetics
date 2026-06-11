@@ -312,7 +312,9 @@ class ContinuousConditionEmbed(nn.Module):
         if cond.ndim == 1:
             cond = cond.unsqueeze(-1)
         assert self.n_cond == cond.shape[-1], f"{self.n_cond} != {cond.shape[-1]}"
-        out = cond.unsqueeze(-1) @ self.omega.unsqueeze(0)
+        # cond may arrive bf16 (autocast train) while omega stays f32; match dtype so the
+        # matmul works in both autocast training and f32 eval (no autocast)
+        out = cond.unsqueeze(-1).to(self.omega.dtype) @ self.omega.unsqueeze(0)
         emb = torch.concat([torch.sin(out), torch.cos(out)], dim=-1)
         emb = rearrange(emb, "... ncond cdim -> ... (ncond cdim)")
         if self.padding > 0:

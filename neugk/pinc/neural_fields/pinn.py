@@ -23,41 +23,66 @@ from copy import deepcopy
 import torch
 import torch.nn.functional as F
 
-# gyaradax (JAX) is an OPTIONAL dependency, only needed for the PINN baseline.
-# Import it at module load (not lazily) because torch.compile, run during the
-# density warmup, hooks the import machinery and shadows a later import. If it
-# is absent, this module still imports; the PINN entry points raise on use.
-try:
-    import gyaradax  # noqa: F401  (configures jax x64 on import)
-    import jax
-    import jax.numpy as jnp
-    from gyaradax import gk_from_gkw_dir
-    from gyaradax.backends import create_ops
-    from gyaradax.solver import _compute_fields, g_to_f
-
-    # persistent on-disk XLA cache: the ~30s RHS compile is reused across worker
-    # processes (and runs). Requires the jit to be shape-keyed (geometry/params
-    # are passed as args below, so the HLO is identical across same-shape trajs).
-    jax.config.update(
-        "jax_compilation_cache_dir",
-        os.environ.get("PINN_JAX_CACHE", os.path.expanduser("~/.cache/pinn_jax")),
-    )
-    jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
-    jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
-    _GYARADAX_ERR = None
-except Exception as _e:  # ImportError, or a JAX/CUDA init failure
-    jax = jnp = None
-    _GYARADAX_ERR = _e
-
 from neugk.pinc.neural_fields.nf_utils import sample_field
+
+# gyaradax (JAX) optional; imported lazily to avoid half-init after torch.compile
+jax = jnp = None
+gk_from_gkw_dir = create_ops = _compute_fields = g_to_f = None
+_GYARADAX_ERR = None
+_GYARADAX_LOADED = False
+
+
+def _load_gyaradax():
+    global jax, jnp, gk_from_gkw_dir, create_ops, _compute_fields, g_to_f
+    global _GYARADAX_ERR, _GYARADAX_LOADED
+    if _GYARADAX_LOADED:
+        return
+    _GYARADAX_LOADED = True
+    import sys
+
+    # strip CWD/..-relative sys.path entries shadowing gyaradax editable install
+    sys.modules.pop("gyaradax", None)
+    bad = {os.path.abspath(p) for p in (".", "..", os.getcwd(),
+                                        os.path.dirname(os.getcwd()))}
+    saved_path = sys.path[:]
+    sys.path[:] = [p for p in sys.path
+                   if p not in ("", ".", "..") and os.path.abspath(p) not in bad]
+    try:
+        import jax as _jax
+        import jax.numpy as _jnp
+        from gyaradax import gk_from_gkw_dir as _gk
+        from gyaradax.backends import create_ops as _ops
+        from gyaradax.solver import _compute_fields as _cf, g_to_f as _g2f
+
+        # persistent XLA cache on /tmp (not home, which filled 50GB); gyaradax bakes per-trajectory constants (~1GB each); 1s compile floor keeps only RHS kernel
+        _jax.config.update(
+            "jax_compilation_cache_dir",
+            os.environ.get("PINN_JAX_CACHE", "/tmp/pinn_jax"),
+        )
+        _jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
+        _jax.config.update("jax_persistent_cache_min_compile_time_secs", 1.0)
+        jax, jnp = _jax, _jnp
+        gk_from_gkw_dir, create_ops = _gk, _ops
+        _compute_fields, g_to_f = _cf, _g2f
+        _GYARADAX_ERR = None
+    except Exception as e:  # ImportError, or a JAX/CUDA init failure
+        import traceback
+
+        _GYARADAX_ERR = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+        # drop half-initialized modules so later retry (fresh worker) is clean
+        for m in [k for k in sys.modules if k == "gyaradax" or k.startswith("gyaradax.")]:
+            sys.modules.pop(m, None)
+    finally:
+        sys.path[:] = saved_path
 
 
 def _require_gyaradax():
+    _load_gyaradax()
     if _GYARADAX_ERR is not None:
         raise ImportError(
             "The PINN-residual baseline needs gyaradax (+jax). Install it from "
-            "https://github.com/gerkone/gyaradax. Original import error: "
-            f"{_GYARADAX_ERR!r}"
+            "https://github.com/gerkone/gyaradax.\nOriginal import traceback:\n"
+            f"{_GYARADAX_ERR}"
         )
 
 
@@ -74,14 +99,7 @@ def _resolve_raw_dir(trajectory: str) -> str:
 
 @lru_cache(maxsize=8)
 def load_gk_rhs(trajectory: str):
-    """Gyrokinetic RHS operator for a trajectory: rhs(f_spectral_jax) -> jax array.
-
-    Cached per trajectory (operator is timestep-independent), so the compile is
-    amortized over all of a trajectory's snapshots in a worker. `create_ops` bakes
-    trajectory-specific constants into the operator, so the jit cannot be shared
-    across trajectories; the persistent on-disk cache still makes re-runs of the
-    SAME trajectory fast (~30s -> ~3s).
-    """
+    """Gyrokinetic RHS operator for a trajectory: rhs(f_spectral_jax) -> jax array; cached per trajectory; jit amortized over snapshots; persistent cache makes re-runs fast."""
     _require_gyaradax()
     d = _resolve_raw_dir(trajectory)
     _, geometry, params, _, pre = gk_from_gkw_dir(d)
@@ -91,7 +109,7 @@ def load_gk_rhs(trajectory: str):
         mixed_precision=getattr(params, "mixed_precision", False),
     )
 
-    def rhs(dg):  # mirrors solver.gkstep_single._rhs (linear; +nonlinear if enabled)
+    def rhs(dg):  # mirrors solver.gkstep_single._rhs: linear (+nonlinear if enabled)
         phi, apar, bpar = _compute_fields(dg, geometry, params, pre)
         df = g_to_f(dg, apar, params, pre) if apar is not None else dg
         r = ops.linear_rhs(df, phi, geometry, params, pre, apar=apar, bpar=bpar)
@@ -103,29 +121,38 @@ def load_gk_rhs(trajectory: str):
 
 
 def _to_spectral_jax(df_real):
-    """JAX: NF real-space df (2, vpar, mu, s, x, y) -> complex spectral
-    (vpar, mu, s, kx, ky), matching FluxIntegral._df_fft (the validated path)."""
+    """JAX: NF real-space df (2, vpar, mu, s, x, y) -> complex spectral (vpar, mu, s, kx, ky), matches FluxIntegral._df_fft."""
     z = (df_real[0] + 1j * df_real[1]).astype(jnp.complex128)
     z = jnp.fft.fftn(z, axes=(-2, -1), norm="forward")
     return jnp.fft.ifftshift(z, axes=(-2,))
 
 
-def make_residual_loss(rhs, gt_df):
-    """Relative gyrokinetic-RHS residual loss in JAX. gt_df: torch (2,...) real.
-    Returns loss_jax(df_real_jax) -> real scalar, with rhs(gt) precomputed."""
-    gt_j = jax.dlpack.from_dlpack(gt_df.detach().contiguous())
-    rhs_gt = rhs(_to_spectral_jax(gt_j))
-    denom = jnp.real(jnp.vdot(rhs_gt, rhs_gt)) + 1e-30
-
-    def loss_jax(df_real):
+@lru_cache(maxsize=8)
+def _residual_loss_core(rhs):
+    """jit(loss(df_real, rhs_gt, denom)); compiles once per trajectory, reused for all snapshots; per-snapshot args traced (not baked in HLO) for persistent cache."""
+    def loss(df_real, rhs_gt, denom):
         diff = rhs(_to_spectral_jax(df_real)) - rhs_gt
         return jnp.real(jnp.vdot(diff, diff)) / denom
 
-    return jax.jit(loss_jax)
+    return jax.jit(loss)
+
+
+def make_residual_loss(rhs, gt_df):
+    """Relative gyrokinetic-RHS residual loss in JAX; gt_df torch (2,...) real; returns loss_jax(df_real_jax) -> real scalar."""
+    gt_j = jax.dlpack.from_dlpack(gt_df.detach().contiguous())
+    rhs_gt = rhs(_to_spectral_jax(gt_j))
+    denom = jnp.real(jnp.vdot(rhs_gt, rhs_gt)) + 1e-30
+    core = _residual_loss_core(rhs)
+
+    # bind per-snapshot ground truth as traced args for identical HLO per trajectory
+    def loss_jax(df_real):
+        return core(df_real, rhs_gt, denom)
+
+    return loss_jax
 
 
 class _ResidualLoss(torch.autograd.Function):
-    """Wrap the JAX real-scalar residual loss as a torch op (jax.vjp backward)."""
+    """Wrap JAX real-scalar residual loss as torch op with jax.vjp backward."""
 
     @staticmethod
     def forward(ctx, df, loss_jax):
@@ -159,41 +186,44 @@ def train_pinn(
     eval_every=2,
     use_print=True,
 ):
-    """PINN baseline: train the NF on the gyrokinetic RHS residual + Sobolev loss
-    (no PINC integral/spectral losses). One snapshot (per-trajectory operator)."""
+    """Train NF on gyrokinetic RHS residual + Sobolev loss (no PINC integral/spectral losses); per-trajectory operator."""
     from neugk.pinc.neural_fields.nf_train import nf_eval  # same val metrics as PINC/density
 
-    rhs, meta = load_gk_rhs(trajectory)
-    data.to(device)
-    model.to(device)
-    gt_df = data.full_df.to(device).double()
-    loss_jax = make_residual_loss(rhs, gt_df)
-    best_psnr, best_model, best_e, losses = -torch.inf, None, 0, []
-    for e in range(n_epochs):
-        model.train()
-        pred = sample_field(model, data, device).double()
-        res = _ResidualLoss.apply(pred, loss_jax)
-        sob = sobolev_loss(pred, gt_df)
-        loss = w_sobolev * sob + w_residual * res
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
-        if sched is not None:
-            sched.step()
-        rec = {"train/loss": float(loss), "train/sobolev": float(sob), "train/residual": float(res)}
-        if eval_every > 0 and (e % eval_every == 0 or e == n_epochs - 1):
-            # full physics eval (df/phi psnr, flux, spectra) — matches train_pinc/density
-            rec.update(
-                {
-                    f"val/{k}": v
-                    for k, v in nf_eval(model, data, device=device, use_flux_fields=False).items()
-                }
-            )
-            if rec["val/df psnr"] > best_psnr:
-                best_psnr, best_e, best_model = rec["val/df psnr"], e, deepcopy(model)
-        losses.append(rec)
-        if use_print:
-            print(f"[{e}] " + ", ".join(f"{k}: {v:.5f}" for k, v in rec.items()))
-    if best_model is None:
-        best_model, best_e = deepcopy(model), n_epochs - 1
+    _require_gyaradax()
+    # pin all jax ops to same GPU as torch tensors; dlpack bridge mismatches otherwise; loss.backward covers it too
+    idx = device.index if getattr(device, "index", None) is not None else 0
+    with jax.default_device(jax.devices()[idx]):
+        rhs, meta = load_gk_rhs(trajectory)
+        data.to(device)
+        model.to(device)
+        gt_df = data.full_df.to(device).double()
+        loss_jax = make_residual_loss(rhs, gt_df)
+        best_psnr, best_model, best_e, losses = -torch.inf, None, 0, []
+        for e in range(n_epochs):
+            model.train()
+            pred = sample_field(model, data, device).double()
+            res = _ResidualLoss.apply(pred, loss_jax)
+            sob = sobolev_loss(pred, gt_df)
+            loss = w_sobolev * sob + w_residual * res
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+            if sched is not None:
+                sched.step()
+            rec = {"train/loss": float(loss), "train/sobolev": float(sob), "train/residual": float(res)}
+            if eval_every > 0 and (e % eval_every == 0 or e == n_epochs - 1):
+                # full physics eval (df/phi psnr, flux, spectra); matches train_pinc/density
+                rec.update(
+                    {
+                        f"val/{k}": v
+                        for k, v in nf_eval(model, data, device=device, use_flux_fields=False).items()
+                    }
+                )
+                if rec["val/df psnr"] > best_psnr:
+                    best_psnr, best_e, best_model = rec["val/df psnr"], e, deepcopy(model)
+            losses.append(rec)
+            if use_print:
+                print(f"[{e}] " + ", ".join(f"{k}: {v:.5f}" for k, v in rec.items()))
+        if best_model is None:
+            best_model, best_e = deepcopy(model), n_epochs - 1
     return model, best_model, losses, best_e

@@ -18,6 +18,7 @@ from neugk.pinc.neural_fields import (
 )
 from neugk.plot_utils import plot_nd, plot_diag
 from neugk.physics.integrals import get_integrals
+from neugk.pinc.eval.metrics import ml_eval
 
 
 @torch.no_grad()
@@ -26,12 +27,13 @@ def nf_eval(
     data: CycloneNFDataset,
     device: torch.device,
     use_flux_fields: bool = False,
+    spectral_loss_type: str = "l1",
 ):
     if data.ndim == 6:
         timesteps = list(range(data.grid.shape[0]))
     else:
         timesteps = [None]
-    losses = []
+    losses, ml = [], []
     for t in timesteps:
         pred_df = sample_field(model, data, device, timestep=t).to(device)
         gt_df = data.full_df[:, t] if t is not None else data.full_df
@@ -52,12 +54,21 @@ def nf_eval(
             gt_phi=gt_phi,
             gt_eflux=gt_eflux,
             ds=data.ds,
+            spectral_loss_type=spectral_loss_type,
+            mode_stds=getattr(data, "spectral_stds", None),
         )
 
         losses.append(int_losses | spec_losses)
+        # psnr/eflux through the canonical eval definition (neugk.pinc.eval.metrics.ml_eval)
+        # so the logged numbers match the eval pipeline: physical phi, per-snapshot max
+        g_phi, (_, g_ef, _) = get_integrals(gt_df.to(device), data.geom, flux_fields=True)
+        p_phi, (_, p_ef, _) = get_integrals(pred_df, data.geom, flux_fields=True)
+        ml.append(ml_eval(pred_df, gt_df, p_phi, g_phi, p_ef, g_ef))
     losses = {k: sum([v[k] for v in losses]).item() / len(losses) for k in losses[0]}
-    losses["df psnr"] = 10 * log10(gt_df.max().item() ** 2 / losses["df loss"] ** 2)
-    losses["phi psnr"] = 10 * log10(gt_phi.max().item() ** 2 / losses["phi mse"] ** 2)
+    # mirror the eval pipeline: average per-snapshot psnr (each snapshot uses its own max)
+    losses["df psnr"] = sum(m["psnr"] for m in ml) / len(ml)
+    losses["phi psnr"] = sum(m["phi_psnr"] for m in ml) / len(ml)
+    losses["eflux l1"] = sum(m["eflux_l1"] for m in ml) / len(ml)
     return losses
 
 
@@ -212,6 +223,7 @@ def train_pinc(
     config_weights: Optional[Dict[str, float]] = None,
     config_clip: Optional[float] = None,
     select: str = "phi",
+    spectral_loss_type: str = "l1",
 ):
     if pinc_loss_weight is None:
         print("`pinc_loss_weight` not specified. Skipping.")
@@ -253,7 +265,9 @@ def train_pinc(
 
             spec_losses, _ = spectra_losses(
                 pred_df=pred_df, pred_phi=pred_phi, pred_eflux=pred_eflux,
-                gt_df=gt_df, gt_phi=gt_phi, gt_eflux=gt_eflux, ds=data.ds)
+                gt_df=gt_df, gt_phi=gt_phi, gt_eflux=gt_eflux, ds=data.ds,
+                spectral_loss_type=spectral_loss_type,
+                mode_stds=getattr(data, "spectral_stds", None))
             spec_losses = {
                 f"{k} loss": pinc_loss_weight[k] * spec_losses[f"{k} loss"]
                 for k in pinc_loss_weight
@@ -312,7 +326,9 @@ def train_pinc(
 
         # evaluation (coarsened: ~as costly as a train step, see train_density)
         if not skip_eval and (e % eval_every == 0 or e == n_epochs - 1):
-            eval_losses = nf_eval(model, data, device=device, use_flux_fields=False)
+            eval_losses = nf_eval(
+                model, data, device=device, use_flux_fields=False,
+                spectral_loss_type=spectral_loss_type)
             losses.update({f"val/{k}": v for k, v in eval_losses.items()})
             if select == "balanced":
                 # higher is better: negative summed relative degradation of the
@@ -441,9 +457,9 @@ def eval_diagnose(
     )
 
     mse = F.mse_loss(pred_df.cpu(), gt_df.cpu())
-    psnr = 10 * torch.log10(gt_df.max() ** 2 / mse**2)
+    psnr = 10 * torch.log10(gt_df.max() ** 2 / mse)       # PSNR = 10 log10(max^2/MSE)
     phi_mse = F.mse_loss(pred_phi, gt_phi)
-    phi_psnr = 10 * torch.log10(gt_phi.max() ** 2 / phi_mse**2)
+    phi_psnr = 10 * torch.log10(gt_phi.max() ** 2 / phi_mse)
     print(
         f"df nmse: {mse / (gt_df.cpu() ** 2).mean():.2f}, "
         f"df psnr: {psnr.item():.2f}\n"

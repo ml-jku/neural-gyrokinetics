@@ -29,7 +29,8 @@ from tqdm import tqdm
 from omegaconf import OmegaConf, ListConfig, DictConfig
 from transformers.optimization import get_scheduler
 
-sys.path.extend([".", ".."])
+# add repo root for direct-script runs; do NOT add ".." (shadows sibling editable installs).
+sys.path.insert(0, os.path.abspath(os.getcwd()))
 
 from neugk.pinc.neural_fields.nf_train import train_density, train_pinc
 from neugk.pinc.neural_fields import CycloneNFDataset, CycloneNFDataLoader
@@ -218,6 +219,13 @@ def train_run(
     flat dict of best-epoch training losses + compression ratio (for grid ranking).
     """
     timestep = timestep[0] if isinstance(timestep, Sequence) else timestep
+
+    # PINN: pre-load gyaradax before the data backend and torch.compile corrupt its editable finder.
+    physics_mode = getattr(cfg, "physics_mode", "pinc")
+    if physics_mode == "pinn":
+        from neugk.pinc.neural_fields.pinn import _load_gyaradax
+        _load_gyaradax()
+
     data, loader = build_data(cfg, trajectory, timestep)
 
     model = get_model(cfg, data)
@@ -225,23 +233,51 @@ def train_run(
         model.load_state_dict(torch.load(shared_init))
     compression = data.full_df.nbytes / sum(p.nbytes for p in model.parameters())
 
-    model, best_model, density_losses, best_de = density_phase(
-        cfg, model, data, loader, device, verbose
-    )
+    # warm-start: load the matching pretrained density-only base NF for this exact
+    # (traj, timestep) and skip the density phase. the base NFs in pinc_init_from were
+    # trained at the same CR/architecture, so the pinc phase resumes from them directly.
+    init_from = getattr(cfg, "pinc_init_from", None)
+    if init_from:
+        import glob
+        _tr = trajectory.replace(".h5", "")
+        _cand = sorted(glob.glob(f"{init_from}/best_mlp_{_tr}_t{int(timestep)}_x*.pt"))
+        if not _cand:
+            raise FileNotFoundError(
+                f"no base NF best_mlp_{_tr}_t{int(timestep)}_x* under {init_from}"
+            )
+        _ck = torch.load(_cand[0], map_location=device, weights_only=False)
+        model.load_state_dict(_ck["state_dict"] if "state_dict" in _ck else _ck)
+        best_model, density_losses, best_de = deepcopy(model), [{}], 0
+    else:
+        model, best_model, density_losses, best_de = density_phase(
+            cfg, model, data, loader, device, verbose
+        )
     ckpts = {"": deepcopy(model).state_dict(), "best_": deepcopy(best_model).state_dict()}
     summary = {f"pre_{k}": float(v) for k, v in density_losses[best_de].items()}
     summary["CR"] = compression
 
-    weights = pinc_loss_weights(cfg)
-    if weights and cfg.pinc_epochs > 0:
-        pinc_model = deepcopy(best_model)
-        pinc_model, pinc_best, pinc_losses, best_pe = pinc_phase(
-            cfg, pinc_model, data, device, weights, verbose
-        )
-        ckpts["int_"] = pinc_model.state_dict()
-        ckpts["best_int_"] = pinc_best.state_dict()
-        if pinc_losses:
-            summary.update({f"pinc_{k}": float(v) for k, v in pinc_losses[best_pe].items()})
+    # second phase: route to PINC (integral/spectral) or PINN (RHS residual + Sobolev), same checkpoint keys.
+    if physics_mode == "pinn":
+        if cfg.pinc_epochs > 0:
+            pinn_model = deepcopy(best_model)
+            pinn_model, pinn_best, pinn_losses, best_pe = pinn_phase(
+                cfg, pinn_model, data, device, trajectory, verbose
+            )
+            ckpts["int_"] = pinn_model.state_dict()
+            ckpts["best_int_"] = pinn_best.state_dict()
+            if pinn_losses:
+                summary.update({f"pinn_{k}": float(v) for k, v in pinn_losses[best_pe].items()})
+    else:
+        weights = pinc_loss_weights(cfg)
+        if weights and cfg.pinc_epochs > 0:
+            pinc_model = deepcopy(best_model)
+            pinc_model, pinc_best, pinc_losses, best_pe = pinc_phase(
+                cfg, pinc_model, data, device, weights, verbose
+            )
+            ckpts["int_"] = pinc_model.state_dict()
+            ckpts["best_int_"] = pinc_best.state_dict()
+            if pinc_losses:
+                summary.update({f"pinc_{k}": float(v) for k, v in pinc_losses[best_pe].items()})
 
     if save:
         save_checkpoints(cfg, trajectory, timestep, compression, ckpts)
@@ -278,9 +314,7 @@ def worker(cfg: DictConfig, traj: str, timesteps: Sequence, gpu: int):
 def main(cfg: DictConfig):
     timesteps = _timesteps(cfg)
     ctx = mp.get_context("spawn")
-    # one worker per trajectory (compile warms up once per worker, not per
-    # timestep). `throttling` workers share each GPU -> gpus * throttling slots,
-    # so the queue must hold that many tokens (each GPU repeated `throttling`).
+    # one worker per traj; `throttling` workers per GPU -> gpus*throttling total slots.
     gpu_queue: Queue = Queue()
     for gpu in cfg.gpus:
         for _ in range(cfg.throttling):
@@ -315,14 +349,16 @@ def main(cfg: DictConfig):
 
 def grid_worker(
     combo_cfg: DictConfig, trajectories: Sequence[str], timesteps: Sequence[int],
-    gpu: int, return_dict: Dict, key: int,
+    gpu: int, return_dict: Dict, key: int, save: bool = False,
 ):
     torch.cuda.set_device(int(gpu))
     device = torch.device(f"cuda:{gpu}")
+    if save:  # per-combo checkpoint dir so the variants do not collide on disk
+        combo_cfg = OmegaConf.merge(combo_cfg, {"ckp_path": f"{combo_cfg.ckp_path}/combo{key}"})
     acc, n = defaultdict(float), 0
     for traj in trajectories:
         for t in timesteps:
-            for k, v in train_run(combo_cfg, traj, t, device, save=False, verbose=False).items():
+            for k, v in train_run(combo_cfg, traj, t, device, save=save, verbose=False).items():
                 acc[k] += v
             n += 1
     return_dict[key] = {k: v / max(n, 1) for k, v in acc.items()}
@@ -331,11 +367,11 @@ def grid_worker(
 def grid(cfg: DictConfig):
     grid_params = {
         k: v for k, v in cfg.items()
-        if isinstance(v, ListConfig) and k not in ["timesteps", "trajectory", "gpus"]
+        if isinstance(v, ListConfig) and k not in ["timesteps", "trajectory", "gpus", "norm_axes"]
     }
     fixed = {
         k: v for k, v in cfg.items()
-        if not isinstance(v, ListConfig) or k in ["timesteps", "trajectory", "gpus"]
+        if not isinstance(v, ListConfig) or k in ["timesteps", "trajectory", "gpus", "norm_axes"]
     }
     combinations = list(itertools.product(*grid_params.values()))
     timesteps = _timesteps(cfg)
@@ -361,7 +397,8 @@ def grid(cfg: DictConfig):
         gpu = gpu_queue.get()
         p = mp.get_context("spawn").Process(
             target=grid_worker,
-            args=(combo_cfg, cfg.trajectory, timesteps, gpu, return_dict, job_id),
+            args=(combo_cfg, cfg.trajectory, timesteps, gpu, return_dict, job_id,
+                  bool(getattr(cfg, "save_ckpts", False))),
         )
         p.start()
         active.append((p, gpu))

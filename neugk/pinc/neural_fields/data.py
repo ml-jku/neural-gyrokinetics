@@ -26,6 +26,7 @@ class CycloneNFDataset(Dataset):
         flux_fields: bool = False,
         flux_fields_train: bool = False,
         backend: str = "gds",
+        prefer_dtype: Optional[str] = None,
     ):
         super().__init__()
 
@@ -39,6 +40,10 @@ class CycloneNFDataset(Dataset):
         self.beta1 = beta1
         self.beta2 = beta2
         self.backend = backend
+        # None / "fp32" keeps the unchanged fp32 path; "bf16" prefers the
+        # .bf16.bin siblings (half the bytes, ~2x faster) and falls back to
+        # fp32 silently when they are absent.
+        self.prefer_dtype = prefer_dtype
 
         trajectory = trajectory.replace(".h5", "")
 
@@ -48,7 +53,9 @@ class CycloneNFDataset(Dataset):
 
         # load via the shared neugk/dataset backends (kvikio/GDS or h5)
         self._backend = (
-            KvikIOBackend(use_kvikio=(backend == "gds"))
+            KvikIOBackend(
+                use_kvikio=(backend == "gds"), prefer_dtype=self.prefer_dtype
+            )
             if backend in ("kvikio", "gds")
             else H5Backend()
         )
@@ -126,18 +133,44 @@ class CycloneNFDataset(Dataset):
         meta = be.read_metadata(path, input_fields=["df"])
         self._meta_ds = float(meta["ds"]) if "ds" in meta else None
 
+        # per-mode log1p std of the served GT turbulence spectra, computed once
+        # from the metadata over the (offset) trajectory. Exposed via
+        # `spectral_stds` so the spectral loss can std-normalise per mode,
+        # identically to the autoencoder path. kyspec drives the kyspec loss,
+        # fluxspec the qspec loss. None when the spectrum is absent.
+        self.spectral_stds = {}
+        _spec_offset = 80
+        for _sk, _lk in (("kyspec", "kyspec"), ("fluxspec", "qspec")):
+            if _sk in meta:
+                _arr = np.log1p(np.asarray(meta[_sk], dtype=np.float64)[_spec_offset:])
+                self.spectral_stds[_lk] = torch.as_tensor(
+                    np.std(_arr, axis=0), dtype=torch.float32
+                )
+
         res = tuple(int(x) for x in meta["resolution"])  # (nvpar, nmu, ns, nkx, nky)
         df_shape = (2, *res)
         phi_shape = tuple(meta["phi_mean"].shape) if "phi_mean" in meta else res[2:]
         flux_arr = meta["flux"] if "flux" in meta else meta["fluxes"]
         active = np.array([0, 1])
 
+        # When prefer_dtype="bf16" the backend reads the .bf16.bin sibling and
+        # hands back a torch.bfloat16 tensor (half the bytes off disk, no upcast
+        # in the read). We keep the served df/phi in that read dtype here -- the
+        # only consumer that strictly needs float32 is the FFT-based
+        # FluxIntegral below, which gets its own upcast copy. Default (fp32) is
+        # byte-identical to the old `.float()` behaviour.
+        keep_bf16 = self.prefer_dtype == "bf16"
+
+        def _as_read_dtype(t):
+            # legacy fp32 path: unconditional .float(); bf16 path: keep bf16.
+            return t.cpu() if keep_bf16 else t.float().cpu()
+
         dfs, phis, fluxes = [], [], []
         with be.open(path) as f:
             for t in timesteps:
                 ts = str(t).zfill(5)
-                df = torch.as_tensor(be.read_df(f, ts, df_shape, active)).float().cpu()
-                phi = torch.as_tensor(be.read_phi(f, ts, phi_shape)).float().cpu()
+                df = _as_read_dtype(torch.as_tensor(be.read_df(f, ts, df_shape, active)))
+                phi = _as_read_dtype(torch.as_tensor(be.read_phi(f, ts, phi_shape)))
                 if phi.shape[0] != 2:
                     phi = torch.stack([phi, torch.zeros_like(phi)], dim=0)
                 dfs.append(df.reshape(df_shape))
@@ -164,7 +197,10 @@ class CycloneNFDataset(Dataset):
 
         if self.flux_fields or self.realpotens:
             geom_ = {k: g[None] for k, g in geom.items()}
-            dfs_ = dfs.clone()
+            # FluxIntegral / get_integrals use torch FFTs that do not support
+            # bfloat16; give them a float32 copy. The served self.df keeps its
+            # read dtype (bf16 when prefer_dtype="bf16").
+            dfs_ = dfs.float().clone()
             if len(timesteps) == 1:
                 dfs_ = dfs_[:, None]
             phis_int, fluxes_int = [], []
@@ -232,6 +268,10 @@ class CycloneNFDataset(Dataset):
         if self.flux_fields_train:
             self.f_flux = self.f_flux.to(device)
         self.norm_ndim = self.norm_ndim.to(device)
+        if getattr(self, "spectral_stds", None):
+            self.spectral_stds = {
+                k: v.to(device) for k, v in self.spectral_stds.items()
+            }
         return self
 
     def shuffle(self):

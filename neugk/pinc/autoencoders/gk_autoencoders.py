@@ -467,6 +467,12 @@ class Swin5DVQVAE(Swin5DAE):
         if self.quantizer_type == "vq":
             codebook = self.vq.codebook.detach()  # (codebook_size, dim)
             z = torch.nn.functional.embedding(indices, codebook)
+        elif self.quantizer_type == "rvq":
+            # rvq stores num_quantizers indices per token (..., Q); sum the per-stage lookups
+            z = None
+            for q, layer in enumerate(self.vq.layers):
+                zq = torch.nn.functional.embedding(indices[..., q], layer.codebook.detach())
+                z = zq if z is None else z + zq
         elif self.quantizer_type in ("fsq", "lfq"):
             z = self.vq.indices_to_codes(indices)
         else:
@@ -481,12 +487,16 @@ class Swin5DVQVAE(Swin5DAE):
             return self._vq_indices.unique().numel() / self.codebook_size
         return torch.tensor(0.0)
 
-    def get_codebook_vectors(self) -> torch.Tensor:
+    def get_codebook_vectors(self) -> Optional[torch.Tensor]:
+        if self.quantizer_type == "rvq":
+            # stack the per-stage codebooks
+            return torch.cat([l.codebook.data for l in self.vq.layers], dim=0)
         if hasattr(self.vq, "embeddings"):
             return self.vq.embeddings.weight.data
         if hasattr(self.vq, "codebook"):
             return self.vq.codebook.data
-        raise AttributeError("no codebook vectors available in vq layer.")
+        # fsq has no lookup codebook (codes are computed, not stored)
+        return None
 
     def get_indices(self) -> torch.Tensor:
         if hasattr(self, "_vq_indices") and self._vq_indices is not None:

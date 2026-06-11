@@ -10,11 +10,13 @@ from neugk.physics.diagnostics import (
     diagnostics,
     monotonicity_loss,
     mass_loss,
+    velocity_moment_errors,
     integral_losses,
     spectra_losses,
     compute_data_loss,
     compute_integral_loss,
     compute_spectral_loss,
+    served_spectral_loss,
 )
 
 __all__ = [
@@ -25,9 +27,11 @@ __all__ = [
     "diagnostics",
     "monotonicity_loss",
     "mass_loss",
+    "velocity_moment_errors",
     "integral_losses",
     "spectra_losses",
     "compute_data_loss",
     "compute_integral_loss",
     "compute_spectral_loss",
+    "served_spectral_loss",
 ]

@@ -122,8 +122,16 @@ class CycloneDataset(Dataset):
         else:
             self.active_keys = np.array([{"re": 0, "im": 1}[k] for k in active_keys])
         assert normalization_scope in ["sample", "dataset", "trajectory"]
+        # spectra (kyspec/fluxspec) are *served* per-timestep but never go
+        # through the df/phi/flux scale-shift normalize path; their stats come
+        # from the log1p probe_targets branch below. Keep them out of the
+        # field-normalization machinery so they don't need a scale-shift entry.
+        self.served_spectral_fields = [
+            k for k in fields_to_load if k in self.SPECTRAL_KEYS
+        ]
+        norm_fields = [k for k in fields_to_load if k not in self.SPECTRAL_KEYS]
         if normalization is not None:
-            assert set(fields_to_load).issubset(
+            assert set(norm_fields).issubset(
                 set(normalization.keys())
             ), "Normalization must be specified for all fields to load"
         self.normalizers = normalization
@@ -132,7 +140,9 @@ class CycloneDataset(Dataset):
             if normalization_stats is not None
             else {
                 k: defaultdict(dict)
-                for k in list(fields_to_load) + list(probe_targets or [])
+                for k in list(fields_to_load)
+                + list(probe_targets or [])
+                + list(self.SPECTRAL_KEYS)
             }
         )
         self.normalization_scope = normalization_scope
@@ -333,7 +343,7 @@ class CycloneDataset(Dataset):
                     if k not in stats:
                         stats[k] = RunningMeanStd()
 
-                    if k in self.fields_to_load:
+                    if k in self.fields_to_load and k not in self.SPECTRAL_KEYS:
                         norm_type = (
                             self.normalizers[k]["type"]
                             if self.normalizers.get(k)
@@ -423,11 +433,21 @@ class CycloneDataset(Dataset):
             self.length = len(self.flat_index_to_file_and_tstep)
 
         norm_dataset = normalization is not None and normalization_scope == "dataset"
-        if norm_dataset and normalization_stats is None and (offset > 0 or separate_zf):
+        # served spectra get their stats from the log1p branch above, not the
+        # per-timestep field recompute (which only knows df/phi/flux).
+        recompute_keys = [
+            k for k in self.fields_to_load if k not in self.SPECTRAL_KEYS
+        ]
+        if (
+            norm_dataset
+            and normalization_stats is None
+            and recompute_keys
+            and (offset > 0 or separate_zf)
+        ):
             recomputed_stats = self._recompute_stats(
-                keys=self.fields_to_load, offset=self.offsets[0]
+                keys=recompute_keys, offset=self.offsets[0]
             )
-            for key in self.fields_to_load:
+            for key in recompute_keys:
                 stats[key] = recomputed_stats[key]
 
         if (
@@ -992,6 +1012,36 @@ class CycloneDataset(Dataset):
         if timestep_idx.dim() > 1:
             timesteps_tensor = timesteps_tensor.view(B, -1)
         return timesteps_tensor
+
+    # --------------------------------------------------------------------- #
+    # spectral (kyspec / fluxspec) helpers
+    # --------------------------------------------------------------------- #
+    SPECTRAL_KEYS = ("kyspec", "fluxspec")
+
+    def get_spectrum(self, file_index: int, original_t_index: int, key: str):
+        """Per-timestep GT spectrum from metadata (raw, not log-transformed)."""
+        return np.asarray(self.metadata[file_index][key][original_t_index], dtype=np.float32)
+
+    def get_spectral_stats(self, key: str) -> Dict[str, np.ndarray]:
+        """Per-mode log1p-space stats for a served spectrum.
+
+        Mirrors the log1p transform used when the stats are computed (see the
+        ``["fluxspec", "kyspec"]`` branch in ``__init__``). Returns ``mean`` /
+        ``std`` (per wavenumber mode) so the loss can std-normalise in log
+        space, analogous to the ``phi_std`` / ``flux_std`` path. The stored
+        stats are already log1p-space mean/std (``np.sqrt(var)``), so no extra
+        transform is applied here.
+        """
+        if key not in self.stats or "full" not in self.stats[key]:
+            raise KeyError(
+                f"no dataset-scope stats for spectrum '{key}'. Add it to "
+                f"`probe_targets` / `normalizers` so stats are computed."
+            )
+        s = self.stats[key]["full"]
+        return {
+            "mean": np.asarray(s["mean"], dtype=np.float32),
+            "std": np.asarray(s["std"], dtype=np.float32),
+        }
 
     def get_fluxes(self, file_index: int):
         fluxes = self.metadata[file_index]["flux"]

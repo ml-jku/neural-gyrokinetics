@@ -12,7 +12,57 @@ import numpy as np
 import torch
 
 
-def read_cupy_bin(file: str, shape: tuple, rank: int = 0, use_kvikio: bool = True):
+_BF16_SUFFIX = ".bf16.bin"
+
+
+def _bf16_sibling(fp32_path: str) -> str:
+    """``foo.bin`` -> ``foo.bf16.bin`` (the side-by-side quantized shard)."""
+    if fp32_path.endswith(".bin"):
+        return fp32_path[:-4] + _BF16_SUFFIX
+    return fp32_path + _BF16_SUFFIX
+
+
+def _resolve_dtyped_path(fp32_path: str, prefer_dtype):
+    """Pick path to read, falling back to fp32 silently; prefer_dtype in ("bf16", None, "fp32"); returns (path, mode)."""
+    if prefer_dtype == "bf16":
+        cand = _bf16_sibling(fp32_path)
+        if os.path.exists(cand):
+            return cand, "bf16"
+    return fp32_path, "fp32"
+
+
+def read_cupy_bin(
+    file: str,
+    shape: tuple,
+    rank: int = 0,
+    use_kvikio: bool = True,
+    prefer_dtype=None,
+):
+    """Read flat .bin into tensor; prefer_dtype="bf16" reads .bf16.bin sibling (no upcast to f32; speedup preserved); else fallback to fp32 silently."""
+    path, mode = _resolve_dtyped_path(file, prefer_dtype)
+
+    if mode == "bf16":
+        n_elements = int(np.prod(shape))
+        if use_kvikio:
+            import cupy as cp
+            import kvikio
+
+            # read u16, bitcast to bf16 via dlpack (cupy has no native bf16) and zero-copy bitcast u16 -> bf16
+            with cp.cuda.Device(rank):
+                gpu_u16 = cp.empty(n_elements, dtype=cp.uint16)
+                with kvikio.CuFile(path, "r") as f:
+                    f.read(gpu_u16)
+            t = torch.from_dlpack(gpu_u16.reshape(shape))
+            return t.view(torch.bfloat16)
+        else:
+            from ml_dtypes import bfloat16
+
+            # ml_dtypes.bf16 -> torch.bf16 via u16 bitcast
+            cpu_bf16 = np.fromfile(path, dtype=bfloat16)
+            t = torch.from_numpy(cpu_bf16.view(np.uint16).reshape(shape))
+            return t.view(torch.bfloat16)
+
+    # fp32: when bf16 requested but sibling absent, downcast to bf16 for uniform batch dtype; eval uses prefer_dtype=None for full precision
     if use_kvikio:
         import cupy as cp
         import kvikio
@@ -20,13 +70,16 @@ def read_cupy_bin(file: str, shape: tuple, rank: int = 0, use_kvikio: bool = Tru
         n_elements = np.prod(shape)
         with cp.cuda.Device(rank):
             gpu_array = cp.empty(n_elements, dtype=cp.float32)
-            with kvikio.CuFile(file, "r") as f:
+            with kvikio.CuFile(path, "r") as f:
                 f.read(gpu_array)
-        return torch.from_dlpack(gpu_array.reshape(shape))
-
+        out = torch.from_dlpack(gpu_array.reshape(shape))
     else:
-        cpu_array = np.fromfile(file, dtype=np.float32)
-        return torch.from_numpy(cpu_array.reshape(shape))
+        cpu_array = np.fromfile(path, dtype=np.float32)
+        out = torch.from_numpy(cpu_array.reshape(shape))
+
+    if prefer_dtype == "bf16":
+        out = out.to(torch.bfloat16)
+    return out
 
 
 class DataBackend(ABC):
@@ -213,10 +266,20 @@ class H5Backend(DataBackend):
 
 
 class KvikIOBackend(DataBackend):
-    def __init__(self, rank: int = 0, use_kvikio: bool = True):
+    def __init__(
+        self,
+        rank: int = 0,
+        use_kvikio: bool = True,
+        prefer_dtype=None,
+        load_bf16: bool = False,
+    ):
         super().__init__(rank)
 
         self.use_kvikio = use_kvikio
+        # back-compat: load_bf16=True -> prefer_dtype="bf16"; None/"fp32" read fp32; "bf16" prefer .bf16.bin sibling, fallback to fp32 silently if absent
+        if load_bf16 and not prefer_dtype:
+            prefer_dtype = "bf16"
+        self.prefer_dtype = prefer_dtype or "fp32"
 
     def _strip_h5(self, path: str) -> str:
         return path.removesuffix("/").removesuffix(".h5")
@@ -255,7 +318,7 @@ class KvikIOBackend(DataBackend):
     ) -> Dict[str, Any]:
         path = self._strip_h5(path)
 
-        # fast path: use cached lightweight metadata if available
+        # use cached lightweight metadata if available (fast path)
         light_path = os.path.join(path, "metadata_light.pkl")
         full_path = os.path.join(path, "metadata.pkl")
 
@@ -307,7 +370,9 @@ class KvikIOBackend(DataBackend):
         active_keys: Optional[Sequence[str]] = None,
     ):
         filepath = os.path.join(f_dir, "data", f"timestep_{timestamp}.bin")
-        k = read_cupy_bin(filepath, shape, self.rank, self.use_kvikio)
+        k = read_cupy_bin(
+            filepath, shape, self.rank, self.use_kvikio, self.prefer_dtype
+        )
 
         if all(active_keys == np.array([0, 1])):
             return k
@@ -315,7 +380,9 @@ class KvikIOBackend(DataBackend):
 
     def read_phi(self, f_dir: str, timestamp: str, shape: Sequence[int]):
         filepath = os.path.join(f_dir, "data", f"poten_{timestamp}.bin")
-        return read_cupy_bin(filepath, shape, self.rank, self.use_kvikio)
+        return read_cupy_bin(
+            filepath, shape, self.rank, self.use_kvikio, self.prefer_dtype
+        )
 
     def write_df(self, f_dir: str, timestamp: str, df: np.ndarray):
         data_dir = os.path.join(f_dir, "data")

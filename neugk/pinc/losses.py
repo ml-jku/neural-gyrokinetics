@@ -4,16 +4,16 @@ Extends base_losses to add support for Spectral, VAE, and VQVAE losses,
 plus EMA normalization and custom Conflict-Free Gradient Descent (ConFIG) patching.
 """
 
-from typing import List, Callable, Dict, Optional, Any
 import warnings
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.nn.functional as F
 
-from neugk.utils import recombine_zf
-from neugk.physics.integrals import FluxIntegral
 from neugk import physics
-from neugk.losses import LossWrapper, GradientBalancer
+from neugk.losses import GradientBalancer, LossWrapper
+from neugk.physics.integrals import FluxIntegral
+from neugk.utils import recombine_zf
 
 
 def _wide_min_norm_solution(
@@ -163,13 +163,10 @@ class PINCLossWrapper(LossWrapper):
             self._ema_initialized.add(loss_name)
         else:
             self._ema_loss_scales[loss_name] = (
-                self.ema_beta * self._ema_loss_scales[loss_name]
-                + (1 - self.ema_beta) * curr_scale
+                self.ema_beta * self._ema_loss_scales[loss_name] + (1 - self.ema_beta) * curr_scale
             )
 
-    def _apply_ema_normalization(
-        self, losses: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    def _apply_ema_normalization(self, losses: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         return {
             name: (
                 val / self._ema_loss_scales[name]
@@ -223,13 +220,11 @@ class PINCLossWrapper(LossWrapper):
             if loss_type == "mse":
                 per_mode[f"mode_loss/ky={m}"] = F.mse_loss(p[..., m], t[..., m])
             elif loss_type == "relative_mse":
-                per_mode[f"mode_loss/ky={m}"] = torch.sum(
-                    (p[..., m] - t[..., m]) ** 2
-                ) / (torch.sum(t[..., m] ** 2) + 1e-8)
-            else:
-                raise NotImplementedError(
-                    f"Unsupported per-mode loss type: {loss_type}"
+                per_mode[f"mode_loss/ky={m}"] = torch.sum((p[..., m] - t[..., m]) ** 2) / (
+                    torch.sum(t[..., m] ** 2) + 1e-8
                 )
+            else:
+                raise NotImplementedError(f"Unsupported per-mode loss type: {loss_type}")
 
         return per_mode
 
@@ -253,9 +248,7 @@ class PINCLossWrapper(LossWrapper):
         cov_loss = (off_diag**2).sum() / D
         return {"vicreg_covariance": cov_loss}
 
-    def compute_logdet(
-        self, z: torch.Tensor, eps: float = 1e-8
-    ) -> Dict[str, torch.Tensor]:
+    def compute_logdet(self, z: torch.Tensor, eps: float = 1e-8) -> Dict[str, torch.Tensor]:
         z = z.reshape(-1, z.shape[-1]).float()
         d = z.shape[-1]
         z_std = (z - z.mean(dim=0)) / (z.std(dim=0) + eps)
@@ -283,9 +276,7 @@ class PINCLossWrapper(LossWrapper):
             complex_metrics=self.complex_metrics,
         )
 
-    def compute_integral_loss(
-        self, pred, target, loss_type="mse", eps=1e-8, loss_name="flux_int"
-    ):
+    def compute_integral_loss(self, pred, target, loss_type="mse", eps=1e-8, loss_name="flux_int"):
         return physics.compute_integral_loss(
             pred,
             target,
@@ -296,15 +287,20 @@ class PINCLossWrapper(LossWrapper):
             ema_state=self.__dict__.setdefault("_int_ema_state", {}),
         )
 
-    def compute_spectral_loss(self, pred, target, loss_type="l1", eps=1e-8):
+    def compute_spectral_loss(self, pred, target, loss_type="l1", eps=1e-8, mode_std=None):
+        # served / std-normalised log-space spectral loss (per-mode balanced,
+        # O(1)); shared with the neural-field path. Falls back to the legacy
+        # trace losses for the other loss types.
+        if "log_std" in loss_type or "served" in loss_type:
+            return physics.served_spectral_loss(
+                pred, target, mode_std=mode_std, loss_type=loss_type, eps=eps
+            )
         return physics.compute_spectral_loss(pred, target, loss_type, eps)
 
     def compute_vae_loss(self, preds):
         if "mu" not in preds or "logvar" not in preds:
             return {}
-        kl_elementwise = -0.5 * (
-            1 + preds["logvar"] - preds["mu"].pow(2) - preds["logvar"].exp()
-        )
+        kl_elementwise = -0.5 * (1 + preds["logvar"] - preds["mu"].pow(2) - preds["logvar"].exp())
         if self.free_bits > 0:
             # Free bits (Kingma et al., 2016): clamp per-dimension KL to a
             # minimum of free_bits so every latent channel stays active
@@ -317,9 +313,7 @@ class PINCLossWrapper(LossWrapper):
     def compute_vqvae_loss(self, preds):
         return {"vq_commit": preds.get("vq_commit_loss")}
 
-    def compute_simsiam_loss(
-        self, preds: Dict[str, torch.Tensor]
-    ) -> Dict[str, torch.Tensor]:
+    def compute_simsiam_loss(self, preds: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         def dist(p, z):
             p = F.normalize(p.flatten(1), dim=1)
             z = F.normalize(z.flatten(1).detach(), dim=1)
@@ -338,9 +332,7 @@ class PINCLossWrapper(LossWrapper):
                 and getattr(self.dataset, "normalization_scope", None) == "dataset"
             ):
                 pred_df = self.denormalize_fn(0, df=preds["df"])
-                pred_phi = (
-                    self.denormalize_fn(0, phi=preds["phi"]) if "phi" in preds else None
-                )
+                pred_phi = self.denormalize_fn(0, phi=preds["phi"]) if "phi" in preds else None
                 tgt_phi = self.denormalize_fn(0, phi=tgts["phi"])
                 tgt_eflux = self.denormalize_fn(0, flux=tgts["flux"])
             else:
@@ -355,9 +347,7 @@ class PINCLossWrapper(LossWrapper):
                         )
                         pred_phi.append(self.denormalize_fn(f, phi=p_phi))
                     t_phi = (
-                        tgts["phi"][b].unsqueeze(0)
-                        if tgts["phi"][b].ndim == 2
-                        else tgts["phi"][b]
+                        tgts["phi"][b].unsqueeze(0) if tgts["phi"][b].ndim == 2 else tgts["phi"][b]
                     )
                     tgt_phi.append(self.denormalize_fn(f, phi=t_phi))
                     tgt_eflux.append(self.denormalize_fn(f, flux=tgts["flux"][b]))
@@ -383,11 +373,15 @@ class PINCLossWrapper(LossWrapper):
 
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
 
+        # tgt_phi can carry a singleton channel dim [B,1,x,s,y]; squeeze it so it matches
+        # pphi_int [B,x,s,y] instead of broadcasting into a [B,B,...] cross-batch tensor
+        if tgt_phi.ndim == pphi_int.ndim + 1 and tgt_phi.shape[1] == 1:
+            tgt_phi = tgt_phi.squeeze(1)
+
         monitor = {
             "phi_int_mse": F.mse_loss(pphi_int, tgt_phi).detach(),
             "flux_int_mse": (
-                torch.abs(pflux).mean()
-                + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze())
+                torch.abs(pflux).mean() + F.l1_loss(eflux.squeeze(), tgt_eflux.squeeze())
             ).detach(),
         }
         int_losses = (
@@ -430,10 +424,15 @@ class PINCLossWrapper(LossWrapper):
         p_diag = physics.diagnostics(p_fft, p_ef, self.ds, aggregate="mean")
         t_diag = physics.diagnostics(t_fft, t_ef, self.ds, aggregate="mean")
 
+        # per-mode log1p std of the served GT spectra (kyspec / fluxspec=>qspec)
+        std_by_key = {
+            "kyspec": self.dataset_stats.get("kyspec_std"),
+            "qspec": self.dataset_stats.get("qspec_std"),
+        }
         for k in ["kxspec", "kyspec", "qspec", "phi_zf"]:
             if k in p_diag and k in t_diag:
                 spec_losses[k] = self.compute_spectral_loss(
-                    p_diag[k], t_diag[k], loss_type
+                    p_diag[k], t_diag[k], loss_type, mode_std=std_by_key.get(k)
                 )
 
         # sort-based monotonicity on the un-aggregated spectra (shared with the NF path)
@@ -482,19 +481,14 @@ class PINCLossWrapper(LossWrapper):
         ) and geometry is not None:
             losses.update(self.compute_spectral_losses(preds, tgts, geometry))
 
-        if (
-            self.training
-            and sum([self.weights.get(k, 0.0) for k in self._simsiam_losses]) > 0
-        ):
+        if self.training and sum([self.weights.get(k, 0.0) for k in self._simsiam_losses]) > 0:
             losses.update(self.compute_simsiam_loss(preds))
 
         # 3. Augmentation losses (VICReg, etc.)
         if self.training:
             for name in self._augmentation_losses:
                 if "vicreg" in name and not "latent" in preds:
-                    warnings.warn(
-                        f"Latents not found in predictions for augmentation loss: {name}"
-                    )
+                    warnings.warn(f"Latents not found in predictions for augmentation loss: {name}")
                     continue
                 if name != "df_delta":
                     losses.update(getattr(self, f"compute_{name}")(preds["latent"]))
@@ -547,9 +541,9 @@ class PINCLossWrapper(LossWrapper):
                     p, t = p.flatten(), t.flatten()
 
                 if k == "df" and separate_zf:
-                    monitor_mse[f"{k}_mse"] = F.mse_loss(
-                        p[:, :2], t[:, :2]
-                    ) + F.mse_loss(p[:, 2:], t[:, 2:])
+                    monitor_mse[f"{k}_mse"] = F.mse_loss(p[:, :2], t[:, :2]) + F.mse_loss(
+                        p[:, 2:], t[:, 2:]
+                    )
                 else:
                     monitor_mse[f"{k}_mse"] = F.mse_loss(p, t)
 
@@ -570,17 +564,13 @@ class PINCLossWrapper(LossWrapper):
                 if k in norm_losses
             )
             log_losses = {
-                k: losses[k]
-                for k in all_keys
-                if k in losses and self.weights.get(k, 0.0) > 0
+                k: losses[k] for k in all_keys if k in losses and self.weights.get(k, 0.0) > 0
             }
             # only log individual _mse if the main loss is not already mse
             if current_loss_types.get("data") != "mse" and monitor_mse:
                 log_losses.update(monitor_mse)
 
-            log_losses.update(
-                {"total_mse": sum(monitor_mse.values()) if monitor_mse else 0.0}
-            )
+            log_losses.update({"total_mse": sum(monitor_mse.values()) if monitor_mse else 0.0})
             log_losses.update(int_monitor)
             log_losses.update(per_mode_losses)
             if self.ema_normalization_loss:
@@ -596,9 +586,7 @@ class PINCLossWrapper(LossWrapper):
             {
                 k: {
                     "value": (v.item() if isinstance(v, torch.Tensor) else v),
-                    "log10": (
-                        float(torch.log10(torch.as_tensor(v)).item()) if v > 0 else 0
-                    ),
+                    "log10": (float(torch.log10(torch.as_tensor(v)).item()) if v > 0 else 0),
                 }
                 for k, v in losses.items()
             },
@@ -640,24 +628,20 @@ class PINCGradientBalancer(GradientBalancer):
                 use_least_square=True,
                 losses=None,
             ):
-                from conflictfree.weight_model import EqualWeight
                 from conflictfree.length_model import ProjectionLength
+                from conflictfree.weight_model import EqualWeight
 
                 weight_model, length_model = (
                     weight_model or EqualWeight(),
                     length_model or ProjectionLength(),
                 )
-                grads = (
-                    torch.stack(grads) if not isinstance(grads, torch.Tensor) else grads
-                )
+                grads = torch.stack(grads) if not isinstance(grads, torch.Tensor) else grads
 
                 with torch.no_grad():
                     weights = weight_model.get_weights(
                         gradients=grads, losses=losses, device=grads.device
                     )
-                    units = torch.nan_to_num(
-                        grads / grads.norm(dim=1).unsqueeze(1), nan=0.0
-                    )
+                    units = torch.nan_to_num(grads / grads.norm(dim=1).unsqueeze(1), nan=0.0)
                     try:
                         best_dir = torch.linalg.lstsq(units, weights).solution
                     except Exception:
