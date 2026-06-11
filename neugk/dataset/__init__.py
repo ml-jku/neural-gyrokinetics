@@ -1,6 +1,6 @@
 import os
+import torch
 from torch.utils.data.dataloader import DataLoader
-import os
 
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
@@ -26,7 +26,7 @@ from neugk.dataset.augment import mask_modes
 
 
 def set_ulimit(limit: int = 65536):
-    # os.system(f"ulimit -n {limit}")
+    # increase file descriptor limit
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft < limit:
@@ -37,7 +37,7 @@ def set_ulimit(limit: int = 65536):
 
 
 def bind_worker_to_numa_node():
-    # Bind worker to same NUMA node as parent
+    # bind worker to same NUMA node as parent
     local_rank = os.environ.get("LOCAL_RANK")
     if local_rank is not None:
         try:
@@ -58,7 +58,7 @@ def _worker_init_fn(worker_id):
 
 
 def check_partial_holdouts(dataset_cfg):
-    # check that each trajectory in partial holdouts also appears in training
+    # ensure each trajectory in partial holdouts also appears in training
     for entry in dataset_cfg.partial_holdouts:
         file = entry.trajectory
         if file not in dataset_cfg.training_trajectories:
@@ -92,7 +92,7 @@ def _is_vae_checkpoint(cfg) -> bool:
 
 
 def get_data(cfg, rank: int = 0):
-    # increase file descriptor limit for CUDA IPC and shared memory handles
+    # increase file descriptor limit for CUDA IPC
     set_ulimit()
     assert cfg.dataset.name in ["cyclone"]
     backend = getattr(cfg.dataset, "backend", "h5")
@@ -116,8 +116,6 @@ def get_data(cfg, rank: int = 0):
                 if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
             ]
         )
-        # exclude fields not in dataset
-        # input_fields = input_fields.intersection({"df", "phi", "flux"})
         if not input_fields.issubset({"df", "phi", "flux", "fluxavg"}):
             raise ValueError(f"{input_fields} contains unknown values")
         if cfg.model.name in ["pointnet", "transolver", "transformer"]:
@@ -126,7 +124,7 @@ def get_data(cfg, rank: int = 0):
             "flux" in input_fields and "fluxavg" in input_fields
         ), "Cannot predict both fluxavg and flux..."
         train_input_fields = val_input_fields = sorted(input_fields)
-        # NOTE: for autoregressive evaluation, crop end of trajectory
+        # crop end of trajectory for autoregressive evaluation
         train_kwargs = {}
         val_kwargs = {"tail_offset": cfg.validation.n_eval_steps}
         if cfg.model.name in ["pointnet", "transolver", "transformer"]:
@@ -140,6 +138,11 @@ def get_data(cfg, rank: int = 0):
         use_kvikio_train = True
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
+        # serve GT spectra (kyspec/fluxspec) when gated in dataset.input_fields
+        for _sk in ("kyspec", "fluxspec"):
+            if _sk in set(getattr(cfg.dataset, "input_fields", []) or []):
+                train_input_fields.append(_sk)
+                val_input_fields.append(_sk)
 
         enc_cond = getattr(cfg.model, "encoder_conditioning", [])
         dec_cond = getattr(cfg.model, "decoder_conditioning", [])
@@ -206,12 +209,18 @@ def get_data(cfg, rank: int = 0):
     if not rank:
         print(f"Loading {train_input_fields} in dataset")
 
+    # bf16 train: prefer bf16 shards, uniform bf16 batch (fast reads converted, f32 downcast otherwise); val always f32; default unchanged f32
+    _prefer_dtype = getattr(cfg.dataset, "prefer_dtype", None)
+    _train_dtype = torch.bfloat16 if _prefer_dtype == "bf16" else torch.float32
+
     # dataloading backend
     if backend == "h5":
         train_backend = H5Backend(rank)
         val_backend = H5Backend(rank)
     elif backend == "gds":
-        train_backend = KvikIOBackend(rank, use_kvikio=use_kvikio_train)
+        train_backend = KvikIOBackend(
+            rank, use_kvikio=use_kvikio_train, prefer_dtype=_prefer_dtype
+        )
         # NOTE: for validation load without gds, save space, slow is acceptable
         val_backend = KvikIOBackend(rank, use_kvikio=False)
 
@@ -241,6 +250,7 @@ def get_data(cfg, rank: int = 0):
         num_workers=cfg.dataset.num_workers,
         real_potens=cfg.dataset.real_potens,
         decouple_mu=cfg.dataset.norm_decouple_mu,
+        dtype=_train_dtype,
         rank=rank,
         **train_kwargs,
     )
@@ -276,22 +286,21 @@ def get_data(cfg, rank: int = 0):
         **val_kwargs,
     )
 
-    # gpudirect storage only used if kvikio is required, oterwise raw bins
+    # gpudirect storage only used if kvikio is required, otherwise raw bins
     use_gpudirect = backend == "gds" and use_kvikio_train
-    # dataloaders
-    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
-    # NOTE: must be false when returning gpu data
+    # must be false when returning gpu data
     pin_memory = cfg.training.pin_memory and not use_gpudirect
+    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
     dataloader_kwargs = {}
     if cfg.training.num_workers > 0:
-        # increase FP limit on each subprocess (for large batch sizes)
+        # increase FD limit on each subprocess for large batch sizes
         dataloader_kwargs["worker_init_fn"] = _worker_init_fn
 
     if use_gpudirect:
-        # cannot for context to dataloader workers with gds
+        # cannot set context to dataloader workers with gds
         if cfg.training.num_workers > 0:
             dataloader_kwargs["multiprocessing_context"] = mp.get_context("spawn")
-        # keep memory requirements low
+        # keep memory low
         prefetch_factor = 1
 
     trainloader = DataLoader(
@@ -405,7 +414,7 @@ def get_data(cfg, rank: int = 0):
                     )
                 )
             elif key in ["vicreg_variance", "vicreg_covariance", "logdet"]:
-                # no additional augmentation function needed, just compute loss on latents
+                # compute loss on latents, no augmentation function needed
                 pass
             else:
                 raise ValueError(f"Unknown augmentation: {key}")
@@ -431,6 +440,7 @@ def get_data(cfg, rank: int = 0):
             holdout_trajectories_valloader,
             holdout_samples_valloader,
         )
+
     if rank == 0:
         print(f"Validation ratio: {val_ratio:.2f}")
     return datasets, dataloaders, augmentations

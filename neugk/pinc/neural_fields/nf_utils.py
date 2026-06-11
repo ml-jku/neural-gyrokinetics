@@ -207,61 +207,64 @@ def load_nf(path: str, device, grid_size=None):
     return model
 
 
+def _shift_zero(u: torch.Tensor, dim: int, off: int) -> torch.Tensor:
+    """neighbour shift along `dim` with zero fill, matching scipy convolve mode='constant'."""
+    out = torch.zeros_like(u)
+    dst = [slice(None)] * u.ndim
+    src = [slice(None)] * u.ndim
+    if off > 0:   # out[idx] = u[idx-1]
+        dst[dim], src[dim] = slice(1, None), slice(0, -1)
+    else:         # out[idx] = u[idx+1]
+        dst[dim], src[dim] = slice(0, -1), slice(1, None)
+    out[tuple(dst)] = u[tuple(src)]
+    return out
+
+
 def optical_flow_5d(
-    x: np.ndarray,
-    deltas: Optional[np.ndarray] = None,
+    x,
+    deltas=None,
     alpha: float = 1.0,
     n_iters: int = 50,
     kernel_size: Optional[Tuple[int]] = None,
 ):
+    """Iterative Horn-Schunck 5D optical flow, vectorised in torch (runs on x's device).
+
+    Numerically matches the prior scipy reference: channel-mean intensity, central-difference
+    spatial gradients (edge_order=1), and the +-1 star-stencil smoothing with zero (constant)
+    boundary -- here as shifted neighbour-sums instead of scipy.ndimage.convolve, which is the
+    only behavioural change and is exact for the star stencil (its nonzero taps are always +-1).
     """
-    Iterative Horn-Schunck 5D optical flow. Enforces smoothness via local averaging.
-    """
-    # channel mean to get intensity
-    x_intensity = x.mean(axis=0)
-    # temporal derivative and mid-point intensity
-    x1 = x_intensity[:-1]
-    x2 = x_intensity[1:]
-    # account for deltas
-    deltas = deltas if deltas is not None else np.ones(x1.shape[0])
+    if not torch.is_tensor(x):
+        x = torch.as_tensor(x)
+    if x.dtype not in (torch.float32, torch.float64):
+        x = x.float()
+    x_intensity = x.mean(dim=0)
+    x1, x2 = x_intensity[:-1], x_intensity[1:]
+    if deltas is None:
+        deltas = torch.ones(x1.shape[0], dtype=x.dtype, device=x.device)
+    else:
+        deltas = torch.as_tensor(deltas, dtype=x.dtype, device=x.device)
     deltas = deltas.reshape(-1, *[1] * 5)
     xt = (x2 - x1) / deltas
     x_mid = 0.5 * (x1 + x2)
 
-    # generalized 5d spatial gradients
-    grads = np.gradient(x_mid, axis=(1, 2, 3, 4, 5))
-    # denominator (alpha^2 + |grad|^2)
-    sum_squared_grads = sum(g**2 for g in grads)
-    denominator = alpha**2 + sum_squared_grads
-    velocity = np.zeros((5, *xt.shape))
-    if n_iters == 0:
-        # non iterative (normal flow, local only)
-        for i, g in enumerate(grads):
-            velocity[i] = -g * xt / denominator
-    else:
-        # iterative smoothing with averaging kernel (global approx)
-        kernel_size = kernel_size if kernel_size else (3, 3, 3, 3, 3)
-        kernel = np.zeros((1, *kernel_size))
-        neighbor_weight = 1.0 / (5 * 2)
-        # star stencil
-        for d in range(5):
-            idx_l = [k // 2 for k in kernel_size]
-            idx_r = [k // 2 for k in kernel_size]
-            idx_l[d] -= 1
-            idx_r[d] += 1
-            kernel[(0, *idx_l)] = neighbor_weight
-            kernel[(0, *idx_r)] = neighbor_weight
-        for _ in range(n_iters):
-            # compute local averages for each component
-            u_avg = np.stack([convolve(u, kernel, mode="constant") for u in velocity])
-            # compute brightness consistency update
-            grad_dot_u_avg = sum(grads[i] * u_avg[i] for i in range(5))
-            # horn schunck update
-            for i in range(5):
-                velocity[i] = u_avg[i] - grads[i] * (grad_dot_u_avg + xt) / denominator
+    grads = torch.stack(torch.gradient(x_mid, dim=(1, 2, 3, 4, 5), edge_order=1), 0)  # (5, T-1, *5d)
+    denominator = alpha**2 + (grads**2).sum(0)
+    if n_iters == 0:  # non-iterative normal flow (local only)
+        return -grads * xt / denominator
+    velocity = torch.zeros_like(grads)
+    spatial_dims = (2, 3, 4, 5, 6)  # the 5 spatial axes of the stacked (component, seq, *5d) tensor
+    neighbor_weight = 1.0 / (5 * 2)
+    for _ in range(n_iters):
+        # star-stencil local average = zero-padded +-1 neighbour sum over the 5 spatial axes
+        u_avg = sum(_shift_zero(velocity, d, +1) + _shift_zero(velocity, d, -1)
+                    for d in spatial_dims) * neighbor_weight
+        grad_dot_u_avg = (grads * u_avg).sum(0)
+        velocity = u_avg - grads * (grad_dot_u_avg + xt) / denominator
     return velocity
 
 
-def endpoint_error(x1: np.ndarray, x2: np.ndarray, optical_flow_fn: Callable):
+def endpoint_error(x1, x2, optical_flow_fn: Callable):
     """Endpoint error (EPE) between optical flow fields of two sequences."""
-    return float(np.mean((optical_flow_fn(x1) - optical_flow_fn(x2)) ** 2))
+    d = optical_flow_fn(x1) - optical_flow_fn(x2)
+    return float((d**2).mean())

@@ -47,7 +47,8 @@ def compute_data_loss(
             return torch.sum((pred - target) ** 2) / (torch.sum(target**2) + eps)
         return (pred - target) ** 2 / (target**2 + eps)
     if loss_type == "relative_l1":
-        return (torch.abs(pred - target) / (torch.abs(target) + eps)).mean()
+        # global ratio ||pred-target||_1 / ||target||_1; per-element divides by near-zero phi and blows up
+        return torch.sum(torch.abs(pred - target)) / (torch.sum(torch.abs(target)) + eps)
     if loss_type == "log_error":
         return F.mse_loss(
             torch.log(torch.abs(pred) + eps),
@@ -131,6 +132,50 @@ def compute_spectral_loss(
         pl, tl = torch.log(torch.abs(pred) + eps), torch.log(torch.abs(target) + eps)
         return F.l1_loss(pl, tl) if "l1" in loss_type else F.mse_loss(pl, tl)
     raise ValueError(f"unknown spectral loss type: {loss_type}")
+
+
+def served_spectral_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    mode_std: Optional[torch.Tensor] = None,
+    loss_type: str = "log_std_l1",
+    eps: float = EPS,
+) -> torch.Tensor:
+    """Per-mode std-normalised, log-space spectral loss against a served GT spectrum.
+
+    Both ``pred`` and ``target`` are spectral traces (last axis = wavenumber
+    mode). The loss is taken in ``log1p`` space and divided by the per-mode
+    standard deviation ``mode_std`` of the (served, log1p-transformed) ground
+    truth spectrum, so every mode contributes O(1) regardless of its raw
+    magnitude (the kyspec/qspec modes span several decades). This is the single
+    spectral formulation shared by the autoencoder and neural-field paths.
+
+    ``mode_std`` is broadcast over any leading (batch) axes of ``pred``/``target``.
+    When ``mode_std`` is ``None`` it falls back to the batch std of the GT log
+    spectrum, so the loss is still O(1) without served stats.
+
+    ``loss_type`` selects ``l1`` vs ``mse`` ("log_std_l1" / "log_std_mse"); the
+    ``std`` normalisation can be dropped with "log_l1" / "log_mse" (plain log
+    space, no per-mode rescale).
+    """
+    pl = torch.log1p(torch.clamp(torch.abs(pred), min=0.0))
+    tl = torch.log1p(torch.clamp(torch.abs(target), min=0.0))
+    diff = pl - tl
+    if "std" in loss_type:
+        use_mode_std = (
+            mode_std is not None and mode_std.shape[-1] == tl.shape[-1]
+        )
+        if use_mode_std:
+            std = mode_std.to(diff.device, diff.dtype)
+        else:
+            # fall back to the GT log-spectrum's own per-mode std over the batch
+            std = (
+                tl.std(dim=tuple(range(tl.ndim - 1)), keepdim=True)
+                if tl.ndim > 1
+                else tl.std()
+            )
+        diff = diff / (std + eps)
+    return diff.abs().mean() if "l1" in loss_type else (diff**2).mean()
 
 
 # --------------------------------------------------------------------------- #
@@ -250,6 +295,78 @@ def mass_loss(pred_df: torch.Tensor, gt_df: torch.Tensor) -> torch.Tensor:
     return F.l1_loss(pred_df.sum(), gt_df.sum())
 
 
+def velocity_moment_errors(
+    pred_df: torch.Tensor,
+    gt_df: torch.Tensor,
+    geom: Dict[str, torch.Tensor],
+    eps: float = EPS,
+) -> Dict[str, float]:
+    """Held-out velocity-moment reconstruction errors for an unbatched snapshot.
+
+    These quantities (density, parallel momentum, energy, free energy) are NOT in
+    the training loss, so they answer the "differently biased, not better" critique.
+    On ground truth they are NOT invariant (the 0th moment Sigma f flips sign and
+    the free energy Sigma f^2 drifts over a trajectory; the turbulence is
+    flux-driven/sourced), so each metric is the reconstruction error of the
+    quantity against the time-varying ground truth, not a deviation-from-constant.
+
+    ``pred_df``/``gt_df`` have axes ``(channels, vpar, mu, s, x, y)`` (real-space
+    full_df). The velocity volume element is ``intvp * intmu * bn`` (the velocity
+    part of the phase-space measure ``d3v = ints*d2X*intmu*bn*intvp`` in
+    ``FluxIntegral.pev_fluxes``, dropping the s/x/y integration). Density,
+    momentum and energy are computed as FIELDS over ``(s, x, y)`` by summing only
+    the velocity axes ``(vpar, mu)`` and the energy kernel is the kinetic
+    ``vpgr^2 + 2*mugr*bn`` matching ``eflux`` in ``pev_fluxes``. Each is scored as
+    a relative L1 against GT; free energy is a scalar positive ``|FE_p-FE_g|/FE_g``.
+    """
+    pred = pred_df.detach().double()
+    gt = gt_df.detach().double()
+
+    def _w(name, axis):
+        # geom weight (1D over its velocity/space axis) -> broadcast to df axes
+        g = geom[name].detach().to(pred.dtype).to(pred.device)
+        shape = [1] * pred.ndim
+        shape[axis] = g.numel()
+        return g.reshape(shape)
+
+    # df axes: (channels, vpar, mu, s, x, y) -> vpar=1, mu=2, s=3
+    intvp = _w("intvp", 1)
+    intmu = _w("intmu", 2)
+    bn = _w("bn", 3)
+    vpgr = _w("vpgr", 1)
+    mugr = _w("mugr", 2)
+
+    # velocity volume element (velocity part of d3v)
+    dv = intvp * intmu * bn
+    energy_kernel = vpgr**2 + 2.0 * mugr * bn
+    vel_axes = (1, 2)  # integrate only vpar, mu -> fields over (channels, s, x, y)
+
+    def _moment(df, kernel):
+        return (kernel * df * dv).sum(dim=vel_axes)
+
+    def _rel_l1(p_field, g_field):
+        return float(
+            (p_field - g_field).abs().sum() / (g_field.abs().sum() + eps)
+        )
+
+    density_l1 = _rel_l1(_moment(pred, 1.0), _moment(gt, 1.0))
+    momentum_l1 = _rel_l1(_moment(pred, vpgr), _moment(gt, vpgr))
+    energy_l1 = _rel_l1(_moment(pred, energy_kernel), _moment(gt, energy_kernel))
+
+    # free energy: clean held-out positive scalar Sigma f^2 (use instead of
+    # -int f ln f, which is undefined for signed delta-f); relative error.
+    fe_pred = (pred**2).sum()
+    fe_gt = (gt**2).sum()
+    free_energy_err = float((fe_pred - fe_gt).abs() / (fe_gt + eps))
+
+    return {
+        "density_l1": density_l1,
+        "momentum_l1": momentum_l1,
+        "energy_l1": energy_l1,
+        "free_energy_err": free_energy_err,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Integral losses (neural-field reference path)
 # --------------------------------------------------------------------------- #
@@ -304,13 +421,35 @@ def spectra_losses(
     gt_eflux: torch.Tensor,
     ds: float,
     aggregate: str = "mean",
+    spectral_loss_type: str = "l1",
+    mode_stds: Optional[Dict[str, torch.Tensor]] = None,
 ):
-    """Spectral-trace, monotonicity and mass losses for an unbatched snapshot."""
+    """Spectral-trace, monotonicity and mass losses for an unbatched snapshot.
+
+    ``spectral_loss_type`` selects the per-spectrum loss: ``"l1"`` (legacy raw
+    L1 on the spectral trace) or a served/std-normalised log-space variant
+    ("log_std_l1" / "log_std_mse" / "log_l1" / ...), in which case ``mode_stds``
+    provides the per-mode log1p std of the served GT spectrum per key (e.g.
+    ``{"kyspec": ..., "qspec": ...}``). This is identical to the autoencoder
+    path's ``compute_spectral_loss`` so AE and NF use the same treatment.
+    """
     pred_eflux, gt_eflux = pred_eflux.squeeze(), gt_eflux.squeeze()
     pred_diag = diagnostics(phi_fft(pred_phi), pred_eflux, ds=ds, aggregate=aggregate)
     gt_diag = diagnostics(phi_fft(gt_phi), gt_eflux, ds=ds, aggregate=aggregate)
 
-    losses = {f"{k} loss": F.l1_loss(pred_diag[k], gt_diag[k]) for k in pred_diag}
+    mode_stds = mode_stds or {}
+    use_served = "log_std" in spectral_loss_type or "served" in spectral_loss_type
+    losses = {}
+    for k in pred_diag:
+        if use_served:
+            losses[f"{k} loss"] = served_spectral_loss(
+                pred_diag[k],
+                gt_diag[k],
+                mode_std=mode_stds.get(k),
+                loss_type=spectral_loss_type,
+            )
+        else:
+            losses[f"{k} loss"] = F.l1_loss(pred_diag[k], gt_diag[k])
     losses.update(monotonicity_loss(pred_diag))
     losses["mass loss"] = mass_loss(pred_df, gt_df)
     return losses, (gt_diag, pred_diag)

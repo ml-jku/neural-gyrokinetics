@@ -149,7 +149,8 @@ class Autoencoder(Reconstructor):
             elif self.vapor:
                 size += int(gt.full_df.numel() * 2 * 4 / 64)  # 2ch f32, hardcoded ratio
             else:
-                size += ae.encode(df, condition=cond)[0].nbytes
+                # latent is stored at bf16 (2 bytes/elem), not the f32 the encoder returns
+                size += ae.encode(df, condition=cond)[0].numel() * 2
             torch.cuda.empty_cache()
         return dfs, size
 
@@ -227,23 +228,23 @@ def nf_scaling_reconstructors(
             continue
         weights_by_cr[cr][traj][t] = f.as_posix()
 
-    # PINC-fine-tuned checkpoints (overwrite if present)
-    int_pat = re.compile(rf"int_{model_type}_([\w.]+)_t(\d+)_x(\d+)\.pt$")
-    has_int: set = set()
-    for f in ckp_dir.glob(f"int_{model_type}_*.pt"):
-        m = int_pat.match(f.name)
-        if not m:
-            continue
-        traj, t, cr = m.groups()
-        traj = traj.split(".")[0]
-        t, cr = int(t), int(cr)
-        if cr < min_cr or cr > max_cr:
-            continue
-        weights_by_cr[cr][traj][t] = f.as_posix()
-        has_int.add(cr)
-
-    # filter to int-only if requested
+    # PINC-fine-tuned checkpoints: ONLY for the PINC family. The plain-NF family
+    # keeps the density pretrain (mlp_*); otherwise the int_mlp_* overwrite would
+    # collapse both families onto the same PINC checkpoints (identical curves).
     if include_int_only:
+        int_pat = re.compile(rf"int_{model_type}_([\w.]+)_t(\d+)_x(\d+)\.pt$")
+        has_int: set = set()
+        for f in ckp_dir.glob(f"int_{model_type}_*.pt"):
+            m = int_pat.match(f.name)
+            if not m:
+                continue
+            traj, t, cr = m.groups()
+            traj = traj.split(".")[0]
+            t, cr = int(t), int(cr)
+            if cr < min_cr or cr > max_cr:
+                continue
+            weights_by_cr[cr][traj][t] = f.as_posix()
+            has_int.add(cr)
         weights_by_cr = {cr: w for cr, w in weights_by_cr.items() if cr in has_int}
 
     # build reconstructors

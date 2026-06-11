@@ -27,8 +27,7 @@ from neugk.pinc.peft_utils import setup_peft_stage, PEFT_PARAM_KEYS
 class PINCRunner(BaseRunner):
     """PINCRunner class."""
 
-    # physics-loss term keys an AE may bring in (integral + spectral). Used to
-    # validate/route the training.physics_mode knob.
+    # physics-loss keys an AE brings (integral + spectral); validate training.physics_mode
     PHYSICS_LOSS_KEYS = (
         "phi",
         "flux",
@@ -125,6 +124,17 @@ class PINCRunner(BaseRunner):
         weights = self.setup_common_losses(model_cfg)
         self.physics_mode = self._resolve_physics_mode(model_cfg)
         dataset_stats = {}
+        # expose per-mode log1p std of the served GT spectra so the spectral
+        # loss can std-normalise (analogous to phi_std/flux_std). kyspec drives
+        # the kyspec loss, fluxspec the qspec loss.
+        for _sk, _stat_key in (("kyspec", "kyspec_std"), ("fluxspec", "qspec_std")):
+            try:
+                _st = self.trainset.get_spectral_stats(_sk)
+                dataset_stats[_stat_key] = torch.as_tensor(
+                    _st["std"], dtype=torch.float32
+                )
+            except (KeyError, AttributeError):
+                pass
         augmentations = [
             k
             for k in getattr(self.cfg.dataset, "augment", {}).keys()
@@ -166,9 +176,9 @@ class PINCRunner(BaseRunner):
 
         self._load_checkpoints()
 
-        # optional freeze
+        # optionally freeze AE weights
         if getattr(model_cfg, "freeze_ae", False):
-            print("Freezing autoencoder weights, training only eflux_head.")
+            print("freezing autoencoder weights, training only eflux_head")
             for name, param in self.model.named_parameters():
                 if "eflux_head" not in name:
                     param.requires_grad = False
@@ -184,16 +194,14 @@ class PINCRunner(BaseRunner):
 
         if self.use_deepspeed:
             assert not is_muon, (
-                "Muon optimizer is incompatible with DeepSpeed "
-                "(uses dist.all_gather on raw params which conflicts with ZeRO)."
+                "muon optimizer incompatible with DeepSpeed (dist.all_gather conflicts with ZeRO)"
             )
             assert grad_mode != "full", (
-                "Gradient balancer 'full' mode is incompatible with DeepSpeed "
-                "(requires retain_graph=True which conflicts with ZeRO gradient hooks)."
+                "gradient balancer 'full' mode incompatible with DeepSpeed (retain_graph conflicts with ZeRO)"
             )
             import deepspeed
 
-            # build optimizer for DeepSpeed to wrap
+            # build optimizer for DeepSpeed
             params = [p for p in self.model.parameters() if p.requires_grad]
             if not params:
                 raise ValueError("no trainable params")
@@ -271,7 +279,7 @@ class PINCRunner(BaseRunner):
                 n_tasks=len(self.loss_wrap.active_losses),
             )
 
-        # whether integral losses need geometry on GPU during training
+        # check if integral losses need geometry on GPU
         int_spec_keys = set(
             self.loss_wrap._int_losses + self.loss_wrap._spectral_losses
         )
@@ -301,6 +309,10 @@ class PINCRunner(BaseRunner):
         self.ae_ckpt_dict = {}
 
         if self.cfg.stage == "peft":
+            # load stage-1 AE weights from ae_checkpoint (run dir or .pth file); fallback to legacy output_path/../best.pth
+            ae_ckpt = getattr(self.cfg, "ae_checkpoint", None)
+            if ae_ckpt:
+                ckpt_path = ae_ckpt if os.path.isfile(ae_ckpt) else os.path.join(ae_ckpt, ckpt_name)
             if not ckpt_path or not os.path.exists(ckpt_path):
                 raise ValueError("peft requires ae_checkpoint")
 
@@ -325,6 +337,17 @@ class PINCRunner(BaseRunner):
                     f"({peft_info['trainable_percentage']:.2f}%)"
                 )
                 self.start_epoch = 0
+        elif getattr(self.cfg, "ae_checkpoint", None):
+            # warm-start full-model run (e.g. scheduled continuation from df-only pretrain); load weights, restart epoch=0 for scheduler
+            ae_ckpt = self.cfg.ae_checkpoint
+            wpath = ae_ckpt if os.path.isfile(ae_ckpt) else os.path.join(ae_ckpt, ckpt_name)
+            if not os.path.exists(wpath):
+                raise ValueError(f"ae_checkpoint not found: {wpath}")
+            self.model, self.ae_ckpt_dict = load_autoencoder(
+                wpath, model=self.model, device=self.device
+            )
+            print(f"warm-started full model from {wpath} (epoch reset to 0)")
+            self.start_epoch = 0
         elif ckpt_path and os.path.exists(ckpt_path):
             self.model, self.ae_ckpt_dict = load_autoencoder(
                 ckpt_path, model=self.model, device=self.device
@@ -416,8 +439,7 @@ class PINCRunner(BaseRunner):
         info_dict = defaultdict(list)
         t_start_data = perf_counter_ns()
 
-        # select the per-stage train step once; the autoencoder step needs the
-        # denormalize fn only when masked-mode modelling is active.
+        # select per-stage train step; denormalize_fn only needed for mask-modes
         step_fn = {
             "autoencoder": train_step_autoencoder,
             "peft": train_step_peft,
@@ -482,6 +504,7 @@ class PINCRunner(BaseRunner):
             info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
             t_start_bkd = perf_counter_ns()
 
+            # collect per-task losses for gradient balancing (exclude totals and completed tasks)
             grad_losses = [
                 v
                 for k, v in losses.items()

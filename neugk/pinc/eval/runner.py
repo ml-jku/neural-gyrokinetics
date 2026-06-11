@@ -16,6 +16,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Sequence
 
 import numpy as np
+import torch
 
 from neugk.pinc.neural_fields.data import CycloneNFDataset
 from neugk.pinc.eval.metrics import (
@@ -26,6 +27,7 @@ from neugk.pinc.eval.metrics import (
     temporal_epe,
 )
 from neugk.pinc.eval.reconstructors import Reconstructor
+from neugk.physics.diagnostics import velocity_moment_errors
 
 
 def _gt_snapshots(gt: CycloneNFDataset):
@@ -34,6 +36,8 @@ def _gt_snapshots(gt: CycloneNFDataset):
     return [gt.full_df]
 
 
+@torch.no_grad()  # eval never needs gradients; without this the forwards retain
+# autograd graphs and OOM the GPU on the wide low-CR nets (then illegal-access cascade).
 def evaluate_method(
     reconstructor: Reconstructor,
     trajectories: Sequence[str],
@@ -62,20 +66,36 @@ def evaluate_method(
             metrics["cr"].append(float(gt.full_df.nbytes) / csize)
 
         pred_diags, gt_diags = [], []
+        # run the metric physics (FluxIntegral FFTs, spectra) on-device; the FluxIntegral
+        # bessel/i0 init stays cpu-isolated internally (B300 special-fn crash), the rest is gpu-safe.
+        geom = {k: v.to(device) for k, v in gt.geom.items()}
         for pred_df, gt_df in zip(dfs, gt_dfs):
-            pred_diags.append(spectral_diagnostics(pred_df, gt.geom, ds))
+            pred_df, gt_df = pred_df.to(device), gt_df.to(device)
+            pred_diags.append(spectral_diagnostics(pred_df, geom, ds))
             if reconstructor.name == "GT":
                 continue
-            gt_diags.append(spectral_diagnostics(gt_df, gt.geom, ds))
-            p_phi, p_ef = integrate(pred_df, gt.geom)
-            g_phi, g_ef = integrate(gt_df, gt.geom)
+            gt_diags.append(spectral_diagnostics(gt_df, geom, ds))
+            p_phi, p_ef = integrate(pred_df, geom)
+            g_phi, g_ef = integrate(gt_df, geom)
             for k, v in ml_eval(pred_df, gt_df, p_phi, g_phi, p_ef, g_ef).items():
                 metrics[k].append(v)
+            # held-out velocity-moment reconstruction fidelity (not in training loss)
+            for k, v in velocity_moment_errors(pred_df, gt_df, geom).items():
+                metrics[k].append(v)
 
-        # store as {key: [per-timestep arrays]} for the visualization notebooks
-        diagnostics_per_traj[traj] = (
-            {k: [d[k] for d in pred_diags] for k in pred_diags[0]} if pred_diags else {}
+        # store as {key: [per-timestep arrays]} for the visualization notebooks.
+        # spectra come back as torch tensors; convert to numpy here (storage boundary
+        # only, not in the metric math). also keep the matching GT spectra inline
+        # (kyspec_gt/qspec_gt/...) so the cascade plot can overlay pred vs GT.
+        _np = lambda t: t.detach().cpu().numpy()
+        traj_diag = (
+            {k: [_np(d[k]) for d in pred_diags] for k in pred_diags[0]} if pred_diags else {}
         )
+        if gt_diags:
+            traj_diag.update(
+                {f"{k}_gt": [_np(d[k]) for d in gt_diags] for k in gt_diags[0]}
+            )
+        diagnostics_per_traj[traj] = traj_diag
         if reconstructor.name != "GT":
             metrics.setdefault("endpoint", []).append(temporal_epe(gt_dfs, dfs))
             for k, v in time_averaged_spectral_metrics(pred_diags, gt_diags).items():
@@ -118,7 +138,13 @@ def run_scaling(
             continue
         entries = []
         for r in reconstructors:
-            agg, _ = evaluate_method(r, trajectories, timesteps, path, backend, device)
+            # failproof: a variant that cannot reach its target CR (traditional knob
+            # out of range) or whose NF was never trained must not kill the family.
+            try:
+                agg, _ = evaluate_method(r, trajectories, timesteps, path, backend, device)
+            except Exception as e:
+                print(f"[scaling]   {r.name}: skipped ({type(e).__name__}: {e})")
+                continue
             cr = agg.get("cr", (None,))[0]
             # flatten (mean, std) → mean only for rate-distortion plots
             entry = {"cr": cr, "name": r.name}

@@ -20,11 +20,10 @@ from omegaconf import DictConfig
 from peft import LoraConfig, get_peft_model, EvaConfig
 
 
-# adapter parameter name fragments, used both to select muon groups and to
-# filter base-vs-adapter weights when (de)serialising checkpoints.
+# adapter parameter name fragments; used to select muon groups and filter base-vs-adapter weights in checkpoints
 PEFT_PARAM_KEYS = ("lora_A", "lora_B", "lora_embedding", "eva_")
 
-# strategies map a named preset to the ordered layer groups it adapts.
+# named strategies map to ordered layer groups to adapt
 _STRATEGY_GROUPS = {
     "comprehensive": ("attention_qkv", "attention_proj", "mlp_layers", "bottleneck"),
     "attention_mlp": ("attention_qkv", "attention_proj", "mlp_layers"),
@@ -41,7 +40,7 @@ _STRATEGY_GROUPS = {
     ),
 }
 
-# defaults for a fresh adapter config when none is supplied.
+# default adapter config when none supplied
 _DEFAULT_PEFT = {
     "r": 64,
     "lora_alpha": 1,
@@ -174,7 +173,7 @@ def attach_peft_adapters(
 
     peft_model = get_peft_model(model, peft_config)
 
-    # unwrap to the underlying base model (PEFT injects adapters in place)
+    # unwrap to underlying base model (PEFT injects adapters in place)
     if hasattr(peft_model, "base_model") and hasattr(peft_model.base_model, "model"):
         base = peft_model.base_model.model
     elif hasattr(peft_model, "model"):
@@ -225,12 +224,10 @@ def setup_peft_stage(
     config: DictConfig,
     peft_config: Optional[Dict] = None,
 ) -> Tuple[nn.Module, Dict]:
-    """Attach adapters for the fine-tuning stage from a Hydra ``autoencoder.peft`` config.
-
-    Returns the adapted model plus an info dict (target modules, parameter counts,
-    resolved config, method) for logging.
-    """
-    peft_cfg = getattr(config.autoencoder, "peft", {})
+    """Attach adapters for fine-tuning stage from Hydra ``autoencoder.peft`` config; return model + info dict."""
+    # model block lives under "autoencoder" or "model"
+    model_cfg = getattr(config, "autoencoder", None) or getattr(config, "model", None)
+    peft_cfg = getattr(model_cfg, "peft", {}) if model_cfg is not None else {}
     method = peft_cfg.get("method", "lora") if peft_cfg else "lora"
     peft_config = peft_config or (peft_cfg.get(method.lower(), {}) if peft_cfg else {})
 
