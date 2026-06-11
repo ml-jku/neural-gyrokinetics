@@ -9,11 +9,12 @@
 defaults:
   - override /dataset: pinc
   - override /model: pinc/vqvae
-  - override /logging: no_logging
+  - override /logging: wandb
   - override /validation: default
 
 experiment_id: pinc_revival_vqvae_lfq
-workflow: pinc_autoencoder
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
 seed: 0
 mode: train
 eval: true
@@ -36,3 +37,6 @@ training:
 amp:
   enable: true
   bfloat: true
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity

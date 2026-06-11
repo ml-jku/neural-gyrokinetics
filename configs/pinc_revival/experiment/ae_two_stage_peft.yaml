@@ -13,7 +13,7 @@
 defaults:
   - override /dataset: pinc
   - override /model: pinc/ae
-  - override /logging: no_logging
+  - override /logging: wandb
   - override /validation: default
 
 experiment_id: pinc_revival_ae_two_stage_peft
@@ -53,10 +53,10 @@ model:
   loss_weights:
     df: 1.0
   extra_loss_weights:
-    phi_int: 1.0e-4
-    flux_int: 1.0e-4
-    qspec: 1.0e-3
-    kyspec: 1.0e-3
+    phi_int: 1.0
+    flux_int: 1.0
+    qspec: 1.0
+    kyspec: 1.0
   loss_scheduler: {}
 
 training:
@@ -64,11 +64,17 @@ training:
   n_epochs: 100
   batch_size: 16
   learning_rate: 3e-4
-  integral_loss_type: complex_mse
+  integral_loss_type: relative_l1
+  spectral_loss_type: relative_l1
   eval_loss_type: mse
+  eval_integral_loss_type: mse
+  eval_spectral_loss_type: l1
 
 amp:
   enable: false   # integrals/FFT in the physics losses need full precision
 
 dataset:
   input_fields: ["df", "phi", "flux"]
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity

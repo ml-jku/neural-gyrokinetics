@@ -8,16 +8,20 @@
 defaults:
   - override /dataset: pinc
   - override /model: pinc/vqvae
-  - override /logging: no_logging
+  - override /logging: wandb
   - override /validation: default
 
 experiment_id: pinc_revival_vqvae_100000x
-workflow: pinc_autoencoder
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
 seed: 0
 mode: train
 eval: true
 device: cuda
 load_ckpt: false
+logging:
+  project: pinc_revival
+  entity: null   # use the authed wandb account's default entity
 
 model:
   vq:

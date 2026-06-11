@@ -1,144 +1,85 @@
 # Neural Gyrokinetics
-Machine learning tools to accelerate high-dimensional plasma turbulence simulations.
-Neural Gyrokinetics includes research code for
-- <img src="pages/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>[GyroSwin](https://arxiv.org/abs/2510.07314)</strong>, a 5D neural surrogate for nonlinear gyrokinetics.
-- <img src="pages/imgs/pinc_icon.png" alt="PINC Icon" height="12px"> <strong>[PINC](https://arxiv.org/abs/2602.04758)</strong>, physics-informed neural compression for plasma data.
+
+Machine learning tools to accelerate and compress high-dimensional plasma turbulence simulations. A growing collection of research code at the intersection of scientific machine learning and gyrokinetics.
+
+- <img src="pages/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="12px"> <strong>[GyroSwin](https://arxiv.org/abs/2510.07314)</strong>: a 5D neural surrogate for nonlinear gyrokinetics. [blogpost](https://ml-jku.github.io/blog/2025/gyroswin/)
+- <img src="pages/imgs/pinc_icon.png" alt="PINC Icon" height="12px"> <strong>[PINC](https://arxiv.org/abs/2602.04758)</strong>: physics-informed neural compression of plasma data. [blogpost](https://ml-jku.github.io/blog/2026/pinc/)
+- <strong>Diffusion</strong>: latent flow matching over the learned representations for generative sampling.
+- <strong>[gyaradax](https://arxiv.org/abs/2604.06085)</strong>: a differentiable JAX gyrokinetic solver. [repo](https://github.com/gerkone/gyaradax) · [blogpost](https://gerkone.github.io/blog/gyaradax.html)
+
+This repository keeps growing as the project expands.
 
 ## Who is this for?
-For researchers at the intersection between scientific machine learning and plasma physics, or in general working on (accelerating) high-dimensional simulations.
+Researchers at the intersection of scientific machine learning and plasma physics, or anyone working on accelerating high-dimensional simulations.
 
-## Pretrained GyroSwin Models
-Our trained Gyroswin models are available on the huggingface hub. We provide all three model sizes of GyroSwin as reported in the paper: [Small](https://huggingface.co/ml-jku/gyroswin_small) | [Medium](https://huggingface.co/ml-jku/gyroswin_medium) | [Large](https://huggingface.co/ml-jku/gyroswin_large).
+## Models and data
+GyroSwin checkpoints are on the Hub in three sizes: [small](https://huggingface.co/ml-jku/gyroswin_small) | [medium](https://huggingface.co/ml-jku/gyroswin_medium) | [large](https://huggingface.co/ml-jku/gyroswin_large), with the in- and out-of-distribution evaluation cases at [gyroswin_cbc_id_ood](https://huggingface.co/datasets/ml-jku/gyroswin_cbc_id_ood).
 
-In addition we uploaded the different in-distribution and out-of-distribution cases we used for evaluation in the paper on the huggingface hub at [this link](https://huggingface.co/datasets/ml-jku/gyroswin_cbc_id_ood).
-The uploaded data contains the snapshot which we start from for the different simulations along with all necessary conditioning parameters. 
-To perform inference with a GyroSwin model, simply execute
+The PINC compression test set and model checkpoints (neural fields and autoencoders) are at [pinc_gkw](https://huggingface.co/datasets/gerkone/pinc_gkw). The complete trajectory set, with the per-trajectory GKW `input.dat` and generation config for reproducibility, is at [gyrokinetic-adiabatic-256traj](https://huggingface.co/datasets/gerkone/gyrokinetic-adiabatic-256traj).
 
+GyroSwin inference from the Hub:
 ```
 python -m neugk.gyroswin.eval.inference_from_hf
 ```
-  
-This script will automatically fetch all necessary data from the hub along with the model weights and perform inference in an autoregressive manner. Each prediction (df, phi, flux) will be stored in a newly generated directory called `predictions`. You can select which model checkpoint to load via the `--ckpt` option.
-
-## Data Generation
-The dataset used to train GyroSwin is too large to be easily distributed,
-but we include instructions on how to generate it as well as the configuration files needed in the `data_generation` directory. 
-
+This fetches the data and weights and rolls out autoregressively, writing each prediction (`df`, `phi`, `flux`) to `predictions/`. Select the checkpoint with `--ckpt`.
 
 ## Running
-Running is managed with Hydra configs, structured as follows.
-
+Experiments use Hydra configs (`configs/{dataset,logging,model,training,validation}`); training and evaluation run through `main.py`. To sample from a trained diffusion checkpoint:
 ```
-📁 configs
-├── 📁 dataset                     # Dataset configs (specify paths and trajectories here)
-├── 📁 logging                     # Logging configs
-├── 📁 model                       # Configs for GyroSwin and baselines
-├── 📁 training                    # Training configs
-└── 📁 validation                  # Validation configs
-```
-
-After generating and preprocessing the dataset, GyroSwin and baselines training can be started with `main.py`.
-
-## Diffusion Sample Generation
-To generate new samples from a trained diffusion checkpoint and save them as H5 files, use:
-
-```bash
 python generate_samples.py --config configs/generation/generate_samples.yaml
 ```
+setting `diffusion_checkpoint_dir`, `ae_checkpoint`, and `generation.{trajectories,output_dir}` in the config.
 
-Set the following fields in the config file:
-- `diffusion_checkpoint_dir`: path to the trained diffusion run directory (must contain `config.yaml` and checkpoint snapshots)
-- `ae_checkpoint`: path to AE checkpoint directory or file (optional if present in diffusion `config.yaml`)
-- `generation.trajectories`: trajectory pattern or list (for example `iteration_{0-5,7-12}.h5` or `ood_iteration_{0-4}.h5`)
-- `generation.output_dir`: directory for generated H5 files
+## Components
 
-You can also provide explicit conditioning vectors via `generation.conditions` instead of trajectories.
+<img src="pages/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="16px"> <strong>GyroSwin</strong> is a 5D vision transformer with shifted-window linear attention that captures the full nonlinear dynamics of gyrokinetic turbulence, predicting turbulent transport at a fraction of the simulation cost while preserving physics that quasilinear models miss. See the [blogpost](https://ml-jku.github.io/blog/2025/gyroswin/).
 
-## <img src="pages/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="18px"> GyroSwin
-<p align="center">
-  <img src="pages/imgs/figure1.png" alt="Figure 1" width="66%">
-</p>
-GyroSwin is a 5D vision transformer trained to capture the full nonlinear dynamics of gyrokinetic plasma turbulence. It uses shifted window linear attention, as global attention is too expensive for 5-dimensional grids.
-GyroSwin provides accurate predictions of turbulent transport at a fraction of the computational cost, while preserving key physical phenomena missed by tabular regression or quasilinear models.
+<img src="pages/imgs/pinc_icon.png" alt="PINC Icon" height="16px"> <strong>PINC</strong> compresses gyrokinetic turbulence data by up to 70,000x while preserving physical diagnostics, with a unified pipeline to assess how well compressors retain spatial and temporal turbulence. See the [blogpost](https://ml-jku.github.io/blog/2026/pinc/).
 
-Check out our [blogpost](https://ml-jku.github.io/blog/2025/gyroswin/)!
-
-
-## <img src="pages/imgs/pinc_icon.png" alt="PINC Icon" height="18px"> Physics-Informed Neural Compression of Plasma Data
-<p align="center">
-  <img src="pages/imgs/pinc.png" alt="Figure 1" width="66%">
-</p>
-
-__Physics-Inspired Neural Compression (PINC)__ investigates compression of (storage intensve) gyrokinetic plasma turbulence data by up to 70,000× while preserving key physical characteristics. It also proposes a unified evaluation pipeline to assess how well different compression techniques retain spatial and temporal turbulence phenomena.
-
-PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2026/pinc/).
-
+<strong>gyaradax</strong> is a differentiable JAX implementation of the gyrokinetic right-hand side, used for the physics losses and the PINN-residual baseline. [repo](https://github.com/gerkone/gyaradax) · [paper](https://arxiv.org/abs/2604.06085) · [blogpost](https://gerkone.github.io/blog/gyaradax.html)
 
 ## Project structure
 ```
-📁 data_generation                    # Info for generating gyrokinetics data from GKW
-
-📁 configs                            # Experiment configs
+📁 configs                            # Experiment configs (Hydra)
 
 📁 neugk
-├── 📁 gyroswin                       # Code from the GyroSwin paper
-│   ├── 📁 eval                       # Evaluation and analysis
-│   │   ├── 📄 evaluate.py            # Rollout evaluation functions
-│   │   └── 📄 inference_from_hf.py   # Inference utilities
-│   ├── 📁 models                     # Model architectures (GyroSwin and baselines)
-|   │   ├── 📁 baselines              # FNO, PointNet, Transformer and Transolver
-│   │   ├── 📄 gyroswin.py            # Multi-head UNet with cross attention (GyroSwin)
-│   │   └── 📄 x_layers.py            # Cross attention mixing blocks
-│   └── 📄 run.py                     # Gyroswin runner (train, log and eval)
+├── 📁 gyroswin                       # GyroSwin surrogate
+│   ├── 📁 eval                       # rollout evaluation and hub inference
+│   ├── 📁 models                     # GyroSwin and baseline architectures
+│   └── 📄 run.py                     # GyroSwin runner
 │
-├── 📁 pinc                           # Code from physics-inspired compression
-│   ├── 📁 autoencoders               # 5D swin autoencoder and VQ-VAE
-│   │   ├── 📄 ae_utils.py            # Loading and autoencoder training
-│   │   ├── 📄 evaluate.py            # Autoencoder evaluation functions
-│   │   ├── 📄 gk_autoencoder.py      # 5D AE, VAE and VQ-VAE models
-│   │   ├── 📄 vapor.py               # VAPOR baseline (by Choi et al., 2021)
-│   │   └── 📄 vector_quantize.py     # Vector quantization logic
-│   ├── 📁 neural_fields              # Neural fields models, training and evaluation
-│   │   ├── 📁 models                 # MLP, SIREN and WIRE
-│   │   ├── 📄 data.py                # Simple in-memory dataset and dataloader
-│   │   ├── 📄 gk_losses.py           # Neural field physics-informed losses
-│   │   ├── 📄 nf_train.py            # Neural field training
-│   │   ├── 📄 nf_utils.py            # Neural field utilities, evaluation and plotting
-│   │   └── 📄 trad.py                # Traditional compression funcions
-│   ├── 📄 losses.py                  # Extended PINC-specific losses and balancer
-│   ├── 📄 nf_main.py                 # Neural fields parallel runner and grid search
-│   ├── 📄 peft_utils.py              # LoRA utilities for PINC training of large models
+├── 📁 pinc                           # physics-informed neural compression
+│   ├── 📁 autoencoders               # 5D Swin AE, VAE, VQ-VAE, VAPOR baseline
+│   ├── 📁 neural_fields              # per-snapshot neural fields (incl. PINN-residual baseline)
+│   ├── 📁 eval                       # compression metrics, reconstructors, traditional baselines
+│   ├── 📄 losses.py                  # PINC integral and spectral losses
+│   ├── 📄 peft_utils.py              # LoRA/EVA adapters for the fine-tuning stage
+│   ├── 📄 nf_main.py                 # neural field parallel runner
 │   └── 📄 run.py                     # PINC autoencoder runner
-|
-├── 📁 dataset                        # Dataset utilities and preprocessing
-│   ├── 📄 augment.py                 # Data augmentation functions
-│   ├── 📄 cyclone.py                 # Gyrokinetics dataset class
-│   ├── 📄 cyclone_diff.py            # Autoencoder-specific dataset
-│   └── 📄 preprocess.py              # Preprocessing utilities
 │
-├── 📁 models                         # Model architectures
-│   ├── 📁 nd_vit                     # nD Vision Transformer modules
-│   │   ├── 📄 drop.py                # Dropout and regularization
-│   │   ├── 📄 patching.py            # Patching utilities
-│   │   ├── 📄 positional.py          # Positional encodings
-│   │   ├── 📄 swin_layers.py         # Swin Transformer layers
-│   │   └── 📄 vit_layers.py          # ViT layers
-│   ├── 📄 gk_unet.py                 # UNet swin model
-│   └── 📄 layers.py                  # Common layers (MLP, attention, conditioning)
-|
-├── 📄 eval.py                        # General evaluation and base class
-├── 📄 integrals.py                   # Gyrokinetics integrals (potential and flux)
-├── 📄 losses.py                      # Loss computation and gradient balancer
-└── 📄 runner.py                      # Base runner class
+├── 📁 diffusion                      # latent flow matching / diffusion
+│   ├── 📁 models                     # AR transformer, DiT, diffusion UNet
+│   └── 📄 run.py                     # diffusion runner
+│
+├── 📁 physics                        # gyrokinetic integrals and diagnostics
+│   ├── 📄 integrals.py               # potential and flux phase-space integrals
+│   └── 📄 diagnostics.py             # spectra and turbulence diagnostics
+│
+├── 📁 dataset                        # dataset classes, backends and preprocessing
+├── 📁 models                         # shared nD ViT / Swin building blocks
+├── 📄 evaluate.py                    # base evaluator
+├── 📄 losses.py                      # common losses and gradient balancer
+└── 📄 runner.py                      # base runner class
 
-📄 main.py                            # Entry point for training/experiments
+📄 main.py                            # training / evaluation entry point
+📄 generate_samples.py                # diffusion sampling entry point
 ```
 
 ## Citing
 
 ```
 @inproceedings{paischer2025gyroswin,
-    title={GyroSwin: 5D Surrogates for Gyrokinetic Plasma Turbulence Simulations}, 
+    title={GyroSwin: 5D Surrogates for Gyrokinetic Plasma Turbulence Simulations},
     author={Fabian Paischer and Gianluca Galletti and William Hornsby and Paul Setinek and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter},
     booktitle={Advances in Neural Information Processing Systems 38: Annual Conference on Neural Information Processing Systems 2025, NeurIPS 2025, San Diego, CA, USA, December 02 - 07, 2025},
     year={2025}
@@ -147,7 +88,7 @@ PINC is presented in our second [blogpost](https://ml-jku.github.io/blog/2026/pi
 
 ```
 @misc{galletti2026pinc,
-      title={Physics-Informed Neural Compression of High-Dimensional Plasma Data}, 
+      title={Physics-Informed Neural Compression of High-Dimensional Plasma Data},
       author={Gianluca Galletti and Gerald Gutenbrunner and Sandeep S. Cranganore and William Hornsby and Lorenzo Zanisi and Naomi Carey and Stanislas Pamela and Johannes Brandstetter and Fabian Paischer},
       year={2026},
       eprint={2602.04758},
