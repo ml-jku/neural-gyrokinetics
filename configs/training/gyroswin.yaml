@@ -1,0 +1,11 @@
+batch_size: 4
+n_epochs: 100
+learning_rate: 3.0e-4
+final_learning_rate: 1.0e-6
+weight_decay: 1.0e-6
+clip_grad: true
+clip_to: 1.0
+exclude_from_wd: [cond, pos_embed]
+amp:
+  enable: false
+  dtype: bf16

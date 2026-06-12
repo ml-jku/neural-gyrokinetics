@@ -1,0 +1,15 @@
+name: cyclone
+path: /local00/bioinf/galletti/preprocessed_kvikio
+backend: numpy
+training_trajectories: iteration_{0-3}
+validation_trajectories: iteration_{4-4}
+input_fields: [df]
+conditions: [itg, dg, s_hat, q]
+separate_zf: true
+offset: 0
+normalization:
+  df:
+    type: zscore
+    agg_axes: [0, 1, 3, 4, 5]
+normalization_scope: dataset
+normalization_stats: /local00/bioinf/galletti/preprocessed_kvikio/df_flux_phi_offset80_mu_57f5caf2_stats.pkl

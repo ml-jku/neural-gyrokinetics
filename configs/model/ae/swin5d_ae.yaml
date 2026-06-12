@@ -1,0 +1,27 @@
+name: ae
+decouple_mu: true
+latent_dim: 1024
+num_layers: 1
+hidden_mlp_ratio: 2.0
+patch:
+  patch_size: [4, 0, 4, 5, 4]
+  window_size: [4, 0, 4, 9, 4]
+  merging_depth: 2
+  unmerging_depth: 2
+  merging_hidden_ratio: 1.0
+  unmerging_hidden_ratio: 1.0
+  c_multiplier: 1
+vit:
+  num_heads: [16]
+  depth: [8]
+  use_rpb: true
+  gated_attention: true
+  qk_norm: true
+  qkv_bias: false
+bottleneck:
+  dim: 256
+  depth: 2
+  num_heads: 4
+  normalized_latent: false
+middle_depth: 2
+middle_num_heads: 4

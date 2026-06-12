@@ -1,0 +1,30 @@
+name: cyclone
+path: /local00/bioinf/galletti/preprocessed_kvikio
+backend: kvikio  # gpu-direct reads via cupy+kvikio, zero-copy to jax. falls back to numpy
+# train-only quantization (eval always reads fp32). values: null/fp32 (default), fp16, bf16, i8, i4.
+# falls back silently to fp32 when the sibling shard is missing. Shards are produced by
+# ``python -m neugk_jax.dataset.preprocess --mode=quantize --bits=<dtype>``.
+prefer_dtype: null
+training_trajectories: iteration_{0-3}
+validation_trajectories: iteration_{4-4}
+input_fields: [df]
+conditions: [itg, dg, s_hat, q]
+separate_zf: true
+offset: 0
+normalization:
+  df:
+    type: zscore
+    agg_axes: [0, 1, 3, 4, 5]
+  phi:
+    type: zscore
+    agg_axes: [0, 1, 2]
+normalization_scope: dataset
+normalization_stats: /local00/bioinf/galletti/preprocessed_kvikio/df_flux_phi_offset80_mu_57f5caf2_stats.pkl
+# trajectory filters — drop stable/non-turbulent runs (mean flux below 1.0 over first/last 80 steps).
+# matches upstream ``configs/dataset/cyclone.yaml``. set to null to disable.
+training_cond_filters:
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]
+eval_cond_filters:
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]

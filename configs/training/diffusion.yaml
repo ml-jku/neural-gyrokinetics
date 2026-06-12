@@ -1,14 +1,9 @@
-batch_size: 512
-n_epochs: 500
-num_workers: 2
-pin_memory: true
-learning_rate: 3e-3
-use_latest_checkpoint: false
-final_learning_rate: 1e-6
-weight_decay: 1e-6
-exclude_from_wd: ["cond"]
-predict_delta: false
-scheduler: "cosine"
+batch_size: 2
+n_epochs: 1
+learning_rate: 1.0e-4
+final_learning_rate: 1.0e-6
+weight_decay: 0.0
 clip_grad: true
 clip_to: 1.0
-gradnorm_balancer: "none"  # "none", "full", "pseudo"
+exclude_from_wd: []
+precompute_batch: 2

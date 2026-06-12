@@ -1,25 +1,12 @@
 defaults:
   - _self_
-  - dataset: cyclone
-  - model: multi
-  - logging: no_logging
-  - training: default
+  - model: ae/swin5d_ae
+  - dataset: cyclone_ae
+  - training: ae
   - validation: default
-  - optional experiment: null
+  - logging: none
+  - distributed: single
 
-experiment_id: test
+workflow: ae
 seed: 0
-output_path: /system/user/publicwork/galletti/checkpoints
-ddp:
-  enable: false
-  n_nodes: 1
-amp: 
-  enable: true  # set to false when using rope or integrals in training (complex / fft)
-  bfloat: true  # set to false for fno
-mode: "train"
-eval: true
-device: "cuda"
-load_ckpt: false
-workflow: "gyroswin" # "gyroswin", "pinc", "diffusion"
-stage: null  # training style, eg. "autoencoder", "peft"
-ae_checkpoint: null
+output_path: null

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neugk-jax"
+version = "0.0.1"
+description = "JAX/Equinox port of neural gyrokinetics."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.4.30",
+    "jaxlib>=0.4.30",
+    "equinox>=0.11.0",
+    "optax>=0.2.0",
+    "orbax-checkpoint>=0.5.0",
+    "ml-dtypes>=0.4",   # bf16 numpy dtype (quantize pipeline)
+    "omegaconf>=2.3",
+    "hydra-core>=1.3",
+    "einops>=0.7",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "tqdm>=4.65",
+    "wandb>=0.16",
+    "pyyaml>=6.0",
+    "matplotlib>=3.8",  # eval / parity figures
+]
+
+[project.optional-dependencies]
+cuda = ["jax[cuda12]"]
+gyro = ["gyaradax @ git+https://github.com/gerkone/gyaradax.git@master"]
+io = ["cupy-cuda12x", "kvikio-cu12"]
+dev = ["pytest>=7", "pytest-xdist", "ruff>=0.5"]
+
+[tool.setuptools.packages.find]
+include = ["neugk_jax*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

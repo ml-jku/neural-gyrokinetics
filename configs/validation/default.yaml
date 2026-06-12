@@ -1,5 +1,5 @@
-batch_size: 16
-n_eval_steps: 2
-validate_every_n_epochs: 20
-eval_integrals: true
-model_selection_metric: "df"
+validate_every_n_epochs: 1
+n_eval_steps: 2            # gyroswin: # of autoregressive rollout steps in val (logs df_x1, df_x2, ...)
+eval_integrals: true       # call gyaradax.get_integrals during validation (phi + eflux MSE on top of df MSE)
+eval_sampling: false       # diffusion only — runs sample_fn (slow)
+eval_sample_steps: 50
