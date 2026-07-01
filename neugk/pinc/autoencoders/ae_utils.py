@@ -210,8 +210,10 @@ def load_autoencoder(
         state_dict = {"module." + k: v for k, v in state_dict.items()}
 
     # Check if it is a PEFT checkpoint
-    is_peft_checkpoint = loaded_ckpt.get("stage") == "peft"
     has_peft_params = any("lora_A" in k or "lora_B" in k for k in state_dict.keys())
+    # some PEFT checkpoints omit the explicit stage marker; the lora_A/lora_B params are
+    # the definitive signal, so treat the checkpoint as PEFT whenever they are present.
+    is_peft_checkpoint = loaded_ckpt.get("stage") == "peft" or has_peft_params
 
     if is_peft_checkpoint and has_peft_params:
         if load_peft:

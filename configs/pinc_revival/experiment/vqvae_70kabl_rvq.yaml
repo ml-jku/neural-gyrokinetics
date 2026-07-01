@@ -1,0 +1,51 @@
+# @package _global_
+# 70k VQ-VAE codebook ablation (rvq, CR-MATCHED to 77369x). RVQ stores num_quantizers codes/token,
+# so to hold the same CR as the 1-code/token variants we HALVE the token grid: patch [4,0,2,5,4] ->
+# grid [4,4,9,4] = 576 tokens, times num_quantizers=2 = 1152 code-slots = identical 77369x.
+# This trades spatial resolution (576 coarser tokens) for residual depth (2-level refinement), which
+# is the actual RVQ question. 100 epochs on ~20% of the training set (dataset.subsample=5).
+# Run: python main.py --config-dir configs/pinc_revival experiment=vqvae_70kabl_rvq
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_70kabl_rvq
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+output_path: /system/user/publicwork/galletti/pinc_revival
+logging:
+  project: pinc_revival_codebook_ablation
+  entity: null   # authed wandb default entity
+
+model:
+  patch:
+    patch_size: [4, 0, 2, 5, 4]   # halved grid [4,4,9,4] = 576 tokens; 576 * 2 quantizers = 1152 slots
+  vit:
+    num_heads: [8]
+    depth: [4]
+  vq:
+    quantizer: rvq
+    num_quantizers: 2             # 2 residual codebooks -> 2 codes/token; 576*2 = 1152 = euclidean CR
+    codebook_size: 8192           # per-stage codebook (matches the 1-code variants' per-code capacity)
+    codebook_type: euclidean
+
+training:
+  n_epochs: 100
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
+
+dataset:
+  subsample: 5   # ~20% of training samples (every 5th timestep, uniform across trajectories)

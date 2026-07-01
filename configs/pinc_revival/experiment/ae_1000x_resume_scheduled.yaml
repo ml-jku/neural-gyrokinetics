@@ -1,0 +1,100 @@
+# @package _global_
+# PINC revival branch (a): SCHEDULED physics CONTINUATION from the shared df pretrain.
+#
+# Warm-starts the full 1000x AE from a df-only pretrain checkpoint (pass
+# ae_checkpoint=<pretrain_run_dir>; the autoencoder stage loads the weights and
+# resets epoch to 0) and trains 100 more epochs with the physics losses ramped in:
+#   df:            full (1.0) throughout
+#   phi_int/flux_int (integrals): ramp 0 -> 1 over fractions [0.0, 0.5]
+#   qspec/kyspec    (spectra):    ramp 0 -> 1 over fractions [0.3, 0.8]
+#
+# Run:  python main.py --config-dir configs/pinc_revival \
+#         experiment=ae_1000x_resume_scheduled ae_checkpoint=<pretrain_run_dir>
+defaults:
+    - override /dataset: pinc
+    - override /model: pinc/ae
+    - override /logging: wandb
+    - override /validation: default
+
+experiment_id: pinc_revival_ae_1000x_resume_scheduled
+workflow: pinc
+stage: autoencoder
+logging:
+    project: pinc_revival
+    entity: null
+seed: 0
+mode: train
+eval: true
+device: cuda
+validation:
+    model_selection_metric: phi_int # physics-aware selection (stable phi, not the volatile spectra)
+load_ckpt: false
+output_path: /system/user/publicwork/galletti/pinc_revival # checkpoints land here (home is only 50GB)
+
+model:
+    # 1000x architecture (must match the pretrain checkpoint being warm-started)
+    patch:
+        patch_size: [4, 0, 4, 5, 4]
+    vit:
+        num_heads: [16]
+        depth: [8]
+    bottleneck:
+        dim: 154
+    loss_weights:
+        df: 1.0
+    extra_loss_weights:
+        phi_int: 1.0
+        flux_int: 1.0
+        qspec: 1.0
+        kyspec: 1.0
+    # the AE is already df-converged (warm start), so physics ramps in earlier than
+    # the from-scratch schedule: integrals over the first half, spectra [0.3, 0.8].
+    loss_scheduler:
+        phi_int:
+            {
+                type: linear,
+                start: 0.0,
+                end: 1.0,
+                start_fraction: 0.0,
+                end_fraction: 0.5,
+            }
+        flux_int:
+            {
+                type: linear,
+                start: 0.0,
+                end: 1.0,
+                start_fraction: 0.0,
+                end_fraction: 0.5,
+            }
+        qspec:
+            {
+                type: linear,
+                start: 0.0,
+                end: 1.0,
+                start_fraction: 0.3,
+                end_fraction: 0.8,
+            }
+        kyspec:
+            {
+                type: linear,
+                start: 0.0,
+                end: 1.0,
+                start_fraction: 0.3,
+                end_fraction: 0.8,
+            }
+
+training:
+    physics_mode: scheduled
+    n_epochs: 100
+    batch_size: 16
+    learning_rate: 5e-5   # finetune from the converged df base, below the 3e-4 pretrain lr
+    integral_loss_type: relative_l1
+    spectral_loss_type: log_std_l1
+    eval_loss_type: mse
+
+amp:
+    enable: true   # bf16 training data needs autocast; the physics integrals self-guard to f32/f64 internally
+    bfloat: true
+
+dataset:
+    input_fields: ["df", "phi", "flux"]

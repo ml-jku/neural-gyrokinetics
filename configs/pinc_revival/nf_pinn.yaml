@@ -1,0 +1,64 @@
+# PINC revival: PINN-residual baseline over the full test set (proxy for final
+# results). Same per-(trajectory, timestep) neural field as nf_train.yaml, but the
+# physics phase trains on the gyrokinetic-RHS residual (gyaradax) + Sobolev loss
+# instead of the PINC integral/spectral losses (physics_mode: pinn). Writes to its
+# own ckpt dir so the eval can score it separately from the PINC NFs.
+#
+# Run:  python -m neugk.pinc.nf_main config=configs/pinc_revival/nf_pinn.yaml
+mode: default
+ckp_path: nf_ckps_pinn/
+
+# data (kvikio GPU-direct backend)
+path: /local00/bioinf/galletti/preprocessed_kvikio
+backend: gds
+normalization: zscore
+norm_axes: [-4]
+use_flux_fields: false
+
+# training schedule
+epochs: 20               # density (MSE) warmup
+lr: 7e-3
+batch_size: 4096
+density_eval_every: 0
+pinc_epochs: 100         # PINN residual+Sobolev epochs (reuses the pinc_epochs knob)
+pinc_lr: 5e-4
+pinc_lr_sched: true
+min_lr: 1e-8
+pinc_eval_every: 2
+
+# PINN-specific
+physics_mode: pinn
+w_sobolev: 1.0
+w_residual: 1.0
+
+# best PINC-paper neural field (identical architecture to the PINC NFs)
+name: mlp
+dim: 64
+n_layers: 5
+skips: true
+embed_type: discrete
+act_fn: silu
+
+# GPUs 0,3 only (4,5,6,7 hold the overnight AE runs). throttling=2 -> 4 slots.
+# The persistent JAX cache amortizes the ~30s RHS compile across each traj's timesteps.
+gpus: [0, 3]
+throttling: 2
+
+# 5 timesteps spanning the turbulent window; missing snapshots are skipped per traj.
+timesteps: [100, 140, 180, 220, 260]
+
+# the 60 held-out turbulent test trajectories (same set as nf_train.yaml)
+trajectory: [
+  iteration_0.h5, iteration_8.h5, iteration_20.h5, iteration_36.h5, iteration_41.h5,
+  iteration_48.h5, iteration_55.h5, iteration_65.h5, iteration_73.h5, iteration_79.h5,
+  iteration_85.h5, iteration_94.h5, iteration_100.h5, iteration_104.h5, iteration_108.h5,
+  iteration_113.h5, iteration_117.h5, iteration_121.h5, iteration_125.h5, iteration_130.h5,
+  iteration_134.h5, iteration_138.h5, iteration_142.h5, iteration_146.h5, iteration_151.h5,
+  iteration_155.h5, iteration_159.h5, iteration_163.h5, iteration_168.h5, iteration_172.h5,
+  iteration_176.h5, iteration_180.h5, iteration_185.h5, iteration_189.h5, iteration_193.h5,
+  iteration_197.h5, iteration_202.h5, iteration_206.h5, iteration_210.h5, iteration_214.h5,
+  iteration_218.h5, iteration_223.h5, iteration_227.h5, iteration_231.h5, iteration_235.h5,
+  iteration_240.h5, iteration_244.h5, iteration_248.h5, iteration_252.h5, iteration_257.h5,
+  iteration_261.h5, iteration_265.h5, iteration_269.h5, iteration_274.h5, iteration_278.h5,
+  iteration_282.h5, iteration_286.h5, iteration_291.h5, iteration_295.h5, iteration_299.h5,
+]

@@ -1,0 +1,46 @@
+# @package _global_
+# 70k VQ-VAE codebook ablation (lfq): same 77369x grid (patch [4,0,2,5,2], 1152 tokens, 1 code/token), 100 epochs on ~20% of the training set (dataset.subsample=5). One variant per GPU.
+# Run: python main.py --config-dir configs/pinc_revival experiment=pinc_revival_vqvae_70kabl_lfq
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_70kabl_lfq
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+output_path: /system/user/publicwork/galletti/pinc_revival
+logging:
+  project: pinc_revival_codebook_ablation
+  entity: null   # authed wandb default entity
+
+model:
+  patch:
+    patch_size: [4, 0, 2, 5, 2]   # 77369x grid [4,4,9,8] = 1152 tokens
+  vit:
+    num_heads: [8]
+    depth: [4]
+  vq:
+    quantizer: lfq
+    codebook_size: 8192          # power of 2 -> 13 sign dims
+    entropy_loss_weight: 0.1
+
+training:
+  n_epochs: 100
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
+
+dataset:
+  subsample: 5   # ~20% of training samples (every 5th timestep, uniform across trajectories)

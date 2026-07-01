@@ -222,7 +222,7 @@ def get_data(cfg, rank: int = 0):
             rank, use_kvikio=use_kvikio_train, prefer_dtype=_prefer_dtype
         )
         # NOTE: for validation load without gds, save space, slow is acceptable
-        val_backend = KvikIOBackend(rank, use_kvikio=False)
+        val_backend = KvikIOBackend(rank, use_kvikio=False, prefer_dtype=_prefer_dtype)
 
     trainset = dataset_class(
         backend=train_backend,

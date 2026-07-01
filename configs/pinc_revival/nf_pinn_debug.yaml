@@ -1,0 +1,45 @@
+# PINC revival: PINN baseline DEBUG config (single trajectory, single timestep).
+# Trains a neural field with the gyrokinetic-RHS residual (gyaradax) + Sobolev
+# loss instead of the PINC integral/spectral losses (physics_mode: pinn). Used to
+# smoke-test the PINN path on iteration_13 before the full per-(traj, t) sweep.
+#
+# Run:  python -m neugk.pinc.nf_main config=configs/pinc_revival/nf_pinn_debug.yaml
+mode: default
+ckp_path: nf_ckps_pinn_debug/
+
+# data (kvikio GPU-direct backend)
+path: /local00/bioinf/galletti/preprocessed_kvikio
+backend: gds
+normalization: zscore
+norm_axes: [-4]
+use_flux_fields: false
+
+# training schedule
+epochs: 20               # density (MSE) warmup
+lr: 7e-3
+batch_size: 4096
+density_eval_every: 0
+pinc_epochs: 100         # PINN residual+Sobolev epochs (reuses pinc_epochs knob)
+pinc_lr: 5e-4
+pinc_lr_sched: true
+min_lr: 1e-8
+pinc_eval_every: 2
+
+# PINN-specific
+physics_mode: pinn
+w_sobolev: 1.0
+w_residual: 1.0
+
+# best PINC-paper neural field
+name: mlp
+dim: 64
+n_layers: 5
+skips: true
+embed_type: discrete
+act_fn: silu
+
+# debug: one GPU, one trajectory, one timestep
+gpus: [0]
+throttling: 1
+timesteps: [200]
+trajectory: [iteration_13.h5]
