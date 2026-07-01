@@ -15,6 +15,59 @@ import torch
 _BF16_SUFFIX = ".bf16.bin"
 
 
+def _flatten_meta(meta):
+    flat = {}
+    for k, v in meta.items():
+        if k == "geometry" and isinstance(v, dict):
+            for gk, gv in v.items():
+                flat[f"geometry/{gk}"] = np.asarray(gv)
+        else:
+            flat[k] = np.asarray(v)
+    return flat
+
+
+def _unflatten_meta(z):
+    meta, geom = {}, {}
+    for k in z.files:
+        v = z[k]
+        if k.startswith("geometry/"):
+            geom[k[len("geometry/"):]] = v
+        elif k == "resolution":
+            meta["resolution"] = tuple(int(x) for x in np.atleast_1d(v))
+        else:
+            meta[k] = v
+    if geom:
+        meta["geometry"] = geom
+    return meta
+
+
+def _meta_ext(base):
+    if os.path.exists(base + ".npz"):
+        return ".npz"
+    if os.path.exists(base + ".pkl"):
+        return ".pkl"
+    return None
+
+
+def load_meta(base):
+    ext = _meta_ext(base)
+    if ext == ".npz":
+        with np.load(base + ".npz", allow_pickle=False) as z:
+            return _unflatten_meta(z)
+    if ext == ".pkl":
+        with open(base + ".pkl", "rb") as f:
+            return pickle.load(f)
+    return None
+
+
+def save_meta(base, meta, ext):
+    if ext == ".npz":
+        np.savez(base + ".npz", **_flatten_meta(meta))
+    else:
+        with open(base + ".pkl", "wb") as f:
+            pickle.dump(meta, f)
+
+
 def _bf16_sibling(fp32_path: str) -> str:
     """``foo.bin`` -> ``foo.bf16.bin`` (the side-by-side quantized shard)."""
     if fp32_path.endswith(".bin"):
@@ -290,7 +343,9 @@ class KvikIOBackend(DataBackend):
 
     def exists(self, path: str) -> bool:
         path = self._strip_h5(path)
-        return os.path.exists(os.path.join(path, "metadata.pkl"))
+        # a trajectory is present if it has full or lightweight metadata, in either npz or pkl
+        return any(_meta_ext(os.path.join(path, n)) is not None
+                   for n in ("metadata", "metadata_light"))
 
     def format_path(
         self,
@@ -318,19 +373,15 @@ class KvikIOBackend(DataBackend):
     ) -> Dict[str, Any]:
         path = self._strip_h5(path)
 
-        # use cached lightweight metadata if available (fast path)
-        light_path = os.path.join(path, "metadata_light.pkl")
-        full_path = os.path.join(path, "metadata.pkl")
+        # metadata is stored as npz (safe, no pickle) or pkl; prefer npz, and fall back to the
+        # lightweight file when the full one is absent (published datasets ship only the light one)
+        light_base = os.path.join(path, "metadata_light")
+        full_base = os.path.join(path, "metadata")
 
-        # fall back to the lightweight metadata when the full file is absent -- the published
-        # datasets ship only metadata_light.pkl (the heavy df_* normalization-stat arrays are
-        # unused: df normalization is recomputed from the field data).
-        if (lightweight or not os.path.exists(full_path)) and os.path.exists(light_path):
-            with open(light_path, "rb") as mf:
-                meta = pickle.load(mf)
+        if (lightweight or _meta_ext(full_base) is None) and _meta_ext(light_base) is not None:
+            meta = load_meta(light_base)
         else:
-            with open(full_path, "rb") as mf:
-                meta = pickle.load(mf)
+            meta = load_meta(full_base)
             if lightweight:
                 drop_keys = {
                     "df_min",
@@ -342,13 +393,11 @@ class KvikIOBackend(DataBackend):
                     "phi_max",
                     "phi_var",
                 }
-                light_meta = {k: v for k, v in meta.items() if k not in drop_keys}
+                meta = {k: v for k, v in meta.items() if k not in drop_keys}
                 try:
-                    with open(light_path, "wb") as lf:
-                        pickle.dump(light_meta, lf)
+                    save_meta(light_base, meta, _meta_ext(full_base))
                 except OSError:
                     pass
-                meta = light_meta
 
         if "geometry" in meta:
             for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
