@@ -18,7 +18,7 @@ import time
 
 from neugk.pinc.pigs.model import from_gaussian, quantize_, BYTES_PER_PARAM as _BPP
 from neugk.pinc.pigs.train import train_default, train_fast, train_pinc, refine_flux
-from neugk.pinc.pigs.flux import residual_centers, add_atoms, evaluate, TAIL_BINS
+from neugk.pinc.pigs.flux import residual_centers, add_atoms, TAIL_BINS
 from neugk.pinc.pigs.fast import solve_new_amps_complex
 
 
