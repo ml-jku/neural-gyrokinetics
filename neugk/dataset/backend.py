@@ -322,7 +322,10 @@ class KvikIOBackend(DataBackend):
         light_path = os.path.join(path, "metadata_light.pkl")
         full_path = os.path.join(path, "metadata.pkl")
 
-        if lightweight and os.path.exists(light_path):
+        # fall back to the lightweight metadata when the full file is absent -- the published
+        # datasets ship only metadata_light.pkl (the heavy df_* normalization-stat arrays are
+        # unused: df normalization is recomputed from the field data).
+        if (lightweight or not os.path.exists(full_path)) and os.path.exists(light_path):
             with open(light_path, "rb") as mf:
                 meta = pickle.load(mf)
         else:

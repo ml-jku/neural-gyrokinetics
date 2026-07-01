@@ -7,7 +7,7 @@
 import torch
 
 from neugk.pinc.neural_fields import integral_losses, spectra_losses
-from neugk.integrals import get_integrals
+from neugk.physics.integrals import get_integrals
 
 from neugk.pinc.pigs.model import GaborSplat5D, build_gs_5d, inv_softplus, YIDX
 from neugk.pinc.pigs.fast import build_subgrids, gabor_sep_field, gabor_denorm, ky_per_bin

@@ -59,7 +59,10 @@ def fast_forward(model, coords, compile: bool = True):
     """Drop-in for model(coords) on the density polish; inductor fuses the (B,N,3) intermediate."""
     global _compiled
     fn = _ff_impl
-    if compile:
+    # eager fallback for Blackwell/B300, where inductor's triton kernels hit an nvrtc
+    # `invalid --gpu-architecture` (set PIGS_NO_COMPILE=1).
+    import os
+    if compile and os.environ.get("PIGS_NO_COMPILE") != "1":
         if _compiled is None:
             _compiled = torch.compile(_ff_impl, dynamic=True)
         fn = _compiled
@@ -77,11 +80,10 @@ def grid_target(data, Nv, Np, device):
     return data.full_df.reshape(2, -1).t().reshape(Nv, Np, 2).contiguous().to(device)
 
 
-def sep_field(model, vel_grid, phys_grid, pchunk: int = 8192):
-    """Exact Gaussian f̂ on the full grid -> (Nv, Np, 2). Differentiable."""
-    Lpi = torch.linalg.inv(flat_to_lower_tri(model.L_phys_raw, 3))
-    Lvi = torch.linalg.inv(flat_to_lower_tri(model.L_vel_raw, 2))
-    mup, muv = model.mu[:, PHYS], model.mu[:, VEL]
+def _sep_impl(mu, Lp_raw, Lv_raw, amps, vel_grid, phys_grid, pchunk: int = 8192):
+    Lpi = torch.linalg.inv(flat_to_lower_tri(Lp_raw, 3))
+    Lvi = torch.linalg.inv(flat_to_lower_tri(Lv_raw, 2))
+    mup, muv = mu[:, PHYS], mu[:, VEL]
     dv = vel_grid.unsqueeze(0) - muv.unsqueeze(1)
     V = torch.exp(-0.5 * (torch.einsum('nij,nvj->nvi', Lvi, dv) ** 2).sum(-1))
     Pc = []
@@ -89,12 +91,28 @@ def sep_field(model, vel_grid, phys_grid, pchunk: int = 8192):
         dp = phys_grid[s:s + pchunk].unsqueeze(0) - mup.unsqueeze(1)
         Pc.append(torch.exp(-0.5 * (torch.einsum('nij,ncj->nci', Lpi, dp) ** 2).sum(-1)))
     P = torch.cat(Pc, 1)
-    return torch.stack([V.t() @ (P * model.amps[:, c:c + 1]) for c in range(2)], -1)
+    return torch.stack([V.t() @ (P * amps[:, c:c + 1]) for c in range(2)], -1)
+
+
+_compiled_sep = None
+
+
+def sep_field(model, vel_grid, phys_grid, pchunk: int = 8192, compile: bool = True):
+    """Exact Gaussian f̂ on the full grid -> (Nv, Np, 2). Differentiable. The density-warmup hot step;
+    inductor fuses the per-chunk (N,Np) exp into the GEMM. eager fallback on B300 via PIGS_NO_COMPILE=1."""
+    global _compiled_sep
+    fn = _sep_impl
+    import os
+    if compile and os.environ.get("PIGS_NO_COMPILE") != "1":
+        if _compiled_sep is None:
+            _compiled_sep = torch.compile(_sep_impl, dynamic=False)
+        fn = _compiled_sep
+    return fn(model.mu, model.L_phys_raw, model.L_vel_raw, model.amps, vel_grid, phys_grid, pchunk)
 
 
 def sep_sample_field(model, data, vel_grid, phys_grid):
     """Separable Gaussian reconstruction in the DENORMALIZED (2,vpar,mu,s,x,y) layout."""
-    f = sep_field(model, vel_grid, phys_grid)
+    f = sep_field(model, vel_grid, phys_grid, compile=False)
     nvp, nmu, ns, nx, ny = data.df.shape[1:]
     f = f.reshape(nvp, nmu, ns, nx, ny, 2).permute(5, 0, 1, 2, 3, 4).contiguous()
     scale = data.scale["df"].reshape(2, 1, 1, 1, 1, 1).to(f.device)
@@ -102,14 +120,14 @@ def sep_sample_field(model, data, vel_grid, phys_grid):
     return f * scale + shift
 
 
-def gabor_sep_field(model, vel_grid, phys_grid, pchunk: int = 8192):
-    """Exact Gabor f̂ -> (Nv, Np, 2) = (Re, Im) of complex df. Reduces bit-identically to sep_field at ky=0."""
+def gabor_basis(model, vel_grid, phys_grid, pchunk: int = 8192):
+    """Geometry-only Gabor basis (no amplitudes): V (N,Nv) real vel factor, Pc (N,Np) complex phys+carrier
+    factor. df = V.t() @ (Pc * c). Split out so a frozen-geometry refine can cache it (amps-only POST)."""
     Lpi = torch.linalg.inv(flat_to_lower_tri(model.L_phys_raw, 3))
     Lvi = torch.linalg.inv(flat_to_lower_tri(model.L_vel_raw, 2))
     mup, muv = model.mu[:, PHYS], model.mu[:, VEL]
     dv = vel_grid.unsqueeze(0) - muv.unsqueeze(1)
     V = torch.exp(-0.5 * (torch.einsum('nij,nvj->nvi', Lvi, dv) ** 2).sum(-1))
-    c = torch.complex(model.amps[:, 0], model.amps[:, 1])
     muy = model.mu[:, YIDX]
     chunks = []
     for s in range(0, phys_grid.shape[0], pchunk):
@@ -118,7 +136,13 @@ def gabor_sep_field(model, vel_grid, phys_grid, pchunk: int = 8192):
         Pmag = torch.exp(-0.5 * (torch.einsum('nij,ncj->nci', Lpi, dp) ** 2).sum(-1))
         theta = model.ky.unsqueeze(1) * (pg[:, 2].unsqueeze(0) - muy.unsqueeze(1))
         chunks.append(Pmag * torch.polar(torch.ones_like(theta), theta))
-    Pc = torch.cat(chunks, 1)
+    return V, torch.cat(chunks, 1)
+
+
+def gabor_sep_field(model, vel_grid, phys_grid, pchunk: int = 8192):
+    """Exact Gabor f̂ -> (Nv, Np, 2) = (Re, Im) of complex df. Reduces bit-identically to sep_field at ky=0."""
+    V, Pc = gabor_basis(model, vel_grid, phys_grid, pchunk)
+    c = torch.complex(model.amps[:, 0], model.amps[:, 1])
     df = V.t().to(Pc.dtype) @ (Pc * c.unsqueeze(1))
     return torch.stack([df.real, df.imag], -1)
 

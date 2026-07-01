@@ -155,6 +155,42 @@ class Autoencoder(Reconstructor):
         return dfs, size
 
 
+class PIGS(Reconstructor):
+    """Per-snapshot Gabor-splat (PIGS) compressor. Fits ``compress_pigs`` at the matched per-snapshot CR
+    for each timestep, renders the denormalized field, and reports the TRUE stored bytes (``info['bytes']``,
+    which accounts for the tied flux carriers -- not the free-carrier ``model_bytes``). Bytes are summed
+    over the sequence so ``evaluate_method``'s ``cr = gt.nbytes / csize`` matches NF/AE/trad. The fit needs
+    gradients, so reconstruct re-enables them inside ``evaluate_method``'s ``no_grad`` scope."""
+
+    def __init__(self, name: str, path: str, backend: str, cr_target: float):
+        self.name = name
+        self.path = path
+        self.backend = backend
+        self.cr = cr_target
+
+    def reconstruct(self, traj, timesteps, gt, device):
+        from neugk.pinc.pigs.recipe import compress_pigs, n_for_cr
+        from neugk.pinc.pigs.fast import build_subgrids, gabor_denorm
+        from neugk.pinc.pigs.model import GaborSplat5D, from_gaussian
+
+        tk = traj.replace(".h5", "")
+        dfs, size = [], 0
+        for t in timesteps:
+            data = CycloneNFDataset(tk, timesteps=int(t), path=self.path, backend=self.backend,
+                                    realpotens=True, normalize="zscore", normalize_coords=True, norm_axes=())
+            data.to(device)
+            n = n_for_cr(data, self.cr)
+            with torch.enable_grad():  # evaluate_method runs under no_grad; the fit needs grad
+                model, info = compress_pigs(data, n_total=n, device=device, verbose=False)
+            vg, pg, _, _ = build_subgrids(data, device)
+            m = model if isinstance(model, GaborSplat5D) else from_gaussian(model)
+            dfs.append(gabor_denorm(m, data, vg, pg).detach().cpu())
+            size += int(info["bytes"])  # true stored bytes, summed over the sequence
+            del model, data
+            torch.cuda.empty_cache()
+        return dfs, size
+
+
 def traditional_suite(
     error_args: Optional[Dict[str, dict]] = None,
 ) -> List[Traditional]:

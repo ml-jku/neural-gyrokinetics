@@ -132,7 +132,8 @@ def compress_pinc(data, n, device="cuda", quant="fp16", pinc_epochs=40, seed=Non
 
 def compress_pigs(data, n_total=1000, flux_frac=0.25, n_flux=None, device="cuda", quant="fp16",
                   flux_mode="raw", flux_lambda=3.0, pinc_epochs=40, post_steps=500,
-                  tied=True, tied_k=9, placement="stratified", seed=None, verbose=True, **fit_kw):
+                  tied=True, tied_k=9, placement="stratified", seed=None, verbose=True,
+                  patience=25, **fit_kw):
     """Full PIGS: fast density -> gPINC -> graft flux carriers -> frozen-base flux refine (POST).
     Budget-neutral: n_total = n_base + n_flux atom-equivalents (round(flux_frac*n_total) unless n_flux given).
 
@@ -151,7 +152,7 @@ def compress_pigs(data, n_total=1000, flux_frac=0.25, n_flux=None, device="cuda"
     t0 = time.time()
     log = (lambda *a: print(*a, flush=True)) if verbose else (lambda *a: None)
 
-    md, _ = train_fast(data, n_base, device, **fit_kw)                            # 1. fast density
+    md, _ = train_fast(data, n_base, device, patience=patience, **fit_kw)         # 1. fast density
     log(f"[1/4] fast density  N_base={n_base}  ({time.time()-t0:.0f}s)")
     mg, _ = train_pinc(md, data, device, epochs=pinc_epochs, mode="gpinc")        # 2. gPINC physics
     log(f"[2/4] gPINC  ({time.time()-t0:.0f}s)")
@@ -171,7 +172,7 @@ def compress_pigs(data, n_total=1000, flux_frac=0.25, n_flux=None, device="cuda"
         solve_new_amps_complex(m, mask, data, device)
         log(f"[3/4] graft  +{n_carr} TIED carriers ({m_env} envelopes x {tied_k})  ({time.time()-t0:.0f}s)")
         m = refine_flux(m, data, device, mask=mask, train=("amps",),              # 4. POST (amps only ->
-                        flux_mode=flux_mode, flux_lambda=flux_lambda, steps=post_steps)  # tying stays exact)
+                        flux_mode=flux_mode, flux_lambda=flux_lambda, steps=post_steps, patience=patience)  # tying stays exact)
         nbytes = tied_model_bytes(n_base, m_env, tied_k, quant)
         extra = {"n_base": n_base, "n_flux": n_carr, "tied": True, "m_env": m_env, "tied_k": tied_k,
                  "placement": placement, "flux_mode": flux_mode, "flux_lambda": flux_lambda}
@@ -181,7 +182,7 @@ def compress_pigs(data, n_total=1000, flux_frac=0.25, n_flux=None, device="cuda"
         solve_new_amps_complex(m, mask, data, device)
         log(f"[3/4] graft  +{n_flux} free flux atoms  ({time.time()-t0:.0f}s)")
         m = refine_flux(m, data, device, mask=mask, flux_mode=flux_mode,
-                        flux_lambda=flux_lambda, steps=post_steps)
+                        flux_lambda=flux_lambda, steps=post_steps, patience=patience)
         nbytes = model_bytes(n_base, n_flux, quant)
         extra = {"n_base": n_base, "n_flux": n_flux, "tied": False,
                  "flux_mode": flux_mode, "flux_lambda": flux_lambda}

@@ -530,7 +530,8 @@ class CycloneDataset(Dataset):
                             for k in keys:
                                 x = s[k]
                                 if isinstance(x, torch.Tensor):
-                                    x = x.cpu().numpy()
+                                    # numpy has no bf16; upcast before host copy
+                                    x = x.float().cpu().numpy()
                                 batch_data[k].append(x)
 
                         for k in keys:

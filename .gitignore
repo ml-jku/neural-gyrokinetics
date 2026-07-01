@@ -12,3 +12,4 @@ upload_changed_py.sh
 cache/
 .env
 nf_ckps_*/
+pinc_eval_results/

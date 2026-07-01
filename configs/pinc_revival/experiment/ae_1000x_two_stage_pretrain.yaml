@@ -1,0 +1,47 @@
+# @package _global_
+# PINC revival ablation: 1000x AE, TWO-STAGE STAGE 1 (df-only pretrain); stage 2 (peft) adapts to physics losses; use this run's best.pth as stage-2 ae_checkpoint
+# Run: python main.py --config-dir configs/pinc_revival experiment=ae_1000x_two_stage_pretrain
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/ae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_ae_1000x_two_stage_pretrain
+workflow: pinc          # get_data dispatches on full workflow == "pinc"; stage distinguishes
+stage: autoencoder
+logging:
+  project: pinc_revival
+  entity: null   # use the authed wandb account's default entity
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+output_path: /system/user/publicwork/galletti/pinc_revival   # checkpoints land here (home is only 50GB)
+
+model:
+  patch:
+    patch_size: [4, 0, 4, 5, 4]
+  vit:
+    num_heads: [16]
+    depth: [8]
+  bottleneck:
+    dim: 154
+  loss_weights:
+    df: 1.0
+  extra_loss_weights: {}
+  loss_scheduler: {}
+
+training:
+  physics_mode: two_stage
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: relative_l1
+  spectral_loss_type: relative_l1
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true

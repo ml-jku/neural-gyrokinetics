@@ -17,17 +17,42 @@ import torch
 import torch.nn.functional as F
 
 from neugk.pinc.neural_fields import CycloneNFDataLoader, sample_field, integral_losses, spectra_losses
-from neugk.integrals import get_integrals
+from neugk.physics.integrals import get_integrals
 from neugk.pinc.neural_fields.nf_utils import to_complex
 
 from neugk.pinc.pigs.model import build_gs_5d
 from neugk.pinc.pigs.fast import (
     solve_amplitudes, fast_forward, build_subgrids, grid_target, sep_field, sep_sample_field, gabor_denorm,
+    gabor_basis,
 )
 
 PINC_LW = {"df": 1.0, "flux": 1.0, "phi": 1.0, "kyspec": 1.0, "qspec": 1.0,
            "kyspec monotonicity": 1.0, "qspec monotonicity": 1.0}
 _PARAM = {"amps": "amps", "ky": "ky", "mu": "mu", "L_phys": "L_phys_raw", "L_vel": "L_vel_raw"}
+
+
+class _MAStop:
+    """early stop when the moving average of the loss stops improving. quits once the windowed MA has not
+    set a new minimum for `patience` checks. Takes the loss TENSOR (not .item()) and syncs only once per
+    `window` steps -- a per-step .item() would serialize the otherwise-async GPU loop and cost more than
+    the steps it saves. patience=0 disables (no sync at all)."""
+    def __init__(self, window=25, patience=25, tol=0.0):
+        self.window, self.patience, self.tol = window, patience, tol
+        self.buf, self.best, self.since, self.n = [], float("inf"), 0, 0
+
+    def step(self, loss):
+        if self.patience <= 0:
+            return False
+        self.buf.append(loss.detach()); self.n += 1
+        if self.n % self.window:           # only evaluate (and sync) once per window
+            return False
+        ma = torch.stack(self.buf).mean().item()
+        self.buf = []
+        if ma < self.best - self.tol:
+            self.best, self.since = ma, 0
+        else:
+            self.since += 1
+        return self.since * self.window >= self.patience  # `patience` is in steps (~last-N-epochs)
 
 
 def _loss_fn(name):
@@ -67,8 +92,9 @@ def train_default(data, n, device, epochs=120, batch=200_000, seed=0):
 
 
 def train_fast(data, n, device, warmup_steps=1000, polish_epochs=2, batch=200_000, seed=0,
-               loss="huber", vel_grid=None, phys_grid=None):
-    """amp warm-start -> separable warmup (exact ~17ms steps) -> short fused polish."""
+               loss="huber", vel_grid=None, phys_grid=None, patience=25):
+    """amp warm-start -> separable warmup (exact ~17ms steps) -> short fused polish.
+    patience: early-stop the separable warmup when its loss MA plateaus for that many steps (0 disables)."""
     torch.set_float32_matmul_precision("high")
     lf = _loss_fn(loss)
     model = build_gs_5d(data, n, device, seed=seed)
@@ -83,9 +109,12 @@ def train_fast(data, n, device, warmup_steps=1000, polish_epochs=2, batch=200_00
                              {"params": [model.L_phys_raw, model.L_vel_raw], "lr": 5e-3},
                              {"params": [model.amps], "lr": 1e-2}], weight_decay=1e-8)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, warmup_steps, 1e-6)
+    stop = _MAStop(patience=patience)
     for _ in range(warmup_steps):
         loss_v = lf(sep_field(model, vel_grid, phys_grid), Y)
         opt.zero_grad(set_to_none=True); loss_v.backward(); opt.step(); sched.step()
+        if stop.step(loss_v):
+            break
     loader = CycloneNFDataLoader(data, batch_size=batch, preload=True, shuffle=True)
     opt = torch.optim.AdamW([{"params": [model.mu], "lr": 2e-4},
                              {"params": [model.L_phys_raw, model.L_vel_raw], "lr": 1e-3},
@@ -137,7 +166,7 @@ def train_pinc(model, data, device, epochs=40, mode="gpinc", vel_grid=None, phys
 
 
 def refine_flux(model, data, device, mask=None, train=("amps", "ky"), flux_mode="raw",
-                steps=500, lr=1e-2, flux_lambda=3.0, band=(1, 16), phi_floor=2e-2):
+                steps=500, lr=1e-2, flux_lambda=3.0, band=(1, 16), phi_floor=2e-2, patience=25):
     """Frozen-base flux refine. Objective = df-MSE anchor + flux_lambda*(flux term)/ft0.
       'raw'   -> match Q(ky) directly         (fixes BOTH bands, spends phi)
       'wnorm' -> match W(ky)=Q/|phi_k|^2       (quasilinear weight: phi-preserving, fixes the TAIL)
@@ -150,10 +179,32 @@ def refine_flux(model, data, device, mask=None, train=("amps", "ky"), flux_mode=
         p.requires_grad_(True)
     vg, pg, _, _ = build_subgrids(data, device); gt = data.full_df.to(device); b = slice(*band)
 
+    # amps-only POST freezes ALL geometry (mu/Sigma/ky), so the per-atom field basis is constant and the
+    # render is linear in the complex amps: cache V,Pc once and replace 500 full exp/polar renders with a
+    # single GEMM per step (bit-identical to gabor_denorm, ~10x cheaper -- the dominant cost of compress_pigs).
+    amps_only = tuple(train) == ("amps",)
+    if amps_only:
+        with torch.no_grad():
+            _V, _Pc = gabor_basis(m, vg, pg)
+            _Vt = _V.t().to(torch.complex64).contiguous()
+        _nvp, _nmu, _ns, _nx, _ny = data.df.shape[1:]
+        _scale = data.scale["df"].reshape(2, 1, 1, 1, 1, 1).to(device)
+        _shift = data.shift["df"].reshape(2, 1, 1, 1, 1, 1).to(device)
+
+        def render():
+            c = torch.complex(m.amps[:, 0], m.amps[:, 1])
+            dfc = _Vt @ (_Pc * c.unsqueeze(1))
+            f = torch.stack([dfc.real, dfc.imag], -1).reshape(_nvp, _nmu, _ns, _nx, _ny, 2)
+            return f.permute(5, 0, 1, 2, 3, 4).contiguous() * _scale + _shift
+    else:
+        def render():
+            return gabor_denorm(m, data, vg, pg)
+
     def spectra(field):
         phi, (_, ef, _) = get_integrals(field, data.geom, flux_fields=True, spectral_df=False)
         Q = ef[0].sum((0, 1, 2, 3))
-        Pphi = (torch.fft.fft(to_complex(phi), dim=-1, norm="forward").abs() ** 2).sum((0, 1))
+        _z = torch.fft.fft(to_complex(phi), dim=-1, norm="forward")
+        Pphi = (_z.real ** 2 + _z.imag ** 2).sum((0, 1))  # |z|^2 without complex abs (B300 nvrtc-safe)
         return Q, Pphi
 
     with torch.no_grad():
@@ -164,10 +215,11 @@ def refine_flux(model, data, device, mask=None, train=("amps", "ky"), flux_mode=
         return (((Q[b] - Qg[b]) / Qsc) ** 2).sum() if flux_mode == "raw" else ((Q[b] / (Pphi[b] + pfl) - Wg[b]) ** 2).sum()
 
     with torch.no_grad():
-        ft0 = fterm(*spectra(gabor_denorm(m, data, vg, pg))).clamp_min(1e-12)
+        ft0 = fterm(*spectra(render())).clamp_min(1e-12)
     opt = torch.optim.Adam(params, lr=lr)
+    stop = _MAStop(patience=patience)
     for _ in range(steps):
-        pred = gabor_denorm(m, data, vg, pg)
+        pred = render()
         loss = ((pred - gt) ** 2).mean() + flux_lambda * fterm(*spectra(pred)) / ft0
         opt.zero_grad(set_to_none=True); loss.backward()
         if mask is not None:
@@ -175,5 +227,7 @@ def refine_flux(model, data, device, mask=None, train=("amps", "ky"), flux_mode=
                 if p.grad is not None and p.shape[0] == mask.shape[0]:
                     p.grad.mul_(mask.view(-1, *([1] * (p.dim() - 1))))
         opt.step()
+        if stop.step(loss):
+            break
     torch.cuda.synchronize()
     return m
