@@ -501,9 +501,9 @@ class SwinTransformerBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         shortcut = x
         if self.use_checkpoint:
-            x = x + checkpoint.checkpoint(self.forward_part2, x, use_reentrant=False)
+            x = checkpoint.checkpoint(self.forward_part2, x, use_reentrant=False)
         else:
-            x = x + self.forward_part2(x)
+            x = self.forward_part2(x)
         x = shortcut + x
         return x
 
