@@ -12,7 +12,7 @@ from functools import partial
 
 import numpy as np
 
-from neugk.pinc.neural_fields.data import CycloneNFDataset  # re-exported for the drivers
+from neugk.pinc.neural_fields.data import CycloneNFDataset  # noqa: F401  re-exported for the eval drivers
 from neugk.pinc.eval import trad
 from neugk.pinc.eval.metrics import integrate
 from neugk.physics.diagnostics import velocity_moment_errors

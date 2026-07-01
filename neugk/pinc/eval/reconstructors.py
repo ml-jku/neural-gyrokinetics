@@ -10,7 +10,6 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from abc import ABC, abstractmethod
 from collections import defaultdict
 
-import numpy as np
 import torch
 
 from neugk.pinc.neural_fields.data import CycloneNFDataset

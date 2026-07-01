@@ -7,7 +7,6 @@ GEMM (~17 ms) vs ~6 s dense, equal to the dense forward to machine precision.
 """
 import torch
 from neugk.pinc.pigs.model import flat_to_lower_tri, PHYS, VEL, YIDX
-from neugk.pinc.neural_fields.nf_utils import to_complex
 
 
 @torch.no_grad()
