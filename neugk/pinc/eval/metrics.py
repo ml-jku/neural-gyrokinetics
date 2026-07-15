@@ -76,6 +76,25 @@ def integrate(df: torch.Tensor, geom: Dict[str, torch.Tensor]):
     return phi.squeeze(0), eflux.squeeze(0)
 
 
+def _zonal_profiles(
+    phi_spec: torch.Tensor, geom: Dict[str, torch.Tensor]
+) -> Dict[str, torch.Tensor]:
+    """GKW diagnos_zfshear trio from the spectral potential (s, kx, ky).
+
+    zfphi is the flux-surface average (ints weights) of the zonal (ky=0) mode;
+    zfflow/zfshear are its first/second radial derivatives (i*kx in spectral x),
+    the E x B zonal flow and its shear rate (Dannert & Jenko, PoP 2005).
+    """
+    ints = geom["ints"].to(phi_spec.device).view(-1, 1)
+    zon = (phi_spec[:, :, 0] * ints).sum(0)  # (kx,) complex
+    kx = geom["kxrh"].to(phi_spec.device)
+
+    def prof(z):
+        return torch.fft.ifft(torch.fft.ifftshift(z), norm="forward").real
+
+    return {"zfphi": prof(zon), "zfflow": prof(1j * kx * zon), "zfshear": prof(-(kx**2) * zon)}
+
+
 def spectral_diagnostics(
     df: torch.Tensor, geom: Dict[str, torch.Tensor], ds: float
 ) -> Dict[str, torch.Tensor]:
@@ -83,6 +102,7 @@ def spectral_diagnostics(
     integ = FluxIntegral(real_potens=True, flux_fields=True, spectral_potens=True)
     phi_spec, (_, eflux, _) = integ(_batch_geom(geom), df.unsqueeze(0))
     d = diagnostics(phi_spec.squeeze(), eflux.squeeze(), ds=ds)
+    d.update(_zonal_profiles(phi_spec.squeeze(), geom))
     return {k: v.detach() for k, v in d.items()}
 
 
@@ -98,14 +118,29 @@ def time_averaged_spectral_metrics(
         out[f"{key}_pc"] = float(_pearson(p, g))
         out[f"{key}_sc"] = float(_spearman(p, g))
         out[f"{key}_l1"] = float((p - g).abs().sum())
+        out[f"{key}_rl2"] = float((p - g).norm() / (g.norm() + 1e-12))  # relative L2
+        out[f"{key}_rl1"] = float((p - g).abs().sum() / (g.abs().sum() + 1e-12))  # relative L1
         pn, gn = p / (p.sum() + 1e-12), g / (g.sum() + 1e-12)
         out[f"{key}_wd"] = float(_wasserstein_1d(pn, gn))
+    # zonal-flow fidelity (gkw diagnos_zfshear quantities): the profiles are signed
+    # and time-varying, so score per snapshot (rel-L2) and average over time.
+    for key in ("zfphi", "zfflow", "zfshear"):
+        if key in pred_diags[0]:
+            rl2 = [
+                float((p[key] - g[key]).norm() / (g[key].norm() + 1e-12))
+                for p, g in zip(pred_diags, gt_diags)
+            ]
+            out[f"{key}_rl2"] = sum(rl2) / len(rl2)
+    if "zfphi" in pred_diags[0]:
+        er = [
+            float((p["zfphi"] ** 2).sum() / ((g["zfphi"] ** 2).sum() + 1e-12))
+            for p, g in zip(pred_diags, gt_diags)
+        ]
+        out["zf_energy_err"] = abs(sum(er) / len(er) - 1)  # |E_pred/E_gt - 1|
     return out
 
 
-def temporal_epe(
-    gt_dfs: Sequence[torch.Tensor], pred_dfs: Sequence[torch.Tensor]
-) -> float:
+def temporal_epe(gt_dfs: Sequence[torch.Tensor], pred_dfs: Sequence[torch.Tensor]) -> float:
     """End-point error of the optical flow over a snapshot sequence (>=2 frames)."""
     if len(gt_dfs) < 2:
         return float("nan")
@@ -135,8 +170,16 @@ DIRECTION = {
     "qspec_l1": "min",
     "kyspec_wd": "min",
     "qspec_wd": "min",
+    "kyspec_rl2": "min",
+    "qspec_rl2": "min",
+    "kyspec_rl1": "min",
+    "qspec_rl1": "min",
     "density_l1": "min",
     "momentum_l1": "min",
     "energy_l1": "min",
     "free_energy_err": "min",
+    "zfphi_rl2": "min",
+    "zfflow_rl2": "min",
+    "zfshear_rl2": "min",
+    "zf_energy_err": "min",
 }

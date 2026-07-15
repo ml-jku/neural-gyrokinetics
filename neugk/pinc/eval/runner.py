@@ -13,7 +13,7 @@ pickles; ``evaluate_method`` is process-safe.
 import os
 import pickle
 from collections import defaultdict
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Sequence
 
 import numpy as np
 import torch
@@ -92,18 +92,14 @@ def evaluate_method(
             {k: [_np(d[k]) for d in pred_diags] for k in pred_diags[0]} if pred_diags else {}
         )
         if gt_diags:
-            traj_diag.update(
-                {f"{k}_gt": [_np(d[k]) for d in gt_diags] for k in gt_diags[0]}
-            )
+            traj_diag.update({f"{k}_gt": [_np(d[k]) for d in gt_diags] for k in gt_diags[0]})
         diagnostics_per_traj[traj] = traj_diag
         if reconstructor.name != "GT":
             metrics.setdefault("endpoint", []).append(temporal_epe(gt_dfs, dfs))
             for k, v in time_averaged_spectral_metrics(pred_diags, gt_diags).items():
                 metrics[k].append(v)
 
-    agg = {
-        k: (float(np.mean(v)), float(np.std(v))) for k, v in metrics.items() if len(v)
-    }
+    agg = {k: (float(np.mean(v)), float(np.std(v))) for k, v in metrics.items() if len(v)}
     return agg, diagnostics_per_traj
 
 
@@ -128,9 +124,7 @@ def run_scaling(
     """
     os.makedirs(out_dir, exist_ok=True)
     scaling_path = os.path.join(out_dir, "scaling.pkl")
-    scaling = (
-        pickle.load(open(scaling_path, "rb")) if os.path.exists(scaling_path) else {}
-    )
+    scaling = pickle.load(open(scaling_path, "rb")) if os.path.exists(scaling_path) else {}
 
     for family_name, reconstructors in reconstructor_groups:
         if family_name in scaling:
@@ -150,9 +144,7 @@ def run_scaling(
             entry = {"cr": cr, "name": r.name}
             entry.update({k: v[0] for k, v in agg.items()})
             entries.append(entry)
-            print(
-                f"[scaling]   {r.name}: cr={cr:.1f}" if cr else f"[scaling]   {r.name}"
-            )
+            print(f"[scaling]   {r.name}: cr={cr:.1f}" if cr else f"[scaling]   {r.name}")
         entries.sort(key=lambda e: e.get("cr", 0) or 0)
         scaling[family_name] = entries
         # incremental save: survive long multi-family runs

@@ -89,8 +89,8 @@ COND_META_MAP = {"itg": "ion_temp_grad", "dg": "density_grad"}
 # surface one row per split per model. Add a fourth tuple here to introduce
 # yet another split with no further code changes.
 SUMMARY_SPLITS = (
-    ("ID",   "id",   TRAJECTORIES_ID),
-    ("OOD",  "ood",  TRAJECTORIES_OOD),
+    ("ID", "id", TRAJECTORIES_ID),
+    ("OOD", "ood", TRAJECTORIES_OOD),
     ("TEST", "test", TRAJECTORIES_TEST),
 )
 
@@ -113,7 +113,7 @@ def _gpu_mem_str():
     if not torch.cuda.is_available():
         return "(no cuda)"
     a = torch.cuda.memory_allocated() / 1024**3
-    r = torch.cuda.memory_reserved()  / 1024**3
+    r = torch.cuda.memory_reserved() / 1024**3
     return f"alloc={a:.2f}G reserved={r:.2f}G"
 
 
@@ -124,6 +124,7 @@ class _GpuTimer:
     measurement actually covers kernel completion (kernels are otherwise
     asynchronous). On CPU the syncs are no-ops.
     """
+
     def __init__(self):
         self.elapsed = 0.0
 
@@ -158,8 +159,7 @@ def _cached_or_run(output_path, run_fn):
             print(f"  [cache hit ] {output_path}")
             return cached
         except (RuntimeError, EOFError, OSError, pickle.UnpicklingError) as e:
-            print(f"  [cache CORRUPT] {output_path}  "
-                  f"({type(e).__name__}: {e}); regenerating")
+            print(f"  [cache CORRUPT] {output_path}  " f"({type(e).__name__}: {e}); regenerating")
             try:
                 os.replace(output_path, output_path + ".corrupt")
             except OSError:
@@ -182,8 +182,7 @@ def _resolve_splits(trajectories_id, trajectories_ood, trajectories_test=None):
     """Return [(suffix, trajs), ...] for non-empty splits, in canonical
     SUMMARY_SPLITS order. Empty splits are omitted so cached results don't
     grow stub keys when a split isn't requested."""
-    by_label = {"id": trajectories_id, "ood": trajectories_ood,
-                "test": trajectories_test}
+    by_label = {"id": trajectories_id, "ood": trajectories_ood, "test": trajectories_test}
     out = []
     for _label, suffix, _default in SUMMARY_SPLITS:
         trajs = by_label.get(suffix)
@@ -199,9 +198,7 @@ def _add_meta_targets(gt_res, meta):
             arr = np.asarray(meta[spec_key])
             if arr.ndim >= 1 and arr.shape[0] > 1:
                 arr = arr[-80:].mean(0)
-            gt_res[f"meta_{spec_key}_mean"] = torch.as_tensor(
-                arr, dtype=torch.float32
-            )
+            gt_res[f"meta_{spec_key}_mean"] = torch.as_tensor(arr, dtype=torch.float32)
     return gt_res
 
 
@@ -236,13 +233,13 @@ def _build_pinc_model_and_stats(ckpt_dir, device, data_path=None):
     trainset = datasets[0]
     norm_stats = {
         "df_mean": np.asarray(trainset.stats["df"]["full"]["mean"]),
-        "df_std":  np.asarray(trainset.stats["df"]["full"]["std"]),
+        "df_std": np.asarray(trainset.stats["df"]["full"]["std"]),
     }
     # Drop the trainset (and the AE it may carry as `trainset.autoencoder` for
     # diffusion configs) before loading our own AE -- otherwise we double up.
     del datasets, trainset
     gc.collect()
-    print(f"  loading AE weights ...")
+    print("  loading AE weights ...")
     model, _, _ = load_autoencoder(ckpt_dir, device)
     model = model.to(device).eval()
     return model, train_cfg, norm_stats
@@ -262,18 +259,20 @@ def _build_ar_model(ar_ckpt_dir, device, data_path=None, ae_checkpoint=None):
     trainset = datasets[0]
     norm_stats = {
         "df_mean": np.asarray(trainset.stats["df"]["full"]["mean"]),
-        "df_std":  np.asarray(trainset.stats["df"]["full"]["std"]),
+        "df_std": np.asarray(trainset.stats["df"]["full"]["std"]),
     }
-    print(f"  loading AE (VQ-VAE) ...")
+    print("  loading AE (VQ-VAE) ...")
     ae_model, _, _ = load_autoencoder(ae_ckpt, device)
     ae_model = ae_model.to(device).eval()
-    assert isinstance(ae_model, Swin5DVQVAE), \
-        f"AR requires a VQ-VAE AE, got {type(ae_model).__name__}"
-    print(f"  building AR transformer ...")
+    assert isinstance(
+        ae_model, Swin5DVQVAE
+    ), f"AR requires a VQ-VAE AE, got {type(ae_model).__name__}"
+    print("  building AR transformer ...")
     ar_model = get_diffusion_model(ar_cfg, ae_model, trainset)
     ar_model = ar_model.to(device).eval()
-    state = torch.load(os.path.join(ar_ckpt_dir, "best.pth"),
-                       map_location=device, weights_only=True)
+    state = torch.load(
+        os.path.join(ar_ckpt_dir, "best.pth"), map_location=device, weights_only=True
+    )
     ar_model.load_state_dict(state["model_state_dict"])
     # Drop trainset (it carries its own AE on diffusion configs -> double-load
     # of the VQ-VAE on GPU otherwise) and the loaded state dict.
@@ -282,11 +281,23 @@ def _build_ar_model(ar_ckpt_dir, device, data_path=None, ae_checkpoint=None):
     return ar_model, ae_model, ar_cfg, norm_stats
 
 
-def _run_pinc_trajectories(model, ckpt_dir, train_cfg, norm_stats, trajectories,
-                           inference_cfg, n_samples, batch_size, device,
-                           integrator, vq_prior=None, data_path=None):
-    cli = SimpleNamespace(trajectories=trajectories, n_samples=n_samples,
-                          batch_size=batch_size, device=str(device))
+def _run_pinc_trajectories(
+    model,
+    ckpt_dir,
+    train_cfg,
+    norm_stats,
+    trajectories,
+    inference_cfg,
+    n_samples,
+    batch_size,
+    device,
+    integrator,
+    vq_prior=None,
+    data_path=None,
+):
+    cli = SimpleNamespace(
+        trajectories=trajectories, n_samples=n_samples, batch_size=batch_size, device=str(device)
+    )
     inf_cfg = load_inference_config(inference_cfg, cli)
     if data_path is not None:
         inf_cfg["root"] = str(data_path)
@@ -297,11 +308,20 @@ def _run_pinc_trajectories(model, ckpt_dir, train_cfg, norm_stats, trajectories,
         with open(meta_path, "rb") as f:
             meta = pickle.load(f)
         timing = {}
-        gen = evaluate_generative(model, ckpt_dir, train_cfg, inf_cfg, meta,
-                                  norm_stats, device, integrator, vq_prior=vq_prior,
-                                  timing_out=timing)
+        gen = evaluate_generative(
+            model,
+            ckpt_dir,
+            train_cfg,
+            inf_cfg,
+            meta,
+            norm_stats,
+            device,
+            integrator,
+            vq_prior=vq_prior,
+            timing_out=timing,
+        )
         gen["_gen_time_s"] = float(timing.get("gen_time_s", 0.0))
-        gen["_n_samples"]  = int(timing.get("n_samples", n_samples))
+        gen["_n_samples"] = int(timing.get("n_samples", n_samples))
         gt = evaluate_ground_truth(meta, traj, train_cfg, inf_cfg, device, integrator)
         gt = _add_full_alias(_add_meta_targets(gt, meta))
         results[traj] = {"gen": gen, "gt": gt}
@@ -314,18 +334,29 @@ def _ar_sample_decode(ar_model, ae_model, ar_cfg, condition, batch_size, device)
     ar_sub = ar_cfg.model.get("ar", {})
     temperature = ar_sub.get("temperature", 1.0)
     top_k = ar_sub.get("top_k", None)
-    cond = (condition.unsqueeze(0).expand(batch_size, -1).to(device)
-            if condition is not None else None)
-    indices = ar_model.generate(condition=cond, temperature=temperature,
-                                top_k=top_k, device=device)
+    cond = (
+        condition.unsqueeze(0).expand(batch_size, -1).to(device) if condition is not None else None
+    )
+    indices = ar_model.generate(condition=cond, temperature=temperature, top_k=top_k, device=device)
     return ae_model.decode_from_indices(indices, condition=cond)["df"]
 
 
-def _run_ar_trajectories(ar_model, ae_model, ar_cfg, norm_stats, trajectories,
-                         inference_cfg, n_samples, batch_size, device, integrator,
-                         data_path=None):
-    cli = SimpleNamespace(trajectories=trajectories, n_samples=n_samples,
-                          batch_size=batch_size, device=str(device))
+def _run_ar_trajectories(
+    ar_model,
+    ae_model,
+    ar_cfg,
+    norm_stats,
+    trajectories,
+    inference_cfg,
+    n_samples,
+    batch_size,
+    device,
+    integrator,
+    data_path=None,
+):
+    cli = SimpleNamespace(
+        trajectories=trajectories, n_samples=n_samples, batch_size=batch_size, device=str(device)
+    )
     inf_cfg = load_inference_config(inference_cfg, cli)
     if data_path is not None:
         inf_cfg["root"] = str(data_path)
@@ -347,12 +378,14 @@ def _run_ar_trajectories(ar_model, ae_model, ar_cfg, norm_stats, trajectories,
         while remaining > 0:
             bs = min(batch_size, remaining)
             with _GpuTimer() as _t:
-                gen_df = _ar_sample_decode(ar_model, ae_model, ar_cfg, condition, bs, device).float()
+                gen_df = _ar_sample_decode(
+                    ar_model, ae_model, ar_cfg, condition, bs, device
+                ).float()
             gen_time_s += _t.elapsed
             n_done += bs
-            denorm = torch.stack([
-                denormalize(df=gen_df[b], norm_stats=norm_stats) for b in range(bs)
-            ])
+            denorm = torch.stack(
+                [denormalize(df=gen_df[b], norm_stats=norm_stats) for b in range(bs)]
+            )
             geom_b = tree_map(lambda g: g.unsqueeze(0).expand(bs, *g.shape), geometry)
             phys = compute_physics(denorm.cpu(), geom_b, sep_zf, integrator)
             for k, v in phys.items():
@@ -362,11 +395,9 @@ def _run_ar_trajectories(ar_model, ae_model, ar_cfg, norm_stats, trajectories,
         gen_res = {}
         for k, tensors in accum.items():
             stacked = torch.cat(tensors, dim=0)
-            gen_res[k] = {"all": stacked,
-                          "mean": stacked.mean(dim=0),
-                          "std":  stacked.std(dim=0)}
+            gen_res[k] = {"all": stacked, "mean": stacked.mean(dim=0), "std": stacked.std(dim=0)}
         gen_res["_gen_time_s"] = float(gen_time_s)
-        gen_res["_n_samples"]  = int(n_done)
+        gen_res["_n_samples"] = int(n_done)
 
         gt_res = evaluate_ground_truth(meta, traj, ar_cfg, inf_cfg, device, integrator)
         gt_res = _add_full_alias(_add_meta_targets(gt_res, meta))
@@ -375,30 +406,44 @@ def _run_ar_trajectories(ar_model, ae_model, ar_cfg, norm_stats, trajectories,
     return results
 
 
-def evaluate_vae(ckpt_dir, inference_cfg, *,
-                 trajectories_id=TRAJECTORIES_ID,
-                 trajectories_ood=TRAJECTORIES_OOD,
-                 trajectories_test=TRAJECTORIES_TEST,
-                 n_samples=128, batch_size=64,
-                 output_path=None,
-                 data_path=None,
-                 device=torch.device("cuda")):
+def evaluate_vae(
+    ckpt_dir,
+    inference_cfg,
+    *,
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    n_samples=128,
+    batch_size=64,
+    output_path=None,
+    data_path=None,
+    device=torch.device("cuda"),
+):
     """Evaluate a Swin5DVAE on ID + OOD (+ TEST if non-empty). Returns
     one entry per non-empty split keyed `vae_<id|ood|test>`."""
     print("\n" + "=" * 60 + "\n  VAE\n" + "=" * 60)
     print(f"  GPU before: {_gpu_mem_str()}")
     splits = _resolve_splits(trajectories_id, trajectories_ood, trajectories_test)
+
     def _run():
         integrator = FluxIntegral(flux_fields=True, spectral_df=False, spectral_potens=True)
         model, train_cfg, norm_stats = _build_pinc_model_and_stats(ckpt_dir, device, data_path)
-        assert isinstance(model, Swin5DVAE), \
-            f"Expected VAE at {ckpt_dir}, got {type(model).__name__}"
+        assert isinstance(
+            model, Swin5DVAE
+        ), f"Expected VAE at {ckpt_dir}, got {type(model).__name__}"
         try:
             out = {
                 f"vae_{suffix}": _run_pinc_trajectories(
-                    model, ckpt_dir, train_cfg, norm_stats,
-                    trajs, inference_cfg, n_samples,
-                    batch_size, device, integrator,
+                    model,
+                    ckpt_dir,
+                    train_cfg,
+                    norm_stats,
+                    trajs,
+                    inference_cfg,
+                    n_samples,
+                    batch_size,
+                    device,
+                    integrator,
                     data_path=data_path,
                 )
                 for suffix, trajs in splits
@@ -408,6 +453,7 @@ def evaluate_vae(ckpt_dir, inference_cfg, *,
             del model, train_cfg, norm_stats
             free_cuda()
         return out
+
     out = _cached_or_run(output_path, _run)
     print(f"  GPU after:  {_gpu_mem_str()}")
     return out
@@ -428,13 +474,17 @@ _RECON_QTY_TO_COL = {
 
 
 @torch.no_grad()
-def evaluate_reconstruction(ckpt_dir, inference_cfg, *,
-                            trajectories_id=TRAJECTORIES_ID,
-                            trajectories_ood=TRAJECTORIES_OOD,
-                            trajectories_test=TRAJECTORIES_TEST,
-                            data_path=None,
-                            batch_size=4,
-                            device=torch.device("cuda")):
+def evaluate_reconstruction(
+    ckpt_dir,
+    inference_cfg,
+    *,
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    data_path=None,
+    batch_size=4,
+    device=torch.device("cuda"),
+):
     """Per-trajectory reconstruction RMSE for an AE / VAE / VQ-VAE, on both
     the raw distribution function `df` and the physics integrals computed
     from it (energy flux scalar `eflux`, phi spectra `kxspec`/`kyspec`, and
@@ -462,27 +512,32 @@ def evaluate_reconstruction(ckpt_dir, inference_cfg, *,
         where `<quantity>` is one of `_RECON_QUANTITIES`. Splits with no
         trajectories are omitted.
     """
-    print("\n" + "=" * 60 +
-          f"\n  Reconstruction\n  ckpt_dir={ckpt_dir}\n" + "=" * 60)
+    print("\n" + "=" * 60 + f"\n  Reconstruction\n  ckpt_dir={ckpt_dir}\n" + "=" * 60)
     print(f"  GPU before: {_gpu_mem_str()}")
 
     splits = _resolve_splits(trajectories_id, trajectories_ood, trajectories_test)
 
     model, train_cfg, norm_stats = _build_pinc_model_and_stats(
-        ckpt_dir, device, data_path,
+        ckpt_dir,
+        device,
+        data_path,
     )
     n_params_M = sum(p.numel() for p in model.parameters()) / 1e6
     sep_zf = bool(train_cfg.dataset.separate_zf)
     offset = int(train_cfg.dataset.offset)
 
     integrator = FluxIntegral(
-        flux_fields=True, spectral_df=False, spectral_potens=True,
+        flux_fields=True,
+        spectral_df=False,
+        spectral_potens=True,
     )
 
     all_trajs = [t for _suffix, trajs in splits for t in trajs]
     cli = SimpleNamespace(
         trajectories=all_trajs,
-        n_samples=1, batch_size=batch_size, device=str(device),
+        n_samples=1,
+        batch_size=batch_size,
+        device=str(device),
     )
     inf_cfg = load_inference_config(inference_cfg, cli)
     if data_path is not None:
@@ -491,39 +546,33 @@ def evaluate_reconstruction(ckpt_dir, inference_cfg, *,
     # Encoder/decoder conditioning union (matches evaluate_generative).
     model_key = "autoencoder" if hasattr(train_cfg, "autoencoder") else "model"
     model_cfg = getattr(train_cfg, model_key)
-    cond_keys = sorted(set(getattr(model_cfg, "decoder_conditioning", []))
-                       | set(getattr(model_cfg, "encoder_conditioning", [])))
+    cond_keys = sorted(
+        set(getattr(model_cfg, "decoder_conditioning", []))
+        | set(getattr(model_cfg, "encoder_conditioning", []))
+    )
 
-    shift_t = torch.as_tensor(np.asarray(norm_stats["df_mean"]),
-                              dtype=torch.float32, device=device)
-    scale_t = torch.as_tensor(np.asarray(norm_stats["df_std"]),
-                              dtype=torch.float32, device=device)
+    shift_t = torch.as_tensor(np.asarray(norm_stats["df_mean"]), dtype=torch.float32, device=device)
+    scale_t = torch.as_tensor(np.asarray(norm_stats["df_std"]), dtype=torch.float32, device=device)
     df_shape = (2, 32, 8, 16, 85, 32)  # raw bin layout; separate_zf expands ch=0
 
     def _process(traj):
         meta_path = os.path.join(inf_cfg["root"], traj, "metadata.pkl")
         with open(meta_path, "rb") as f:
             meta = pickle.load(f)
-        condition = (
-            get_conditioning(cond_keys, meta, device) if cond_keys else None
-        )
+        condition = get_conditioning(cond_keys, meta, device) if cond_keys else None
         # Geometry pulled per-trajectory; expanded to batch shape on each iter.
         geometry = get_geometry(meta)
 
         gt_path = os.path.join(inf_cfg["root"], traj, "data")
-        timesteps = sorted(
-            f for f in os.listdir(gt_path) if f.startswith("timestep")
-        )[offset:]
+        timesteps = sorted(f for f in os.listdir(gt_path) if f.startswith("timestep"))[offset:]
 
-        sq_sum  = {q: 0.0 for q in _RECON_QUANTITIES}
-        n_elems = {q: 0   for q in _RECON_QUANTITIES}
-        for i in tqdm(range(0, len(timesteps), batch_size),
-                      desc=f"  {traj}", unit="batch"):
-            batch_files = timesteps[i:i + batch_size]
+        sq_sum = {q: 0.0 for q in _RECON_QUANTITIES}
+        n_elems = {q: 0 for q in _RECON_QUANTITIES}
+        for i in tqdm(range(0, len(timesteps), batch_size), desc=f"  {traj}", unit="batch"):
+            batch_files = timesteps[i : i + batch_size]
             dfs = []
             for ts in batch_files:
-                arr = np.fromfile(os.path.join(gt_path, ts),
-                                  dtype=np.float32).reshape(df_shape)
+                arr = np.fromfile(os.path.join(gt_path, ts), dtype=np.float32).reshape(df_shape)
                 if sep_zf:
                     arr = separate_zf(arr, dim=0)
                 dfs.append(arr)
@@ -534,36 +583,45 @@ def evaluate_reconstruction(ckpt_dir, inference_cfg, *,
             scale_b = expand_as(scale_t, df_phys)
             df_norm = (df_phys - shift_b) / scale_b
 
-            cond_b = (condition.unsqueeze(0).expand(B, -1).to(device)
-                      if condition is not None else None)
+            cond_b = (
+                condition.unsqueeze(0).expand(B, -1).to(device) if condition is not None else None
+            )
             kwargs = {} if cond_b is None else {"condition": cond_b}
-            recon_norm = model(df_norm, **kwargs)["df"]
+            recon_norm = model(df_norm, **kwargs)["df"]  # noqa: F821
             recon_phys = recon_norm * scale_b + shift_b
 
             # Point-wise df RMSE in physical space.
             err_df = (recon_phys - df_phys).pow(2)
-            sq_sum["df"]  += float(err_df.sum().item())
+            sq_sum["df"] += float(err_df.sum().item())
             n_elems["df"] += df_phys.numel()
 
             # Physics integrals on both. compute_physics expects (B, C, ...);
             # geometry must be batched with leading dim B. Run on CPU since
             # the integrator uses float64 Bessel functions via NVRTC.
             geom_b = tree_map(
-                lambda g: g.unsqueeze(0).expand(B, *g.shape), geometry,
+                lambda g: g.unsqueeze(0).expand(B, *g.shape),
+                geometry,
             )
             phys_pred = compute_physics(
-                recon_phys.float().cpu(), geom_b, sep_zf, integrator,
+                recon_phys.float().cpu(),
+                geom_b,
+                sep_zf,
+                integrator,
             )
             phys_gt = compute_physics(
-                df_phys.float().cpu(), geom_b, sep_zf, integrator,
+                df_phys.float().cpu(),
+                geom_b,
+                sep_zf,
+                integrator,
             )
             for k in ("eflux", "kxspec", "kyspec", "qspec"):
                 err = (phys_pred[k] - phys_gt[k]).pow(2)
-                sq_sum[k]  += float(err.sum().item())
+                sq_sum[k] += float(err.sum().item())
                 n_elems[k] += err.numel()
 
-        return {q: float((sq_sum[q] / n_elems[q]) ** 0.5)
-                for q in _RECON_QUANTITIES if n_elems[q] > 0}
+        return {
+            q: float((sq_sum[q] / n_elems[q]) ** 0.5) for q in _RECON_QUANTITIES if n_elems[q] > 0
+        }
 
     out = {"n_params_M": float(n_params_M)}
     for suffix, _ in splits:
@@ -610,9 +668,7 @@ def build_recon_table(recon_results):
                     row[f"{col}_std"] = float("nan")
                 else:
                     row[col] = float(np.mean(vals))
-                    row[f"{col}_std"] = (
-                        float(np.std(vals, ddof=1)) if len(vals) >= 2 else 0.0
-                    )
+                    row[f"{col}_std"] = float(np.std(vals, ddof=1)) if len(vals) >= 2 else 0.0
             rows.append(row)
     if not rows:
         return pd.DataFrame()
@@ -624,12 +680,9 @@ def build_recon_table(recon_results):
     return df[[c for c in cols if c in df.columns]]
 
 
-def format_recon_latex(recon_results, *,
-                       quantities=("df",),
-                       splits=None,
-                       caption=None,
-                       label=None,
-                       precision=3):
+def format_recon_latex(
+    recon_results, *, quantities=("df",), splits=None, caption=None, label=None, precision=3
+):
     """LaTeX recon-error table with one column-group per (split, quantity).
 
     `quantities` is a string ("df") or a list/tuple of strings from
@@ -679,11 +732,11 @@ def format_recon_latex(recon_results, *,
         label = "tab:ae_recon_rmse"
 
     quantity_label = {
-        "df":     r"{Recon}_{\mathrm{RMSE}}",
-        "eflux":  r"\bar{Q}_{\mathrm{RMSE}}",
+        "df": r"{Recon}_{\mathrm{RMSE}}",
+        "eflux": r"\bar{Q}_{\mathrm{RMSE}}",
         "kxspec": r"k_x\text{-spec}_{\mathrm{RMSE}}",
         "kyspec": r"k_y\text{-spec}_{\mathrm{RMSE}}",
-        "qspec":  r"Q\text{-spec}_{\mathrm{RMSE}}",
+        "qspec": r"Q\text{-spec}_{\mathrm{RMSE}}",
     }
 
     def _agg(r, split_key, qty):
@@ -725,10 +778,9 @@ def format_recon_latex(recon_results, *,
         ql = quantity_label.get(qty, qty)
         head.append(rf"\multicolumn{{{n_splits}}}{{c}}{{${ql}\downarrow$}}")
     lines.append(" & ".join(head) + r" \\")
-    lines.append(" ".join(
-        rf"\cmidrule(lr){{{3 + n_splits * i}-{2 + n_splits * (i + 1)}}}"
-        for i in range(n)
-    ))
+    lines.append(
+        " ".join(rf"\cmidrule(lr){{{3 + n_splits * i}-{2 + n_splits * (i + 1)}}}" for i in range(n))
+    )
     sub = ["", ""]
     for _ in quantities:
         for split_label_, _suf in active_splits:
@@ -747,25 +799,32 @@ def format_recon_latex(recon_results, *,
     return "\n".join(lines)
 
 
-def evaluate_vqvae(ckpt_dir, inference_cfg, *,
-                   vq_index_pkl=None,
-                   trajectories_id=TRAJECTORIES_ID,
-                   trajectories_ood=TRAJECTORIES_OOD,
-                   trajectories_test=TRAJECTORIES_TEST,
-                   n_samples=128, batch_size=64,
-                   output_path=None,
-                   data_path=None,
-                   device=torch.device("cuda")):
+def evaluate_vqvae(
+    ckpt_dir,
+    inference_cfg,
+    *,
+    vq_index_pkl=None,
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    n_samples=128,
+    batch_size=64,
+    output_path=None,
+    data_path=None,
+    device=torch.device("cuda"),
+):
     """Evaluate a Swin5DVQVAE on ID + OOD (+ TEST if non-empty). Returns
     one entry per non-empty split keyed `vqvae_<id|ood|test>`."""
     print("\n" + "=" * 60 + "\n  VQ-VAE\n" + "=" * 60)
     print(f"  GPU before: {_gpu_mem_str()}")
     splits = _resolve_splits(trajectories_id, trajectories_ood, trajectories_test)
+
     def _run():
         integrator = FluxIntegral(flux_fields=True, spectral_df=False, spectral_potens=True)
         model, train_cfg, norm_stats = _build_pinc_model_and_stats(ckpt_dir, device, data_path)
-        assert isinstance(model, Swin5DVQVAE), \
-            f"Expected VQ-VAE at {ckpt_dir}, got {type(model).__name__}"
+        assert isinstance(
+            model, Swin5DVQVAE
+        ), f"Expected VQ-VAE at {ckpt_dir}, got {type(model).__name__}"
         vq_prior = None
         if vq_index_pkl:
             vq_prior = compute_codebook_prior(vq_index_pkl, model.vq.codebook_size)
@@ -774,10 +833,18 @@ def evaluate_vqvae(ckpt_dir, inference_cfg, *,
         try:
             out = {
                 f"vqvae_{suffix}": _run_pinc_trajectories(
-                    model, ckpt_dir, train_cfg, norm_stats,
-                    trajs, inference_cfg, n_samples,
-                    batch_size, device, integrator,
-                    vq_prior=vq_prior, data_path=data_path,
+                    model,
+                    ckpt_dir,
+                    train_cfg,
+                    norm_stats,
+                    trajs,
+                    inference_cfg,
+                    n_samples,
+                    batch_size,
+                    device,
+                    integrator,
+                    vq_prior=vq_prior,
+                    data_path=data_path,
                 )
                 for suffix, trajs in splits
             }
@@ -786,20 +853,26 @@ def evaluate_vqvae(ckpt_dir, inference_cfg, *,
             del model, train_cfg, norm_stats, vq_prior
             free_cuda()
         return out
+
     out = _cached_or_run(output_path, _run)
     print(f"  GPU after:  {_gpu_mem_str()}")
     return out
 
 
-def evaluate_ar(ar_ckpt_dir, inference_cfg, *,
-                ae_checkpoint=None,
-                trajectories_id=TRAJECTORIES_ID,
-                trajectories_ood=TRAJECTORIES_OOD,
-                trajectories_test=TRAJECTORIES_TEST,
-                n_samples=128, batch_size=64,
-                output_path=None,
-                data_path=None,
-                device=torch.device("cuda")):
+def evaluate_ar(
+    ar_ckpt_dir,
+    inference_cfg,
+    *,
+    ae_checkpoint=None,
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    n_samples=128,
+    batch_size=64,
+    output_path=None,
+    data_path=None,
+    device=torch.device("cuda"),
+):
     """Evaluate AR-transformer + VQ-VAE decoder on ID + OOD (+ TEST if
     non-empty). Returns one entry per non-empty split keyed
     `ar_<id|ood|test>`.
@@ -811,17 +884,28 @@ def evaluate_ar(ar_ckpt_dir, inference_cfg, *,
     print("\n" + "=" * 60 + "\n  AR (over VQ-VAE codes)\n" + "=" * 60)
     print(f"  GPU before: {_gpu_mem_str()}")
     splits = _resolve_splits(trajectories_id, trajectories_ood, trajectories_test)
+
     def _run():
         integrator = FluxIntegral(flux_fields=True, spectral_df=False, spectral_potens=True)
         ar_model, ae_model, ar_cfg, norm_stats = _build_ar_model(
-            ar_ckpt_dir, device, data_path, ae_checkpoint=ae_checkpoint,
+            ar_ckpt_dir,
+            device,
+            data_path,
+            ae_checkpoint=ae_checkpoint,
         )
         try:
             out = {
                 f"ar_{suffix}": _run_ar_trajectories(
-                    ar_model, ae_model, ar_cfg, norm_stats,
-                    trajs, inference_cfg,
-                    n_samples, batch_size, device, integrator,
+                    ar_model,
+                    ae_model,
+                    ar_cfg,
+                    norm_stats,
+                    trajs,
+                    inference_cfg,
+                    n_samples,
+                    batch_size,
+                    device,
+                    integrator,
                     data_path=data_path,
                 )
                 for suffix, trajs in splits
@@ -832,6 +916,7 @@ def evaluate_ar(ar_ckpt_dir, inference_cfg, *,
             del ar_model, ae_model, ar_cfg, norm_stats
             free_cuda()
         return out
+
     out = _cached_or_run(output_path, _run)
     print(f"  GPU after:  {_gpu_mem_str()}")
     return out
@@ -840,8 +925,9 @@ def evaluate_ar(ar_ckpt_dir, inference_cfg, *,
 # ===========================================================================
 # Diff (flow-matching) family
 # ===========================================================================
-def _build_diff_runner(diff_ckpt_dir, ae_checkpoint, data_path,
-                       valid_traj_h5_names, model_snapshot, device):
+def _build_diff_runner(
+    diff_ckpt_dir, ae_checkpoint, data_path, valid_traj_h5_names, model_snapshot, device
+):
     pcfg = omegaconf.OmegaConf.load(os.path.join(diff_ckpt_dir, "config.yaml"))
     pcfg.output_path = diff_ckpt_dir
     pcfg.dataset.path = str(data_path)
@@ -860,12 +946,15 @@ def _build_diff_runner(diff_ckpt_dir, ae_checkpoint, data_path,
 
     runner = get_diffusion_runner(rank=0, cfg=pcfg, world_size=1)
     torch.use_deterministic_algorithms(False)
-    ckpt = torch.load(os.path.join(diff_ckpt_dir, model_snapshot),
-                      map_location=device, weights_only=False)
+    ckpt = torch.load(
+        os.path.join(diff_ckpt_dir, model_snapshot), map_location=device, weights_only=False
+    )
     runner.model.load_state_dict(ckpt["model_state_dict"])
     runner.model.eval()
-    print(f"  diff ckpt epoch={ckpt.get('epoch', '?')}, "
-          f"params={sum(p.numel() for p in runner.model.parameters())/1e6:.1f}M")
+    print(
+        f"  diff ckpt epoch={ckpt.get('epoch', '?')}, "
+        f"params={sum(p.numel() for p in runner.model.parameters())/1e6:.1f}M"
+    )
     return runner
 
 
@@ -880,8 +969,9 @@ def _traj_basename(path):
 
 
 @torch.no_grad()
-def _diff_evaluate_trajectory(runner, fi, n_samples, gen_batch_size,
-                              n_denoising_steps, integrator, device):
+def _diff_evaluate_trajectory(
+    runner, fi, n_samples, gen_batch_size, n_denoising_steps, integrator, device
+):
     """Sample latents, decode -> df, run physics on the decoded df. Stores raw
     latents under gen['_latents'] for chapter-B probe application.
     """
@@ -890,8 +980,8 @@ def _diff_evaluate_trajectory(runner, fi, n_samples, gen_batch_size,
     cond_keys = sorted(runner.cfg.model.conditioning)
 
     fpath = valset.files[fi]
-    traj  = _traj_basename(fpath)
-    meta  = valset.metadata[fi]
+    traj = _traj_basename(fpath)
+    meta = valset.metadata[fi]
     cond_vals = [float(np.squeeze(meta[COND_META_MAP.get(k, k)])) for k in cond_keys]
     cond = torch.tensor(cond_vals, dtype=torch.float32).unsqueeze(0)
 
@@ -923,11 +1013,11 @@ def _diff_evaluate_trajectory(runner, fi, n_samples, gen_batch_size,
         if sep_zf and pred_df.shape[1] > 2:
             pred_df = recombine_zf(pred_df, dim=1)
 
-        geom = tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64),
-                        meta["geometry"])
+        geom = tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), meta["geometry"])
         geom_b = tree_map(lambda g: g.unsqueeze(0).expand(bs, *g.shape), geom)
-        phys = compute_physics(pred_df.float().cpu(), geom_b, separate_zf=False,
-                               integrator=integrator)
+        phys = compute_physics(
+            pred_df.float().cpu(), geom_b, separate_zf=False, integrator=integrator
+        )
         for k, v in phys.items():
             accum[k].append(v.cpu())
         remaining -= bs
@@ -939,58 +1029,60 @@ def _diff_evaluate_trajectory(runner, fi, n_samples, gen_batch_size,
     gen_res["_latents"] = np.concatenate(all_latents, axis=0)
     gen_res["_sample_time_s"] = float(sample_time_s)
     gen_res["_decode_time_s"] = float(decode_time_s)
-    gen_res["_gen_time_s"]    = float(sample_time_s + decode_time_s)
-    gen_res["_n_samples"]     = int(n_done)
+    gen_res["_gen_time_s"] = float(sample_time_s + decode_time_s)
+    gen_res["_n_samples"] = int(n_done)
 
     # GT physics + meta-side spectra targets.
     gt_subdir = f"{traj}_ifft_realpotens"
-    gt_res = evaluate_ground_truth(meta, gt_subdir, runner.cfg,
-                                   {"root": str(runner.cfg.dataset.path)},
-                                   device, integrator)
+    gt_res = evaluate_ground_truth(
+        meta, gt_subdir, runner.cfg, {"root": str(runner.cfg.dataset.path)}, device, integrator
+    )
     gt_res = _add_full_alias(_add_meta_targets(gt_res, meta))
     return traj, {"gen": gen_res, "gt": gt_res}
 
 
-def _fit_diff_probes(runner, n_components, alpha, subsample, seed,
-                     gen_batch_size, n_denoising_steps):
+def _fit_diff_probes(
+    runner, n_components, alpha, subsample, seed, gen_batch_size, n_denoising_steps
+):
     """Fit linear probes on training latents (flux + cond + spectra)."""
     from sklearn.linear_model import Ridge
 
     print("  fitting probes ...")
     cond_keys = sorted(runner.cfg.model.conditioning)
     all_keys = list(runner.trainset.precomputed_latents.keys())
-    X_ae_full = np.stack([
-        np.array(runner.trainset.precomputed_latents[k]["x"]).reshape(-1)
-        for k in all_keys
-    ])
-    y_flux_full = np.array([
-        float(np.squeeze(runner.trainset.precomputed_latents[k]["flux"]))
-        for k in all_keys
-    ])
-    C_full = np.stack([
-        np.array([
-            float(np.squeeze(runner.trainset.precomputed_latents[k][ck]))
-            for ck in cond_keys
-        ])
-        for k in all_keys
-    ])
+    X_ae_full = np.stack(
+        [np.array(runner.trainset.precomputed_latents[k]["x"]).reshape(-1) for k in all_keys]
+    )
+    y_flux_full = np.array(
+        [float(np.squeeze(runner.trainset.precomputed_latents[k]["flux"])) for k in all_keys]
+    )
+    C_full = np.stack(
+        [
+            np.array(
+                [float(np.squeeze(runner.trainset.precomputed_latents[k][ck])) for ck in cond_keys]
+            )
+            for k in all_keys
+        ]
+    )
 
     if subsample and subsample < len(X_ae_full):
         sub_idx = np.random.RandomState(seed).choice(
-            len(X_ae_full), subsample, replace=False,
+            len(X_ae_full),
+            subsample,
+            replace=False,
         )
-        X_ae    = X_ae_full[sub_idx]
-        y_flux  = y_flux_full[sub_idx]
+        X_ae = X_ae_full[sub_idx]
+        y_flux = y_flux_full[sub_idx]
         C_train = C_full[sub_idx]
         sub_keys = [all_keys[i] for i in sub_idx]
     else:
         X_ae, y_flux, C_train = X_ae_full, y_flux_full, C_full
         sub_keys = all_keys
 
-    X_gen = generate_latents(runner, C_train, batch_size=gen_batch_size,
-                             steps=n_denoising_steps)
-    probes = fit_probes(X_ae, X_gen, y_flux, cond_keys, C_train,
-                        n_components=n_components, alpha=alpha)
+    X_gen = generate_latents(runner, C_train, batch_size=gen_batch_size, steps=n_denoising_steps)
+    probes = fit_probes(
+        X_ae, X_gen, y_flux, cond_keys, C_train, n_components=n_components, alpha=alpha
+    )
     pca = probes["pca"]
 
     # Spectra probes (kyspec/fluxspec from meta, kxspec from integrator)
@@ -1030,8 +1122,9 @@ def _fit_diff_probes(runner, n_components, alpha, subsample, seed,
             df_t = recombine_zf(df_t, dim=1)
         geom_t = trainset.get_batch_geometry(torch.tensor([fi]))
         geom_t = tree_map(lambda g: torch.as_tensor(g, dtype=torch.float64), geom_t)
-        phys = compute_physics(df_t.float().cpu(), geom_t, separate_zf=False,
-                               integrator=integrator_sp)
+        phys = compute_physics(
+            df_t.float().cpu(), geom_t, separate_zf=False, integrator=integrator_sp
+        )
         kx_val = phys["kxspec"].squeeze(0).cpu().numpy().reshape(-1)
         for k, v in vals_meta.items():
             raw_targets[k].append(v)
@@ -1054,16 +1147,20 @@ def _fit_diff_probes(runner, n_components, alpha, subsample, seed,
         all_specs[k] = {"y": ((raw_log - m) / d).astype(np.float32), "mean": m, "std": d}
 
     valid_rows = np.asarray(valid_rows)
-    X_ae_pca  = pca.transform(X_ae[valid_rows])
+    X_ae_pca = pca.transform(X_ae[valid_rows])
     X_gen_pca = pca.transform(X_gen[valid_rows])
 
     spec_probes = {}
     for k, spec in all_specs.items():
         y = spec["y"]
-        pae  = Ridge(alpha=alpha).fit(X_ae_pca, y)
+        pae = Ridge(alpha=alpha).fit(X_ae_pca, y)
         pgen = Ridge(alpha=alpha).fit(X_gen_pca, y)
-        spec_probes[k] = {"probe_ae": pae, "probe_gen": pgen,
-                          "mean": spec["mean"], "std": spec["std"]}
+        spec_probes[k] = {
+            "probe_ae": pae,
+            "probe_gen": pgen,
+            "mean": spec["mean"],
+            "std": spec["std"],
+        }
 
     return {"probes": probes, "spec_probes": spec_probes, "pca": pca}
 
@@ -1085,29 +1182,37 @@ def _apply_diff_probes(group, probe_pack):
         X = gen["_latents"]
         with _GpuTimer() as _t:
             X_pca = pca.transform(X)
-            gen["probe_flux_ae"]  = probes["flux"]["probe_ae"].predict(X_pca)
+            gen["probe_flux_ae"] = probes["flux"]["probe_ae"].predict(X_pca)
             gen["probe_flux_gen"] = probes["flux"]["probe_gen"].predict(X_pca)
             for sk, sp in spec_probes.items():
                 for v in ("ae", "gen"):
                     pred_norm = sp[f"probe_{v}"].predict(X_pca)
-                    pred_log  = pred_norm * sp["std"] + sp["mean"]
+                    pred_log = pred_norm * sp["std"] + sp["mean"]
                     gen[f"probe_{sk}_{v}"] = np.expm1(pred_log)
         gen["_probe_time_s"] = float(_t.elapsed)
     return group
 
 
-def evaluate_diff(diff_ckpt_dir, ae_checkpoint, *,
-                  data_path,
-                  trajectories_id=TRAJECTORIES_ID,
-                  trajectories_ood=TRAJECTORIES_OOD,
-                  trajectories_test=TRAJECTORIES_TEST,
-                  n_samples=128, gen_batch_size=64, n_denoising_steps=20,
-                  with_probes=True,
-                  probe_n_components=64, probe_alpha=1.0,
-                  probe_subsample=256, probe_seed=0,
-                  model_snapshot="best.pth",
-                  output_path=None,
-                  device=torch.device("cuda")):
+def evaluate_diff(
+    diff_ckpt_dir,
+    ae_checkpoint,
+    *,
+    data_path,
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    n_samples=128,
+    gen_batch_size=64,
+    n_denoising_steps=20,
+    with_probes=True,
+    probe_n_components=64,
+    probe_alpha=1.0,
+    probe_subsample=256,
+    probe_seed=0,
+    model_snapshot="best.pth",
+    output_path=None,
+    device=torch.device("cuda"),
+):
     """Evaluate a flow-matching diffusion model on ID + OOD (+ TEST if
     non-empty).
 
@@ -1119,14 +1224,15 @@ def evaluate_diff(diff_ckpt_dir, ae_checkpoint, *,
     print("\n" + "=" * 60 + "\n  Diff (flow-matching)\n" + "=" * 60)
     print(f"  GPU before: {_gpu_mem_str()}")
     splits = _resolve_splits(trajectories_id, trajectories_ood, trajectories_test)
+
     def _run():
         integrator = FluxIntegral(flux_fields=True, spectral_df=False, spectral_potens=True)
         valid_h5 = [
-            t.replace("_ifft_realpotens", "") + ".h5"
-            for _suffix, trajs in splits for t in trajs
+            t.replace("_ifft_realpotens", "") + ".h5" for _suffix, trajs in splits for t in trajs
         ]
-        runner = _build_diff_runner(diff_ckpt_dir, ae_checkpoint, data_path,
-                                    valid_h5, model_snapshot, device)
+        runner = _build_diff_runner(
+            diff_ckpt_dir, ae_checkpoint, data_path, valid_h5, model_snapshot, device
+        )
         try:
             valset = runner.valsets[0]
             # Map trajectory base -> (output key, group dict).
@@ -1145,16 +1251,26 @@ def evaluate_diff(diff_ckpt_dir, ae_checkpoint, *,
                     continue
                 print(f"  [{key}] {base}")
                 _, res = _diff_evaluate_trajectory(
-                    runner, fi, n_samples, gen_batch_size, n_denoising_steps,
-                    integrator, device,
+                    runner,
+                    fi,
+                    n_samples,
+                    gen_batch_size,
+                    n_denoising_steps,
+                    integrator,
+                    device,
                 )
                 out[key][base] = res
                 free_cuda()
 
             if with_probes:
                 probe_pack = _fit_diff_probes(
-                    runner, probe_n_components, probe_alpha, probe_subsample,
-                    probe_seed, gen_batch_size, n_denoising_steps,
+                    runner,
+                    probe_n_components,
+                    probe_alpha,
+                    probe_subsample,
+                    probe_seed,
+                    gen_batch_size,
+                    n_denoising_steps,
                 )
                 for k in out:
                     _apply_diff_probes(out[k], probe_pack)
@@ -1165,22 +1281,28 @@ def evaluate_diff(diff_ckpt_dir, ae_checkpoint, *,
             del runner
             free_cuda()
         return out
+
     out = _cached_or_run(output_path, _run)
     print(f"  GPU after:  {_gpu_mem_str()}")
     return out
 
 
 @torch.no_grad()
-def evaluate_diff_n_sweep(diff_ckpt_dir, ae_checkpoint, *,
-                          data_path,
-                          n_denoising_steps_list,
-                          trajectories_id=TRAJECTORIES_ID,
-                          trajectories_ood=TRAJECTORIES_OOD,
-                          trajectories_test=TRAJECTORIES_TEST,
-                          n_samples=128, gen_batch_size=64,
-                          model_snapshot="best.pth",
-                          output_path_fn=None,
-                          device=torch.device("cuda")):
+def evaluate_diff_n_sweep(
+    diff_ckpt_dir,
+    ae_checkpoint,
+    *,
+    data_path,
+    n_denoising_steps_list,
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    n_samples=128,
+    gen_batch_size=64,
+    model_snapshot="best.pth",
+    output_path_fn=None,
+    device=torch.device("cuda"),
+):
     """Sweep `n_denoising_steps` over `n_denoising_steps_list` while loading
     the diffusion runner ONCE.
 
@@ -1196,9 +1318,12 @@ def evaluate_diff_n_sweep(diff_ckpt_dir, ae_checkpoint, *,
 
     Returns: {n_denoising_steps: {"diff_id": {<traj>: ...}, "diff_ood": ...}}.
     """
-    print("\n" + "=" * 60 +
-          f"\n  Diff (flow-matching, N sweep over {list(n_denoising_steps_list)})\n"
-          + "=" * 60)
+    print(
+        "\n"
+        + "=" * 60
+        + f"\n  Diff (flow-matching, N sweep over {list(n_denoising_steps_list)})\n"
+        + "=" * 60
+    )
     print(f"  GPU before: {_gpu_mem_str()}")
 
     # Load whatever's already cached, defer the rest to one runner build.
@@ -1215,7 +1340,9 @@ def evaluate_diff_n_sweep(diff_ckpt_dir, ae_checkpoint, *,
                 print(f"  [cache hit ] N={n}: {path}")
                 continue
             except (RuntimeError, EOFError, OSError, pickle.UnpicklingError) as e:
-                print(f"  [cache CORRUPT] N={n}: {path}  ({type(e).__name__}: {e}); will regenerate")
+                print(
+                    f"  [cache CORRUPT] N={n}: {path}  ({type(e).__name__}: {e}); will regenerate"
+                )
                 # Move the bad file aside so a fresh save can take its slot.
                 try:
                     os.replace(path, path + ".corrupt")
@@ -1234,16 +1361,21 @@ def evaluate_diff_n_sweep(diff_ckpt_dir, ae_checkpoint, *,
         return results
 
     integrator = FluxIntegral(
-        flux_fields=True, spectral_df=False, spectral_potens=True,
+        flux_fields=True,
+        spectral_df=False,
+        spectral_potens=True,
     )
     splits = _resolve_splits(trajectories_id, trajectories_ood, trajectories_test)
     valid_h5 = [
-        t.replace("_ifft_realpotens", "") + ".h5"
-        for _suffix, trajs in splits for t in trajs
+        t.replace("_ifft_realpotens", "") + ".h5" for _suffix, trajs in splits for t in trajs
     ]
     runner = _build_diff_runner(
-        diff_ckpt_dir, ae_checkpoint, data_path,
-        valid_h5, model_snapshot, device,
+        diff_ckpt_dir,
+        ae_checkpoint,
+        data_path,
+        valid_h5,
+        model_snapshot,
+        device,
     )
     try:
         valset = runner.valsets[0]
@@ -1264,8 +1396,13 @@ def evaluate_diff_n_sweep(diff_ckpt_dir, ae_checkpoint, *,
                     continue
                 print(f"  [{key}] {base}")
                 _, res = _diff_evaluate_trajectory(
-                    runner, fi, n_samples, gen_batch_size, n,
-                    integrator, device,
+                    runner,
+                    fi,
+                    n_samples,
+                    gen_batch_size,
+                    n,
+                    integrator,
+                    device,
                 )
                 out[key][base] = res
                 free_cuda()
@@ -1288,8 +1425,7 @@ def evaluate_diff_n_sweep(diff_ckpt_dir, ae_checkpoint, *,
 # ===========================================================================
 # GyroSwin (optional)
 # ===========================================================================
-def _build_gyroswin_runner(diff_dir, ae_checkpoint, data_path,
-                           pinned_traj_h5, device):
+def _build_gyroswin_runner(diff_dir, ae_checkpoint, data_path, pinned_traj_h5, device):
     pcfg = omegaconf.OmegaConf.load(os.path.join(diff_dir, "config.yaml"))
     pcfg.output_path = diff_dir
     pcfg.dataset.path = str(data_path)
@@ -1325,17 +1461,28 @@ def _gyroswin_load_df_bin(data_dir, idx, res, sep_zf):
 def _gyroswin_scale_shift(gs_stats, field, ref):
     s = gs_stats[field]["full"]
     mean = np.asarray(s["mean"], dtype=np.float32)
-    std  = np.asarray(s["std"],  dtype=np.float32)
+    std = np.asarray(s["std"], dtype=np.float32)
     shift = expand_as(torch.as_tensor(mean, dtype=ref.dtype, device=ref.device), ref)
-    scale = expand_as(torch.as_tensor(std,  dtype=ref.dtype, device=ref.device), ref)
+    scale = expand_as(torch.as_tensor(std, dtype=ref.dtype, device=ref.device), ref)
     return scale, shift
 
 
 @torch.no_grad()
-def _gyroswin_ar_rollout(gs_model, gs_stats, gs_cond_keys, traj, n_steps,
-                         offset, flux_mean, flux_std,
-                         data_prep, sep_zf, device, return_df=True,
-                         flux_key="flux"):
+def _gyroswin_ar_rollout(
+    gs_model,
+    gs_stats,
+    gs_cond_keys,
+    traj,
+    n_steps,
+    offset,
+    flux_mean,
+    flux_std,
+    data_prep,
+    sep_zf,
+    device,
+    return_df=True,
+    flux_key="flux",
+):
     """`flux_key` is the output dict key the GyroSwin uses for its flux head;
     "flux" for per-step flux (old codebase + the GyroSwin_tiny ckpt) and
     "fluxavg" for the warm-start checkpoints that supervise the time-averaged
@@ -1351,16 +1498,20 @@ def _gyroswin_ar_rollout(gs_model, gs_stats, gs_cond_keys, traj, n_steps,
     df0 = _gyroswin_load_df_bin(data_dir, offset, res, sep_zf).unsqueeze(0).to(device)
     df_scale, df_shift = _gyroswin_scale_shift(gs_stats, "df", df0)
     params = {
-        k: torch.tensor(np.asarray(meta[COND_META_MAP.get(k, k)]).reshape(1),
-                        dtype=torch.float32, device=device)
-        for k in gs_cond_keys if k != "timestep"
+        k: torch.tensor(
+            np.asarray(meta[COND_META_MAP.get(k, k)]).reshape(1), dtype=torch.float32, device=device
+        )
+        for k in gs_cond_keys
+        if k != "timestep"
     }
     inputs = {"df": (df0 - df_shift) / df_scale}
     flux_pred = np.empty(n_act, dtype=np.float32)
     df_snaps = [] if return_df else None
     for step in range(n_act):
         params["timestep"] = torch.tensor(
-            [float(t_grid[offset + step])], dtype=torch.float32, device=device,
+            [float(t_grid[offset + step])],
+            dtype=torch.float32,
+            device=device,
         )
         out = gs_model(**inputs, **params)
         inputs["df"] = out["df"].clone()
@@ -1368,10 +1519,14 @@ def _gyroswin_ar_rollout(gs_model, gs_stats, gs_cond_keys, traj, n_steps,
         flux_pred[step] = flux_norm * flux_std + flux_mean
         if return_df:
             df_snaps.append((out["df"] * df_scale + df_shift).squeeze(0).cpu())
-    return dict(meta=meta, n_steps=n_act, offset=offset,
-                t_grid=t_grid[offset:offset + n_act].astype(np.float32),
-                flux_pred=flux_pred,
-                df_pred=torch.stack(df_snaps) if return_df else None)
+    return dict(
+        meta=meta,
+        n_steps=n_act,
+        offset=offset,
+        t_grid=t_grid[offset : offset + n_act].astype(np.float32),
+        flux_pred=flux_pred,
+        df_pred=torch.stack(df_snaps) if return_df else None,
+    )
 
 
 def _gyroswin_compute_physics_batched(df_snaps, meta, sep_zf):
@@ -1382,14 +1537,35 @@ def _gyroswin_compute_physics_batched(df_snaps, meta, sep_zf):
     return compute_physics(df_snaps.cpu().float(), geom_b, sep_zf, integrator)
 
 
-def _gyroswin_evaluate_trajectory(traj, n_steps, offset, flux_mean, flux_std,
-                                   data_prep, sep_zf, gs_model, gs_stats, gs_cond_keys,
-                                   device, flux_key="flux"):
+def _gyroswin_evaluate_trajectory(
+    traj,
+    n_steps,
+    offset,
+    flux_mean,
+    flux_std,
+    data_prep,
+    sep_zf,
+    gs_model,
+    gs_stats,
+    gs_cond_keys,
+    device,
+    flux_key="flux",
+):
     with _GpuTimer() as _t_roll:
         roll = _gyroswin_ar_rollout(
-            gs_model, gs_stats, gs_cond_keys, traj, n_steps, offset,
-            flux_mean, flux_std, data_prep, sep_zf, device,
-            return_df=True, flux_key=flux_key,
+            gs_model,
+            gs_stats,
+            gs_cond_keys,
+            traj,
+            n_steps,
+            offset,
+            flux_mean,
+            flux_std,
+            data_prep,
+            sep_zf,
+            device,
+            return_df=True,
+            flux_key=flux_key,
         )
     n = roll["n_steps"]
     meta = roll["meta"]
@@ -1399,38 +1575,52 @@ def _gyroswin_evaluate_trajectory(traj, n_steps, offset, flux_mean, flux_std,
 
     full_n = len(meta["timesteps"]) - offset
     if full_n != n:
-        gt_df_full = torch.stack([
-            _gyroswin_load_df_bin(data_prep / traj, offset + k, meta["resolution"], sep_zf)
-            for k in range(full_n)
-        ]).float()
+        gt_df_full = torch.stack(
+            [
+                _gyroswin_load_df_bin(data_prep / traj, offset + k, meta["resolution"], sep_zf)
+                for k in range(full_n)
+            ]
+        ).float()
     else:
-        gt_df_full = torch.stack([
-            _gyroswin_load_df_bin(data_prep / traj, offset + k, meta["resolution"], sep_zf)
-            for k in range(n)
-        ]).float()
+        gt_df_full = torch.stack(
+            [
+                _gyroswin_load_df_bin(data_prep / traj, offset + k, meta["resolution"], sep_zf)
+                for k in range(n)
+            ]
+        ).float()
     gt_phys_full = _gyroswin_compute_physics_batched(gt_df_full, meta, sep_zf)
     gt_phys_full["eflux"] = gt_phys_full["eflux"].float()
 
     def _stats(t):
-        return {"mean": t.mean(dim=0) if t.dim() > 0 else t,
-                "std":  (t.std(dim=0) if t.dim() > 1
-                         else (t.std() if t.dim() == 1 else torch.zeros_like(t))),
-                "all":  t,
-                "full": t}
+        return {
+            "mean": t.mean(dim=0) if t.dim() > 0 else t,
+            "std": (
+                t.std(dim=0) if t.dim() > 1 else (t.std() if t.dim() == 1 else torch.zeros_like(t))
+            ),
+            "all": t,
+            "full": t,
+        }
 
-    gen_res = {k: {"all": v if isinstance(v, torch.Tensor) else torch.as_tensor(v),
-                   "mean": (v.mean(dim=0) if isinstance(v, torch.Tensor) and v.dim() > 0
-                             else v),
-                   "std":  (v.std(dim=0) if isinstance(v, torch.Tensor) and v.dim() > 1
-                             else torch.zeros_like(v) if isinstance(v, torch.Tensor)
-                             else torch.tensor(0.0))}
-               for k, v in gen_phys.items()}
+    gen_res = {
+        k: {
+            "all": v if isinstance(v, torch.Tensor) else torch.as_tensor(v),
+            "mean": (v.mean(dim=0) if isinstance(v, torch.Tensor) and v.dim() > 0 else v),
+            "std": (
+                v.std(dim=0)
+                if isinstance(v, torch.Tensor) and v.dim() > 1
+                else torch.zeros_like(v) if isinstance(v, torch.Tensor) else torch.tensor(0.0)
+            ),
+        }
+        for k, v in gen_phys.items()
+    }
     # GyroSwin rollout = 1 "sample" per trajectory (autoregressive over the
     # whole horizon), so n_samples=1 and time_per_sample = total rollout time.
     gen_res["_gen_time_s"] = float(_t_roll.elapsed)
-    gen_res["_n_samples"]  = 1
-    gt_res = {k: _stats(v if isinstance(v, torch.Tensor) else torch.as_tensor(v))
-              for k, v in gt_phys_full.items()}
+    gen_res["_n_samples"] = 1
+    gt_res = {
+        k: _stats(v if isinstance(v, torch.Tensor) else torch.as_tensor(v))
+        for k, v in gt_phys_full.items()
+    }
     gt_res = _add_meta_targets(gt_res, meta)
     return {"gen": gen_res, "gt": gt_res, "t_grid": roll["t_grid"]}
 
@@ -1448,23 +1638,29 @@ def _scalar_stat(arr, name):
     if a.size == 0:
         raise ValueError(f"empty {name} stats")
     if a.size > 1:
-        print(f"  WARNING: {name} stats has shape {np.asarray(arr).shape}; "
-              f"reducing to scalar via mean of {a.size} values.")
+        print(
+            f"  WARNING: {name} stats has shape {np.asarray(arr).shape}; "
+            f"reducing to scalar via mean of {a.size} values."
+        )
         return float(a.mean())
     return float(a.item())
 
 
-def evaluate_gyroswin_new(gyroswin_ckpt_dir, *,
-                          data_path,
-                          variant="new",
-                          trajectories_id=TRAJECTORIES_ID,
-                          trajectories_ood=TRAJECTORIES_OOD,
-                          trajectories_test=TRAJECTORIES_TEST,
-                          n_steps=128,
-                          start_timestep=80,
-                          flux_mean=None, flux_std=None,
-                          output_path=None,
-                          device=torch.device("cuda")):
+def evaluate_gyroswin_new(
+    gyroswin_ckpt_dir,
+    *,
+    data_path,
+    variant="new",
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    n_steps=128,
+    start_timestep=80,
+    flux_mean=None,
+    flux_std=None,
+    output_path=None,
+    device=torch.device("cuda"),
+):
     """Evaluate a GyroSwin trained with the *current* codebase on ID + OOD.
 
     Loads via `neugk.gyroswin.models.get_model` -- no monkey-patching, same
@@ -1486,15 +1682,17 @@ def evaluate_gyroswin_new(gyroswin_ckpt_dir, *,
     explicit values for the rollout's flux denormalization.
     """
     splits = _resolve_splits(trajectories_id, trajectories_ood, trajectories_test)
-    print("\n" + "=" * 60 +
-          f"\n  GyroSwin ({variant}, AR rollout)\n" + "=" * 60)
+    print("\n" + "=" * 60 + f"\n  GyroSwin ({variant}, AR rollout)\n" + "=" * 60)
     print(f"  GPU before: {_gpu_mem_str()}")
+
     def _run():
         from neugk.gyroswin.models import get_model as get_gyroswin_model
 
-        cfg = _notebook_safe(omegaconf.OmegaConf.load(
-            os.path.join(gyroswin_ckpt_dir, "config.yaml"),
-        ))
+        cfg = _notebook_safe(
+            omegaconf.OmegaConf.load(
+                os.path.join(gyroswin_ckpt_dir, "config.yaml"),
+            )
+        )
         cfg.dataset.path = str(data_path)
         cfg.dataset.gds_override = True
 
@@ -1502,14 +1700,17 @@ def evaluate_gyroswin_new(gyroswin_ckpt_dir, *,
         datasets, _, _ = get_data(cfg, rank=0)
         trainset = datasets[0]
 
-        print(f"  building GyroSwin model ...")
+        print("  building GyroSwin model ...")
         gs_model = get_gyroswin_model(cfg, dataset=trainset).to(device).eval()
-        ckpt = torch.load(os.path.join(gyroswin_ckpt_dir, "best.pth"),
-                          map_location=device, weights_only=False)
+        ckpt = torch.load(
+            os.path.join(gyroswin_ckpt_dir, "best.pth"), map_location=device, weights_only=False
+        )
         state = ckpt.get("model_state_dict", ckpt)
         gs_model.load_state_dict(state, strict=True)
-        print(f"  GyroSwin ckpt epoch={ckpt.get('epoch', '?')}, "
-              f"params={sum(p.numel() for p in gs_model.parameters())/1e6:.1f}M")
+        print(
+            f"  GyroSwin ckpt epoch={ckpt.get('epoch', '?')}, "
+            f"params={sum(p.numel() for p in gs_model.parameters())/1e6:.1f}M"
+        )
 
         # Some checkpoints (the warm-start ones) supervise time-averaged flux
         # via `fluxavg` instead of per-step `flux`. The model's `outputs` list
@@ -1530,9 +1731,11 @@ def evaluate_gyroswin_new(gyroswin_ckpt_dir, *,
         # Flux denorm stats: caller override > trainset.stats[<flux_key>].
         if flux_mean is not None and flux_std is not None:
             flux_mean_v = float(flux_mean)
-            flux_std_v  = float(flux_std)
-            print(f"  using user-provided {flux_key} stats: "
-                  f"mean={flux_mean_v:.4g}, std={flux_std_v:.4g}")
+            flux_std_v = float(flux_std)
+            print(
+                f"  using user-provided {flux_key} stats: "
+                f"mean={flux_mean_v:.4g}, std={flux_std_v:.4g}"
+            )
         else:
             stats_entry = trainset.stats.get(flux_key, {}).get("full")
             if not (stats_entry and "mean" in stats_entry and "std" in stats_entry):
@@ -1541,19 +1744,23 @@ def evaluate_gyroswin_new(gyroswin_ckpt_dir, *,
                     f"pass flux_mean= / flux_std= explicitly."
                 )
             flux_mean_v = _scalar_stat(stats_entry["mean"], f"{flux_key}.full.mean")
-            flux_std_v  = _scalar_stat(stats_entry["std"],  f"{flux_key}.full.std")
+            flux_std_v = _scalar_stat(stats_entry["std"], f"{flux_key}.full.std")
 
         # Reshape df stats so they look like the old gs_stats pickle layout
         # (gs_stats[<field>]["full"]["mean"|"std"]) consumed by
         # `_gyroswin_scale_shift`.
-        gs_stats = {"df": {"full": {
-            "mean": np.asarray(trainset.stats["df"]["full"]["mean"]),
-            "std":  np.asarray(trainset.stats["df"]["full"]["std"]),
-        }}}
+        gs_stats = {
+            "df": {
+                "full": {
+                    "mean": np.asarray(trainset.stats["df"]["full"]["mean"]),
+                    "std": np.asarray(trainset.stats["df"]["full"]["std"]),
+                }
+            }
+        }
         del datasets
 
-        offset    = int(start_timestep)
-        sep_zf    = bool(cfg.dataset.separate_zf)
+        offset = int(start_timestep)
+        sep_zf = bool(cfg.dataset.separate_zf)
         cond_keys = sorted(list(cfg.model.conditioning))
 
         try:
@@ -1563,8 +1770,17 @@ def evaluate_gyroswin_new(gyroswin_ckpt_dir, *,
                 for traj in trajs:
                     print(f"  [{label}] {traj} (start_t={offset})")
                     out[label][traj] = _gyroswin_evaluate_trajectory(
-                        traj, n_steps, offset, flux_mean_v, flux_std_v,
-                        Path(data_path), sep_zf, gs_model, gs_stats, cond_keys, device,
+                        traj,
+                        n_steps,
+                        offset,
+                        flux_mean_v,
+                        flux_std_v,
+                        Path(data_path),
+                        sep_zf,
+                        gs_model,
+                        gs_stats,
+                        cond_keys,
+                        device,
                         flux_key=flux_key,
                     )
                 free_cuda()
@@ -1573,18 +1789,22 @@ def evaluate_gyroswin_new(gyroswin_ckpt_dir, *,
             del gs_model, trainset, gs_stats
             free_cuda()
         return out
+
     out = _cached_or_run(output_path, _run)
     print(f"  GPU after:  {_gpu_mem_str()}")
     return out
 
 
-def load_gyroswin_xxl_results(autoreg_root, *,
-                              data_path,
-                              trajectories_id=TRAJECTORIES_ID,
-                              trajectories_ood=TRAJECTORIES_OOD,
-                              trajectories_test=TRAJECTORIES_TEST,
-                              offset=80,
-                              n_last_steps=80):
+def load_gyroswin_xxl_results(
+    autoreg_root,
+    *,
+    data_path,
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    offset=80,
+    n_last_steps=80,
+):
     """Load pre-computed AR-rollout outputs from a `gyroswin_xxl_*/autoreg_t0/`
     directory and assemble result groups compatible with `build_summary_table`.
 
@@ -1636,7 +1856,7 @@ def load_gyroswin_xxl_results(autoreg_root, *,
             base = t.replace("_ifft_realpotens", "")
             if suffix == "ood" and base.startswith("ood_"):
                 # `ood_iteration_0_ifft_realpotens` -> autoreg `ood/iteration_0`.
-                sub = "ood/" + base[len("ood_"):]
+                sub = "ood/" + base[len("ood_") :]
             else:
                 sub = base
             plan.append((group_key, t, sub, t))
@@ -1665,18 +1885,16 @@ def load_gyroswin_xxl_results(autoreg_root, *,
         # GyroSwin row's convention where gen_phys["eflux"] is overridden with
         # the flux-head output.
         try:
-            pred_eflux = np.array([
-                float(open(os.path.join(best_dir, k, "flux")).read().strip())
-                for k in Ks
-            ], dtype=np.float32)
-            pred_ky = np.stack([
-                np.loadtxt(os.path.join(best_dir, k, "kyspec"))
-                for k in Ks
-            ]).astype(np.float32)
-            pred_es = np.stack([
-                np.loadtxt(os.path.join(best_dir, k, "eflux_spectra"))
-                for k in Ks
-            ]).astype(np.float32)
+            pred_eflux = np.array(
+                [float(open(os.path.join(best_dir, k, "flux")).read().strip()) for k in Ks],
+                dtype=np.float32,
+            )
+            pred_ky = np.stack(
+                [np.loadtxt(os.path.join(best_dir, k, "kyspec")) for k in Ks]
+            ).astype(np.float32)
+            pred_es = np.stack(
+                [np.loadtxt(os.path.join(best_dir, k, "eflux_spectra")) for k in Ks]
+            ).astype(np.float32)
         except FileNotFoundError as e:
             print(f"  [skip] {traj_label}: {e}")
             continue
@@ -1699,10 +1917,11 @@ def load_gyroswin_xxl_results(autoreg_root, *,
         # GT references: `meta[<key>][offset:offset+n]` aligns one-to-one with
         # the predicted K-steps. The slice clamps if the metadata is shorter
         # than offset+n.
-        gt_flux_arr = np.asarray(meta[flux_key])[offset:offset + n].astype(np.float32)
+        gt_flux_arr = np.asarray(meta[flux_key])[offset : offset + n].astype(np.float32)
         gt_ky_arr = (
-            np.asarray(meta["kyspec"])[offset:offset + n].astype(np.float32)
-            if "kyspec" in meta else None
+            np.asarray(meta["kyspec"])[offset : offset + n].astype(np.float32)
+            if "kyspec" in meta
+            else None
         )
 
         # Restrict to the last `n_last_steps` (saturated-regime convention).
@@ -1710,8 +1929,8 @@ def load_gyroswin_xxl_results(autoreg_root, *,
         # slice applies to both.
         if n_last_steps is not None and n_last_steps < n:
             pred_eflux = pred_eflux[-n_last_steps:]
-            pred_ky    = pred_ky[-n_last_steps:]
-            pred_es    = pred_es[-n_last_steps:]
+            pred_ky = pred_ky[-n_last_steps:]
+            pred_es = pred_es[-n_last_steps:]
             gt_flux_arr = gt_flux_arr[-n_last_steps:]
             if gt_ky_arr is not None:
                 gt_ky_arr = gt_ky_arr[-n_last_steps:]
@@ -1720,19 +1939,13 @@ def load_gyroswin_xxl_results(autoreg_root, *,
             n_kept = n
 
         pred_eflux_t = torch.as_tensor(pred_eflux)
-        pred_ky_t    = torch.as_tensor(pred_ky)
-        pred_es_t    = torch.as_tensor(pred_es)
+        pred_ky_t = torch.as_tensor(pred_ky)
+        pred_es_t = torch.as_tensor(pred_es)
 
         gen = {
-            "eflux":  {"all":  pred_eflux_t,
-                       "mean": pred_eflux_t.mean(),
-                       "std":  pred_eflux_t.std()},
-            "kyspec": {"all":  pred_ky_t,
-                       "mean": pred_ky_t.mean(0),
-                       "std":  pred_ky_t.std(0)},
-            "qspec":  {"all":  pred_es_t,
-                       "mean": pred_es_t.mean(0),
-                       "std":  pred_es_t.std(0)},
+            "eflux": {"all": pred_eflux_t, "mean": pred_eflux_t.mean(), "std": pred_eflux_t.std()},
+            "kyspec": {"all": pred_ky_t, "mean": pred_ky_t.mean(0), "std": pred_ky_t.std(0)},
+            "qspec": {"all": pred_es_t, "mean": pred_es_t.mean(0), "std": pred_es_t.std(0)},
             # Single autoregressive rollout per trajectory; no on-demand timing
             # available (these are pre-dumped outputs).
             "_n_samples": 1,
@@ -1740,17 +1953,21 @@ def load_gyroswin_xxl_results(autoreg_root, *,
 
         gt_flux_t = torch.as_tensor(gt_flux_arr)
         gt = {
-            "eflux":  {"mean": gt_flux_t.mean(),
-                       "std":  gt_flux_t.std(),
-                       "all":  gt_flux_t,
-                       "full": gt_flux_t},
+            "eflux": {
+                "mean": gt_flux_t.mean(),
+                "std": gt_flux_t.std(),
+                "all": gt_flux_t,
+                "full": gt_flux_t,
+            },
         }
         if gt_ky_arr is not None:
             gt_ky_t = torch.as_tensor(gt_ky_arr)
-            gt["kyspec"] = {"mean": gt_ky_t.mean(0),
-                            "std":  gt_ky_t.std(0),
-                            "all":  gt_ky_t,
-                            "full": gt_ky_t}
+            gt["kyspec"] = {
+                "mean": gt_ky_t.mean(0),
+                "std": gt_ky_t.std(0),
+                "all": gt_ky_t,
+                "full": gt_ky_t,
+            }
         # `_add_meta_targets` adds meta_kyspec_mean / meta_fluxspec_mean (last-80
         # convention) so the qspec-vs-meta_fluxspec_mean column has a target.
         # Already silently skips keys missing from this trajectory's metadata.
@@ -1769,22 +1986,30 @@ def load_gyroswin_xxl_results(autoreg_root, *,
             if n_last_steps is not None and n_last_steps < n
             else f"n_steps={n}"
         )
-        print(f"  [{group_key}] {traj_label}: {steps_str}, "
-              f"pred eflux mean={float(pred_eflux_t.mean()):.4g}, "
-              f"gt eflux mean={float(gt_flux_t.mean()):.4g}{note_str}")
+        print(
+            f"  [{group_key}] {traj_label}: {steps_str}, "
+            f"pred eflux mean={float(pred_eflux_t.mean()):.4g}, "
+            f"gt eflux mean={float(gt_flux_t.mean()):.4g}{note_str}"
+        )
 
     return out
 
 
-def evaluate_gyroswin(gyroswin_checkpoint, diff_dir, ae_checkpoint, *,
-                      data_prep,
-                      trajectories_id=TRAJECTORIES_ID,
-                      trajectories_ood=TRAJECTORIES_OOD,
-                      trajectories_test=TRAJECTORIES_TEST,
-                      n_steps=128,
-                      fluxavg_mean=92.6521, fluxavg_std=45.026,
-                      output_path=None,
-                      device=torch.device("cuda")):
+def evaluate_gyroswin(
+    gyroswin_checkpoint,
+    diff_dir,
+    ae_checkpoint,
+    *,
+    data_prep,
+    trajectories_id=TRAJECTORIES_ID,
+    trajectories_ood=TRAJECTORIES_OOD,
+    trajectories_test=TRAJECTORIES_TEST,
+    n_steps=128,
+    fluxavg_mean=92.6521,
+    fluxavg_std=45.026,
+    output_path=None,
+    device=torch.device("cuda"),
+):
     """Evaluate GyroSwin AR-rollout on ID + OOD (+ TEST if non-empty).
     Loads the checkpoint via the bundled `notebooks.neurips_gyroswin_eval`
     helper (same one gyroswin_generate.ipynb uses). Returns one entry per
@@ -1793,8 +2018,10 @@ def evaluate_gyroswin(gyroswin_checkpoint, diff_dir, ae_checkpoint, *,
     print(f"  GPU before: {_gpu_mem_str()}")
     splits = _resolve_splits(trajectories_id, trajectories_ood, trajectories_test)
     if not splits:
-        raise ValueError("evaluate_gyroswin: at least one of "
-                         "trajectories_id/ood/test must be non-empty.")
+        raise ValueError(
+            "evaluate_gyroswin: at least one of " "trajectories_id/ood/test must be non-empty."
+        )
+
     def _run():
         # Local imports so non-gyroswin runs don't need this on the path.
         sys.path.insert(0, str(Path(__file__).parent))
@@ -1803,15 +2030,16 @@ def evaluate_gyroswin(gyroswin_checkpoint, diff_dir, ae_checkpoint, *,
         # `pinned` only feeds the runner's validation dataset; pick any traj
         # we actually evaluate (first split, first traj).
         pinned = splits[0][1][0].replace("_ifft_realpotens", "") + ".h5"
-        runner = _build_gyroswin_runner(diff_dir, ae_checkpoint, data_prep,
-                                        pinned, device)
+        runner = _build_gyroswin_runner(diff_dir, ae_checkpoint, data_prep, pinned, device)
         gs_model, gs_cfg, _ = load_gyroswin_model(
-            gyroswin_checkpoint, dataset=runner.trainset, device=device,
+            gyroswin_checkpoint,
+            dataset=runner.trainset,
+            device=device,
         )
         with open(os.path.join(gyroswin_checkpoint, "normalization_stats.pkl"), "rb") as f:
             gs_stats = pickle.load(f)
-        offset    = int(gs_cfg.dataset.get("offset", 80))
-        sep_zf    = bool(gs_cfg.dataset.separate_zf)
+        offset = int(gs_cfg.dataset.get("offset", 80))
+        sep_zf = bool(gs_cfg.dataset.separate_zf)
         cond_keys = sorted(list(gs_cfg.model.conditioning))
 
         try:
@@ -1821,8 +2049,17 @@ def evaluate_gyroswin(gyroswin_checkpoint, diff_dir, ae_checkpoint, *,
                 for traj in trajs:
                     print(f"  [{label}] {traj}")
                     out[label][traj] = _gyroswin_evaluate_trajectory(
-                        traj, n_steps, offset, fluxavg_mean, fluxavg_std,
-                        data_prep, sep_zf, gs_model, gs_stats, cond_keys, device,
+                        traj,
+                        n_steps,
+                        offset,
+                        fluxavg_mean,
+                        fluxavg_std,
+                        data_prep,
+                        sep_zf,
+                        gs_model,
+                        gs_stats,
+                        cond_keys,
+                        device,
                     )
                 free_cuda()
         finally:
@@ -1832,6 +2069,7 @@ def evaluate_gyroswin(gyroswin_checkpoint, diff_dir, ae_checkpoint, *,
             del gs_model, runner, gs_stats
             free_cuda()
         return out
+
     out = _cached_or_run(output_path, _run)
     print(f"  GPU after:  {_gpu_mem_str()}")
     return out
@@ -1842,42 +2080,42 @@ def evaluate_gyroswin(gyroswin_checkpoint, diff_dir, ae_checkpoint, *,
 # ===========================================================================
 _RENAME_TO_COL = {
     # 5D row keys (integrator-side targets except for fluxspec)
-    "eflux_RMSE":             "eflux_RMSE",
-    "eflux_RMSE_std":         "eflux_RMSE_std",
-    "kxspec_RMSE":            "kxspec_RMSE",
-    "kxspec_RMSE_std":        "kxspec_RMSE_std",
-    "kxspec_WD":              "kxspec_WD",
-    "kxspec_WD_std":          "kxspec_WD_std",
-    "kyspec_RMSE":            "kyspec_RMSE",
-    "kyspec_RMSE_std":        "kyspec_RMSE_std",
-    "kyspec_WD":              "kyspec_WD",
-    "kyspec_WD_std":          "kyspec_WD_std",
-    "qspec_RMSE":             "fluxspec_RMSE",
-    "qspec_RMSE_std":         "fluxspec_RMSE_std",
+    "eflux_RMSE": "eflux_RMSE",
+    "eflux_RMSE_std": "eflux_RMSE_std",
+    "kxspec_RMSE": "kxspec_RMSE",
+    "kxspec_RMSE_std": "kxspec_RMSE_std",
+    "kxspec_WD": "kxspec_WD",
+    "kxspec_WD_std": "kxspec_WD_std",
+    "kyspec_RMSE": "kyspec_RMSE",
+    "kyspec_RMSE_std": "kyspec_RMSE_std",
+    "kyspec_WD": "kyspec_WD",
+    "kyspec_WD_std": "kyspec_WD_std",
+    "qspec_RMSE": "fluxspec_RMSE",
+    "qspec_RMSE_std": "fluxspec_RMSE_std",
     # Probe row keys
-    "probe_flux_ae_RMSE":      "eflux_RMSE",
-    "probe_flux_ae_RMSE_std":  "eflux_RMSE_std",
-    "probe_flux_gen_RMSE":     "eflux_RMSE",
+    "probe_flux_ae_RMSE": "eflux_RMSE",
+    "probe_flux_ae_RMSE_std": "eflux_RMSE_std",
+    "probe_flux_gen_RMSE": "eflux_RMSE",
     "probe_flux_gen_RMSE_std": "eflux_RMSE_std",
-    "probe_kxspec_ae_RMSE":      "kxspec_RMSE",
-    "probe_kxspec_ae_RMSE_std":  "kxspec_RMSE_std",
-    "probe_kxspec_ae_WD":        "kxspec_WD",
-    "probe_kxspec_ae_WD_std":    "kxspec_WD_std",
-    "probe_kxspec_gen_RMSE":     "kxspec_RMSE",
+    "probe_kxspec_ae_RMSE": "kxspec_RMSE",
+    "probe_kxspec_ae_RMSE_std": "kxspec_RMSE_std",
+    "probe_kxspec_ae_WD": "kxspec_WD",
+    "probe_kxspec_ae_WD_std": "kxspec_WD_std",
+    "probe_kxspec_gen_RMSE": "kxspec_RMSE",
     "probe_kxspec_gen_RMSE_std": "kxspec_RMSE_std",
-    "probe_kxspec_gen_WD":       "kxspec_WD",
-    "probe_kxspec_gen_WD_std":   "kxspec_WD_std",
-    "probe_kyspec_ae_RMSE":      "kyspec_RMSE",
-    "probe_kyspec_ae_RMSE_std":  "kyspec_RMSE_std",
-    "probe_kyspec_ae_WD":        "kyspec_WD",
-    "probe_kyspec_ae_WD_std":    "kyspec_WD_std",
-    "probe_kyspec_gen_RMSE":     "kyspec_RMSE",
+    "probe_kxspec_gen_WD": "kxspec_WD",
+    "probe_kxspec_gen_WD_std": "kxspec_WD_std",
+    "probe_kyspec_ae_RMSE": "kyspec_RMSE",
+    "probe_kyspec_ae_RMSE_std": "kyspec_RMSE_std",
+    "probe_kyspec_ae_WD": "kyspec_WD",
+    "probe_kyspec_ae_WD_std": "kyspec_WD_std",
+    "probe_kyspec_gen_RMSE": "kyspec_RMSE",
     "probe_kyspec_gen_RMSE_std": "kyspec_RMSE_std",
-    "probe_kyspec_gen_WD":       "kyspec_WD",
-    "probe_kyspec_gen_WD_std":   "kyspec_WD_std",
-    "probe_fluxspec_ae_RMSE":      "fluxspec_RMSE",
-    "probe_fluxspec_ae_RMSE_std":  "fluxspec_RMSE_std",
-    "probe_fluxspec_gen_RMSE":     "fluxspec_RMSE",
+    "probe_kyspec_gen_WD": "kyspec_WD",
+    "probe_kyspec_gen_WD_std": "kyspec_WD_std",
+    "probe_fluxspec_ae_RMSE": "fluxspec_RMSE",
+    "probe_fluxspec_ae_RMSE_std": "fluxspec_RMSE_std",
+    "probe_fluxspec_gen_RMSE": "fluxspec_RMSE",
     "probe_fluxspec_gen_RMSE_std": "fluxspec_RMSE_std",
 }
 
@@ -1899,8 +2137,10 @@ def _row_metrics_probe(group, variant):
     return print_aggregate_metrics(
         group,
         scalar_keys=[(f"probe_flux_{variant}", "eflux")],
-        spec_keys=[(f"probe_kxspec_{variant}", "kxspec"),
-                   (f"probe_kyspec_{variant}", "meta_kyspec_mean")],
+        spec_keys=[
+            (f"probe_kxspec_{variant}", "kxspec"),
+            (f"probe_kyspec_{variant}", "meta_kyspec_mean"),
+        ],
         extra_keys=[(f"probe_fluxspec_{variant}", "meta_fluxspec_mean")],
     )
 
@@ -1909,9 +2149,7 @@ def _coerce_table_row(model_label, split_label, raw_metrics, time_per_sample_s=N
     row = {
         "model": model_label,
         "split": split_label,
-        **{_RENAME_TO_COL[k]: v
-           for k, v in raw_metrics.items()
-           if k in _RENAME_TO_COL},
+        **{_RENAME_TO_COL[k]: v for k, v in raw_metrics.items() if k in _RENAME_TO_COL},
     }
     if time_per_sample_s is not None:
         row["time_per_sample_s"] = time_per_sample_s
@@ -1944,7 +2182,7 @@ def _mean_time_per_sample(group, *, include_probe=False):
             continue
         if include_probe:
             sample_t = gen.get("_sample_time_s", gen.get("_gen_time_s"))
-            probe_t  = gen.get("_probe_time_s", 0.0)
+            probe_t = gen.get("_probe_time_s", 0.0)
             if sample_t is None:
                 continue
             per_sample = (float(sample_t) + float(probe_t)) / float(n)
@@ -1977,19 +2215,23 @@ def build_summary_table(all_results, *, with_diff_probes=True):
     splits = SUMMARY_SPLITS  # (label, suffix, _default_traj_list)
 
     for model_label, base in (
-        ("VAE",      "vae"),
-        ("VQ-VAE",   "vqvae"),
-        ("AR",       "ar"),
-        ("Diff 5D",  "diff"),
+        ("VAE", "vae"),
+        ("VQ-VAE", "vqvae"),
+        ("AR", "ar"),
+        ("Diff 5D", "diff"),
     ):
         for split_label, suffix, _ in splits:
             g = all_results.get(f"{base}_{suffix}")
             if not g:
                 continue
-            rows.append(_coerce_table_row(
-                model_label, split_label, _row_metrics_5d(g),
-                time_per_sample_s=_mean_time_per_sample(g),
-            ))
+            rows.append(
+                _coerce_table_row(
+                    model_label,
+                    split_label,
+                    _row_metrics_5d(g),
+                    time_per_sample_s=_mean_time_per_sample(g),
+                )
+            )
 
     if with_diff_probes:
         for variant in ("ae", "gen"):
@@ -1998,35 +2240,43 @@ def build_summary_table(all_results, *, with_diff_probes=True):
                 if not g:
                     continue
                 # Skip if probe predictions are not present.
-                probe_present = any(
-                    f"probe_flux_{variant}" in res["gen"]
-                    for res in g.values()
-                )
+                probe_present = any(f"probe_flux_{variant}" in res["gen"] for res in g.values())
                 if not probe_present:
                     continue
-                rows.append(_coerce_table_row(
-                    f"Diff probe ({variant})", split_label,
-                    _row_metrics_probe(g, variant),
-                    time_per_sample_s=_mean_time_per_sample(g, include_probe=True),
-                ))
+                rows.append(
+                    _coerce_table_row(
+                        f"Diff probe ({variant})",
+                        split_label,
+                        _row_metrics_probe(g, variant),
+                        time_per_sample_s=_mean_time_per_sample(g, include_probe=True),
+                    )
+                )
 
     for split_label, suffix, _ in splits:
         g = all_results.get(f"gyroswin_{suffix}")
         if not g:
             continue
-        rows.append(_coerce_table_row(
-            "GyroSwin", split_label, _row_metrics_5d(g),
-            time_per_sample_s=_mean_time_per_sample(g),
-        ))
+        rows.append(
+            _coerce_table_row(
+                "GyroSwin",
+                split_label,
+                _row_metrics_5d(g),
+                time_per_sample_s=_mean_time_per_sample(g),
+            )
+        )
 
     for split_label, suffix, _ in splits:
         g = all_results.get(f"gyroswin_xxl_{suffix}")
         if not g:
             continue
-        rows.append(_coerce_table_row(
-            "GyroSwin XXL", split_label, _row_metrics_5d(g),
-            time_per_sample_s=_mean_time_per_sample(g),
-        ))
+        rows.append(
+            _coerce_table_row(
+                "GyroSwin XXL",
+                split_label,
+                _row_metrics_5d(g),
+                time_per_sample_s=_mean_time_per_sample(g),
+            )
+        )
 
     # Auto-detect any number of `gyroswin_<variant>_<split>` groups (set by
     # `evaluate_gyroswin_new(..., variant=...)`). Each becomes a
@@ -2040,7 +2290,7 @@ def build_summary_table(all_results, *, with_diff_probes=True):
             continue
         for suffix in _split_suffixes:
             if key.endswith(f"_{suffix}"):
-                tail = key[len("gyroswin_"):-(len(suffix) + 1)]
+                tail = key[len("gyroswin_") : -(len(suffix) + 1)]
                 if tail and tail not in _RESERVED_GS_VARIANTS:
                     _gs_variants.add(tail)
                 break
@@ -2049,10 +2299,14 @@ def build_summary_table(all_results, *, with_diff_probes=True):
             g = all_results.get(f"gyroswin_{variant}_{suffix}")
             if not g:
                 continue
-            rows.append(_coerce_table_row(
-                f"GyroSwin ({variant})", split_label, _row_metrics_5d(g),
-                time_per_sample_s=_mean_time_per_sample(g),
-            ))
+            rows.append(
+                _coerce_table_row(
+                    f"GyroSwin ({variant})",
+                    split_label,
+                    _row_metrics_5d(g),
+                    time_per_sample_s=_mean_time_per_sample(g),
+                )
+            )
 
     if not rows:
         return pd.DataFrame()
@@ -2061,11 +2315,18 @@ def build_summary_table(all_results, *, with_diff_probes=True):
     # Mean and std interleaved so each metric reads "value (± spread across
     # trajectories)" left-to-right. Std is sample std (ddof=1) of per-traj RMSE.
     cols = [
-        "eflux_RMSE",    "eflux_RMSE_std",
-        "kxspec_RMSE",   "kxspec_RMSE_std",   "kxspec_WD",   "kxspec_WD_std",
-        "kyspec_RMSE",   "kyspec_RMSE_std",   "kyspec_WD",   "kyspec_WD_std",
-        "fluxspec_RMSE", "fluxspec_RMSE_std",
+        "eflux_RMSE",
+        "eflux_RMSE_std",
+        "kxspec_RMSE",
+        "kxspec_RMSE_std",
+        "kxspec_WD",
+        "kxspec_WD_std",
+        "kyspec_RMSE",
+        "kyspec_RMSE_std",
+        "kyspec_WD",
+        "kyspec_WD_std",
+        "fluxspec_RMSE",
+        "fluxspec_RMSE_std",
         "time_per_sample_s",
     ]
     return df[[c for c in cols if c in df.columns]]
-

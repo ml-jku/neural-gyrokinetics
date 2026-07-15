@@ -4,6 +4,7 @@ from einops import rearrange
 
 import os
 import io
+import tempfile
 import pywt
 import zfpy
 from sklearn.decomposition import PCA
@@ -197,24 +198,23 @@ def jpeg2000_recon(df: torch.Tensor, quality: float = 0.2):
 
         img_uint16 = (norm_slice * 65535).astype(np.uint16)
 
-        # NOTE: does not work with tempfile or io buffer for some reason
-        try:
-            os.remove("/tmp/df.jp2")
-        except OSError:
-            pass
-        glymur.Jp2k("/tmp/df.jp2", data=img_uint16, cratios=[100.0 / quality])
+        # unique path per call: a fixed name races across parallel eval workers and
+        # yields a half-written stream (InvalidJp2kError). glymur needs a real filename
+        # (not io/tempfile buffer), so we mint a unique one and remove it after.
+        fd, tmp = tempfile.mkstemp(suffix=".jp2")
+        os.close(fd)
+        os.remove(tmp)  # glymur writes the file fresh
+        glymur.Jp2k(tmp, data=img_uint16, cratios=[100.0 / quality])
         compressed_data.append({"bytes": None, "min": mn, "max": mx})
-        compressed_size += os.path.getsize("/tmp/df.jp2")
-        jp2 = glymur.Jp2k("/tmp/df.jp2")
+        compressed_size += os.path.getsize(tmp)
+        jp2 = glymur.Jp2k(tmp)
         recon_uint16 = jp2[:]
         recon_norm = recon_uint16.astype(np.float32) / 65535.0
         recon_flat[ch] = recon_norm * (mx - mn) + mn
         try:
-            os.remove("/tmp/df.jp2")
+            os.remove(tmp)
         except OSError:
             pass
 
-    recon_np = rearrange(
-        recon_flat, "c (vp vm s) (x y) -> c vp vm s x y", vp=vp, vm=vm, x=x
-    )
+    recon_np = rearrange(recon_flat, "c (vp vm s) (x y) -> c vp vm s x y", vp=vp, vm=vm, x=x)
     return torch.from_numpy(recon_np), compressed_data, compressed_size

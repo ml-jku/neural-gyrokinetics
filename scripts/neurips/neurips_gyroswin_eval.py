@@ -11,6 +11,7 @@ After loading, the model exposes `df_unet` and `flux_head` with the same
 interface that `notebooks/neurips_diff_eval.py::extract_gyroswin_latents`
 expects (both `source="bottleneck"` and `source="flux_head"` work).
 """
+
 from __future__ import annotations
 
 import os
@@ -48,21 +49,39 @@ def _build_conditional_flux_decoder(
     from models.nd_vit.x_layers import MixingBlock
 
     class _CondLatentMixingTransformer(nn.Module):
-        def __init__(self, left_dim, right_dim, depth, num_heads, n_cond,
-                     cond_embed_dim, mlp_ratio, attn_drop, drop):
+        def __init__(
+            self,
+            left_dim,
+            right_dim,
+            depth,
+            num_heads,
+            n_cond,
+            cond_embed_dim,
+            mlp_ratio,
+            attn_drop,
+            drop,
+        ):
             super().__init__()
             self.left_dim = left_dim
             self.right_dim = right_dim
             self.cond_embed = ContinuousConditionEmbed(dim=cond_embed_dim, n_cond=n_cond)
-            self.blocks = nn.ModuleList([
-                MixingBlock(
-                    left_dim=left_dim, right_dim=right_dim, num_heads=num_heads,
-                    mlp_ratio=mlp_ratio, qkv_bias=True,
-                    drop=drop, attn_drop=attn_drop, drop_path=0.0,
-                    act_fn=nn.GELU, init_weights=None,
-                )
-                for _ in range(depth)
-            ])
+            self.blocks = nn.ModuleList(
+                [
+                    MixingBlock(
+                        left_dim=left_dim,
+                        right_dim=right_dim,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
+                        qkv_bias=True,
+                        drop=drop,
+                        attn_drop=attn_drop,
+                        drop_path=0.0,
+                        act_fn=nn.GELU,
+                        init_weights=None,
+                    )
+                    for _ in range(depth)
+                ]
+            )
             self.conditioning = nn.ModuleList(
                 [Film(self.cond_embed.cond_dim, left_dim) for _ in range(depth)]
             )
@@ -81,21 +100,29 @@ def _build_conditional_flux_decoder(
             self.reduction = base.reduction
             self.reductions = base.reductions
 
-            self.blocks = nn.ModuleList([
-                _CondLatentMixingTransformer(
-                    left_dim=blk.left_dim, right_dim=blk.right_dim,
-                    depth=depth, num_heads=num_heads, n_cond=n_cond,
-                    cond_embed_dim=cond_embed_dim, mlp_ratio=2.0,
-                    attn_drop=attn_drop, drop=drop,
-                )
-                for blk in base.blocks
-            ])
+            self.blocks = nn.ModuleList(
+                [
+                    _CondLatentMixingTransformer(
+                        left_dim=blk.left_dim,
+                        right_dim=blk.right_dim,
+                        depth=depth,
+                        num_heads=num_heads,
+                        n_cond=n_cond,
+                        cond_embed_dim=cond_embed_dim,
+                        mlp_ratio=2.0,
+                        attn_drop=attn_drop,
+                        drop=drop,
+                    )
+                    for blk in base.blocks
+                ]
+            )
             self.cond_embed = ContinuousConditionEmbed(dim=cond_embed_dim, n_cond=n_cond)
 
             flux_latent_size = sum(b.left_dim for b in self.blocks)
             self.flux_mlp = MLP(
                 [flux_latent_size, flux_latent_size // 2, 1],
-                dropout_prob=drop, act_fn=nn.GELU,
+                dropout_prob=drop,
+                act_fn=nn.GELU,
             )
             self._cond_cache = None
 
@@ -117,8 +144,13 @@ def _build_conditional_flux_decoder(
             return flux.squeeze(1)
 
     return ConditionalFluxDecoder(
-        base, n_cond=n_cond, num_heads=num_heads, depth=depth,
-        cond_embed_dim=cond_embed_dim, drop=drop, attn_drop=attn_drop,
+        base,
+        n_cond=n_cond,
+        num_heads=num_heads,
+        depth=depth,
+        cond_embed_dim=cond_embed_dim,
+        drop=drop,
+        attn_drop=attn_drop,
     )
 
 
@@ -127,6 +159,7 @@ def _get_gyroswin_model(cfg, dataset):
     `_prepare_old_src` so the `models` import resolves to the checkpoint's
     bundled src/."""
     from models import get_model as _old_get_model
+
     return _old_get_model(cfg, dataset=dataset)
 
 

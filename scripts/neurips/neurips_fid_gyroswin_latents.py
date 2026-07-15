@@ -5,6 +5,7 @@ real validation snapshots and matched diffusion samples once, then re-uses the
 same df batches to evaluate FID under several latent-extraction choices
 (bottleneck, full multiscale flux_head, individual flux_head levels, ...).
 """
+
 from __future__ import annotations
 
 import os
@@ -13,7 +14,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -21,7 +22,6 @@ import pandas as pd
 import pickle
 import torch
 from sklearn.decomposition import PCA
-from tqdm import tqdm
 
 from notebooks.neurips_diff_eval import (
     compute_fid,
@@ -62,6 +62,7 @@ class LatentSource:
             vector — strongly recommended at low sample counts (FID with
             K~64 vs raw flattened activations is under-determined).
     """
+
     name: str
     source: str
     level: Optional[int] = None
@@ -87,8 +88,11 @@ def _load_old_gyroswin(checkpoint_dir, trainset, device):
     """Load the legacy monkey-patched GyroSwin checkpoint."""
     sys.path.insert(0, str(Path(__file__).parent))
     from neurips_gyroswin_eval import load_gyroswin_model
+
     gs_model, gs_cfg, _ = load_gyroswin_model(
-        checkpoint_dir, dataset=trainset, device=device,
+        checkpoint_dir,
+        dataset=trainset,
+        device=device,
     )
     return gs_model, gs_cfg
 
@@ -99,10 +103,12 @@ def _load_new_gyroswin(checkpoint_dir, trainset, device, model_snapshot="best.pt
     `resolution`); GyroSwin-specific knobs come from the checkpoint cfg."""
     import omegaconf
     from neugk.gyroswin.models import get_model as get_gyroswin_model
+
     cfg = omegaconf.OmegaConf.load(os.path.join(checkpoint_dir, "config.yaml"))
     gs_model = get_gyroswin_model(cfg, dataset=trainset).to(device).eval()
-    ckpt = torch.load(os.path.join(checkpoint_dir, model_snapshot),
-                      map_location=device, weights_only=False)
+    ckpt = torch.load(
+        os.path.join(checkpoint_dir, model_snapshot), map_location=device, weights_only=False
+    )
     gs_model.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=True)
     return gs_model, cfg
 
@@ -121,19 +127,24 @@ def _load_new_gs_norm_stats(checkpoint_dir, data_path):
     read the stats pkl that the dataset normalizer auto-loads. The trainset
     is dropped immediately afterwards."""
     import omegaconf
-    cfg = _notebook_safe(omegaconf.OmegaConf.load(
-        os.path.join(checkpoint_dir, "config.yaml"),
-    ))
+
+    cfg = _notebook_safe(
+        omegaconf.OmegaConf.load(
+            os.path.join(checkpoint_dir, "config.yaml"),
+        )
+    )
     cfg.dataset.path = str(data_path)
     cfg.dataset.gds_override = True
     print(f"  loading GS norm stats for new ckpt ({checkpoint_dir}) ...")
     datasets, _, _ = get_data(cfg, rank=0)
     trainset = datasets[0]
     stats = {
-        "df": {"full": {
-            "mean": np.asarray(trainset.stats["df"]["full"]["mean"]),
-            "std":  np.asarray(trainset.stats["df"]["full"]["std"]),
-        }}
+        "df": {
+            "full": {
+                "mean": np.asarray(trainset.stats["df"]["full"]["mean"]),
+                "std": np.asarray(trainset.stats["df"]["full"]["std"]),
+            }
+        }
     }
     del datasets, trainset
     free_cuda()
@@ -148,11 +159,13 @@ def _gs_stats_to_tensors(gs_stats, ref_tensor):
     """
     mean = torch.as_tensor(
         np.asarray(gs_stats["df"]["full"]["mean"]),
-        dtype=ref_tensor.dtype, device=ref_tensor.device,
+        dtype=ref_tensor.dtype,
+        device=ref_tensor.device,
     )
     std = torch.as_tensor(
         np.asarray(gs_stats["df"]["full"]["std"]),
-        dtype=ref_tensor.dtype, device=ref_tensor.device,
+        dtype=ref_tensor.dtype,
+        device=ref_tensor.device,
     )
     return expand_as(mean, ref_tensor), expand_as(std, ref_tensor)
 
@@ -164,8 +177,8 @@ def setup(
     valid_traj_h5_names,
     device,
     *,
-    gyroswin_checkpoint=None,       # legacy (monkey-patched) checkpoint
-    gyroswin_checkpoint_new=None,   # current-codebase checkpoint
+    gyroswin_checkpoint=None,  # legacy (monkey-patched) checkpoint
+    gyroswin_checkpoint_new=None,  # current-codebase checkpoint
     model_snapshot="best.pth",
 ):
     """Build the diffusion runner and load 1-2 GyroSwin variants for FID.
@@ -179,19 +192,23 @@ def setup(
         Variants whose checkpoint is None are omitted; at least one is required.
     """
     if not gyroswin_checkpoint and not gyroswin_checkpoint_new:
-        raise ValueError(
-            "supply at least one of gyroswin_checkpoint / gyroswin_checkpoint_new"
-        )
+        raise ValueError("supply at least one of gyroswin_checkpoint / gyroswin_checkpoint_new")
 
     runner = _build_diff_runner(
-        diff_ckpt_dir, ae_checkpoint, data_path,
-        valid_traj_h5_names, model_snapshot, device,
+        diff_ckpt_dir,
+        ae_checkpoint,
+        data_path,
+        valid_traj_h5_names,
+        model_snapshot,
+        device,
     )
 
     gyroswins = {}
     if gyroswin_checkpoint:
         gs_model, gs_cfg = _load_old_gyroswin(
-            gyroswin_checkpoint, runner.trainset, device,
+            gyroswin_checkpoint,
+            runner.trainset,
+            device,
         )
         if not gyroswin_has_flux_head(gs_model):
             raise RuntimeError(
@@ -199,20 +216,23 @@ def setup(
                 "only source='bottleneck' will work."
             )
         gyroswins["old"] = {
-            "model": gs_model, "cfg": gs_cfg,
+            "model": gs_model,
+            "cfg": gs_cfg,
             "cond_keys": sorted(list(gs_cfg.model.conditioning)),
             "norm_stats": _load_old_gs_norm_stats(gyroswin_checkpoint),
         }
     if gyroswin_checkpoint_new:
         gs_model, gs_cfg = _load_new_gyroswin(
-            gyroswin_checkpoint_new, runner.trainset, device, model_snapshot,
+            gyroswin_checkpoint_new,
+            runner.trainset,
+            device,
+            model_snapshot,
         )
         if not gyroswin_has_flux_head(gs_model):
-            raise RuntimeError(
-                f"GyroSwin (new) at {gyroswin_checkpoint_new} has no flux_head."
-            )
+            raise RuntimeError(f"GyroSwin (new) at {gyroswin_checkpoint_new} has no flux_head.")
         gyroswins["new"] = {
-            "model": gs_model, "cfg": gs_cfg,
+            "model": gs_model,
+            "cfg": gs_cfg,
             "cond_keys": sorted(list(gs_cfg.model.conditioning)),
             "norm_stats": _load_new_gs_norm_stats(
                 gyroswin_checkpoint_new,
@@ -234,16 +254,20 @@ def _build_cond_kwargs(meta, valset, fi, t_idx, cond_keys, device):
     if "timestep" in cond_keys:
         offset = valset.offsets[fi] if hasattr(valset, "offsets") else 0
         vals["timestep"] = float(meta["timesteps"][t_idx + offset])
-    return {
-        k: torch.tensor([v], dtype=torch.float32, device=device)
-        for k, v in vals.items()
-    }
+    return {k: torch.tensor([v], dtype=torch.float32, device=device) for k, v in vals.items()}
 
 
 @torch.no_grad()
 def gyroswin_recon_sanity(
-    gs_model, runner, gs_cond_keys, device,
-    *, fi: int = 0, t_idx: int = 30, rel_l2_threshold: float = 0.5, plot: bool = True,
+    gs_model,
+    runner,
+    gs_cond_keys,
+    device,
+    *,
+    fi: int = 0,
+    t_idx: int = 30,
+    rel_l2_threshold: float = 0.5,
+    plot: bool = True,
 ):
     """Forward one validation sample through GyroSwin, plot the 5D recon and
     report the relative L2 error. Loud-warns if rel L2 > `rel_l2_threshold`,
@@ -261,7 +285,7 @@ def gyroswin_recon_sanity(
                 fi, t_idx = k
                 break
     meta = valset.metadata[fi]
-    sample_in   = valset[flat_idx_map[(fi, t_idx)]]
+    sample_in = valset[flat_idx_map[(fi, t_idx)]]
     sample_next = valset[flat_idx_map[(fi, t_idx + 1)]]
     df_in = sample_in.df.unsqueeze(0).to(device)
 
@@ -294,12 +318,13 @@ def gyroswin_recon_sanity(
     if plot:
         try:
             from neugk.plot_utils import plot_nd
+
             fig = plot_nd(gt_df, pred_df, to_wandb=False)
             if hasattr(fig, "suptitle"):
                 fig.suptitle(
-                    f"GyroSwin recon: input (left) vs output (right) "
-                    f"— rel L2 = {rel_l2:.3f}",
-                    fontsize=11, y=1.01,
+                    f"GyroSwin recon: input (left) vs output (right) " f"— rel L2 = {rel_l2:.3f}",
+                    fontsize=11,
+                    y=1.01,
                 )
         except Exception as e:
             print(f"  (plot_nd skipped: {e})")
@@ -309,8 +334,14 @@ def gyroswin_recon_sanity(
 
 @torch.no_grad()
 def latent_extraction_sanity(
-    gs_model, runner, gs_cond_keys, latent_sources, device,
-    *, fi: int = 0, batch_size: int = 2,
+    gs_model,
+    runner,
+    gs_cond_keys,
+    latent_sources,
+    device,
+    *,
+    fi: int = 0,
+    batch_size: int = 2,
 ):
     """Run a 2-sample mini-batch through every entry in `latent_sources` and
     print the resulting feature shape + basic stats. Catches silent shape
@@ -333,19 +364,30 @@ def latent_extraction_sanity(
     nontime_keys = [k for k in gs_cond_keys if k != "timestep"]
     meta = valset.metadata[fi]
     vals = [float(np.squeeze(meta[COND_META_MAP.get(k, k)])) for k in nontime_keys]
-    cond = torch.tensor(vals, dtype=torch.float32, device=device).unsqueeze(0).expand(len(idxs), -1).contiguous()
+    cond = (
+        torch.tensor(vals, dtype=torch.float32, device=device)
+        .unsqueeze(0)
+        .expand(len(idxs), -1)
+        .contiguous()
+    )
 
     print("\n  -- latent extraction sanity --")
     for ls in latent_sources:
         try:
             feats = extract_gyroswin_latents(
-                gs_model, dfs, device=device, condition=cond,
-                cond_keys=nontime_keys, **ls.kwargs(),
+                gs_model,
+                dfs,
+                device=device,
+                condition=cond,
+                cond_keys=nontime_keys,
+                **ls.kwargs(),
             )
             mean, std = float(feats.mean()), float(feats.std())
             nz = float((feats != 0).mean())
-            print(f"  {ls.name:20s}  shape={feats.shape}  mean={mean:+.3e}  "
-                  f"std={std:.3e}  nz={nz:.2%}")
+            print(
+                f"  {ls.name:20s}  shape={feats.shape}  mean={mean:+.3e}  "
+                f"std={std:.3e}  nz={nz:.2%}"
+            )
         except Exception as e:
             print(f"  {ls.name:20s}  FAILED: {type(e).__name__}: {e}")
 
@@ -366,8 +408,7 @@ def _denormalize_with_dataset(dataset, fi, df_norm):
     return df_norm * scale + shift
 
 
-def collect_real(runner, n_per_traj=None, max_total=None, seed=0,
-                 physical=False):
+def collect_real(runner, n_per_traj=None, max_total=None, seed=0, physical=False):
     """Stratified pick of validation snapshots: up to `n_per_traj` evenly
     spaced snapshots per trajectory, optionally capped at `max_total`.
 
@@ -401,8 +442,9 @@ def collect_real(runner, n_per_traj=None, max_total=None, seed=0,
             rng = np.random.default_rng(seed)
             keep = rng.choice(len(flat), size=max_total, replace=False)
             keep_set = {flat[k] for k in keep}
-            sel_per_fi = {fi: [i for i in sel_per_fi[fi] if (fi, i) in keep_set]
-                          for fi in sel_per_fi}
+            sel_per_fi = {
+                fi: [i for i in sel_per_fi[fi] if (fi, i) in keep_set] for fi in sel_per_fi
+            }
 
     out = {}
     for fi, idxs in sorted(sel_per_fi.items()):
@@ -417,14 +459,15 @@ def collect_real(runner, n_per_traj=None, max_total=None, seed=0,
             "label": _traj_label(valset.files[fi]),
         }
     n_total = sum(len(v["df"]) for v in out.values())
-    print(f"  real samples: {n_total} across {len(out)} trajs "
-          f"({ {fi: len(v['df']) for fi, v in out.items()} })  "
-          f"[{'physical' if physical else 'AE-normalized'}]")
+    print(
+        f"  real samples: {n_total} across {len(out)} trajs "
+        f"({ {fi: len(v['df']) for fi, v in out.items()} })  "
+        f"[{'physical' if physical else 'AE-normalized'}]"
+    )
     return out
 
 
-def split_by_traj_set(by_fi, runner, trajectories_id, trajectories_ood,
-                      trajectories_test=None):
+def split_by_traj_set(by_fi, runner, trajectories_id, trajectories_ood, trajectories_test=None):
     """Partition a `{fi: ...}` dict (real or gen) into ID/OOD/TEST subsets,
     matching basenames against the trajectory lists.
 
@@ -437,8 +480,8 @@ def split_by_traj_set(by_fi, runner, trajectories_id, trajectories_ood,
     splits as before, plus an empty ``"TEST"`` entry.
     """
     valset = runner.valsets[0]
-    id_bases   = {t.replace("_ifft_realpotens", "") for t in (trajectories_id or [])}
-    ood_bases  = {t.replace("_ifft_realpotens", "") for t in (trajectories_ood or [])}
+    id_bases = {t.replace("_ifft_realpotens", "") for t in (trajectories_id or [])}
+    ood_bases = {t.replace("_ifft_realpotens", "") for t in (trajectories_ood or [])}
     test_bases = {t.replace("_ifft_realpotens", "") for t in (trajectories_test or [])}
     out = {"ID": {}, "OOD": {}, "TEST": {}}
     skipped = []
@@ -454,14 +497,15 @@ def split_by_traj_set(by_fi, runner, trajectories_id, trajectories_ood,
             skipped.append(base)
     if skipped:
         print(f"  [split] dropped {len(skipped)} unmatched trajectories: {skipped}")
-    print(f"  [split] ID: {len(out['ID'])} trajs | OOD: {len(out['OOD'])} trajs"
-          f" | TEST: {len(out['TEST'])} trajs")
+    print(
+        f"  [split] ID: {len(out['ID'])} trajs | OOD: {len(out['OOD'])} trajs"
+        f" | TEST: {len(out['TEST'])} trajs"
+    )
     return out
 
 
 @torch.no_grad()
-def generate_diff(runner, real_by_fi, n_denoising_steps=15, batch_size=32,
-                  physical=False):
+def generate_diff(runner, real_by_fi, n_denoising_steps=15, batch_size=32, physical=False):
     """For each trajectory in `real_by_fi`, sample as many diffusion samples as
     real ones (using that trajectory's conditioning). Returns the same dict
     layout but with key 'df' holding the decoded gen df tensors (cpu).
@@ -509,8 +553,14 @@ def _trajectory_condition(runner, keys, fi, n):
 
 @torch.no_grad()
 def extract_features(
-    gs_model, by_fi, runner, gs_cond_keys, latent_source: LatentSource,
-    batch_size=8, device="cuda", desc="extract",
+    gs_model,
+    by_fi,
+    runner,
+    gs_cond_keys,
+    latent_source: LatentSource,
+    batch_size=8,
+    device="cuda",
+    desc="extract",
     gs_norm_stats=None,
 ):
     """Run all df samples through the GyroSwin extractor for one latent source.
@@ -536,14 +586,18 @@ def extract_features(
         cond_t = _trajectory_condition(runner, nontime_keys, fi, n)
         feats = []
         for i in range(0, n, batch_size):
-            batch_df = torch.stack(dfs[i:i+batch_size])
+            batch_df = torch.stack(dfs[i : i + batch_size])
             if gs_norm_stats is not None:
                 gs_mean, gs_std = _gs_stats_to_tensors(gs_norm_stats, batch_df)
                 batch_df = (batch_df - gs_mean) / gs_std
-            batch_cond = cond_t[i:i+batch_size]
+            batch_cond = cond_t[i : i + batch_size]
             f = extract_gyroswin_latents(
-                gs_model, batch_df, device=device, condition=batch_cond,
-                cond_keys=nontime_keys, **extractor_kw,
+                gs_model,
+                batch_df,
+                device=device,
+                condition=batch_cond,
+                cond_keys=nontime_keys,
+                **extractor_kw,
             )
             feats.append(f)
         out[fi] = {"feats": np.concatenate(feats, axis=0), "label": entry["label"]}
@@ -576,18 +630,18 @@ def compute_fid_set(real_feats, gen_feats, n_components=64):
     pca, raw_dim = _fit_pca(combined, n_components)
 
     real_pca = {fi: pca.transform(real_feats[fi]["feats"]) for fi in fis}
-    gen_pca  = {fi: pca.transform(gen_feats[fi]["feats"])  for fi in fis}
+    gen_pca = {fi: pca.transform(gen_feats[fi]["feats"]) for fi in fis}
 
     # Global: pool everything
     real_all = np.concatenate([real_pca[fi] for fi in fis], axis=0)
-    gen_all  = np.concatenate([gen_pca[fi]  for fi in fis], axis=0)
+    gen_all = np.concatenate([gen_pca[fi] for fi in fis], axis=0)
     mu_r, sig_r = compute_statistics(real_all)
     mu_g, sig_g = compute_statistics(gen_all)
     fid_global = compute_fid(mu_r, sig_r, mu_g, sig_g)
 
     # Per-traj stats
     stats_real = {fi: compute_statistics(real_pca[fi]) for fi in fis}
-    stats_gen  = {fi: compute_statistics(gen_pca[fi])  for fi in fis}
+    stats_gen = {fi: compute_statistics(gen_pca[fi]) for fi in fis}
 
     fid_gt_gt = np.full((n_traj, n_traj), np.nan)
     fid_gt_diff = np.full((n_traj, n_traj), np.nan)
@@ -596,7 +650,7 @@ def compute_fid_set(real_feats, gen_feats, n_components=64):
         for j, fj in enumerate(fis):
             mu_rj, cov_rj = stats_real[fj]
             mu_gj, cov_gj = stats_gen[fj]
-            fid_gt_gt[i, j]   = compute_fid(mu_ri, cov_ri, mu_rj, cov_rj)
+            fid_gt_gt[i, j] = compute_fid(mu_ri, cov_ri, mu_rj, cov_rj)
             fid_gt_diff[i, j] = compute_fid(mu_ri, cov_ri, mu_gj, cov_gj)
 
     return {
@@ -617,15 +671,25 @@ def _draw_heatmap(ax, M, labels, title, fmt="{:.1f}"):
     n = len(labels)
     vmax = np.nanmax(M) if np.isfinite(M).any() else 1.0
     im = ax.imshow(M, cmap="YlOrRd", vmin=0, vmax=vmax)
-    ax.set_xticks(range(n)); ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
-    ax.set_yticks(range(n)); ax.set_yticklabels(labels, fontsize=8)
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(labels, fontsize=8)
     for i in range(n):
         for j in range(n):
             if np.isfinite(M[i, j]):
                 color = "white" if M[i, j] > 0.6 * vmax else "black"
                 weight = "bold" if i == j else "normal"
-                ax.text(j, i, fmt.format(M[i, j]), ha="center", va="center",
-                        fontsize=8, fontweight=weight, color=color)
+                ax.text(
+                    j,
+                    i,
+                    fmt.format(M[i, j]),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    fontweight=weight,
+                    color=color,
+                )
     ax.set_title(title, fontsize=10)
     plt.colorbar(im, ax=ax, fraction=0.046, label="FID")
 
@@ -647,12 +711,16 @@ def plot_heatmap_grid(results, title=None):
         name = _result_label(key)
         labels = res["labels"]
         _draw_heatmap(
-            axes[r, 0], res["fid_gt_gt"], labels,
+            axes[r, 0],
+            res["fid_gt_gt"],
+            labels,
             f"{name}: GT vs GT  (raw dim={res['raw_dim']}, "
             f"pca={res['pca_dim']}, var={res['explained_var']:.0%})",
         )
         _draw_heatmap(
-            axes[r, 1], res["fid_gt_diff"], labels,
+            axes[r, 1],
+            res["fid_gt_diff"],
+            labels,
             f"{name}: GT vs Diff  (global FID = {res['fid_global']:.2f})",
         )
         axes[r, 1].set_xlabel("Diff (col traj conditioning)", fontsize=9)
@@ -673,26 +741,30 @@ def build_table(results):
         gt_diff = res["fid_gt_diff"]
         n = gt_diff.shape[0]
         diag = np.diag(gt_diff)
-        off = gt_diff.copy(); np.fill_diagonal(off, np.nan)
+        off = gt_diff.copy()
+        np.fill_diagonal(off, np.nan)
         gt_gt = res["fid_gt_gt"]
-        gt_gt_off = gt_gt.copy(); np.fill_diagonal(gt_gt_off, np.nan)
+        gt_gt_off = gt_gt.copy()
+        np.fill_diagonal(gt_gt_off, np.nan)
 
         if isinstance(key, tuple):
             latent, split = key
         else:
             latent, split = key, None
 
-        rows.append({
-            "latent":                 latent,
-            "split":                  split,
-            "raw_dim":                res["raw_dim"],
-            "pca_dim":                res["pca_dim"],
-            "var_explained":          res["explained_var"],
-            "global_FID":             res["fid_global"],
-            "diag_FID(GT_i,Diff_i)":  float(np.nanmean(diag)),
-            "off_FID(GT_i,Diff_j)":   float(np.nanmean(off))    if n > 1 else np.nan,
-            "GT-GT off-diag":         float(np.nanmean(gt_gt_off)) if n > 1 else np.nan,
-        })
+        rows.append(
+            {
+                "latent": latent,
+                "split": split,
+                "raw_dim": res["raw_dim"],
+                "pca_dim": res["pca_dim"],
+                "var_explained": res["explained_var"],
+                "global_FID": res["fid_global"],
+                "diag_FID(GT_i,Diff_i)": float(np.nanmean(diag)),
+                "off_FID(GT_i,Diff_j)": float(np.nanmean(off)) if n > 1 else np.nan,
+                "GT-GT off-diag": float(np.nanmean(gt_gt_off)) if n > 1 else np.nan,
+            }
+        )
     df = pd.DataFrame(rows)
     index_cols = ["latent", "split"] if has_split else ["latent"]
     if not has_split:

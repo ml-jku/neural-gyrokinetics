@@ -135,7 +135,10 @@ def get_data(cfg, rank: int = 0):
         else:
             dataset_class = CycloneDataset
     elif cfg.workflow == "pinc":
-        use_kvikio_train = True
+        # GPU-direct (kvikio) loading returns CUDA tensors; with num_workers>0 those cross the
+        # worker->main CUDA-IPC path, which needs pidfd_getfd and fails under kernel ptrace_scope>=2.
+        # respect gds_override (default False -> CPU-side load) so DataLoader workers ship CPU tensors.
+        use_kvikio_train = getattr(cfg.dataset, "gds_override", False)
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
         # serve GT spectra (kyspec/fluxspec) when gated in dataset.input_fields
@@ -173,9 +176,7 @@ def get_data(cfg, rank: int = 0):
         val_kwargs = {"conditions": sorted(cfg.model.conditioning)}
 
         if use_vae_latents:
-            latent_sampling_mode = getattr(
-                cfg.dataset, "latent_sampling_mode", "stochastic"
-            )
+            latent_sampling_mode = getattr(cfg.dataset, "latent_sampling_mode", "stochastic")
             val_latent_sampling_mode = getattr(
                 cfg.dataset, "val_latent_sampling_mode", latent_sampling_mode
             )
@@ -188,9 +189,7 @@ def get_data(cfg, rank: int = 0):
         val_kwargs["latent_scaling_mode"] = latent_scaling_mode
 
         if rank == 0:
-            latent_type = (
-                "VQVAE" if use_vqvae_latents else "VAE" if use_vae_latents else "AE"
-            )
+            latent_type = "VQVAE" if use_vqvae_latents else "VAE" if use_vae_latents else "AE"
             print(f"Diffusion latent dataset mode: {latent_type}")
 
         # load AE cfg for normalization stats
@@ -211,6 +210,17 @@ def get_data(cfg, rank: int = 0):
 
     # bf16 train: prefer bf16 shards, uniform bf16 batch (fast reads converted, f32 downcast otherwise); val always f32; default unchanged f32
     _prefer_dtype = getattr(cfg.dataset, "prefer_dtype", None)
+    if _prefer_dtype == "bf16":
+        # bf16 inputs need bf16 autocast downstream; without it the model runs f32 on bf16 tensors -> silent
+        # dtype mismatch / precision loss. fail loudly rather than train on an inconsistent setup.
+        _amp = getattr(cfg, "amp", None)
+        if not (
+            _amp is not None and getattr(_amp, "enable", False) and getattr(_amp, "bfloat", False)
+        ):
+            raise ValueError(
+                "dataset.prefer_dtype='bf16' requires amp.enable=true and amp.bfloat=true "
+                "(bf16 data must be paired with bf16 autocast)."
+            )
     _train_dtype = torch.bfloat16 if _prefer_dtype == "bf16" else torch.float32
 
     # dataloading backend
@@ -218,9 +228,7 @@ def get_data(cfg, rank: int = 0):
         train_backend = H5Backend(rank)
         val_backend = H5Backend(rank)
     elif backend == "gds":
-        train_backend = KvikIOBackend(
-            rank, use_kvikio=use_kvikio_train, prefer_dtype=_prefer_dtype
-        )
+        train_backend = KvikIOBackend(rank, use_kvikio=use_kvikio_train, prefer_dtype=_prefer_dtype)
         # NOTE: for validation load without gds, save space, slow is acceptable
         val_backend = KvikIOBackend(rank, use_kvikio=False, prefer_dtype=_prefer_dtype)
 
@@ -383,9 +391,7 @@ def get_data(cfg, rank: int = 0):
                     )
                 )
             elif key == "mask_modes":
-                mix_weights = getattr(
-                    cfg.dataset.augment.mask_modes, "mix_weights", None
-                )
+                mix_weights = getattr(cfg.dataset.augment.mask_modes, "mix_weights", None)
                 cutoff = getattr(cfg.dataset.augment.mask_modes, "cutoff", None)
                 augmentations.append(
                     mask_modes(
@@ -408,9 +414,7 @@ def get_data(cfg, rank: int = 0):
                             if not cfg.dataset.augment.mask_modes.is_fourier
                             else None
                         ),
-                        per_sample=getattr(
-                            cfg.dataset.augment.mask_modes, "per_sample", False
-                        ),
+                        per_sample=getattr(cfg.dataset.augment.mask_modes, "per_sample", False),
                     )
                 )
             elif key in ["vicreg_variance", "vicreg_covariance", "logdet"]:
@@ -429,9 +433,7 @@ def get_data(cfg, rank: int = 0):
         print(f"Holdout trajectories (val): {len(holdout_trajectories_valset)}")
 
     if partial_holdouts:
-        val_ratio = (
-            len(holdout_samples_valset) + len(holdout_trajectories_valset)
-        ) / len(trainset)
+        val_ratio = (len(holdout_samples_valset) + len(holdout_trajectories_valset)) / len(trainset)
         if rank == 0:
             print(f"Holdout samples (val): {len(holdout_samples_valset)}")
         datasets = ((trainset, holdout_trajectories_valset, holdout_samples_valset),)

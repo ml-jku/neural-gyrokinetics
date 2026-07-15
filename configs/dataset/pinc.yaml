@@ -2,7 +2,7 @@
 name: cyclone
 path: /local00/bioinf/galletti/preprocessed_kvikio
 backend: gds
-gds_override: false
+gds_override: true   # GPU-direct (kvikio) loading. NOTE: needs num_workers=0 under kernel ptrace_scope>=2 (CUDA-IPC/pidfd blocked)
 # training serves uniform bf16 (fast bf16 shards if converted, f32 downcast otherwise); validation always f32; null -> f32 everywhere
 prefer_dtype: bf16
 normalization: 

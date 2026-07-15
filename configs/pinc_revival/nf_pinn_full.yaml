@@ -1,0 +1,48 @@
+# PINN-residual baseline, FULL 18-timestep tab:results protocol (90..260 step 10), on gorilla.
+# Same as nf_pinn.yaml but 18 ts + 7 A40s. Resumable: is_complete skips the 300 already-done (60x5).
+mode: default
+ckp_path: /system/user/galletti/git/neural-gyrokinetics-gitlab/nf_ckps_pinn/
+path: /local00/bioinf/galletti/preprocessed_kvikio
+backend: gds
+normalization: zscore
+norm_axes: [-4]
+use_flux_fields: false
+epochs: 20
+lr: 7e-3
+batch_size: 4096
+density_eval_every: 0
+pinc_epochs: 100
+pinc_lr: 5e-4
+pinc_lr_sched: true
+min_lr: 1e-8
+pinc_eval_every: 2
+physics_mode: pinn
+w_sobolev: 1.0
+w_residual: 1.0
+name: mlp
+dim: 64
+n_layers: 5
+skips: true
+embed_type: discrete
+act_fn: silu
+# gradient checkpointing: PINN full-grid fp64 residual graph peaks ~26GB without it and OOMs
+# alongside the JAX RHS (~16GB) on a 44GB A40; checkpointing drops the torch peak to ~20GB.
+grad_checkpoint: true
+gpus: [0, 1, 3, 4, 5, 6, 7]
+# one job per GPU: torch(~20GB)+JAX(~16GB) fills a 44GB A40; two would OOM.
+throttling: 1
+timesteps: [90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260]
+trajectory: [
+  iteration_0.h5, iteration_8.h5, iteration_20.h5, iteration_36.h5, iteration_41.h5,
+  iteration_48.h5, iteration_55.h5, iteration_65.h5, iteration_73.h5, iteration_79.h5,
+  iteration_85.h5, iteration_94.h5, iteration_100.h5, iteration_104.h5, iteration_108.h5,
+  iteration_113.h5, iteration_117.h5, iteration_121.h5, iteration_125.h5, iteration_130.h5,
+  iteration_134.h5, iteration_138.h5, iteration_142.h5, iteration_146.h5, iteration_151.h5,
+  iteration_155.h5, iteration_159.h5, iteration_163.h5, iteration_168.h5, iteration_172.h5,
+  iteration_176.h5, iteration_180.h5, iteration_185.h5, iteration_189.h5, iteration_193.h5,
+  iteration_197.h5, iteration_202.h5, iteration_206.h5, iteration_210.h5, iteration_214.h5,
+  iteration_218.h5, iteration_223.h5, iteration_227.h5, iteration_231.h5, iteration_235.h5,
+  iteration_240.h5, iteration_244.h5, iteration_248.h5, iteration_252.h5, iteration_257.h5,
+  iteration_261.h5, iteration_265.h5, iteration_269.h5, iteration_274.h5, iteration_278.h5,
+  iteration_282.h5, iteration_286.h5, iteration_291.h5, iteration_295.h5, iteration_299.h5,
+]

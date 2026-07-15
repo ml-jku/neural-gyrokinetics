@@ -14,6 +14,7 @@ the total size without touching the hub. Pass --execute to actually upload.
   python scripts/hf_upload.py --target full --execute       # real upload (bf16, everything)
 auth: uses --token or $HF_TOKEN.
 """
+
 import os
 import re
 import sys
@@ -32,10 +33,68 @@ RAW_ROOT = "/restricteddata/ukaea/gyrokinetics/raw"  # holds per-trajectory inpu
 TEST_TIMESTEPS = list(range(90, 261, 10))
 
 # 60 held-out turbulent test trajectories (matches configs/dataset/pinc.yaml)
-TEST_IDS = [0, 8, 20, 36, 41, 48, 55, 65, 73, 79, 85, 94, 100, 104, 108, 113, 117,
-            121, 125, 130, 134, 138, 142, 146, 151, 155, 159, 163, 168, 172, 176,
-            180, 185, 189, 193, 197, 202, 206, 210, 214, 218, 223, 227, 231, 235,
-            240, 244, 248, 252, 257, 261, 265, 269, 274, 278, 282, 286, 291, 295, 299]
+TEST_IDS = [
+    0,
+    8,
+    20,
+    36,
+    41,
+    48,
+    55,
+    65,
+    73,
+    79,
+    85,
+    94,
+    100,
+    104,
+    108,
+    113,
+    117,
+    121,
+    125,
+    130,
+    134,
+    138,
+    142,
+    146,
+    151,
+    155,
+    159,
+    163,
+    168,
+    172,
+    176,
+    180,
+    185,
+    189,
+    193,
+    197,
+    202,
+    206,
+    210,
+    214,
+    218,
+    223,
+    227,
+    231,
+    235,
+    240,
+    244,
+    248,
+    252,
+    257,
+    261,
+    265,
+    269,
+    274,
+    278,
+    282,
+    286,
+    291,
+    295,
+    299,
+]
 
 # neural-field checkpoints -> (path within repo, allow_patterns). We ship ONLY the best basic NF
 # (best_mlp_*) and the best NF-PINC (best_int_mlp_*) from nf_ckps_revival -- not the last-epoch
@@ -56,15 +115,15 @@ def human(n):
 # and a bfloat16 sibling (..bf16.bin). pinc_gkw ships f32, the full repo ships bf16.
 F32_SHARD = re.compile(r"_\d{5}\.bin$")  # f32 data shard; the .bf16.bin sibling does NOT match
 # upload-pattern complements: drop the OTHER format's data shards (metadata/stats kept either way)
-IGNORE_F32 = ["*.bf16.bin"]        # keep f32 shards, drop bf16
-IGNORE_BF16 = ["*_?????.bin"]      # keep bf16 shards, drop f32 (5-digit f32 names only)
+IGNORE_F32 = ["*.bf16.bin"]  # keep f32 shards, drop bf16
+IGNORE_BF16 = ["*_?????.bin"]  # keep bf16 shards, drop f32 (5-digit f32 names only)
 
 
 def _skip(fmt):
     """file predicate: True for data shards of the OTHER format (excluded from the size report)."""
     if fmt == "bf16":
-        return lambda f: bool(F32_SHARD.search(f))      # skip f32 shards
-    return lambda f: f.endswith(".bf16.bin")            # skip bf16 shards (f32 archive)
+        return lambda f: bool(F32_SHARD.search(f))  # skip f32 shards
+    return lambda f: f.endswith(".bf16.bin")  # skip bf16 shards (f32 archive)
 
 
 def dir_size(path, fmt="f32"):
@@ -124,19 +183,25 @@ def upload_aux(api, repo, bases, execute):
     if not execute:
         return
     for b in found:
-        api.upload_file(path_or_fileobj=raw_input_dat(b), path_in_repo=f"{b}/input.dat",
-                        repo_id=repo, repo_type="dataset")
+        api.upload_file(
+            path_or_fileobj=raw_input_dat(b),
+            path_in_repo=f"{b}/input.dat",
+            repo_id=repo,
+            repo_type="dataset",
+        )
 
 
 def ckpt_size(local, allow):
     """bytes of the files in a checkpoint dir matching any of the allow globs (by basename)."""
     import fnmatch
+
     tot = n = 0
     for r, _, fs in os.walk(local):
         for f in fs:
             if any(fnmatch.fnmatch(f, pat) for pat in allow):
                 try:
-                    tot += os.path.getsize(os.path.join(r, f)); n += 1
+                    tot += os.path.getsize(os.path.join(r, f))
+                    n += 1
                 except OSError:
                     pass
     return tot, n
@@ -243,8 +308,10 @@ def write_card(api, repo, text, execute):
     if not execute:
         return
     api.upload_file(
-        path_or_fileobj=text.encode(), path_in_repo="README.md",
-        repo_id=repo, repo_type="dataset",
+        path_or_fileobj=text.encode(),
+        path_in_repo="README.md",
+        repo_id=repo,
+        repo_type="dataset",
     )
 
 
@@ -265,9 +332,11 @@ def do_pinc_gkw(api, execute):
         # arrays (df_mean/std/var/min/max) that the loader never reads (it recomputes from data).
         allow += [f"{base}/metadata_light.pkl", f"{base}/data_source.txt"]
     # normalization stats are NOT shipped (recomputed by the loader); do not upload *_stats.pkl
-    print(f"  test data: {n_samp} snapshots over {len(TEST_IDS)} trajs "
-          f"(18 timesteps {TEST_TIMESTEPS[0]}-{TEST_TIMESTEPS[-1]} step 10) = "
-          f"{human(sel_bytes)} of df/phi (+ metadata), f32")
+    print(
+        f"  test data: {n_samp} snapshots over {len(TEST_IDS)} trajs "
+        f"(18 timesteps {TEST_TIMESTEPS[0]}-{TEST_TIMESTEPS[-1]} step 10) = "
+        f"{human(sel_bytes)} of df/phi (+ metadata), f32"
+    )
     print("  [checkpoints]")
     ck_total = 0
     for local, (dst, allow_ck) in CHECKPOINTS.items():
@@ -280,14 +349,22 @@ def do_pinc_gkw(api, execute):
     print(f"    {'-'*9}\n    {human(ck_total):>9}  total")
     if execute:
         api.create_repo(PINC_GKW_REPO, repo_type="dataset", exist_ok=True)
-        api.upload_large_folder(repo_id=PINC_GKW_REPO, repo_type="dataset",
-                                folder_path=DATA_ROOT, allow_patterns=allow,
-                                ignore_patterns=IGNORE_F32)
+        api.upload_large_folder(
+            repo_id=PINC_GKW_REPO,
+            repo_type="dataset",
+            folder_path=DATA_ROOT,
+            allow_patterns=allow,
+            ignore_patterns=IGNORE_F32,
+        )
         for local, (dst, allow_ck) in CHECKPOINTS.items():
             if os.path.exists(local):
-                api.upload_folder(repo_id=PINC_GKW_REPO, repo_type="dataset",
-                                  folder_path=local, path_in_repo=dst,
-                                  allow_patterns=allow_ck)
+                api.upload_folder(
+                    repo_id=PINC_GKW_REPO,
+                    repo_type="dataset",
+                    folder_path=local,
+                    path_in_repo=dst,
+                    allow_patterns=allow_ck,
+                )
         write_card(api, PINC_GKW_REPO, card_pinc_gkw(), execute)
         print("  uploaded.")
     else:
@@ -296,10 +373,13 @@ def do_pinc_gkw(api, execute):
 
 def do_full(api, execute, repo, cleanup=False, threads=16):
     import glob
+
     # used (non-zero-flux) in-distribution trajs + ood; skip the zero-flux ones
     # (metadata only, no df shards) so we do not upload empty trajectories
-    cand = sorted(glob.glob(os.path.join(DATA_ROOT, f"iteration_*{TRAJ_SUFFIX}")) +
-                  glob.glob(os.path.join(DATA_ROOT, f"ood_iteration_*{TRAJ_SUFFIX}")))
+    cand = sorted(
+        glob.glob(os.path.join(DATA_ROOT, f"iteration_*{TRAJ_SUFFIX}"))
+        + glob.glob(os.path.join(DATA_ROOT, f"ood_iteration_*{TRAJ_SUFFIX}"))
+    )
     with_data = [d for d in cand if has_data(d)]
     # cleanup mode uploads EVERY f32 trajectory, converting its bf16 on the fly (the disk is too full
     # to hold all bf16 at once, and ~50/250 have no/partial bf16). non-cleanup uploads only trajs that
@@ -308,8 +388,11 @@ def do_full(api, execute, repo, cleanup=False, threads=16):
     bases = [os.path.basename(d) for d in dirs]
     n_ood = sum("ood_" in b for b in bases)
     mode = "convert-on-the-fly + per-traj cleanup" if cleanup else "preexisting bf16"
-    print(f"=== full dataset ({repo}): {len(dirs)} trajs ({n_ood} ood); "
-          f"skipped {len(cand)-len(with_data)} empty/zero-flux; mode={mode}, BFLOAT16 ===", flush=True)
+    print(
+        f"=== full dataset ({repo}): {len(dirs)} trajs ({n_ood} ood); "
+        f"skipped {len(cand)-len(with_data)} empty/zero-flux; mode={mode}, BFLOAT16 ===",
+        flush=True,
+    )
     if not execute:
         if not cleanup:
             report(f"data (bf16 on disk, {len(dirs)} trajs)", dirs, fmt="bf16")
@@ -328,24 +411,39 @@ def do_full(api, execute, repo, cleanup=False, threads=16):
         from neugk.dataset.preprocess import convert_trajs_to_bf16
         from concurrent.futures import ThreadPoolExecutor, as_completed
         import threading
+
         lock, st = threading.Lock(), {"freed": 0, "ok": 0, "err": 0}
 
         def process(b, d):
             convert_trajs_to_bf16([d], num_workers=1, force=False)  # fill any missing bf16 shards
-            api.upload_folder(repo_id=repo, repo_type="dataset", folder_path=d, path_in_repo=b,
-                              ignore_patterns=IGNORE_BF16 + ["metadata.pkl"])  # bf16 + metadata_light; drop f32 + heavy stats
+            api.upload_folder(
+                repo_id=repo,
+                repo_type="dataset",
+                folder_path=d,
+                path_in_repo=b,
+                ignore_patterns=IGNORE_BF16 + ["metadata.pkl"],
+            )  # bf16 + metadata_light; drop f32 + heavy stats
             if raw_input_dat(b):
-                api.upload_file(path_or_fileobj=raw_input_dat(b), path_in_repo=f"{b}/input.dat",
-                                repo_id=repo, repo_type="dataset")
+                api.upload_file(
+                    path_or_fileobj=raw_input_dat(b),
+                    path_in_repo=f"{b}/input.dat",
+                    repo_id=repo,
+                    repo_type="dataset",
+                )
             nrm = brm = 0
             for r, _, fs in os.walk(os.path.join(d, "data")):
                 for f in fs:
                     if f.endswith(".bf16.bin"):
                         p = os.path.join(r, f)
-                        brm += os.path.getsize(p); os.remove(p); nrm += 1
+                        brm += os.path.getsize(p)
+                        os.remove(p)
+                        nrm += 1
             return b, nrm, brm
 
-        print(f"  parallel convert+upload+cleanup, {threads} workers (peak ~{threads * 11} GB bf16 on disk)", flush=True)
+        print(
+            f"  parallel convert+upload+cleanup, {threads} workers (peak ~{threads * 11} GB bf16 on disk)",
+            flush=True,
+        )
         with ThreadPoolExecutor(max_workers=threads) as ex:
             futs = {ex.submit(process, b, d): b for b, d in zip(bases, dirs)}
             for fut in as_completed(futs):
@@ -353,20 +451,34 @@ def do_full(api, execute, repo, cleanup=False, threads=16):
                 try:
                     b, nrm, brm = fut.result()
                     with lock:
-                        st["freed"] += brm; st["ok"] += 1
-                        print(f"  [{st['ok'] + st['err']}/{len(dirs)}] {b}: ok, -{nrm} bf16 "
-                              f"({brm/1e9:.1f} GB, {st['freed']/1e12:.2f} TB reclaimed)", flush=True)
+                        st["freed"] += brm
+                        st["ok"] += 1
+                        print(
+                            f"  [{st['ok'] + st['err']}/{len(dirs)}] {b}: ok, -{nrm} bf16 "
+                            f"({brm/1e9:.1f} GB, {st['freed']/1e12:.2f} TB reclaimed)",
+                            flush=True,
+                        )
                 except Exception as e:
                     with lock:
                         st["err"] += 1
-                        print(f"  [{st['ok'] + st['err']}/{len(dirs)}] {b}: ERROR {type(e).__name__}: {e}", flush=True)
+                        print(
+                            f"  [{st['ok'] + st['err']}/{len(dirs)}] {b}: ERROR {type(e).__name__}: {e}",
+                            flush=True,
+                        )
         write_card(api, repo, card_full(st["ok"], repo), execute)
-        print(f"  done: {st['ok']} ok, {st['err']} err, {st['freed']/1e12:.2f} TB bf16 reclaimed from {DATA_ROOT}")
+        print(
+            f"  done: {st['ok']} ok, {st['err']} err, {st['freed']/1e12:.2f} TB bf16 reclaimed from {DATA_ROOT}"
+        )
     else:
         allow = [f"{b}/**" for b in bases]
         # keep the bf16 shards (+ metadata/stats), drop the f32 siblings
-        api.upload_large_folder(repo_id=repo, repo_type="dataset", folder_path=DATA_ROOT,
-                                allow_patterns=allow, ignore_patterns=IGNORE_BF16)
+        api.upload_large_folder(
+            repo_id=repo,
+            repo_type="dataset",
+            folder_path=DATA_ROOT,
+            allow_patterns=allow,
+            ignore_patterns=IGNORE_BF16,
+        )
         upload_aux(api, repo, bases, execute=True)
         write_card(api, repo, card_full(len(dirs), repo), execute)
         print("  uploaded.")
@@ -380,11 +492,18 @@ def main():
     ap.add_argument("--data-root", default=DATA_ROOT)
     ap.add_argument("--token", default=os.environ.get("HF_TOKEN"))
     ap.add_argument("--execute", action="store_true", help="actually upload (default: dry run)")
-    ap.add_argument("--cleanup-bf16", action="store_true",
-                    help="full target only: convert each trajectory's bf16 on the fly, upload, then "
-                         "delete its bf16 shards (bounded disk; uploads ALL f32 trajs, reclaims ~2.8 TB)")
-    ap.add_argument("--threads", type=int, default=16,
-                    help="parallel convert+upload workers for --cleanup-bf16 (peak ~threads x 11 GB on disk)")
+    ap.add_argument(
+        "--cleanup-bf16",
+        action="store_true",
+        help="full target only: convert each trajectory's bf16 on the fly, upload, then "
+        "delete its bf16 shards (bounded disk; uploads ALL f32 trajs, reclaims ~2.8 TB)",
+    )
+    ap.add_argument(
+        "--threads",
+        type=int,
+        default=16,
+        help="parallel convert+upload workers for --cleanup-bf16 (peak ~threads x 11 GB on disk)",
+    )
     args = ap.parse_args()
     DATA_ROOT = args.data_root
     if args.execute and not args.token:

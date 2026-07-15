@@ -26,6 +26,7 @@ Also kept here for legacy use: `time_to_convergence` (TTC) — superseded
 by the divergence-based metrics above (paper §5.2 lines 630–631 explains
 why the running-mean band threshold is degenerate under a good warm-start).
 """
+
 from __future__ import annotations
 
 import os
@@ -37,6 +38,7 @@ from scipy.stats import pearsonr
 # ---------------------------------------------------------------------------
 # Trajectory drivers
 # ---------------------------------------------------------------------------
+
 
 def _resolved_spectra_jax(phi, df, gt):
     """ky/kx-resolved kxspec, kyspec, qspec from gyaradax `phi` and `df`.
@@ -60,7 +62,7 @@ def _resolved_spectra_jax(phi, df, gt):
 
     # |phi|^2 spectra (sum over parallel + the orthogonal mode axis)
     phi_abs2 = jnp.abs(phi) ** 2
-    if phi.ndim == 3:                     # (s, kx, ky)
+    if phi.ndim == 3:  # (s, kx, ky)
         kxspec = jnp.sum(phi_abs2, axis=(0, 2))
         kyspec = jnp.sum(phi_abs2, axis=(0, 1))
     else:
@@ -68,31 +70,31 @@ def _resolved_spectra_jax(phi, df, gt):
 
     # eflux per-mode — replicates gyaradax.calculate_fluxes math up to (but
     # not including) the final scalar sum.
-    bn       = gt["bn"]
+    bn = gt["bn"]
     parseval = gt["parseval"]
-    ints     = gt["ints"]
-    efun     = gt["efun"]
-    krho     = gt["krho"]
-    bessel   = gt["bessel"]
-    vpgr     = gt["vpgr"]
-    mugr     = gt["mugr"]
-    intvp    = gt["intvp"]
-    intmu    = gt["intmu"]
-    d2X      = gt["d2X"]
+    ints = gt["ints"]
+    efun = gt["efun"]
+    krho = gt["krho"]
+    bessel = gt["bessel"]
+    vpgr = gt["vpgr"]
+    mugr = gt["mugr"]
+    intvp = gt["intvp"]
+    intmu = gt["intmu"]
+    d2X = gt["d2X"]
 
-    if df.ndim == 5:                      # adiabatic
+    if df.ndim == 5:  # adiabatic
         phi_expanded = rearrange(phi, "s x y -> 1 1 s x y")
-    elif df.ndim == 6:                    # kinetic
+    elif df.ndim == 6:  # kinetic
         phi_expanded = rearrange(phi, "s x y -> 1 1 1 s x y")
     else:
         raise ValueError(f"unexpected df.ndim={df.ndim}")
     phi_gyro = bessel * phi_expanded
 
-    dum  = parseval * ints * (efun * krho) * df
+    dum = parseval * ints * (efun * krho) * df
     dum1 = dum * jnp.conj(phi_gyro)
     dum2 = dum1 * bn
-    d3v  = d2X * intmu * bn * intvp
-    eflux_field = d3v * (vpgr ** 2 * jnp.imag(dum1) + 2.0 * mugr * jnp.imag(dum2))
+    d3v = d2X * intmu * bn * intvp
+    eflux_field = d3v * (vpgr**2 * jnp.imag(dum1) + 2.0 * mugr * jnp.imag(dum2))
 
     # `parseval`/`bessel` are 6-D in gyaradax, so `eflux_field` is 6-D even for
     # 5-D `df`. Sum over all axes except the last (ky) — robust to either
@@ -103,7 +105,7 @@ def _resolved_spectra_jax(phi, df, gt):
     return {
         "kxspec": np.asarray(kxspec),
         "kyspec": np.asarray(kyspec),
-        "qspec":  np.asarray(qspec),
+        "qspec": np.asarray(qspec),
     }
 
 
@@ -161,6 +163,7 @@ def run_trajectories(
     gt_cached = pre["geom_tensors"] if (pre is not None and "geom_tensors" in pre) else None
     if log_resolved_spectra and gt_cached is None:
         from gyaradax.integrals import geom_tensors as _gt
+
         gt_cached = _gt(geometry, params=params)
 
     def _log_step(b, phi, fluxes, df_now):
@@ -178,7 +181,10 @@ def run_trajectories(
 
     for b in range(ntraj):
         phi, fluxes = get_integrals(
-            dfs[b], geometry, params=params, pre=pre,
+            dfs[b],
+            geometry,
+            params=params,
+            pre=pre,
             adiabatic_electrons=params.adiabatic_electrons,
         )
         _log_step(b, phi, fluxes, dfs[b])
@@ -188,13 +194,21 @@ def run_trajectories(
         n = min(chunk_size, n_steps - steps_done)
         for b in range(ntraj):
             dfs[b], (phi, fluxes), states[b] = gksolve(
-                dfs[b], geometry, params, states[b], n_steps=n, pre=pre,
+                dfs[b],
+                geometry,
+                params,
+                states[b],
+                n_steps=n,
+                pre=pre,
             )
         steps_done += n
         if steps_done % log_every == 0 or steps_done == n_steps:
             for b in range(ntraj):
                 phi_b, fluxes_b = get_integrals(
-                    dfs[b], geometry, params=params, pre=pre,
+                    dfs[b],
+                    geometry,
+                    params=params,
+                    pre=pre,
                     adiabatic_electrons=params.adiabatic_electrons,
                 )
                 _log_step(b, phi_b, fluxes_b, dfs[b])
@@ -219,26 +233,54 @@ def run_trajectories(
 
 
 def run_trajectory_pair(
-    df_gt, df_warm, geometry, params, pre, state_init,
-    n_steps=1000, label="", chunk_size=1, backend="cuda",
-    mixed_precision=True, print_every=500, log_every=1,
+    df_gt,
+    df_warm,
+    geometry,
+    params,
+    pre,
+    state_init,
+    n_steps=1000,
+    label="",
+    chunk_size=1,
+    backend="cuda",
+    mixed_precision=True,
+    print_every=500,
+    log_every=1,
     log_resolved_spectra=True,
 ):
     """Run GT and a single warm-start trajectory."""
     log_gt, log_warms = run_trajectories(
-        df_gt, [df_warm], geometry, params, pre, state_init,
-        n_steps=n_steps, labels=[label], chunk_size=chunk_size,
-        backend=backend, mixed_precision=mixed_precision,
-        print_every=print_every, log_every=log_every,
+        df_gt,
+        [df_warm],
+        geometry,
+        params,
+        pre,
+        state_init,
+        n_steps=n_steps,
+        labels=[label],
+        chunk_size=chunk_size,
+        backend=backend,
+        mixed_precision=mixed_precision,
+        print_every=print_every,
+        log_every=log_every,
         log_resolved_spectra=log_resolved_spectra,
     )
     return log_gt, log_warms[0]
 
 
 def run_trajectory(
-    df_init, geometry, params, pre, state_init,
-    n_steps=1000, label="", chunk_size=1, backend="cuda",
-    mixed_precision=True, print_every=500, log_every=1,
+    df_init,
+    geometry,
+    params,
+    pre,
+    state_init,
+    n_steps=1000,
+    label="",
+    chunk_size=1,
+    backend="cuda",
+    mixed_precision=True,
+    print_every=500,
+    log_every=1,
     log_resolved_spectra=True,
 ):
     """Run a single trajectory."""
@@ -269,6 +311,7 @@ def run_trajectory(
     gt_cached = pre["geom_tensors"] if (pre is not None and "geom_tensors" in pre) else None
     if log_resolved_spectra and gt_cached is None:
         from gyaradax.integrals import geom_tensors as _gt
+
         gt_cached = _gt(geometry, params=params)
 
     def _log_step(phi, fluxes, df_now, state):
@@ -285,7 +328,10 @@ def run_trajectory(
             log["ky_spec"].append(np.array(diags["ky_spec"]))
 
     phi, fluxes = get_integrals(
-        df_init, geometry, params=params, pre=pre,
+        df_init,
+        geometry,
+        params=params,
+        pre=pre,
         adiabatic_electrons=params.adiabatic_electrons,
     )
     _log_step(phi, fluxes, df_init, state)
@@ -294,14 +340,21 @@ def run_trajectory(
     while steps_done < n_steps:
         n = min(chunk_size, n_steps - steps_done)
         df_init, (phi, fluxes), state = gksolve(
-            df_init, geometry, params, state, n_steps=n, pre=pre,
+            df_init,
+            geometry,
+            params,
+            state,
+            n_steps=n,
+            pre=pre,
         )
         steps_done += n
         if steps_done % log_every == 0 or steps_done == n_steps:
             _log_step(phi, fluxes, df_init, state)
         if steps_done % print_every == 0 or steps_done == n_steps:
-            print(f"  [{label}] {steps_done}/{n_steps}  t={float(state.time):.3f}  "
-                  f"Q={float(log['eflux'][-1]):.4e}")
+            print(
+                f"  [{label}] {steps_done}/{n_steps}  t={float(state.time):.3f}  "
+                f"Q={float(log['eflux'][-1]):.4e}"
+            )
     out = {k: np.array(v) for k, v in log.items()}
     return out
 
@@ -309,6 +362,7 @@ def run_trajectory(
 # ---------------------------------------------------------------------------
 # Reference loaders + window helpers
 # ---------------------------------------------------------------------------
+
 
 def load_reference_flux(gkw_dir, iteration):
     """Heat-flux mean/std over the last 240 steps of GKW fluxes.dat."""
@@ -349,9 +403,11 @@ def stationary_window_2d(X, frac=0.5):
 # Two-sample distributional divergences (1-D scalar — flux)
 # ---------------------------------------------------------------------------
 
+
 def flux_ks_pvalue(x_warm, x_ref):
     """KS two-sample p-value (higher = more indistinguishable). Paper $\\tau_Q$."""
     from scipy.stats import ks_2samp
+
     return float(ks_2samp(np.asarray(x_warm), np.asarray(x_ref)).pvalue)
 
 
@@ -360,6 +416,7 @@ def flux_ks_statistic(x_warm, x_ref):
     Lower = more similar. Sample-size-invariant in interpretation, unlike
     the p-value which collapses to 0 once nm/(n+m) is large."""
     from scipy.stats import ks_2samp
+
     return float(ks_2samp(np.asarray(x_warm), np.asarray(x_ref)).statistic)
 
 
@@ -371,6 +428,7 @@ def flux_diff_ks_statistic(x_warm, x_ref):
     constant trajectory at the right mean has Δ ≡ 0 → degenerate Δ-distribution
     that fails the test, unlike pure marginal-shape metrics."""
     from scipy.stats import ks_2samp
+
     a = np.diff(np.asarray(x_warm).ravel())
     b = np.diff(np.asarray(x_ref).ravel())
     if a.size < 2 or b.size < 2:
@@ -406,6 +464,7 @@ def flux_ad_statistic(x_warm, x_ref):
     -- so we silence them at the call site to keep the run log clean."""
     import warnings
     from scipy.stats import anderson_ksamp
+
     try:
         with warnings.catch_warnings():
             warnings.filterwarnings(
@@ -413,9 +472,11 @@ def flux_ad_statistic(x_warm, x_ref):
                 message=r"p-value (floored|capped):.*",
                 category=UserWarning,
             )
-            return float(anderson_ksamp(
-                [np.asarray(x_warm), np.asarray(x_ref)],
-            ).statistic)
+            return float(
+                anderson_ksamp(
+                    [np.asarray(x_warm), np.asarray(x_ref)],
+                ).statistic
+            )
     except Exception:
         return np.nan
 
@@ -423,6 +484,7 @@ def flux_ad_statistic(x_warm, x_ref):
 def flux_wasserstein(x_warm, x_ref):
     """1-D Wasserstein-1 distance."""
     from scipy.stats import wasserstein_distance
+
     return float(wasserstein_distance(np.asarray(x_warm), np.asarray(x_ref)))
 
 
@@ -430,6 +492,7 @@ def flux_cdf_linf(x_warm, x_ref):
     """L∞ between empirical CDFs (the KS *statistic*; complements the p-value
     which depends on sample sizes)."""
     from scipy.stats import ks_2samp
+
     return float(ks_2samp(np.asarray(x_warm), np.asarray(x_ref)).statistic)
 
 
@@ -457,7 +520,7 @@ def flux_mmd_rbf(x_warm, x_ref, sigma=None):
     A two-sample-test alternative that's smoother than KS/AD and
     well-defined for any 1-D distribution (no ties / continuity assumption)."""
     a = np.asarray(x_warm, dtype=np.float64).ravel()
-    b = np.asarray(x_ref,  dtype=np.float64).ravel()
+    b = np.asarray(x_ref, dtype=np.float64).ravel()
     if a.size < 2 or b.size < 2:
         return np.nan
     if sigma is None:
@@ -470,15 +533,13 @@ def flux_mmd_rbf(x_warm, x_ref, sigma=None):
         d2 = (u[:, None] - v[None, :]) ** 2
         return np.exp(-g * d2)
 
-    Kxx = _k(a, a); np.fill_diagonal(Kxx, 0.0)
-    Kyy = _k(b, b); np.fill_diagonal(Kyy, 0.0)
+    Kxx = _k(a, a)
+    np.fill_diagonal(Kxx, 0.0)
+    Kyy = _k(b, b)
+    np.fill_diagonal(Kyy, 0.0)
     Kxy = _k(a, b)
     n, m = a.size, b.size
-    return float(
-        Kxx.sum() / (n * (n - 1))
-        + Kyy.sum() / (m * (m - 1))
-        - 2.0 * Kxy.mean()
-    )
+    return float(Kxx.sum() / (n * (n - 1)) + Kyy.sum() / (m * (m - 1)) - 2.0 * Kxy.mean())
 
 
 def vector_mmd_rbf(X_warm, X_ref, n_max=600, rng=None):
@@ -494,7 +555,7 @@ def vector_mmd_rbf(X_warm, X_ref, n_max=600, rng=None):
     """
     rng = rng if rng is not None else np.random.default_rng(0)
     Xw = np.asarray(X_warm, dtype=np.float64)
-    Xr = np.asarray(X_ref,  dtype=np.float64)
+    Xr = np.asarray(X_ref, dtype=np.float64)
     if Xw.ndim != 2 or Xr.ndim != 2 or Xw.size == 0 or Xr.size == 0:
         return np.nan
     if Xw.shape[0] > n_max:
@@ -511,15 +572,13 @@ def vector_mmd_rbf(X_warm, X_ref, n_max=600, rng=None):
         return np.nan
     sigma = max(float(np.median(pooled)), 1e-12)
     g = 1.0 / (2 * sigma * sigma)
-    Kxx = np.exp(-g * XX); np.fill_diagonal(Kxx, 0.0)
-    Kyy = np.exp(-g * YY); np.fill_diagonal(Kyy, 0.0)
+    Kxx = np.exp(-g * XX)
+    np.fill_diagonal(Kxx, 0.0)
+    Kyy = np.exp(-g * YY)
+    np.fill_diagonal(Kyy, 0.0)
     Kxy = np.exp(-g * XY)
     n, m = Xw.shape[0], Xr.shape[0]
-    return float(
-        Kxx.sum() / (n * (n - 1))
-        + Kyy.sum() / (m * (m - 1))
-        - 2.0 * Kxy.mean()
-    )
+    return float(Kxx.sum() / (n * (n - 1)) + Kyy.sum() / (m * (m - 1)) - 2.0 * Kxy.mean())
 
 
 def flux_mannwhitney_u_p(x_warm, x_ref):
@@ -531,10 +590,15 @@ def flux_mannwhitney_u_p(x_warm, x_ref):
     under-react. Higher p = more indistinguishable.
     """
     from scipy.stats import mannwhitneyu
+
     try:
-        return float(mannwhitneyu(
-            np.asarray(x_warm), np.asarray(x_ref), alternative="two-sided",
-        ).pvalue)
+        return float(
+            mannwhitneyu(
+                np.asarray(x_warm),
+                np.asarray(x_ref),
+                alternative="two-sided",
+            ).pvalue
+        )
     except Exception:
         return np.nan
 
@@ -543,9 +607,12 @@ def flux_mannwhitney_u_stat(x_warm, x_ref):
     """Mann–Whitney U statistic (rank-sum). Lower-bounded by 0; depends on
     sample sizes — pair with the p-value or normalise by `n*m`."""
     from scipy.stats import mannwhitneyu
+
     try:
         u = mannwhitneyu(
-            np.asarray(x_warm), np.asarray(x_ref), alternative="two-sided",
+            np.asarray(x_warm),
+            np.asarray(x_ref),
+            alternative="two-sided",
         ).statistic
         return float(u) / (len(x_warm) * len(x_ref))
     except Exception:
@@ -557,6 +624,7 @@ def flux_wilcoxon_signed_rank_p(x_warm, x_ref):
     have the same length and are paired in time (e.g. snapshot-by-snapshot).
     Returns NaN otherwise."""
     from scipy.stats import wilcoxon
+
     a = np.asarray(x_warm).ravel()
     b = np.asarray(x_ref).ravel()
     if a.size != b.size or a.size < 1:
@@ -584,11 +652,11 @@ def flux_arima_param_l2(x_warm, x_ref, order=(2, 0, 2)):
         return np.nan
     import warnings
     from statsmodels.tools.sm_exceptions import ConvergenceWarning
+
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", ConvergenceWarning)
-            warnings.filterwarnings("ignore", category=UserWarning,
-                                     module="statsmodels")
+            warnings.filterwarnings("ignore", category=UserWarning, module="statsmodels")
             ma = ARIMA(a, order=order).fit(disp=False).params
             mb = ARIMA(b, order=order).fit(disp=False).params
     except Exception:
@@ -622,7 +690,7 @@ def spec_r2_meanlog(X_warm, X_ref, eps=1e-30):
     analogue of `mean_log_spectrum_pearson`: 1 = perfectly reconstructed shape,
     0 = no better than predicting the mean across modes."""
     a = np.log10(np.maximum(np.asarray(X_warm).mean(axis=0), eps))
-    b = np.log10(np.maximum(np.asarray(X_ref).mean(axis=0),  eps))
+    b = np.log10(np.maximum(np.asarray(X_ref).mean(axis=0), eps))
     if a.size < 2:
         return np.nan
     ss_res = float(np.sum((b - a) ** 2))
@@ -636,12 +704,12 @@ def flux_energy_distance(x_warm, x_ref):
     Two-sample test that is metric on probability measures with finite first
     moment; cheap O(n·m) but stable on heavy tails."""
     a = np.asarray(x_warm, dtype=np.float64).ravel()
-    b = np.asarray(x_ref,  dtype=np.float64).ravel()
+    b = np.asarray(x_ref, dtype=np.float64).ravel()
     if a.size < 2 or b.size < 2:
         return np.nan
     cross = np.abs(a[:, None] - b[None, :]).mean()
-    aa    = np.abs(a[:, None] - a[None, :]).mean()
-    bb    = np.abs(b[:, None] - b[None, :]).mean()
+    aa = np.abs(a[:, None] - a[None, :]).mean()
+    bb = np.abs(b[:, None] - b[None, :]).mean()
     return float(max(2 * cross - aa - bb, 0.0))
 
 
@@ -650,8 +718,15 @@ def flux_energy_distance(x_warm, x_ref):
 # (paper §5.2 eq for τ_Q = min{t : p_KS({Q(s)}_{s≤t}, {Q_GKW}) ≥ α}, α = 0.05)
 # ---------------------------------------------------------------------------
 
+
 def _first_passage_prefix(
-    x_warm, x_ref, time_axis, predicate, *, t_min=8, log_every=2,
+    x_warm,
+    x_ref,
+    time_axis,
+    predicate,
+    *,
+    t_min=8,
+    log_every=2,
 ):
     """Walk prefixes of `x_warm` (lengths t_min, t_min·log_every, ...) and
     return the smallest `time_axis[t-1] - time_axis[0]` at which
@@ -673,8 +748,11 @@ def tau_q_ks(x_warm, x_ref, time_axis, alpha=0.05, **kw):
     """Paper's primary τ_Q (KS): first prefix-time at which the KS p-value
     against the GKW reference is ≥ alpha."""
     return _first_passage_prefix(
-        x_warm, x_ref, time_axis,
-        lambda a, b: flux_ks_pvalue(a, b) >= alpha, **kw,
+        x_warm,
+        x_ref,
+        time_axis,
+        lambda a, b: flux_ks_pvalue(a, b) >= alpha,
+        **kw,
     )
 
 
@@ -682,8 +760,11 @@ def tau_q_ad(x_warm, x_ref, time_axis, threshold=2.5, **kw):
     """τ_Q variant using Anderson–Darling: first prefix-time at which the AD
     statistic drops below `threshold` (≈ 2.5 corresponds to p ≳ 0.05)."""
     return _first_passage_prefix(
-        x_warm, x_ref, time_axis,
-        lambda a, b: flux_ad_statistic(a, b) <= threshold, **kw,
+        x_warm,
+        x_ref,
+        time_axis,
+        lambda a, b: flux_ad_statistic(a, b) <= threshold,
+        **kw,
     )
 
 
@@ -694,16 +775,22 @@ def tau_q_wasserstein(x_warm, x_ref, time_axis, threshold=None, **kw):
     if threshold is None:
         threshold = 0.1 * float(np.std(x_ref) + 1e-12)
     return _first_passage_prefix(
-        x_warm, x_ref, time_axis,
-        lambda a, b: flux_wasserstein(a, b) <= threshold, **kw,
+        x_warm,
+        x_ref,
+        time_axis,
+        lambda a, b: flux_wasserstein(a, b) <= threshold,
+        **kw,
     )
 
 
 def tau_q_gelman_rubin(x_warm, x_ref, time_axis, threshold=1.1, **kw):
     """τ_Q via Gelman–Rubin: first prefix-time at which R̂ < threshold (1.1)."""
     return _first_passage_prefix(
-        x_warm, x_ref, time_axis,
-        lambda a, b: gelman_rubin_R(a, b) < threshold, **kw,
+        x_warm,
+        x_ref,
+        time_axis,
+        lambda a, b: gelman_rubin_R(a, b) < threshold,
+        **kw,
     )
 
 
@@ -711,14 +798,18 @@ def tau_q_mannwhitney(x_warm, x_ref, time_axis, alpha=0.05, **kw):
     """τ_Q via Mann–Whitney rank-sum (Wilcoxon): first prefix-time at which the
     test fails to reject (p ≥ alpha)."""
     return _first_passage_prefix(
-        x_warm, x_ref, time_axis,
-        lambda a, b: flux_mannwhitney_u_p(a, b) >= alpha, **kw,
+        x_warm,
+        x_ref,
+        time_axis,
+        lambda a, b: flux_mannwhitney_u_p(a, b) >= alpha,
+        **kw,
     )
 
 
 # ---------------------------------------------------------------------------
 # MCMC-mixing diagnostics
 # ---------------------------------------------------------------------------
+
 
 def gelman_rubin_R(x_warm, x_ref):
     """Two-chain Gelman–Rubin $\\hat R$ on the full window. <1.1 ≈ converged."""
@@ -752,6 +843,7 @@ def gelman_rubin_t_curve(x_warm, x_ref):
 # ---------------------------------------------------------------------------
 # Time-structure / random-walk consistency
 # ---------------------------------------------------------------------------
+
 
 def flux_autocorr(x, max_lag=40):
     """Centered autocorrelation $C_Q(\\tau)/C_Q(0)$, $\\tau = 0, \\dots, $`max_lag`."""
@@ -791,10 +883,12 @@ def autocorr_l1(x_warm, x_ref, max_lag=40, kind="autocorr"):
 # Multivariate divergences and spectra-window comparisons
 # ---------------------------------------------------------------------------
 
+
 def sliced_wasserstein(X_warm, X_ref, n_projections=64, seed=0):
     """Sliced Wasserstein-1 by averaging 1-D W₁ over `n_projections` random
     unit directions."""
     from scipy.stats import wasserstein_distance
+
     rng = np.random.default_rng(seed)
     X_warm = np.asarray(X_warm)
     X_ref = np.asarray(X_ref)
@@ -806,10 +900,7 @@ def sliced_wasserstein(X_warm, X_ref, n_projections=64, seed=0):
     P /= np.linalg.norm(P, axis=0, keepdims=True) + 1e-12
     proj_w = X_warm @ P
     proj_r = X_ref @ P
-    vals = [
-        wasserstein_distance(proj_w[:, i], proj_r[:, i])
-        for i in range(n_projections)
-    ]
+    vals = [wasserstein_distance(proj_w[:, i], proj_r[:, i]) for i in range(n_projections)]
     return float(np.mean(vals))
 
 
@@ -842,18 +933,14 @@ def spec_divergence(X_warm, X_ref, kind="w1"):
     populated when `kind == "ks"`.
     """
     if kind not in _SPEC_METRIC_TABLE:
-        raise ValueError(
-            f"unknown kind: {kind!r}; choose from {list(_SPEC_METRIC_TABLE)}"
-        )
+        raise ValueError(f"unknown kind: {kind!r}; choose from {list(_SPEC_METRIC_TABLE)}")
     per_mode = _per_mode_apply(_SPEC_METRIC_TABLE[kind], X_warm, X_ref)
     finite = per_mode[np.isfinite(per_mode)]
     return {
         "per_mode": per_mode,
-        "mean":     float(np.mean(finite))   if finite.size else np.nan,
-        "median":   float(np.median(finite)) if finite.size else np.nan,
-        "frac_indistinguishable": (
-            float(np.mean(per_mode >= 0.05)) if kind == "ks" else np.nan
-        ),
+        "mean": float(np.mean(finite)) if finite.size else np.nan,
+        "median": float(np.median(finite)) if finite.size else np.nan,
+        "frac_indistinguishable": (float(np.mean(per_mode >= 0.05)) if kind == "ks" else np.nan),
     }
 
 
@@ -864,7 +951,7 @@ def mean_log_spectrum_pearson(X_warm, X_ref, eps=1e-30):
     averaged over the whole window rather than evaluated snapshot-by-snapshot.
     """
     a = np.log10(np.maximum(np.asarray(X_warm).mean(axis=0), eps))
-    b = np.log10(np.maximum(np.asarray(X_ref).mean(axis=0),  eps))
+    b = np.log10(np.maximum(np.asarray(X_ref).mean(axis=0), eps))
     if a.size < 2:
         return np.nan
     r, _ = pearsonr(a, b)
@@ -874,7 +961,7 @@ def mean_log_spectrum_pearson(X_warm, X_ref, eps=1e-30):
 def mean_log_spectrum_l2(X_warm, X_ref, eps=1e-30):
     """L2 distance between time-averaged log-spectra (lower = closer)."""
     a = np.log10(np.maximum(np.asarray(X_warm).mean(axis=0), eps))
-    b = np.log10(np.maximum(np.asarray(X_ref).mean(axis=0),  eps))
+    b = np.log10(np.maximum(np.asarray(X_ref).mean(axis=0), eps))
     return float(np.linalg.norm(a - b) / np.sqrt(a.size))
 
 
@@ -883,8 +970,10 @@ def time_avg_spectrum_kl(X_warm, X_ref, eps=1e-30):
     probability distributions over modes (normalised to sum 1)."""
     a = np.asarray(X_warm).mean(axis=0)
     b = np.asarray(X_ref).mean(axis=0)
-    a = np.clip(a, eps, None); a = a / a.sum()
-    b = np.clip(b, eps, None); b = b / b.sum()
+    a = np.clip(a, eps, None)
+    a = a / a.sum()
+    b = np.clip(b, eps, None)
+    b = b / b.sum()
     return float(np.sum(a * (np.log(a) - np.log(b))))
 
 
@@ -893,7 +982,7 @@ def spec_cosine_curve(X_warm, X_ref, eps=1e-30):
     is closer; a `cold` start with a transient yields ≪1 early then climbs.
     For a window-only evaluation we just average across the window."""
     a = np.log10(np.maximum(np.asarray(X_warm), eps))
-    b = np.log10(np.maximum(np.asarray(X_ref),  eps))
+    b = np.log10(np.maximum(np.asarray(X_ref), eps))
     if a.shape != b.shape or a.ndim != 2:
         return np.nan
     num = (a * b).sum(axis=-1)
@@ -918,10 +1007,10 @@ def running_mean_drift(x_warm, x_ref):
 # are the ONLY metrics the driver emits — extra helpers above remain available
 # for direct use but are deliberately excluded from the default output.
 CANONICAL_METRICS = {
-    "w1":         flux_wasserstein,
-    "mmd":        flux_mmd_rbf,
-    "ks_d":       flux_ks_statistic,
-    "ad":         flux_ad_statistic,
+    "w1": flux_wasserstein,
+    "mmd": flux_mmd_rbf,
+    "ks_d": flux_ks_statistic,
+    "ad": flux_ad_statistic,
 }
 
 
@@ -937,8 +1026,13 @@ def _normalize_modewise(X, eps=1e-30):
 
 
 def compute_distribution_divergences(
-    log_run, log_gt, *, ref_flux_samples=None, warm_frac=0.95,
-    max_lag=40, spec_keys=("ky_spec", "fluxspec"),
+    log_run,
+    log_gt,
+    *,
+    ref_flux_samples=None,
+    warm_frac=0.95,
+    max_lag=40,
+    spec_keys=("ky_spec", "fluxspec"),
     normalize_spectra=False,
 ):
     """Divergences between a warm-started run and the GT saturated reference.
@@ -993,8 +1087,8 @@ def compute_distribution_divergences(
         e_pr = np.asarray(log_run["eflux_per_restart"])  # (R, T)
         T = e_pr.shape[1]
         keep = max(1, int(round(warm_frac * T)))
-        e_pr_kept = e_pr[:, T - keep:]                   # (R, T')
-        flux_warm_pooled = e_pr_kept.reshape(-1)         # (R*T',)
+        e_pr_kept = e_pr[:, T - keep :]  # (R, T')
+        flux_warm_pooled = e_pr_kept.reshape(-1)  # (R*T',)
         flux_per_restart = [e_pr_kept[r] for r in range(e_pr.shape[0])]
     else:
         flux_warm_pooled = stationary_window(log_run["eflux"], warm_frac)
@@ -1024,10 +1118,14 @@ def compute_distribution_divergences(
                     except Exception:
                         vals.append(np.nan)
                 v = np.asarray(vals, dtype=float)
-                out[f"flux_{name}_per_restart"]      = v.tolist()
+                out[f"flux_{name}_per_restart"] = v.tolist()
                 _vf = v[np.isfinite(v)]
-                out[f"flux_{name}_per_restart_mean"] = float(_vf.mean()) if _vf.size else float("nan")
-                out[f"flux_{name}_per_restart_std"]  = float(_vf.std(ddof=0)) if _vf.size else float("nan")
+                out[f"flux_{name}_per_restart_mean"] = (
+                    float(_vf.mean()) if _vf.size else float("nan")
+                )
+                out[f"flux_{name}_per_restart_std"] = (
+                    float(_vf.std(ddof=0)) if _vf.size else float("nan")
+                )
 
     # ---- spectra ---------------------------------------------------------
     for spec_key in spec_keys:
@@ -1036,7 +1134,7 @@ def compute_distribution_divergences(
             X_pr = np.asarray(log_run[per_restart_key])  # (R, T, K)
             T = X_pr.shape[1]
             keep = max(1, int(round(warm_frac * T)))
-            X_pr_kept = X_pr[:, T - keep:]               # (R, T', K)
+            X_pr_kept = X_pr[:, T - keep :]  # (R, T', K)
             Xw_pooled = X_pr_kept.reshape(-1, X_pr_kept.shape[-1])
             X_per_restart = [X_pr_kept[r] for r in range(X_pr.shape[0])]
         elif spec_key in log_run:
@@ -1055,7 +1153,7 @@ def compute_distribution_divergences(
         # absolute amplitude before per-mode divergences are computed.
         if normalize_spectra:
             Xw_pooled = _normalize_modewise(Xw_pooled)
-            Xr        = _normalize_modewise(Xr)
+            Xr = _normalize_modewise(Xr)
             X_per_restart = [_normalize_modewise(X) for X in X_per_restart]
 
         # --- joint-over-modes MMD (single number per family) ---------------
@@ -1065,18 +1163,24 @@ def compute_distribution_divergences(
         try:
             out[f"{spec_key}_mmd2d"] = float(vector_mmd_rbf(Xw_pooled, Xr))
         except Exception as e:
-            out[f"{spec_key}_mmd2d"]       = np.nan
+            out[f"{spec_key}_mmd2d"] = np.nan
             out[f"{spec_key}_mmd2d_error"] = repr(e)
         if len(X_per_restart) > 1:
             vals = []
             for X_r_arr in X_per_restart:
-                try:    vals.append(float(vector_mmd_rbf(X_r_arr, Xr)))
-                except Exception: vals.append(np.nan)
+                try:
+                    vals.append(float(vector_mmd_rbf(X_r_arr, Xr)))
+                except Exception:
+                    vals.append(np.nan)
             v = np.asarray(vals, dtype=float)
-            out[f"{spec_key}_mmd2d_per_restart"]      = v.tolist()
+            out[f"{spec_key}_mmd2d_per_restart"] = v.tolist()
             _vf = v[np.isfinite(v)]
-            out[f"{spec_key}_mmd2d_per_restart_mean"] = float(_vf.mean()) if _vf.size else float("nan")
-            out[f"{spec_key}_mmd2d_per_restart_std"]  = float(_vf.std(ddof=0)) if _vf.size else float("nan")
+            out[f"{spec_key}_mmd2d_per_restart_mean"] = (
+                float(_vf.mean()) if _vf.size else float("nan")
+            )
+            out[f"{spec_key}_mmd2d_per_restart_std"] = (
+                float(_vf.std(ddof=0)) if _vf.size else float("nan")
+            )
 
         for name, fn in CANONICAL_METRICS.items():
             metric_key = f"{spec_key}_{name}_mean"
@@ -1099,10 +1203,14 @@ def compute_distribution_divergences(
                     except Exception:
                         vals.append(float("nan"))
                 v = np.asarray(vals, dtype=float)
-                out[f"{metric_key}_per_restart"]      = v.tolist()
+                out[f"{metric_key}_per_restart"] = v.tolist()
                 _vf = v[np.isfinite(v)]
-                out[f"{metric_key}_per_restart_mean"] = float(_vf.mean()) if _vf.size else float("nan")
-                out[f"{metric_key}_per_restart_std"]  = float(_vf.std(ddof=0)) if _vf.size else float("nan")
+                out[f"{metric_key}_per_restart_mean"] = (
+                    float(_vf.mean()) if _vf.size else float("nan")
+                )
+                out[f"{metric_key}_per_restart_std"] = (
+                    float(_vf.std(ddof=0)) if _vf.size else float("nan")
+                )
 
     return out
 
@@ -1112,10 +1220,18 @@ def compute_distribution_divergences(
 # back-compat / sanity rows).
 # ---------------------------------------------------------------------------
 
+
 def time_to_convergence(
-    log_warm, log_gt, time_axis,
-    window=50, flux_n_std=3.0, flux_threshold=0.6, spec_threshold=0.95,
-    verbose=True, ref_flux_mean=None, ref_flux_std=None,
+    log_warm,
+    log_gt,
+    time_axis,
+    window=50,
+    flux_n_std=3.0,
+    flux_threshold=0.6,
+    spec_threshold=0.95,
+    verbose=True,
+    ref_flux_mean=None,
+    ref_flux_std=None,
 ):
     """Legacy ±nσ band TTC for flux + ky-spectrum Pearson. Kept for the
     pre-divergence FID-vs-TTC scatter; new metrics live in
@@ -1142,7 +1258,7 @@ def time_to_convergence(
     ky_corr = np.zeros(n_spec)
     for i in range(n_spec):
         ky_w = np.log10(np.maximum(log_warm["ky_spec"][i], 1e-30))
-        ky_g = np.log10(np.maximum(log_gt["ky_spec"][i],   1e-30))
+        ky_g = np.log10(np.maximum(log_gt["ky_spec"][i], 1e-30))
         ky_corr[i] = pearsonr(ky_w, ky_g)[0] if len(ky_w) > 1 else 0.0
 
     def _rolling_ttc(signal, threshold, win):
@@ -1152,7 +1268,7 @@ def time_to_convergence(
         return np.inf
 
     ttc_flux = _rolling_ttc(flux_in_band, flux_threshold, effective_window)
-    ttc_spec = _rolling_ttc(ky_corr,      spec_threshold, effective_window)
+    ttc_spec = _rolling_ttc(ky_corr, spec_threshold, effective_window)
 
     if verbose:
         n_in = int(flux_in_band.sum())
@@ -1163,6 +1279,8 @@ def time_to_convergence(
             f"in_band={n_in}/{n} ({n_in/max(n,1):.0%}), "
             f"window={effective_window}, ttc={ttc_flux:.3f}"
         )
-        print(f"    ttc spec: mean_r(ky)={mean_corr:.3f}, "
-              f"window={effective_window}, ttc={ttc_spec:.3f}")
+        print(
+            f"    ttc spec: mean_r(ky)={mean_corr:.3f}, "
+            f"window={effective_window}, ttc={ttc_spec:.3f}"
+        )
     return {"flux": ttc_flux, "ky_spec": ttc_spec}

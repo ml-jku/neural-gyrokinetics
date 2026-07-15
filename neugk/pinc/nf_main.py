@@ -49,23 +49,43 @@ PINC_LOSS_GROUPS = {
 def get_model(cfg: DictConfig, data: CycloneNFDataset):
     if cfg.name == "siren":
         return SIREN(
-            data.ndim, data.nchannels, n_layers=cfg.n_layers, dim=cfg.dim,
-            first_w0=cfg.first_w0, hidden_w0=cfg.hidden_w0, readout_w0=cfg.hidden_w0,
-            skips=cfg.skips, embed_type=cfg.embed_type, clip_out=False,
+            data.ndim,
+            data.nchannels,
+            n_layers=cfg.n_layers,
+            dim=cfg.dim,
+            first_w0=cfg.first_w0,
+            hidden_w0=cfg.hidden_w0,
+            readout_w0=cfg.hidden_w0,
+            skips=cfg.skips,
+            embed_type=cfg.embed_type,
+            clip_out=False,
             grid_size=data.grid_size,
         )
     if cfg.name == "wire":
         return WIRE(
-            data.ndim, data.nchannels // 2, n_layers=cfg.n_layers, dim=cfg.dim,
-            first_w0=cfg.first_w0, hidden_w0=cfg.hidden_w0, readout_w0=cfg.hidden_w0,
-            complex_out=False, skips=cfg.skips, learnable_w0_s0=True,
+            data.ndim,
+            data.nchannels // 2,
+            n_layers=cfg.n_layers,
+            dim=cfg.dim,
+            first_w0=cfg.first_w0,
+            hidden_w0=cfg.hidden_w0,
+            readout_w0=cfg.hidden_w0,
+            complex_out=False,
+            skips=cfg.skips,
+            learnable_w0_s0=True,
             grid_size=data.grid_size,
         )
     if cfg.name == "mlp":
         return MLPNF(
-            data.ndim, data.nchannels, n_layers=cfg.n_layers, dim=cfg.dim,
-            act_fn=ACTS[cfg.act_fn], use_checkpoint=False, skips=cfg.skips,
-            embed_type=cfg.embed_type, grid_size=data.grid_size,
+            data.ndim,
+            data.nchannels,
+            n_layers=cfg.n_layers,
+            dim=cfg.dim,
+            act_fn=ACTS[cfg.act_fn],
+            use_checkpoint=getattr(cfg, "grad_checkpoint", False),
+            skips=cfg.skips,
+            embed_type=cfg.embed_type,
+            grid_size=data.grid_size,
         )
     raise ValueError(f"unknown model: {cfg.name}")
 
@@ -117,12 +137,19 @@ def density_phase(cfg, model, data, loader, device, verbose):
     opt = optim.AdamW(model.parameters(), cfg.lr, weight_decay=1e-8)
     sched = optim.lr_scheduler.CosineAnnealingLR(opt, cfg.epochs, 1e-12)
     return train_density(
-        model, n_epochs=cfg.epochs, data=data, loader=loader, optim=opt, sched=sched,
-        device=device, field_subsamples=np.linspace(0.2, 1.0, cfg.epochs),
+        model,
+        n_epochs=cfg.epochs,
+        data=data,
+        loader=loader,
+        optim=opt,
+        sched=sched,
+        device=device,
+        field_subsamples=np.linspace(0.2, 1.0, cfg.epochs),
         # density is an MSE warmup; skip its (expensive) eval by default and let
         # the PINC phase do the physics-aware model selection.
         eval_every=getattr(cfg, "density_eval_every", 0),
-        use_tqdm=False, use_print=verbose,
+        use_tqdm=False,
+        use_print=verbose,
     )
 
 
@@ -130,8 +157,10 @@ def pinc_phase(cfg, model, data, device, weights, verbose):
     opt = optim.AdamW(model.parameters(), cfg.pinc_lr, weight_decay=1e-12)
     sched = (
         get_scheduler(
-            "cosine_with_min_lr", optimizer=opt,
-            num_warmup_steps=cfg.pinc_epochs // 5, num_training_steps=cfg.pinc_epochs,
+            "cosine_with_min_lr",
+            optimizer=opt,
+            num_warmup_steps=cfg.pinc_epochs // 5,
+            num_training_steps=cfg.pinc_epochs,
             scheduler_specific_kwargs={"min_lr": getattr(cfg, "min_lr", 1e-8)},
         )
         if cfg.pinc_lr_sched
@@ -140,16 +169,25 @@ def pinc_phase(cfg, model, data, device, weights, verbose):
     # NB: no torch.compile here — the PINC loss path (complex FluxIntegral ops)
     # does not compile on Blackwell GPUs (nvrtc arch error); it runs eager.
     return train_pinc(
-        model, n_epochs=cfg.pinc_epochs, data=data, optim=opt, sched=sched,
-        device=device, use_flux_fields=cfg.use_flux_fields,
-        pinc_loss_weight=weights, use_print=verbose,
+        model,
+        n_epochs=cfg.pinc_epochs,
+        data=data,
+        optim=opt,
+        sched=sched,
+        device=device,
+        use_flux_fields=cfg.use_flux_fields,
+        pinc_loss_weight=weights,
+        use_print=verbose,
         eval_every=getattr(cfg, "pinc_eval_every", 2),
         use_config=getattr(cfg, "use_config", False),
         config_op=getattr(cfg, "config_op", "config"),
         config_length=getattr(cfg, "config_length", "projection"),
         config_lstsq=getattr(cfg, "config_lstsq", True),
-        config_weights=OmegaConf.to_container(cfg.config_weights)
-        if getattr(cfg, "config_weights", None) else None,
+        config_weights=(
+            OmegaConf.to_container(cfg.config_weights)
+            if getattr(cfg, "config_weights", None)
+            else None
+        ),
         config_clip=getattr(cfg, "config_clip", None),
         select=getattr(cfg, "pinc_select", "phi"),
     )
@@ -158,22 +196,31 @@ def pinc_phase(cfg, model, data, device, weights, verbose):
 def pinn_phase(cfg, model, data, device, trajectory, verbose):
     """PINN baseline: gyrokinetic-RHS residual (gyaradax) + Sobolev, no PINC losses."""
     from neugk.pinc.neural_fields.pinn import train_pinn  # pre-imported in train_run
+
     opt = optim.AdamW(model.parameters(), cfg.pinc_lr, weight_decay=1e-12)
     sched = (
         get_scheduler(
-            "cosine_with_min_lr", optimizer=opt,
-            num_warmup_steps=cfg.pinc_epochs // 5, num_training_steps=cfg.pinc_epochs,
+            "cosine_with_min_lr",
+            optimizer=opt,
+            num_warmup_steps=cfg.pinc_epochs // 5,
+            num_training_steps=cfg.pinc_epochs,
             scheduler_specific_kwargs={"min_lr": getattr(cfg, "min_lr", 1e-8)},
         )
         if cfg.pinc_lr_sched
         else None
     )
     return train_pinn(
-        model, n_epochs=cfg.pinc_epochs, data=data, optim=opt, sched=sched,
-        device=device, trajectory=trajectory,
+        model,
+        n_epochs=cfg.pinc_epochs,
+        data=data,
+        optim=opt,
+        sched=sched,
+        device=device,
+        trajectory=trajectory,
         w_sobolev=getattr(cfg, "w_sobolev", 1.0),
         w_residual=getattr(cfg, "w_residual", 1.0),
-        eval_every=getattr(cfg, "pinc_eval_every", 2), use_print=verbose,
+        eval_every=getattr(cfg, "pinc_eval_every", 2),
+        use_print=verbose,
     )
 
 
@@ -192,9 +239,7 @@ def is_complete(cfg, trajectory, timestep):
     to make the sweep resumable: existing complete dumps are skipped.
     """
     base = _ckpt_fname(cfg, trajectory, timestep)
-    return all(
-        glob.glob(os.path.join(cfg.ckp_path, f"{p}{base}_x*.pt")) for p in CKPT_PREFIXES
-    )
+    return all(glob.glob(os.path.join(cfg.ckp_path, f"{p}{base}_x*.pt")) for p in CKPT_PREFIXES)
 
 
 def save_checkpoints(cfg, trajectory, timestep, compression, state_dicts: Dict[str, dict]):
@@ -224,6 +269,7 @@ def train_run(
     physics_mode = getattr(cfg, "physics_mode", "pinc")
     if physics_mode == "pinn":
         from neugk.pinc.neural_fields.pinn import _load_gyaradax
+
         _load_gyaradax()
 
     data, loader = build_data(cfg, trajectory, timestep)
@@ -239,6 +285,7 @@ def train_run(
     init_from = getattr(cfg, "pinc_init_from", None)
     if init_from:
         import glob
+
         _tr = trajectory.replace(".h5", "")
         _cand = sorted(glob.glob(f"{init_from}/best_mlp_{_tr}_t{int(timestep)}_x*.pt"))
         if not _cand:
@@ -288,6 +335,7 @@ def train_run(
 # multi-GPU orchestration                                                      #
 # --------------------------------------------------------------------------- #
 
+
 def _timesteps(cfg: DictConfig) -> Sequence[int]:
     if hasattr(cfg, "timesteps"):
         return cfg.timesteps
@@ -295,7 +343,13 @@ def _timesteps(cfg: DictConfig) -> Sequence[int]:
 
 
 def worker(cfg: DictConfig, traj: str, timesteps: Sequence, gpu: int):
-    torch.cuda.set_device(int(gpu))
+    # confine this spawned worker to its one physical GPU BEFORE any cuda/JAX
+    # init. otherwise JAX (gyaradax) reserves XLA_PYTHON_CLIENT_MEM_FRACTION on
+    # every visible GPU and spills 200-400MB contexts onto its neighbours, which
+    # fragments the per-GPU budget and OOMs the torch+JAX pair on 44GB A40s.
+    # with the mask, the assigned GPU is the only device -> local index 0.
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(int(gpu))
+    torch.cuda.set_device(0)
     shared_init = (
         f"nf_shared_init/{traj.replace('.h5', '')}.pth"
         if getattr(cfg, "use_shared_init", False)
@@ -305,14 +359,39 @@ def worker(cfg: DictConfig, traj: str, timesteps: Sequence, gpu: int):
         if is_complete(cfg, traj, int(t)):  # resumable: skip already-finished dumps
             continue
         try:
-            train_run(cfg, traj, [int(t)], torch.device(f"cuda:{gpu}"),
-                      save=True, verbose=False, shared_init=shared_init)
+            train_run(
+                cfg,
+                traj,
+                [int(t)],
+                torch.device("cuda:0"),
+                save=True,
+                verbose=False,
+                shared_init=shared_init,
+            )
         except Exception as e:  # a missing snapshot must not kill the whole chunk
             print(f"[skip] {traj} t={t}: {type(e).__name__}: {e}")
 
 
 def main(cfg: DictConfig):
     timesteps = _timesteps(cfg)
+    # transition mode: per-traj timesteps t0..t1 (step 2) from the windows json; skip bad-flagged trajs.
+    # each traj gets its own onset window instead of the global steady-state grid.
+    per_traj_ts = None
+    _tw = getattr(cfg, "transition_windows", None)
+    if _tw:
+        import json as _json
+
+        _w = _json.load(open(_tw))
+        per_traj_ts = {
+            k: list(range(int(v["t0"]), int(v["t1"]) + 1, 2))
+            for k, v in _w.items()
+            if not v.get("bad", False)
+        }
+        cfg.trajectory = [t for t in cfg.trajectory if t.replace(".h5", "") in per_traj_ts]
+        print(
+            f"transition mode: {len(cfg.trajectory)} usable trajs x per-traj windows "
+            f"({sum(len(per_traj_ts[t.replace('.h5','')]) for t in cfg.trajectory)} NFs)"
+        )
     ctx = mp.get_context("spawn")
     # one worker per traj; `throttling` workers per GPU -> gpus*throttling total slots.
     gpu_queue: Queue = Queue()
@@ -333,7 +412,8 @@ def main(cfg: DictConfig):
             active = [(p, gpu) for p, gpu in active if p.is_alive()]
             time.sleep(1.0)
         gpu = gpu_queue.get()
-        p = ctx.Process(target=worker, args=(cfg, traj, timesteps, gpu))
+        ts = per_traj_ts[traj.replace(".h5", "")] if per_traj_ts is not None else timesteps
+        p = ctx.Process(target=worker, args=(cfg, traj, ts, gpu))
         p.start()
         active.append((p, gpu))
 
@@ -347,9 +427,15 @@ def main(cfg: DictConfig):
 # grid hyperparameter search (ranked by training loss)                         #
 # --------------------------------------------------------------------------- #
 
+
 def grid_worker(
-    combo_cfg: DictConfig, trajectories: Sequence[str], timesteps: Sequence[int],
-    gpu: int, return_dict: Dict, key: int, save: bool = False,
+    combo_cfg: DictConfig,
+    trajectories: Sequence[str],
+    timesteps: Sequence[int],
+    gpu: int,
+    return_dict: Dict,
+    key: int,
+    save: bool = False,
 ):
     torch.cuda.set_device(int(gpu))
     device = torch.device(f"cuda:{gpu}")
@@ -366,11 +452,13 @@ def grid_worker(
 
 def grid(cfg: DictConfig):
     grid_params = {
-        k: v for k, v in cfg.items()
+        k: v
+        for k, v in cfg.items()
         if isinstance(v, ListConfig) and k not in ["timesteps", "trajectory", "gpus", "norm_axes"]
     }
     fixed = {
-        k: v for k, v in cfg.items()
+        k: v
+        for k, v in cfg.items()
         if not isinstance(v, ListConfig) or k in ["timesteps", "trajectory", "gpus", "norm_axes"]
     }
     combinations = list(itertools.product(*grid_params.values()))
@@ -397,8 +485,15 @@ def grid(cfg: DictConfig):
         gpu = gpu_queue.get()
         p = mp.get_context("spawn").Process(
             target=grid_worker,
-            args=(combo_cfg, cfg.trajectory, timesteps, gpu, return_dict, job_id,
-                  bool(getattr(cfg, "save_ckpts", False))),
+            args=(
+                combo_cfg,
+                cfg.trajectory,
+                timesteps,
+                gpu,
+                return_dict,
+                job_id,
+                bool(getattr(cfg, "save_ckpts", False)),
+            ),
         )
         p.start()
         active.append((p, gpu))

@@ -13,7 +13,8 @@ cache/
 .env
 # paper working directory (figures, drafts) excluded from git
 paper/
-paper_diff/
-paper_pinc/
+# paper_diff/
+# paper_pinc/
 nf_ckps_*/
 pinc_eval_results/
+interp_exploration/

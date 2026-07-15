@@ -5,6 +5,7 @@ reads as part of the same paper aesthetic. Save format is dual: a PDF for the
 figure (drop-in for LaTeX) plus a pickle of the underlying numbers (for the
 multi-method comparison notebook).
 """
+
 from __future__ import annotations
 
 import os
@@ -20,25 +21,25 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Palette — copied from build_figure1_nb.py so the notebook + paper agree.
 # ---------------------------------------------------------------------------
-COLOR_FLUX      = "#CC7B7B"   # terracotta — flux traces / samples
-COLOR_KY        = "#8878B8"   # wisteria — W(ky) / kyspec
-COLOR_QY        = "#6890B5"   # steel blue — Q(ky) / qspec / fluxspec
-COLOR_REF       = "#202020"   # neutral dark — reference dashed lines
-COLOR_GKW       = "#505050"
-COLOR_GYROSWIN  = "#8878B8"   # purple, paper convention
-COLOR_QUALIKIZ  = "#B088A8"
-COLOR_GYROFLOW  = "#58A8A0"   # teal — our method
+COLOR_FLUX = "#CC7B7B"  # terracotta — flux traces / samples
+COLOR_KY = "#8878B8"  # wisteria — W(ky) / kyspec
+COLOR_QY = "#6890B5"  # steel blue — Q(ky) / qspec / fluxspec
+COLOR_REF = "#202020"  # neutral dark — reference dashed lines
+COLOR_GKW = "#505050"
+COLOR_GYROSWIN = "#8878B8"  # purple, paper convention
+COLOR_QUALIKIZ = "#B088A8"
+COLOR_GYROFLOW = "#58A8A0"  # teal — our method
 COLOR_TRANSIENT = "#CC7B7B"
 COLOR_SATURATED = "#58A8A0"
 
 PALETTE = {
-    "flux":     COLOR_FLUX,
-    "ky":       COLOR_KY,
-    "ky_spec":  COLOR_KY,
+    "flux": COLOR_FLUX,
+    "ky": COLOR_KY,
+    "ky_spec": COLOR_KY,
     "fluxspec": COLOR_QY,
-    "qy":       COLOR_QY,
-    "ref":      COLOR_REF,
-    "gkw":      COLOR_GKW,
+    "qy": COLOR_QY,
+    "ref": COLOR_REF,
+    "gkw": COLOR_GKW,
     "gyroswin": COLOR_GYROSWIN,
     "qualikiz": COLOR_QUALIKIZ,
     "gyroflow": COLOR_GYROFLOW,
@@ -46,19 +47,19 @@ PALETTE = {
 
 # Per-method colour for cross-method comparison plots. Stable for a given key.
 METHOD_PALETTE = {
-    "GyroFlow":   COLOR_GYROFLOW,
-    "GKW":        COLOR_GKW,
-    "GyroSwin":   COLOR_GYROSWIN,
-    "QuaLiKiz":   COLOR_QUALIKIZ,
-    "VAE":        "#9c89b8",
-    "VQ-VAE":     "#7689bb",
-    "VQ-VAE+AR":  "#6868a8",
-    "Diff (5D)":  COLOR_GYROFLOW,
-    "diff":       COLOR_GYROFLOW,
+    "GyroFlow": COLOR_GYROFLOW,
+    "GKW": COLOR_GKW,
+    "GyroSwin": COLOR_GYROSWIN,
+    "QuaLiKiz": COLOR_QUALIKIZ,
+    "VAE": "#9c89b8",
+    "VQ-VAE": "#7689bb",
+    "VQ-VAE+AR": "#6868a8",
+    "Diff (5D)": COLOR_GYROFLOW,
+    "diff": COLOR_GYROFLOW,
 }
 
 GHOST_DARKEN = 0.65
-GHOST_ALPHA  = 0.4
+GHOST_ALPHA = 0.4
 
 
 def darken(color: str, factor: float = GHOST_DARKEN) -> tuple:
@@ -80,35 +81,35 @@ def lighten(color: str, factor: float = 0.5) -> tuple:
 # ---------------------------------------------------------------------------
 PAPER_RCPARAMS = {
     "figure.facecolor": "white",
-    "axes.facecolor":   "white",
+    "axes.facecolor": "white",
     "savefig.facecolor": "white",
     "savefig.edgecolor": "none",
-    "savefig.bbox":     "tight",
+    "savefig.bbox": "tight",
     "savefig.pad_inches": 0.05,
-    "font.family":      "sans-serif",
-    "font.sans-serif":  ["DejaVu Sans", "Arial", "Helvetica"],
-    "font.size":        9,
-    "axes.titlesize":   10,
-    "axes.labelsize":   9,
-    "axes.linewidth":   0.8,
-    "axes.edgecolor":   "#444",
-    "xtick.labelsize":  8,
-    "ytick.labelsize":  8,
-    "xtick.color":      "#444",
-    "ytick.color":      "#444",
+    "font.family": "sans-serif",
+    "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica"],
+    "font.size": 9,
+    "axes.titlesize": 10,
+    "axes.labelsize": 9,
+    "axes.linewidth": 0.8,
+    "axes.edgecolor": "#444",
+    "xtick.labelsize": 8,
+    "ytick.labelsize": 8,
+    "xtick.color": "#444",
+    "ytick.color": "#444",
     "xtick.major.width": 0.6,
     "ytick.major.width": 0.6,
-    "legend.fontsize":   8,
-    "legend.frameon":    False,
-    "lines.linewidth":   1.4,
-    "lines.markersize":  4.5,
-    "axes.spines.top":   False,
+    "legend.fontsize": 8,
+    "legend.frameon": False,
+    "lines.linewidth": 1.4,
+    "lines.markersize": 4.5,
+    "axes.spines.top": False,
     "axes.spines.right": False,
-    "axes.grid":         True,
-    "grid.alpha":        0.18,
-    "grid.linewidth":    0.5,
-    "pdf.fonttype":      42,
-    "ps.fonttype":       42,
+    "axes.grid": True,
+    "grid.alpha": 0.18,
+    "grid.linewidth": 0.5,
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
 }
 
 
@@ -209,8 +210,15 @@ def pretty_scatter(
         hi = float(max(np.nanmax(x), np.nanmax(y)))
         ax.plot([lo, hi], [lo, hi], color=COLOR_REF, alpha=0.25, lw=0.9, zorder=1)
     if annot:
-        ax.text(0.04, 0.96, annot, transform=ax.transAxes, va="top", fontsize=8,
-                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.85))
+        ax.text(
+            0.04,
+            0.96,
+            annot,
+            transform=ax.transAxes,
+            va="top",
+            fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.85),
+        )
 
 
 def pretty_grouped_bars(
@@ -224,7 +232,7 @@ def pretty_grouped_bars(
 ) -> None:
     """Grouped bar chart for a `pandas.DataFrame` indexed by group, columned by
     series. `color_by_col` colours each series consistently across groups."""
-    import pandas as pd
+
     assert hasattr(df, "columns")
     n_groups = len(df.index)
     n_cols = len(df.columns)
@@ -234,9 +242,15 @@ def pretty_grouped_bars(
     for i, col in enumerate(df.columns):
         col_color = palette.get(col, METHOD_PALETTE.get(col, f"C{i}"))
         offsets = base + (i - (n_cols - 1) / 2.0) * width
-        ax.bar(offsets, df[col].values, width=width * 0.95,
-               color=col_color, edgecolor="black", linewidth=0.4,
-               label=col)
+        ax.bar(
+            offsets,
+            df[col].values,
+            width=width * 0.95,
+            color=col_color,
+            edgecolor="black",
+            linewidth=0.4,
+            label=col,
+        )
     ax.set_xticks(base)
     ax.set_xticklabels(df.index, rotation=20, ha="right")
     ax.legend(fontsize=8, loc="best", ncol=min(n_cols, 4))

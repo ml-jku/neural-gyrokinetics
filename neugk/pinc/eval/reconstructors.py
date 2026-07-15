@@ -14,6 +14,7 @@ import torch
 
 from neugk.pinc.neural_fields.data import CycloneNFDataset
 from neugk.pinc.neural_fields.nf_utils import sample_field, load_nf, compress_weights
+from neugk.utils import recombine_zf, separate_zf
 
 
 class Reconstructor(ABC):
@@ -31,25 +32,108 @@ class GroundTruth(Reconstructor):
     name = "GT"
 
     def reconstruct(self, traj, timesteps, gt, device):
-        dfs = [
-            gt.full_df[:, t] if gt.ndim > 5 else gt.full_df
-            for t in range(len(timesteps))
-        ]
+        dfs = [gt.full_df[:, t] if gt.ndim > 5 else gt.full_df for t in range(len(timesteps))]
         return dfs, None
 
 
-class Traditional(Reconstructor):
-    """ZFP / Wavelet / PCA / JPEG2000 / SZ3 — `fn(df) -> (recon, _, n_bytes)`."""
+# does a codec's CR grow with its knob? (fixed per method, so we never probe the slow
+# grid endpoints just to learn direction). tolerance/threshold/error_bound up -> more loss
+# -> higher CR; jpeg2000 quality up and pca n_components up -> less compression -> lower CR.
+_KNOB_INCREASES_CR = {"zfp": True, "wavelet": True, "sz3": True, "jpeg2000": False, "pca": False}
 
-    def __init__(self, name: str, fn: Callable):
+
+def _encode_at_cr(name, df, target_cr, warm=None, tol=0.02, max_iter=14):
+    """Encode df with a traditional codec at ~target_cr by searching its knob, so every
+    snapshot lands at the same CR as the (fixed-rate) learned methods. Secant search in
+    log(knob)-log(CR) space (CR is smooth+monotonic in the knob); warm-started from the
+    previous snapshot's knob so consecutive frames need ~2-4 encodes. Returns (recon,
+    size_bytes, knob)."""
+    import math
+    from neugk.pinc.eval.discovery import TRAD
+
+    fn, knob, grid = TRAD[name]
+    disc = knob == "n_components"
+    gvals = [float(x) for x in grid]
+    lo, hi = min(gvals), max(gvals)
+    inc = _KNOB_INCREASES_CR[name]
+    nbytes = df.nbytes
+    cache = {}
+
+    def ev(v):
+        v = min(max(float(v), lo), hi)
+        key = int(round(v)) if disc else v
+        if key not in cache:
+            r, _, s = fn(df, **{knob: key})
+            cache[key] = (r, s)
+        r, s = cache[key]
+        return key, r, s, (nbytes / s if s else float("inf"))
+
+    lt = math.log(target_cr)
+    # track the closest-to-target probe (codecs like ZFP quantize CR in steps, so the
+    # exact target may be unreachable -- always return the nearest achievable CR, not the last).
+    best = [float("inf"), None]
+
+    def probe(v):
+        k, r, s, cr = ev(v)
+        e = abs(math.log(cr) - lt)
+        if e < best[0]:
+            best[0], best[1] = e, (r, s, k)
+        return k, cr
+
+    # knob bracket: klow -> lower CR, khigh -> higher CR
+    klow, khigh = (lo, hi) if inc else (hi, lo)
+    seed = (
+        warm
+        if (warm is not None and lo <= warm <= hi)
+        else math.exp((math.log(lo) + math.log(hi)) / 2)
+    )
+    ka, ca = probe(seed)
+    if best[0] < tol:
+        return best[1]
+    if ca < target_cr:
+        klow = ka
+    else:
+        khigh = ka
+    kb, cb = probe(math.exp((math.log(klow) + math.log(khigh)) / 2))
+    for _ in range(max_iter):
+        if best[0] < tol:
+            break
+        if cb < target_cr:
+            klow = kb
+        else:
+            khigh = kb
+        lca, lcb = math.log(ca), math.log(cb)
+        if abs(lcb - lca) < 1e-9 or abs(math.log(khigh) - math.log(klow)) < 1e-4:
+            break  # secant degenerate or bracket collapsed (quantized plateau) -> stop
+        m = math.exp(math.log(kb) + (lt - lcb) * (math.log(kb) - math.log(ka)) / (lcb - lca))
+        m = min(max(m, min(klow, khigh)), max(klow, khigh))
+        ka, ca = kb, cb
+        kb, cb = probe(m)
+    return best[1]
+
+
+class Traditional(Reconstructor):
+    """ZFP / Wavelet / PCA / JPEG2000 / SZ3. Either fixed-knob (`fn`) or per-snapshot
+    CR-matched (`method` + `target_cr`), the latter searching the knob so every snapshot
+    hits the same CR as the fixed-rate learned methods (true iso-CR comparison)."""
+
+    def __init__(self, name: str, fn: Callable = None, method: str = None, target_cr: float = None):
         self.name = name
         self.fn = fn
+        self.method = method
+        self.target_cr = target_cr
+        self._warm = None  # carries the converged knob across snapshots
 
     def reconstruct(self, traj, timesteps, gt, device):
         dfs, size = [], 0
         for t in range(len(timesteps)):
             df = gt.full_df[:, t] if gt.ndim > 5 else gt.full_df
-            recon, _, cs = self.fn(df)
+            if self.target_cr is not None:
+                recon, cs, self._warm = _encode_at_cr(
+                    self.method, df, self.target_cr, warm=self._warm
+                )
+            else:
+                recon, _, cs = self.fn(df)
             dfs.append(recon)
             size += int(cs)
         return dfs, size
@@ -133,15 +217,14 @@ class Autoencoder(Reconstructor):
             df = sample.df.unsqueeze(0).to(device)
             cond = sample.conditioning.unsqueeze(0).to(device)
             if self.vapor and getattr(val, "separate_zf", False):
-                df = df[:, [0, 1]] + df[:, [2, 3]]
+                df = recombine_zf(df, dim=1)
             out = ae(df, condition=cond)
             ae_df = out["df"].cpu().squeeze(0)
             if self.vapor and getattr(val, "separate_zf", False):
-                zf = ae_df.mean(dim=-1, keepdim=True).expand_as(ae_df)
-                ae_df = torch.cat([zf, ae_df - zf], dim=0)
+                ae_df = separate_zf(ae_df, dim=0)
             ae_df = val.denormalize(0, df=ae_df)
             if ae_df.shape[0] == 4:
-                ae_df = ae_df[[0, 1]] + ae_df[[2, 3]]
+                ae_df = recombine_zf(ae_df, dim=0)
             dfs.append(ae_df)
             if self.vqvae:
                 size += out["vq_indices"].to(torch.int16).nbytes
@@ -175,8 +258,16 @@ class PIGS(Reconstructor):
         tk = traj.replace(".h5", "")
         dfs, size = [], 0
         for t in timesteps:
-            data = CycloneNFDataset(tk, timesteps=int(t), path=self.path, backend=self.backend,
-                                    realpotens=True, normalize="zscore", normalize_coords=True, norm_axes=())
+            data = CycloneNFDataset(
+                tk,
+                timesteps=int(t),
+                path=self.path,
+                backend=self.backend,
+                realpotens=True,
+                normalize="zscore",
+                normalize_coords=True,
+                norm_axes=(),
+            )
             data.to(device)
             n = n_for_cr(data, self.cr)
             with torch.enable_grad():  # evaluate_method runs under no_grad; the fit needs grad
@@ -246,9 +337,7 @@ def nf_scaling_reconstructors(
 
     ckp_dir = Path(ckp_dir)
     # {cr: {traj: {t: ckpt_path}}}
-    weights_by_cr: Dict[int, Dict[str, Dict[int, str]]] = defaultdict(
-        lambda: defaultdict(dict)
-    )
+    weights_by_cr: Dict[int, Dict[str, Dict[int, str]]] = defaultdict(lambda: defaultdict(dict))
 
     # pre-training checkpoints
     pretrain_pat = re.compile(rf"{model_type}_([\w.]+)_t(\d+)_x(\d+)\.pt$")
@@ -318,9 +407,7 @@ def traditional_scaling_reconstructors(
         "JPEG2000": trad.jpeg2000_recon,
     }
     if method not in fn_map:
-        raise ValueError(
-            f"Unknown traditional method: {method}. Choose from {list(fn_map)}."
-        )
+        raise ValueError(f"Unknown traditional method: {method}. Choose from {list(fn_map)}.")
 
     base_fn = fn_map[method]
     results = []

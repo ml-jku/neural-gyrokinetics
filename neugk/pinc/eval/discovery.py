@@ -2,6 +2,7 @@
 metrics and the per-method result-file convention. Imported by the eval drivers in scripts/ so the
 (traj, timestep) set, the matched-CR calibration and the result schema are defined in ONE place.
 """
+
 import os
 import re
 import glob
@@ -12,7 +13,7 @@ from functools import partial
 
 import numpy as np
 
-from neugk.pinc.neural_fields.data import CycloneNFDataset  # noqa: F401  re-exported for the eval drivers
+from neugk.pinc.neural_fields.data import CycloneNFDataset  # noqa: F401  re-export
 from neugk.pinc.eval import trad
 from neugk.pinc.eval.metrics import integrate
 from neugk.physics.diagnostics import velocity_moment_errors
@@ -77,7 +78,9 @@ def metrics_for(pred, gt, geom, csize):
     out = dict(
         df_psnr=float(10 * math.log10(gt.max() ** 2 / mse)) if mse > 0 else float("inf"),
         df_l1=float((pred - gt).abs().mean()),
-        phi_psnr=float(10 * math.log10(g_phi.max() ** 2 / phi_mse)) if phi_mse > 0 else float("inf"),
+        phi_psnr=(
+            float(10 * math.log10(g_phi.max() ** 2 / phi_mse)) if phi_mse > 0 else float("inf")
+        ),
         phi_l1=float((p_phi - g_phi).abs().mean()),
         flux_l1=float(abs(p_ef.sum() - g_ef.sum())),
         cr=float(gt.numel() * 4 / csize) if csize else float("inf"),
@@ -104,6 +107,7 @@ def fname(outdir, label):
 
 def summarize(outdir, labels):
     import statistics as st
+
     print(f"\n==== eval summary -> {outdir}/metrics_<method>.json ====")
     for lbl in labels:
         fp = fname(outdir, lbl)
@@ -115,5 +119,7 @@ def summarize(outdir, labels):
             print(f"  {lbl:10s}  (no successful rows of {len(rows)})")
             continue
         agg = {k: st.median([r[k] for r in ok]) for k in ("df_psnr", "phi_psnr", "flux_l1", "cr")}
-        print(f"  {lbl:10s} n={len(ok):3d} median: df_psnr={agg['df_psnr']:.2f} "
-              f"phi_psnr={agg['phi_psnr']:.2f} flux_l1={agg['flux_l1']:.4f} CR={agg['cr']:.0f}x")
+        print(
+            f"  {lbl:10s} n={len(ok):3d} median: df_psnr={agg['df_psnr']:.2f} "
+            f"phi_psnr={agg['phi_psnr']:.2f} flux_l1={agg['flux_l1']:.4f} CR={agg['cr']:.0f}x"
+        )

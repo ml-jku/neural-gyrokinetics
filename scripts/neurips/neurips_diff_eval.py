@@ -2,7 +2,6 @@
 
 import re
 import os
-from collections import defaultdict
 
 import numpy as np
 import torch
@@ -10,13 +9,13 @@ import matplotlib.pyplot as plt
 from scipy import linalg
 from scipy.stats import pearsonr
 
-from neugk.integrals import FluxIntegral
 from neugk.utils import recombine_zf
 
 
 def set_seed(seed):
     """Seed python random, numpy, and torch (CPU + CUDA) for reproducibility."""
     import random
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -129,7 +128,9 @@ def extract_gyroswin_latents(
         c = condition.to(device)
         if embed is not None:
             if c.shape[-1] < embed.n_cond:
-                ts = torch.empty(c.shape[0], embed.n_cond - c.shape[-1], device=device).uniform_(100, 200)
+                ts = torch.empty(c.shape[0], embed.n_cond - c.shape[-1], device=device).uniform_(
+                    100, 200
+                )
                 c = torch.cat([c, ts], dim=-1)
             cond = {"condition": embed(c)}
         else:
@@ -215,9 +216,7 @@ def extract_gyroswin_latents(
             cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
             cond_kwargs["timestep"] = c[:, -1]
         else:
-            raise ValueError(
-                f"condition has {cols} cols; expected {n_keys} or {n_keys + 1}"
-            )
+            raise ValueError(f"condition has {cols} cols; expected {n_keys} or {n_keys + 1}")
 
         # Capture skip connection from `df_unet.down_blocks[level]`. Down-block
         # forward returns `(x_down, x_pre)` — the second element is the skip
@@ -227,9 +226,7 @@ def extract_gyroswin_latents(
         # Default to the **deepest** skip (closest to the bottleneck).
         lvl = (n_down - 1) if decoder_level is None else decoder_level
         if not -n_down <= lvl < n_down:
-            raise IndexError(
-                f"skip level={lvl} out of range for {n_down} down_blocks"
-            )
+            raise IndexError(f"skip level={lvl} out of range for {n_down} down_blocks")
         target = down_blocks[lvl]
 
         captured = {}
@@ -271,9 +268,7 @@ def extract_gyroswin_latents(
             cond_kwargs = {k: c[:, i] for i, k in enumerate(cond_keys)}
             cond_kwargs["timestep"] = c[:, -1]
         else:
-            raise ValueError(
-                f"condition has {cols} cols; expected {n_keys} or {n_keys + 1}"
-            )
+            raise ValueError(f"condition has {cols} cols; expected {n_keys} or {n_keys + 1}")
 
         # Aggregated phi latents: capture the phi-bottleneck activation
         # (`phi_middle` in SwinXNetMultitask). Spatial-pool by default to
@@ -281,7 +276,8 @@ def extract_gyroswin_latents(
         target = None
         for attr in ("phi_middle", "phi_middle_post"):
             if hasattr(m, attr):
-                target = getattr(m, attr); break
+                target = getattr(m, attr)
+                break
         if target is None and hasattr(m, "phi_unet"):
             target = getattr(m.phi_unet, "middle", None)
         if target is None:
@@ -331,9 +327,7 @@ def extract_gyroswin_latents(
         n_up = len(up_blocks)
         lvl = -1 if decoder_level is None else decoder_level
         if not -n_up <= lvl < n_up:
-            raise IndexError(
-                f"decoder_level={lvl} out of range for {n_up} up_blocks"
-            )
+            raise IndexError(f"decoder_level={lvl} out of range for {n_up} up_blocks")
         target = up_blocks[lvl]
 
         captured = {}
@@ -476,7 +470,9 @@ def run_trajectories(
     while steps_done < n_steps:
         n = min(chunk_size, n_steps - steps_done)
         for b in range(ntraj):
-            dfs[b], (phi, fluxes), states[b] = gksolve(dfs[b], geometry, params, states[b], n_steps=n, pre=pre)
+            dfs[b], (phi, fluxes), states[b] = gksolve(
+                dfs[b], geometry, params, states[b], n_steps=n, pre=pre
+            )
         steps_done += n
 
         if steps_done % log_every == 0 or steps_done == n_steps:
@@ -530,10 +526,19 @@ def run_trajectory_pair(
 ):
     """Run GT and a single warm-start trajectory. Convenience wrapper around run_trajectories."""
     log_gt, log_warms = run_trajectories(
-        df_gt, [df_warm], geometry, params, pre, state_init,
-        n_steps=n_steps, labels=[label], chunk_size=chunk_size,
-        backend=backend, mixed_precision=mixed_precision,
-        print_every=print_every, log_every=log_every,
+        df_gt,
+        [df_warm],
+        geometry,
+        params,
+        pre,
+        state_init,
+        n_steps=n_steps,
+        labels=[label],
+        chunk_size=chunk_size,
+        backend=backend,
+        mixed_precision=mixed_precision,
+        print_every=print_every,
+        log_every=log_every,
     )
     return log_gt, log_warms[0]
 
@@ -588,14 +593,18 @@ def run_trajectory(
     steps_done = 0
     while steps_done < n_steps:
         n = min(chunk_size, n_steps - steps_done)
-        df_init, (phi, fluxes), state = gksolve(df_init, geometry, params, state, n_steps=n, pre=pre)
+        df_init, (phi, fluxes), state = gksolve(
+            df_init, geometry, params, state, n_steps=n, pre=pre
+        )
         steps_done += n
         if steps_done % log_every == 0 or steps_done == n_steps:
             diags = get_diagnostics(phi, fluxes, state)
             for k in log:
                 log[k].append(np.array(diags[k]))
         if steps_done % print_every == 0 or steps_done == n_steps:
-            print(f"  [{label}] {steps_done}/{n_steps}  t={float(state.time):.3f}  Q={float(diags['eflux']):.4e}")
+            print(
+                f"  [{label}] {steps_done}/{n_steps}  t={float(state.time):.3f}  Q={float(diags['eflux']):.4e}"
+            )
 
     return {k: np.array(v) for k, v in log.items()}
 
@@ -626,6 +635,7 @@ def load_reference_flux_samples(gkw_dir, iteration, n_tail=240):
 # which broadcasts a 1-D metric across modes.
 # ---------------------------------------------------------------------------
 
+
 def stationary_window(x, frac=0.5):
     """Return the last `frac` fraction of a 1-D series (the post-saturation
     window we feed to the two-sample tests). frac=0.5 → second half."""
@@ -638,10 +648,12 @@ def stationary_window(x, frac=0.5):
 
 # --- 1-D scalar divergences (flux) -----------------------------------------
 
+
 def flux_ks_pvalue(x_warm, x_ref):
     """Two-sample Kolmogorov–Smirnov p-value. Higher = more indistinguishable
     from the reference distribution. Paper's primary $\\tau_Q$ test."""
     from scipy.stats import ks_2samp
+
     return float(ks_2samp(np.asarray(x_warm), np.asarray(x_ref)).pvalue)
 
 
@@ -649,6 +661,7 @@ def flux_ad_statistic(x_warm, x_ref):
     """Anderson–Darling k-sample statistic (k=2). Heavier tails of $Q$ get
     higher weight than under KS — paper alternative."""
     from scipy.stats import anderson_ksamp
+
     try:
         return float(anderson_ksamp([np.asarray(x_warm), np.asarray(x_ref)]).statistic)
     except Exception:
@@ -660,6 +673,7 @@ def flux_wasserstein(x_warm, x_ref):
     """1-D Wasserstein-1 distance (Earth-mover). Calibrated divergence
     alternative to the KS p-value."""
     from scipy.stats import wasserstein_distance
+
     return float(wasserstein_distance(np.asarray(x_warm), np.asarray(x_ref)))
 
 
@@ -752,11 +766,13 @@ def sliced_wasserstein(X_warm, X_ref, n_projections=64, seed=0):
     proj_w = X_warm @ P  # (n_warm, n_proj)
     proj_r = X_ref @ P
     from scipy.stats import wasserstein_distance
+
     vals = [wasserstein_distance(proj_w[:, i], proj_r[:, i]) for i in range(n_projections)]
     return float(np.mean(vals))
 
 
 # --- vector divergences (spectra) ------------------------------------------
+
 
 def _per_mode_apply(metric_fn, X_warm, X_ref):
     """Apply a 1-D metric per mode-axis column. Returns an array of length
@@ -792,26 +808,29 @@ def spec_divergence(X_warm, X_ref, kind="wasserstein"):
     finite = per_mode[np.isfinite(per_mode)]
     return {
         "per_mode": per_mode,
-        "mean":     float(np.mean(finite)) if finite.size else np.nan,
-        "median":   float(np.median(finite)) if finite.size else np.nan,
-        "frac_indistinguishable": (
-            float(np.mean(per_mode >= 0.05)) if kind == "ks" else np.nan
-        ),
+        "mean": float(np.mean(finite)) if finite.size else np.nan,
+        "median": float(np.median(finite)) if finite.size else np.nan,
+        "frac_indistinguishable": (float(np.mean(per_mode >= 0.05)) if kind == "ks" else np.nan),
     }
 
 
 # --- driver: compute everything for a (warm, ref) pair ---------------------
 
 _FLUX_SCALAR_DIVERGENCES = {
-    "flux_ks_p":            flux_ks_pvalue,
-    "flux_ad":              flux_ad_statistic,
-    "flux_w1":              flux_wasserstein,
-    "flux_R":               gelman_rubin_R,
+    "flux_ks_p": flux_ks_pvalue,
+    "flux_ad": flux_ad_statistic,
+    "flux_w1": flux_wasserstein,
+    "flux_R": gelman_rubin_R,
 }
 
 
 def compute_distribution_divergences(
-    log_run, log_gt, *, ref_flux_samples=None, frac=0.5, max_lag=40,
+    log_run,
+    log_gt,
+    *,
+    ref_flux_samples=None,
+    frac=0.5,
+    max_lag=40,
     spec_keys=("ky_spec", "kx_spec", "fluxspec"),
 ):
     """Compute every flux + spectra divergence for one trajectory pair.
@@ -851,8 +870,12 @@ def compute_distribution_divergences(
             out[name] = np.nan
             out[f"{name}_error"] = repr(e)
     try:
-        out["flux_autocorr_L1"] = float(autocorr_l1(flux_warm, flux_ref, max_lag=max_lag, kind="autocorr"))
-        out["flux_struct_L1"]   = float(autocorr_l1(flux_warm, flux_ref, max_lag=max_lag, kind="struct"))
+        out["flux_autocorr_L1"] = float(
+            autocorr_l1(flux_warm, flux_ref, max_lag=max_lag, kind="autocorr")
+        )
+        out["flux_struct_L1"] = float(
+            autocorr_l1(flux_warm, flux_ref, max_lag=max_lag, kind="struct")
+        )
     except Exception as e:
         out["flux_autocorr_L1"] = np.nan
         out["flux_struct_L1"] = np.nan
@@ -944,7 +967,10 @@ def time_to_convergence(
             f"in_band={n_in}/{n} ({n_in/max(n,1):.0%}), "
             f"window={effective_window}, ttc={ttc_flux:.3f}"
         )
-        print(f"    ttc spec: mean_r(ky)={mean_corr:.3f}, " f"window={effective_window}, ttc={ttc_spec:.3f}")
+        print(
+            f"    ttc spec: mean_r(ky)={mean_corr:.3f}, "
+            f"window={effective_window}, ttc={ttc_spec:.3f}"
+        )
 
     return {"flux": ttc_flux, "ky_spec": ttc_spec}
 
@@ -1126,9 +1152,13 @@ def remap_gyroswin_checkpoint(old_sd, new_model, encoder_only=True, verbose=True
                     f"{old_key} -> {new_key}: " f"FiLM {tuple(old_shape)} vs DiT {tuple(new_shape)}"
                 )
             elif ".blocks." in new_key:
-                skipped_depth.append(f"{old_key} -> {new_key}: {tuple(old_shape)} vs {tuple(new_shape)}")
+                skipped_depth.append(
+                    f"{old_key} -> {new_key}: {tuple(old_shape)} vs {tuple(new_shape)}"
+                )
             else:
-                skipped_shape.append(f"{old_key} -> {new_key}: {tuple(old_shape)} vs {tuple(new_shape)}")
+                skipped_shape.append(
+                    f"{old_key} -> {new_key}: {tuple(old_shape)} vs {tuple(new_shape)}"
+                )
             continue
 
         mapped[new_key] = old_val
@@ -1161,7 +1191,10 @@ def remap_gyroswin_checkpoint(old_sd, new_model, encoder_only=True, verbose=True
             for s in skipped_shape[:10]:
                 print(f"    {s}")
         if rpb_buffer_skipped:
-            print(f"\n  RPB/mask buffers skipped (non-persistent in new model): " f"{len(rpb_buffer_skipped)} keys")
+            print(
+                f"\n  RPB/mask buffers skipped (non-persistent in new model): "
+                f"{len(rpb_buffer_skipped)} keys"
+            )
         if skipped_decoder and encoder_only:
             print(f"\n  Decoder keys skipped (encoder_only=True): {len(skipped_decoder)}")
 
@@ -1259,7 +1292,8 @@ def ic_single_diffusion(runner, params, cond_keys, n_steps=10):
     """Sample one diffusion IC, return denormalised raw model-space array."""
     cond = torch.tensor(
         [cond_from_params(params, cond_keys)],
-        dtype=torch.float32, device=runner.device,
+        dtype=torch.float32,
+        device=runner.device,
     )
     runner.model.eval()
     with torch.no_grad():
@@ -1268,8 +1302,9 @@ def ic_single_diffusion(runner, params, cond_keys, n_steps=10):
     return df * s.numpy() + sh.numpy()
 
 
-def ic_repr_diffusion(runner, params, cond_keys, geometry, pre, state_init,
-                      n_samples=8, n_steps=10, verbose=True):
+def ic_repr_diffusion(
+    runner, params, cond_keys, geometry, pre, state_init, n_samples=8, n_steps=10, verbose=True
+):
     """Sample N diffusion candidates; return the one whose initial eflux is closest
     to the batch mean. Returns (df_model, info_dict)."""
     import dataclasses
@@ -1284,7 +1319,8 @@ def ic_repr_diffusion(runner, params, cond_keys, geometry, pre, state_init,
     t_start = float(state_init.time)
     cond = torch.tensor(
         [cond_from_params(params, cond_keys)],
-        dtype=torch.float32, device=runner.device,
+        dtype=torch.float32,
+        device=runner.device,
     )
 
     dfs, efluxes = [], []
@@ -1305,7 +1341,10 @@ def ic_repr_diffusion(runner, params, cond_keys, geometry, pre, state_init,
                 last_growth_rate=jnp.zeros(nky, dtype=jnp.float64),
             )
             phi, fluxes = get_integrals(
-                df_spec, geometry, params=params_jax, pre=pre,
+                df_spec,
+                geometry,
+                params=params_jax,
+                pre=pre,
                 adiabatic_electrons=params_jax.adiabatic_electrons,
             )
             diags = get_diagnostics(phi, fluxes, state)
@@ -1318,7 +1357,9 @@ def ic_repr_diffusion(runner, params, cond_keys, geometry, pre, state_init,
     best_idx = int(np.argmin(np.abs(np.array(efluxes) - mean_eflux)))
     if verbose:
         print(f"    mean={mean_eflux:.4e}, repr_idx={best_idx} (eflux={efluxes[best_idx]:.4e})")
-    return dfs[best_idx], dict(efluxes=efluxes, mean_eflux=mean_eflux, best_idx=best_idx, n_samples=n_samples)
+    return dfs[best_idx], dict(
+        efluxes=efluxes, mean_eflux=mean_eflux, best_idx=best_idx, n_samples=n_samples
+    )
 
 
 def plot_method_comparison(results, methods=None, method_styles=None):
@@ -1332,9 +1373,9 @@ def plot_method_comparison(results, methods=None, method_styles=None):
     method_styles : dict[name] -> dict of matplotlib kwargs (color, ls, lw, ...)
     """
     default_styles = {
-        "diffusion":      dict(color="#9c27b0", ls="-.", lw=1.1, label_prefix="diffusion (single)"),
-        "repr_diffusion": dict(color="#2196f3", ls="-",  lw=1.4, label_prefix="repr-diffusion"),
-        "nn":             dict(color="#e76f51", ls="--", lw=1.1, label_prefix="NN train"),
+        "diffusion": dict(color="#9c27b0", ls="-.", lw=1.1, label_prefix="diffusion (single)"),
+        "repr_diffusion": dict(color="#2196f3", ls="-", lw=1.4, label_prefix="repr-diffusion"),
+        "nn": dict(color="#e76f51", ls="--", lw=1.1, label_prefix="NN train"),
     }
     styles = {**default_styles, **(method_styles or {})}
 
@@ -1360,12 +1401,19 @@ def plot_method_comparison(results, methods=None, method_styles=None):
             mres = res["methods"][m]
             st = styles.get(m, dict(lw=1.1, label_prefix=m))
             lbl = f"{st.get('label_prefix', m)}  TTC={mres['ttc_flux']:.1f}"
-            ax.plot(t, mres["log_warm"]["eflux"],
-                    color=st.get("color"), ls=st.get("ls", "-"), lw=st.get("lw", 1.1),
-                    label=lbl)
+            ax.plot(
+                t,
+                mres["log_warm"]["eflux"],
+                color=st.get("color"),
+                ls=st.get("ls", "-"),
+                lw=st.get("lw", 1.1),
+                label=lbl,
+            )
         ax.axhspan(ref_mean - ref_std, ref_mean + ref_std, color="k", alpha=0.07, label="ref ±1σ")
         ax.axhline(ref_mean, color="k", ls=":", lw=0.8)
-        ax.set_title(f"iter {it}: flux"); ax.legend(fontsize=6); ax.grid(True, alpha=0.15)
+        ax.set_title(f"iter {it}: flux")
+        ax.legend(fontsize=6)
+        ax.grid(True, alpha=0.15)
         ax.set_xlabel(r"time $[v_{th}/R]$")
 
         # ky spectrum (final snapshot)
@@ -1378,16 +1426,25 @@ def plot_method_comparison(results, methods=None, method_styles=None):
             mres = res["methods"][m]
             st = styles.get(m, dict(lw=1.1, label_prefix=m))
             ky = np.log10(np.maximum(mres["log_warm"]["ky_spec"][-1], 1e-30))
-            ax.plot(ky, color=st.get("color"), ls=st.get("ls", "-"), lw=st.get("lw", 1.1),
-                    label=st.get("label_prefix", m))
-        ax.set_title(f"iter {it}: $k_y$ spectrum (final)"); ax.legend(fontsize=6); ax.grid(True, alpha=0.15)
+            ax.plot(
+                ky,
+                color=st.get("color"),
+                ls=st.get("ls", "-"),
+                lw=st.get("lw", 1.1),
+                label=st.get("label_prefix", m),
+            )
+        ax.set_title(f"iter {it}: $k_y$ spectrum (final)")
+        ax.legend(fontsize=6)
+        ax.grid(True, alpha=0.15)
         ax.set_xlabel("$k_y$ mode")
 
     fig.tight_layout()
     return fig
 
 
-def find_nearest_nn(params, cond_index, runner, saturated_phase_start=120, seed=42, iteration=0, verbose=True):
+def find_nearest_nn(
+    params, cond_index, runner, saturated_phase_start=120, seed=42, iteration=0, verbose=True
+):
     """Find nearest-neighbour training trajectory and sample a saturated-phase IC.
 
     Parameters
@@ -1427,16 +1484,18 @@ def find_nearest_nn(params, cond_index, runner, saturated_phase_start=120, seed=
         for flat_idx, (fi, ti) in runner.trainset.flat_index_to_file_and_tstep.items()
         if fi == nn_idx and ti >= sat_t_min
     ]
-    assert len(sat_flat_indices) > 0, (
-        f"No saturated-phase samples for file {nn_idx} (offset={offset}, sat_t_min={sat_t_min})"
-    )
+    assert (
+        len(sat_flat_indices) > 0
+    ), f"No saturated-phase samples for file {nn_idx} (offset={offset}, sat_t_min={sat_t_min})"
 
     rng = np.random.default_rng(seed=seed + iteration)
     chosen_flat_idx = int(rng.choice(sat_flat_indices))
     chosen_fi, chosen_ti = runner.trainset.flat_index_to_file_and_tstep[chosen_flat_idx]
     orig_ti = chosen_ti + offset
 
-    sample = runner.trainset.__getitem__(chosen_flat_idx, get_normalized=False, override_latens=True)
+    sample = runner.trainset.__getitem__(
+        chosen_flat_idx, get_normalized=False, override_latens=True
+    )
     df_model = sample.df.numpy()
 
     if verbose:
@@ -1618,7 +1677,11 @@ def encode_valset(valset, autoencoder, cond_keys, device, batch_size=32):
             if sample.df is None:
                 continue
             dfs.append(sample.df)
-            conds_t.append(sample.conditioning if sample.conditioning is not None else torch.zeros(len(cond_keys)))
+            conds_t.append(
+                sample.conditioning
+                if sample.conditioning is not None
+                else torch.zeros(len(cond_keys))
+            )
             cond_all.append(cond_vals)
             flux_gt.append(gt_flux)
             fi_list.append(fi)
@@ -1932,20 +1995,15 @@ def print_aggregate_metrics(
                 get_pred=lambda gen, p=pred_key: _extract_pred(gen.get(p)),
                 get_gt=lambda gt, g=gt_key: _extract_gt_mean(gt.get(g)),
                 get_gt_full=(
-                    (lambda gt, g=gt_key: _extract_gt_full(gt.get(g)))
-                    if is_scalar
-                    else None
+                    (lambda gt, g=gt_key: _extract_gt_full(gt.get(g))) if is_scalar else None
                 ),
             )
             out[f"{col}_RMSE"] = m["RMSE"]
             if is_scalar:
                 out[f"{col}_R2"] = m["R2"]
             if label:
-                r2_str = (
-                    f"  R2={m['R2']:.6g}" if is_scalar and m["n_trajs"] else ""
-                )
+                r2_str = f"  R2={m['R2']:.6g}" if is_scalar and m["n_trajs"] else ""
                 print(
-                    f"  {col:>20s}  RMSE = {m['RMSE']:.6g}"
-                    f"   (n_trajs={m['n_trajs']}){r2_str}"
+                    f"  {col:>20s}  RMSE = {m['RMSE']:.6g}" f"   (n_trajs={m['n_trajs']}){r2_str}"
                 )
     return out

@@ -51,15 +51,24 @@ def run_one(cfg, traj, device, weights):
     sched = None
     if cfg.get("pinc_lr_sched", True):
         from transformers.optimization import get_scheduler
+
         sched = get_scheduler(
-            "cosine_with_min_lr", optimizer=opt,
-            num_warmup_steps=cfg.pinc_epochs // 5, num_training_steps=cfg.pinc_epochs,
+            "cosine_with_min_lr",
+            optimizer=opt,
+            num_warmup_steps=cfg.pinc_epochs // 5,
+            num_training_steps=cfg.pinc_epochs,
             scheduler_specific_kwargs={"min_lr": cfg.get("min_lr", 1e-8)},
         )
     _, best_pinc, _, _ = train_pinc(
-        pinc_model, n_epochs=cfg.pinc_epochs, data=data, optim=opt, sched=sched,
-        device=device, use_flux_fields=cfg.use_flux_fields,
-        pinc_loss_weight=weights, use_print=False,
+        pinc_model,
+        n_epochs=cfg.pinc_epochs,
+        data=data,
+        optim=opt,
+        sched=sched,
+        device=device,
+        use_flux_fields=cfg.use_flux_fields,
+        pinc_loss_weight=weights,
+        use_print=False,
         eval_every=cfg.get("pinc_eval_every", 2),
         use_config=cfg.get("use_config", False),
         config_op=cfg.get("config_op", "config"),
@@ -84,7 +93,9 @@ def main():
     ap.add_argument("--config_lstsq", type=str, default=None)
     ap.add_argument("--flux_w", type=float, default=None, help="direction weight on flux")
     ap.add_argument("--select", type=str, default=None, help="phi | balanced")
-    ap.add_argument("--clip", type=float, default=None, help="rescale combined |g| to clip*max|g_i|")
+    ap.add_argument(
+        "--clip", type=float, default=None, help="rescale combined |g| to clip*max|g_i|"
+    )
     ap.add_argument("--eval_every", type=int, default=None)
     ap.add_argument("--subset", type=str, default=None, help="comma ids; default 10-subset")
     ap.add_argument("--timestep", type=int, default=200)
@@ -125,16 +136,22 @@ def main():
             m = run_one(cfg, traj, device, weights)
             m["traj"] = i
             results.append(m)
-            print(f"[{args.variant}] iter_{i}: df={m['df_l1']:.4f} "
-                  f"phi={m['phi_l1']:.4f} flux={m['flux_absQ']:.4f}", flush=True)
+            print(
+                f"[{args.variant}] iter_{i}: df={m['df_l1']:.4f} "
+                f"phi={m['phi_l1']:.4f} flux={m['flux_absQ']:.4f}",
+                flush=True,
+            )
         except Exception as e:
             print(f"[skip] iter_{i}: {type(e).__name__}: {e}", flush=True)
 
     import statistics as st
+
     keys = ["df_l1", "phi_l1", "flux_absQ"]
-    print(f"\n=== {args.variant} (lr={cfg.pinc_lr} ep={cfg.pinc_epochs} "
-          f"op={cfg.get('config_op')} len={cfg.get('config_length')} "
-          f"lstsq={cfg.get('config_lstsq')}) n={len(results)} ===")
+    print(
+        f"\n=== {args.variant} (lr={cfg.pinc_lr} ep={cfg.pinc_epochs} "
+        f"op={cfg.get('config_op')} len={cfg.get('config_length')} "
+        f"lstsq={cfg.get('config_lstsq')}) n={len(results)} ==="
+    )
     for k in keys:
         vals = [r[k] for r in results]
         print(f"{k}: mean={st.mean(vals):.4f} median={st.median(vals):.4f}")
