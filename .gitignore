@@ -13,3 +13,4 @@ cache/
 .env
 nf_ckps_*/
 pinc_eval_results/
+interp_exploration/

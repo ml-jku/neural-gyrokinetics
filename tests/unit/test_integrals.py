@@ -3,7 +3,7 @@ import torch
 import numpy as np
 import os
 
-from neugk.integrals import FluxIntegral, get_integrals
+from neugk.physics.integrals import FluxIntegral, get_integrals
 from neugk.utils import load_geometry, K_files, poten_files
 from neugk.dataset.preprocess import phi_to_spc, phi_fft_to_real
 

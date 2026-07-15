@@ -2,14 +2,27 @@
 per-trajectory val dataset sharing the checkpoint's TRAINING normalization stats (so AE rows line
 up with the NF / traditional / PIGS rows). Kept out of the drivers so the AE wiring lives in one place.
 """
+
 from neugk.dataset.cyclone_diff import CycloneAEDataset
 from neugk.dataset.backend import H5Backend, KvikIOBackend
 
 # AE checkpoints to evaluate: label -> (checkpoint path, load_peft, vqvae)
 AE_CKPTS = {
-    "AE-PRETRAIN": ("/system/user/publicwork/galletti/pinc_revival/AE1k_PRE/best.pth", False, False),
-    "PINC-AE": ("/system/user/publicwork/galletti/pinc_revival/20260606_215226_877/best.pth", True, False),
-    "PINC-AE-LAST": ("/system/user/publicwork/galletti/pinc_revival/20260606_215226_877/ckp.pth", True, False),
+    "AE-PRETRAIN": (
+        "/system/user/publicwork/galletti/pinc_revival/AE1k_PRE/best.pth",
+        False,
+        False,
+    ),
+    "PINC-AE": (
+        "/system/user/publicwork/galletti/pinc_revival/20260606_215226_877/best.pth",
+        True,
+        False,
+    ),
+    "PINC-AE-LAST": (
+        "/system/user/publicwork/galletti/pinc_revival/20260606_215226_877/ckp.pth",
+        True,
+        False,
+    ),
 }
 
 
@@ -71,20 +84,33 @@ def build_make_val_dataset(config, path, backend):
         # val without gds (get_data does the same: KvikIOBackend(rank, use_kvikio=False))
         return KvikIOBackend(0, use_kvikio=False)
 
-    # build the TRAIN set once to obtain dataset-scope stats (cached on disk), then reuse them for
-    # every per-traj val set.
-    train = CycloneAEDataset(
-        backend=make_backend(),
-        split="train",
-        trajectories=ds.training_trajectories,
-        cond_filters=ns_to_dict(_ns_get(ds, "training_cond_filters", None)),
-        subsample=ds.subsample,
-        offset=_ns_get(ds, "offset", 0),
-        timestep_std_filter=_ns_get(ds, "timestep_std_filter", None),
-        **common,
-    )
-    train_stats = train.stats
-    del train
+    # dataset-scope stats: prefer the cached agg-stats pkl directly (the 235-traj recompute is a
+    # multi-hour job on network mounts). fall back to building the train set only if no cache.
+    import os
+    import glob as _glob
+    import pickle as _pickle
+    import numpy as _np
+
+    _cache = sorted(_glob.glob(os.path.join(path, "*df01345_phi012_agg_stats.pkl")))
+    if _cache:
+        _rms = _pickle.load(open(_cache[-1], "rb"))  # {field: RunningMeanStd}
+        train_stats = {
+            fld: {"full": {"mean": r.mean, "std": _np.sqrt(r.var), "min": r.min, "max": r.max}}
+            for fld, r in _rms.items()
+        }
+    else:
+        train = CycloneAEDataset(
+            backend=make_backend(),
+            split="train",
+            trajectories=ds.training_trajectories,
+            cond_filters=ns_to_dict(_ns_get(ds, "training_cond_filters", None)),
+            subsample=ds.subsample,
+            offset=_ns_get(ds, "offset", 0),
+            timestep_std_filter=_ns_get(ds, "timestep_std_filter", None),
+            **common,
+        )
+        train_stats = train.stats
+        del train
 
     def make_val_dataset(traj):
         # one-trajectory val set; subsample=1/offset=0 so flat index == absolute timestep.

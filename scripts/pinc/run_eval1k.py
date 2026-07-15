@@ -16,6 +16,7 @@ Methods: nf, nf-pinc, sz3, jpeg2000, zfp, ae, ae-pinc, pigs.
   # rebuild aggregates from on-disk rows without recomputing:
   python scripts/run_eval1k.py --methods pigs --aggregate-only
 """
+
 import os
 import sys
 import json
@@ -27,7 +28,7 @@ import torch
 import torch.multiprocessing as mp
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from neugk.pinc.eval.reconstructors import NeuralField, Traditional, Autoencoder, PIGS
 from neugk.pinc.eval.runner import evaluate_method
@@ -35,7 +36,7 @@ from neugk.pinc.eval.discovery import discover, calibrate, TRAD, NF_PREFIX, Cycl
 
 # method id -> kind. trad ids match TRAD keys; ae ids map to run_ae_eval.AE_CKPTS labels.
 NF_METHODS = ("nf", "nf-pinc")
-TRAD_METHODS = ("sz3", "jpeg2000", "zfp")
+TRAD_METHODS = ("sz3", "jpeg2000", "zfp", "pca", "wavelet")
 AE_METHODS = {"ae": "AE-PRETRAIN", "ae-pinc": "PINC-AE"}
 ALL_METHODS = NF_METHODS + TRAD_METHODS + tuple(AE_METHODS) + ("pigs",)
 
@@ -60,19 +61,51 @@ def get_recon(method, cache, ctx, dev):
     if method in cache:
         return cache[method]
     if method in NF_METHODS:
-        rec = NeuralField(method, ctx["weights"][NF_PREFIX[method]], path=ctx["path"], backend=ctx["backend"])
+        rec = NeuralField(
+            method, ctx["weights"][NF_PREFIX[method]], path=ctx["path"], backend=ctx["backend"]
+        )
     elif method in TRAD_METHODS:
-        s_df = CycloneNFDataset(ctx["t0"], [ctx["tt"]], path=ctx["path"], backend=ctx["backend"],
-                                realpotens=True, normalize=None).full_df
-        c = calibrate(method, s_df, ctx["nf_cr"])
-        if c is None:
-            raise RuntimeError(f"{method} uncalibratable at CR {ctx['nf_cr']}")
-        fn, ach, v = c
-        print(f"  [calib] {method.upper()}: {TRAD[method][1]}={v:.4g} -> CR {ach:.0f}x", flush=True)
-        rec = Traditional(method.upper(), fn)
+        if method in ctx.get("trad_knob", {}):
+            from functools import partial
+
+            fn = TRAD[method][0]
+            knob = TRAD[method][1]
+            v = ctx["trad_knob"][method]
+            print(f"  [forced] {method.upper()}: {knob}={v}", flush=True)
+            rec = Traditional(method.upper(), partial(fn, **{knob: v}))
+            cache[method] = rec
+            return rec
+        if ctx.get("legacy_calib"):
+            # legacy: one knob for the whole set, calibrated on a single slice (undershoots
+            # on turbulent frames -> variable CR). Kept only for reproducing the old table.
+            s_df = CycloneNFDataset(
+                ctx["t0"],
+                [ctx["tt"]],
+                path=ctx["path"],
+                backend=ctx["backend"],
+                realpotens=True,
+                normalize=None,
+            ).full_df
+            c = calibrate(method, s_df, ctx["nf_cr"])
+            if c is None:
+                raise RuntimeError(f"{method} uncalibratable at CR {ctx['nf_cr']}")
+            fn, ach, v = c
+            print(
+                f"  [calib] {method.upper()}: {TRAD[method][1]}={v:.4g} -> CR {ach:.0f}x",
+                flush=True,
+            )
+            rec = Traditional(method.upper(), fn)
+        else:
+            # default: per-snapshot knob search so every frame hits the learned CR (true iso-CR)
+            print(
+                f"  [match-cr] {method.upper()}: per-snapshot knob -> {ctx['nf_cr']:.0f}x",
+                flush=True,
+            )
+            rec = Traditional(method.upper(), method=method, target_cr=ctx["nf_cr"])
     elif method in AE_METHODS:
         from neugk.pinc.autoencoders.ae_utils import load_autoencoder
         from neugk.pinc.eval.ae_data import build_make_val_dataset, AE_CKPTS
+
         ckp, load_peft, vqvae = AE_CKPTS[AE_METHODS[method]]
         model, _ck, config = load_autoencoder(ckp, dev, model=None, load_peft=load_peft)
         model = model.to(dev).eval()
@@ -94,26 +127,40 @@ def worker(gpu, work, ctx, ts_by_traj, rowdir, q):
     for method, traj in work:
         label = label_of(method)
         rf = rowfile(rowdir, label, traj)
-        if os.path.exists(rf):  # another worker / prior run already did it
+        if os.path.exists(rf) and not ctx.get(
+            "overwrite"
+        ):  # another worker / prior run already did it
             continue
         ts = ts_by_traj[traj]
         try:
             rec = get_recon(method, cache, ctx, dev)
-            agg, _ = evaluate_method(rec, [traj + ".h5"], ts, ctx["path"], ctx["backend"], dev)
+            agg, diags = evaluate_method(rec, [traj + ".h5"], ts, ctx["path"], ctx["backend"], dev)
             row = {k: v[0] for k, v in agg.items()}
             row.update(method=label, traj=traj, n_timesteps=len(ts))
+            if ctx.get(
+                "dump_diags"
+            ):  # per-(method,traj) per-timestep spectra for the cascade figure
+                import pickle
+
+                ddir = os.path.join(rowdir, "diags")
+                os.makedirs(ddir, exist_ok=True)
+                pickle.dump(diags, open(os.path.join(ddir, f"{label}__{traj}.pkl"), "wb"))
         except Exception as e:
             import traceback
+
             traceback.print_exc()
             row = dict(method=label, traj=traj, error=f"{type(e).__name__}: {e}")
         with open(rf, "w") as f:  # checkpoint: this (method, traj) survives any later crash
             json.dump(row, f, indent=2)
         done += 1
         peak = torch.cuda.max_memory_allocated(dev) / 1e9
-        print(f"  [gpu{gpu}] {label} {traj}: "
-              f"psnr={row.get('psnr', float('nan')):.2f} phi_psnr={row.get('phi_psnr', float('nan')):.2f} "
-              f"eflux_l1={row.get('eflux_l1', float('nan')):.4f} (peak {peak:.1f} GB)"
-              + (f"  ERROR {row['error']}" if "error" in row else ""), flush=True)
+        print(
+            f"  [gpu{gpu}] {label} {traj}: "
+            f"psnr={row.get('psnr', float('nan')):.2f} phi_psnr={row.get('phi_psnr', float('nan')):.2f} "
+            f"eflux_l1={row.get('eflux_l1', float('nan')):.4f} (peak {peak:.1f} GB)"
+            + (f"  ERROR {row['error']}" if "error" in row else ""),
+            flush=True,
+        )
     q.put(done)
 
 
@@ -131,16 +178,26 @@ def aggregate(rowdir, outdir, labels):
         rows.sort(key=lambda r: int(r["traj"].split("_")[1]))
         good = [r for r in rows if "error" not in r]
         keys = [k for k in good[0] if k not in ("method", "traj", "n_timesteps")] if good else []
-        agg = {k: [float(np.mean([r[k] for r in good])), float(np.std([r[k] for r in good]))] for k in keys}
+        agg = {
+            k: [float(np.mean([r[k] for r in good])), float(np.std([r[k] for r in good]))]
+            for k in keys
+        }
         agg["n_traj"] = len(good)
         agg["n_err"] = len(rows) - len(good)
-        json.dump({"rows": rows, "agg": agg}, open(os.path.join(outdir, f"eval1k_{label}.json"), "w"), indent=2)
-        print(f"{label}: n={len(good)} (+{len(rows) - len(good)} err)  "
-              f"psnr={agg.get('psnr', [float('nan')])[0]:.2f} "
-              f"phi_psnr={agg.get('phi_psnr', [float('nan')])[0]:.2f} "
-              f"eflux_l1={agg.get('eflux_l1', [float('nan')])[0]:.4f} "
-              f"endpoint={agg.get('endpoint', [float('nan')])[0]:.4f} "
-              f"kyspec_wd={agg.get('kyspec_wd', [float('nan')])[0]:.5f}", flush=True)
+        json.dump(
+            {"rows": rows, "agg": agg},
+            open(os.path.join(outdir, f"eval1k_{label}.json"), "w"),
+            indent=2,
+        )
+        print(
+            f"{label}: n={len(good)} (+{len(rows) - len(good)} err)  "
+            f"psnr={agg.get('psnr', [float('nan')])[0]:.2f} "
+            f"phi_psnr={agg.get('phi_psnr', [float('nan')])[0]:.2f} "
+            f"eflux_l1={agg.get('eflux_l1', [float('nan')])[0]:.4f} "
+            f"endpoint={agg.get('endpoint', [float('nan')])[0]:.4f} "
+            f"kyspec_wd={agg.get('kyspec_wd', [float('nan')])[0]:.5f}",
+            flush=True,
+        )
 
 
 def main():
@@ -150,14 +207,36 @@ def main():
     ap.add_argument("--path", default="/local00/bioinf/galletti/preprocessed_kvikio")
     ap.add_argument("--backend", default="kvikio")
     ap.add_argument("--gpus", default="2,3")
-    ap.add_argument("--weights", default="", help="per-GPU work weights (comma list matching --gpus); "
-                    "e.g. '2,2,1,1' gives the first two GPUs 2x the trajs. Empty = even round-robin.")
-    ap.add_argument("--outdir", default="/system/user/publicwork/galletti/pinc_revival/eval1k_results")
+    ap.add_argument(
+        "--weights",
+        default="",
+        help="per-GPU work weights (comma list matching --gpus); "
+        "e.g. '2,2,1,1' gives the first two GPUs 2x the trajs. Empty = even round-robin.",
+    )
+    ap.add_argument(
+        "--outdir", default="/system/user/publicwork/galletti/pinc_revival/eval1k_results"
+    )
     ap.add_argument("--max-trajs", type=int, default=0)
-    ap.add_argument("--trajs", default="", help="comma list of trajectory names to restrict to "
-                    "(e.g. iteration_0,iteration_8); empty = all discovered")
+    ap.add_argument(
+        "--trajs",
+        default="",
+        help="comma list of trajectory names to restrict to "
+        "(e.g. iteration_0,iteration_8); empty = all discovered",
+    )
     ap.add_argument("--overwrite", action="store_true", help="recompute even rows already on disk")
-    ap.add_argument("--aggregate-only", action="store_true", help="rebuild eval1k_<LABEL>.json from on-disk rows, no compute")
+    ap.add_argument(
+        "--dump-diags",
+        action="store_true",
+        help="dump per-(method,traj) per-timestep spectra pkls for the cascade figure",
+    )
+    ap.add_argument(
+        "--aggregate-only",
+        action="store_true",
+        help="rebuild eval1k_<LABEL>.json from on-disk rows, no compute",
+    )
+    ap.add_argument(
+        "--trad-knob", default="", help="force traditional knob, e.g. sz3=1.2,zfp=3.4,wavelet=11.7"
+    )
     args = ap.parse_args()
 
     methods = [m for m in args.methods.split(",") if m]
@@ -165,6 +244,11 @@ def main():
     if bad:
         raise SystemExit(f"unknown methods {bad}; choose from {list(ALL_METHODS)}")
     labels = [label_of(m) for m in methods]
+    trad_knob = {}
+    if args.trad_knob:
+        for kv in args.trad_knob.split(","):
+            k, v = kv.split("=")
+            trad_knob[k.strip()] = float(v)
     rowdir = os.path.join(args.outdir, "rows")
     os.makedirs(rowdir, exist_ok=True)
 
@@ -182,9 +266,21 @@ def main():
     if args.max_trajs:
         trajs = trajs[: args.max_trajs]
     ts_by_traj = {t: sorted(int(x) for x in weights[NF_PREFIX["nf-pinc"]][t]) for t in trajs}
-    ctx = dict(weights=weights, nf_cr=nf_cr, path=args.path, backend=args.backend,
-               t0=trajs[0], tt=ts_by_traj[trajs[0]][0])
-    print(f"{len(trajs)} trajs x ~{len(ts_by_traj[trajs[0]])} ts; methods={methods}; NF CR={nf_cr}x", flush=True)
+    ctx = dict(
+        weights=weights,
+        nf_cr=nf_cr,
+        path=args.path,
+        backend=args.backend,
+        t0=trajs[0],
+        tt=ts_by_traj[trajs[0]][0],
+        overwrite=args.overwrite,
+        trad_knob=trad_knob,
+        dump_diags=args.dump_diags,
+    )
+    print(
+        f"{len(trajs)} trajs x ~{len(ts_by_traj[trajs[0]])} ts; methods={methods}; NF CR={nf_cr}x",
+        flush=True,
+    )
 
     # flat (method, traj) work list, resume-filtered, round-robin sharded so the expensive
     # method (PIGS) is balanced evenly across GPUs.
@@ -193,7 +289,10 @@ def main():
         skip = sum(1 for m, t in work if os.path.exists(rowfile(rowdir, label_of(m), t)))
         work = [(m, t) for m, t in work if not os.path.exists(rowfile(rowdir, label_of(m), t))]
         if skip:
-            print(f"resuming: {skip} (method,traj) rows already on disk, {len(work)} to do", flush=True)
+            print(
+                f"resuming: {skip} (method,traj) rows already on disk, {len(work)} to do",
+                flush=True,
+            )
     if not work:
         print("nothing to compute; aggregating.")
         aggregate(rowdir, args.outdir, labels)
@@ -210,8 +309,11 @@ def main():
     for i, item in enumerate(work):
         buckets[slots[i % len(slots)]].append(item)
     shards = [(g, buckets[g]) for g in gpus if buckets[g]]
-    print(f"sharding {len(work)} items over {len(shards)} GPU(s) "
-          f"(weights {dict(zip(gpus, weights))}): {[(g, len(s)) for g, s in shards]}", flush=True)
+    print(
+        f"sharding {len(work)} items over {len(shards)} GPU(s) "
+        f"(weights {dict(zip(gpus, weights))}): {[(g, len(s)) for g, s in shards]}",
+        flush=True,
+    )
 
     ctxmp = mp.get_context("spawn")
     q = ctxmp.Queue()
