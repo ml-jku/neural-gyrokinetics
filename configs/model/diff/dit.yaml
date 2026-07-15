@@ -36,6 +36,12 @@ diffusion:
   formulation: flow
   continuous_time: true
   minibatch_ot: true
+  p_mean: -1.2
+  p_std: 1.2
+  sigma_data: 1.0
+  sigma_min: 0.002
+  sigma_max: 80.0
+  rho: 7.0
   scheduler:
     num_train_timesteps: 1000
     beta_start: 0.0001

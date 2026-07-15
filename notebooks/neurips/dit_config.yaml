@@ -1,0 +1,143 @@
+experiment_id: test
+seed: 0
+output_path: /system/user/publicwork/galletti/checkpoints/20260217_115142/20260220_141801
+ddp:
+  enable: true
+  n_nodes: 1
+amp:
+  enable: true
+  bfloat: true
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+workflow: diffusion
+stage: diffusion
+ae_checkpoint: /system/user/publicwork/galletti/checkpoints/simsiam_stable/ckp.pth
+dataset:
+  name: cyclone
+  path: /local00/bioinf/gyrokinetics/preprocessed
+  normalization: zscore
+  normalization_scope: dataset
+  minmax_beta1: 8
+  minmax_beta2: 4
+  offset: 80
+  subsample: 1
+  val_subsample: 10
+  spatial_ifft: true
+  separate_zf: true
+  norm_decouple_mu: true
+  real_potens: true
+  split_into_bands: null
+  log_transform: false
+  num_workers: 4
+  active_keys:
+  - re
+  - im
+  input_fields:
+  - df
+  training_trajectories: iteration_{0-5,7-12,14-31,33-82,84-99}.h5
+  validation_trajectories:
+  - iteration_13.h5
+  - iteration_100.h5
+  - iteration_200.h5
+  partial_holdouts: null
+  training_cond_filters:
+    last_flux: [1., .inf]
+    first_flux: [1., .inf]
+  eval_cond_filters:
+    last_flux: [1., .inf]
+    first_flux: [1., .inf]
+
+  augment:
+    noise: 
+      active: false
+      noise_std: 1e-4
+    mask_modes:
+      active: false
+      mask_ratio: 0.6
+      is_fourier: false
+      weights: null
+      rescale: false
+      mask_zero_mode: true
+      df_delta_weight: 1.0
+      strategy: "mixed" # random, low_from_high, high_from_low, zonal_flow, mixed
+      per_sample: false  # if true, each sample in the batch gets an independent mask/strategy
+    vicreg_variance:
+      active: false
+      weight: 1.0
+    logdet:
+      active: false
+      weight: 1.0
+  timestep_std_filter: null
+  timestep_std_offset: 80
+model:
+  name: diffusion
+  bundle_seq_length: 1
+  model_type: latent_dit
+  latent_dim: 512
+  act_fn: GELU
+  decouple_mu: true
+  conditioning:
+  - itg
+  - dg
+  - s_hat
+  - q
+  extra_zf_loss: false
+  init_weights: kaiming_uniform
+  patching_init_weights: kaiming_uniform
+  cond_init_weights: kaiming_uniform
+  loss_scheduler: null
+  loss_weights:
+    df: 1.0
+  extra_loss_weights: null
+  patch:
+    patch_size: null
+    window_size: null
+  vit:
+    num_heads: 16
+    depth: 4
+    gradient_checkpoint: false
+    use_abs_pe: false
+    use_rpb: true
+    use_rope: false
+    gated_attention: false
+    drop_path: 0.1
+  diffusion:
+    noise_distribution: gaussian
+    formulation: flow
+    continuous_time: true
+    minibatch_ot: true
+    scheduler:
+      num_train_timesteps: 1000
+      beta_start: 0.0001
+      beta_end: 0.02
+      beta_schedule: linear
+      prediction_type: epsilon
+logging:
+  writer: null
+  run_id: diffusion_latent_dit_20260220_141801
+  tqdm: true
+  model_summary: false
+training:
+  batch_size: 128
+  n_epochs: 400
+  num_workers: 4
+  pin_memory: true
+  learning_rate: 0.001
+  use_latest_checkpoint: true
+  final_learning_rate: 1.0e-06
+  weight_decay: 1.0e-06
+  exclude_from_wd:
+  - cond
+  predict_delta: false
+  scheduler: cosine
+  clip_grad: true
+  clip_to: 1.0
+  gradnorm_balancer: none
+validation:
+  batch_size: 16
+  n_eval_steps: 2
+  validate_every_n_epochs: 20
+  eval_integrals: true
+  model_selection_metric: df

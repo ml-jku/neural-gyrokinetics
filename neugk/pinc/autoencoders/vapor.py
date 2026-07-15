@@ -9,6 +9,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from functools import partial
 
 from neugk.dataset import CycloneAEDataset
+from neugk.dataset.backend import KvikIOBackend
 
 
 def get_density(df):
@@ -437,13 +438,14 @@ class VAPOR(nn.Module):
 
     def forward(self, df, **_):
         full_5d = df.ndim > 4
-        if full_5d:
+        if full_5d:  # flatten the (s, x, y) spatial axes into the batch -> 2d (vp, mu) slices
+            b, c, vp, mu, s, x, y = df.shape
             df = rearrange(df, "b c vp mu s x y -> (b s x y) c vp mu")
         vq_loss, df_vae, indices = self.vqvae(df)
         df_out = self.refiner(df_vae)
         if full_5d:
             df_out = rearrange(
-                df_out, "(b s x y) c vp mu -> b c vp mu s x y", s=16, x=85, y=32
+                df_out, "(b s x y) c vp mu -> b c vp mu s x y", b=b, s=s, x=x, y=y
             )
         return {"df": df_out, "df_vae": df_vae, "vq_loss": vq_loss, "indices": indices}
 
@@ -452,7 +454,8 @@ if __name__ == "__main__":
     device = "cuda"
 
     cyc_dataset = CycloneAEDataset(
-        input_fields=["df", "phi", "flux"],
+        backend=KvikIOBackend(0, use_kvikio=False),
+        fields_to_load=["df"],
         split="train",
         normalization="zscore",
         normalization_scope="dataset",
@@ -460,21 +463,20 @@ if __name__ == "__main__":
         cond_filters={"last_fluxes": [1.0, np.inf], "first_fluxes": [1.0, np.inf]},
         separate_zf=False,
         real_potens=True,
-        stage="ae",
         conditions=["itg"],
     )
 
     cyc_valset = CycloneAEDataset(
-        input_fields=["df", "phi", "flux"],
+        backend=KvikIOBackend(0, use_kvikio=False),
+        fields_to_load=["df"],
         split="val",
         normalization="zscore",
         normalization_scope="dataset",
         trajectories=["iteration_13.h5"],
         separate_zf=False,
         real_potens=True,
-        stage="ae",
         conditions=["itg"],
-        normalization_stats=cyc_dataset.norm_stats,
+        normalization_stats=cyc_dataset.stats,
     )
 
     data = torch.cat(
@@ -524,13 +526,16 @@ if __name__ == "__main__":
     vqvae.train()
     fno_refiner.train()
 
+    # geometry (vpgr etc.) for the conservation losses; shared across a file's timesteps
+    geom = {k: v[0] for k, v in cyc_dataset.get_batch_geometry(torch.tensor([0])).items()}
+
     for epoch in range(10):
         progress_bar = tqdm(dataloader, desc=f"[e: {epoch+1}/{10}]")
         for df in progress_bar:
             df = df[0].to(device)
             outs = vapor(df)
             recon_loss = F.mse_loss(outs["df"], df)
-            physics_losses = vapor_loss(outs["df"], df, cyc_dataset[0].geometry)
+            physics_losses = vapor_loss(outs["df"], df, geom)
             total_loss = recon_loss + outs["vq_loss"] + sum(physics_losses.values())
 
             optimizer.zero_grad()

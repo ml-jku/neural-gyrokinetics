@@ -1,5 +1,6 @@
 # Source: https://github.com/lucidrains/vector-quantize-pytorch
 
+import math
 from typing import Callable
 from functools import partial
 from collections import namedtuple
@@ -1293,3 +1294,225 @@ class VectorQuantize(Module):
         )
 
         return quantize, embed_ind, loss, loss_breakdown
+
+
+# =====================================================================
+# Vendored modern quantizer flavors (FSQ / LFQ / ResidualVQ)
+# Minimal, faithful reimplementations of the lucidrains
+# vector-quantize-pytorch classes, since that package is not installed.
+# All are in-training quantizers (quantization inside forward with a
+# straight-through estimator). Each forward returns a 3-tuple
+#   (quantized, indices, aux_loss)
+# matching the VectorQuantize interface used by the autoencoder.
+# =====================================================================
+
+
+def round_ste(z: torch.Tensor) -> torch.Tensor:
+    """Round with straight-through gradient."""
+    zhat = z.round()
+    return z + (zhat - z).detach()
+
+
+class FSQ(Module):
+    """Finite Scalar Quantization (Mentzer et al. 2023, arXiv:2309.15505).
+
+    Each latent dimension is bounded and rounded to one of `levels[i]`
+    integer levels. No codebook, no EMA, no commitment loss. The implicit
+    codebook size is prod(levels). Input/output dim == len(levels).
+    """
+
+    def __init__(self, levels, **kwargs):
+        super().__init__()
+        _levels = torch.tensor(levels, dtype=torch.int64)
+        self.register_buffer("_levels", _levels, persistent=False)
+
+        _basis = torch.cumprod(
+            torch.tensor([1] + list(levels[:-1]), dtype=torch.int64), dim=0
+        )
+        self.register_buffer("_basis", _basis, persistent=False)
+
+        self.dim = len(levels)
+        self.codebook_size = int(_levels.prod().item())
+
+    def bound(self, z: torch.Tensor, eps: float = 1e-3) -> torch.Tensor:
+        """Bound z into the rounding range for each level."""
+        half_l = (self._levels - 1) * (1 + eps) / 2
+        offset = torch.where(self._levels % 2 == 0, 0.5, 0.0)
+        shift = (offset / half_l).atanh()
+        return (z + shift).tanh() * half_l - offset
+
+    def quantize(self, z: torch.Tensor) -> torch.Tensor:
+        """Quantize z, return quantized zhat (same shape, normalized to [-1, 1])."""
+        quantized = round_ste(self.bound(z))
+        half_width = self._levels // 2
+        return quantized / half_width
+
+    def _scale_and_shift(self, zhat_normalized):
+        half_width = self._levels // 2
+        return (zhat_normalized * half_width) + half_width
+
+    def _scale_and_shift_inverse(self, zhat):
+        half_width = self._levels // 2
+        return (zhat - half_width) / half_width
+
+    def codes_to_indices(self, zhat: torch.Tensor) -> torch.Tensor:
+        """Map quantized codes (normalized) to a single integer index per token."""
+        zhat = self._scale_and_shift(zhat)
+        return (zhat * self._basis).sum(dim=-1).round().to(torch.int64)
+
+    def indices_to_codes(self, indices: torch.Tensor) -> torch.Tensor:
+        indices = indices.unsqueeze(-1)
+        codes_non_centered = (indices // self._basis) % self._levels
+        return self._scale_and_shift_inverse(codes_non_centered)
+
+    def forward(self, z: torch.Tensor):
+        assert z.shape[-1] == self.dim, (
+            f"FSQ expected last dim {self.dim}, got {z.shape[-1]}"
+        )
+        codes = self.quantize(z)
+        indices = self.codes_to_indices(codes)
+        # FSQ has no auxiliary loss
+        aux_loss = torch.zeros((), device=z.device, dtype=z.dtype, requires_grad=False)
+        return codes, indices, aux_loss
+
+
+class LFQ(Module):
+    """Lookup-Free Quantization (MAGVIT-v2, Yu et al. 2023, arXiv:2310.05737).
+
+    Each latent dim is sign-quantized to {-1, +1} with a straight-through
+    estimator; the per-token index is the bit pattern. codebook_size must be
+    a power of 2 and equals 2 ** dim. Adds an entropy regularizer
+    (per-sample entropy minimization minus batch entropy maximization).
+    """
+
+    def __init__(
+        self,
+        dim=None,
+        codebook_size=None,
+        entropy_loss_weight=0.1,
+        diversity_gamma=1.0,
+        commitment_weight=0.0,
+        **kwargs,
+    ):
+        super().__init__()
+        assert dim is not None or codebook_size is not None
+        if codebook_size is not None:
+            log2 = math.log2(codebook_size)
+            assert log2.is_integer(), "LFQ codebook_size must be a power of 2"
+            codebook_dim = int(log2)
+        else:
+            codebook_dim = dim
+            codebook_size = 2 ** dim
+
+        self.dim = codebook_dim
+        self.codebook_size = codebook_size
+        self.entropy_loss_weight = entropy_loss_weight
+        self.diversity_gamma = diversity_gamma
+        self.commitment_weight = commitment_weight
+
+        # bit -> mask for index computation
+        self.register_buffer(
+            "mask", 2 ** torch.arange(codebook_dim - 1, -1, -1), persistent=False
+        )
+        self.register_buffer("zero", torch.tensor(0.0), persistent=False)
+
+        # implicit codebook (all sign combinations), for entropy computation
+        all_codes = torch.arange(codebook_size)
+        bits = ((all_codes[..., None] & self.mask) != 0).float()
+        codebook = bits * 2 - 1  # {0,1} -> {-1,+1}
+        self.register_buffer("codebook", codebook, persistent=False)
+
+    def indices_to_codes(self, indices: torch.Tensor) -> torch.Tensor:
+        bits = ((indices[..., None] & self.mask) != 0).float()
+        return bits * 2 - 1
+
+    def forward(self, x: torch.Tensor, inv_temperature: float = 100.0):
+        assert x.shape[-1] == self.dim, (
+            f"LFQ expected last dim {self.dim}, got {x.shape[-1]}"
+        )
+        orig_dtype = x.dtype
+        x = x.float()
+
+        # quantize to sign with straight-through
+        quantized = torch.where(x > 0, 1.0, -1.0)
+        quantized = x + (quantized - x).detach()
+
+        # indices from the sign bits
+        bits = (quantized > 0).long()
+        indices = (bits * self.mask.long()).sum(dim=-1)
+
+        if self.training:
+            # entropy aux loss (per-sample entropy minimized, batch entropy maximized)
+            # distance to each implicit code via inner product
+            logits = 2 * torch.einsum("... d, c d -> ... c", x, self.codebook)
+            probs = F.softmax(logits * inv_temperature, dim=-1)
+            per_sample_entropy = entropy(probs).mean()
+            avg_probs = reduce(probs, "... c -> c", "mean")
+            codebook_entropy = entropy(avg_probs.unsqueeze(0)).mean()
+            entropy_aux_loss = (
+                per_sample_entropy - self.diversity_gamma * codebook_entropy
+            )
+            commit_loss = F.mse_loss(x, quantized.detach())
+            aux_loss = (
+                entropy_aux_loss * self.entropy_loss_weight
+                + commit_loss * self.commitment_weight
+            )
+        else:
+            aux_loss = self.zero
+
+        return quantized.to(orig_dtype), indices, aux_loss
+
+
+class ResidualVQ(Module):
+    """Residual VQ: a stack of VectorQuantize codebooks, each quantizing the
+    residual left by the previous (Zeghidour et al. 2021 / SoundStream).
+
+    Returns quantized = sum of per-stage quantized codes; indices stacked along
+    a trailing dim of shape (..., num_quantizers); aux loss = mean commit loss.
+    """
+
+    def __init__(
+        self,
+        dim,
+        num_quantizers,
+        codebook_size,
+        use_cosine_sim=False,
+        decay=0.99,
+        commitment_weight=0.25,
+        threshold_ema_dead_code=2,
+        **kwargs,
+    ):
+        super().__init__()
+        self.dim = dim
+        self.num_quantizers = num_quantizers
+        self.codebook_size = codebook_size
+        self.layers = nn.ModuleList(
+            [
+                VectorQuantize(
+                    dim=dim,
+                    codebook_size=codebook_size,
+                    use_cosine_sim=use_cosine_sim,
+                    decay=decay,
+                    commitment_weight=commitment_weight,
+                    threshold_ema_dead_code=threshold_ema_dead_code,
+                )
+                for _ in range(num_quantizers)
+            ]
+        )
+
+    def forward(self, x: torch.Tensor):
+        quantized_out = torch.zeros_like(x)
+        residual = x
+
+        all_indices = []
+        all_losses = []
+        for layer in self.layers:
+            quantized, indices, loss = layer(residual)
+            residual = residual - quantized.detach()
+            quantized_out = quantized_out + quantized
+            all_indices.append(indices)
+            all_losses.append(loss)
+
+        all_indices = torch.stack(all_indices, dim=-1)  # (..., num_quantizers)
+        aux_loss = torch.stack([loss.float().mean() for loss in all_losses]).mean()
+        return quantized_out, all_indices, aux_loss

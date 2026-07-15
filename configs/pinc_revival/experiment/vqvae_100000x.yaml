@@ -1,0 +1,44 @@
+# @package _global_
+# PINC revival: VQ-VAE at ~100000x compression.
+# patch_size [4,0,2,5,2], one vit layer -> grid [4,4,9,8] = 1152 tokens, codes/token 1.
+# MEASURED CR = 77369x (empirical; closest discrete grid to 100000x and within 1.5x).
+# The next-coarser grid (576 tokens) gives 154738x = 1.5x over target, so 1152 tokens
+# is the better-centered choice.
+# Run:  python main.py experiment=pinc_revival/vqvae_100000x
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_100000x
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+logging:
+  project: pinc_revival
+  entity: null   # use the authed wandb account's default entity
+
+model:
+  vq:
+    codebook_type: euclidean
+  patch:
+    patch_size: [4, 0, 2, 5, 2]
+  vit:
+    num_heads: [8]
+    depth: [4]
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true

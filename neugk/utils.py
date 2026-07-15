@@ -12,6 +12,7 @@ import re
 import torch
 import torch.distributed as dist
 from torch import nn
+import cupy as cp
 import numpy as np
 from omegaconf import DictConfig, OmegaConf
 
@@ -134,6 +135,33 @@ def ddp_setup(rank, world_size):
     )
 
 
+def handle_signal(signum, frame):
+    cleanup()
+    exit(1)
+
+
+def cleanup():
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+    torch.cuda.empty_cache()
+
+
+def print_mem_stats(rank):
+    print(f"Rank {rank} — before forward pass:")
+    print(
+        f"  torch.cuda.memory_allocated: {torch.cuda.memory_allocated() / 1024**2:.0f} MiB"
+    )
+    print(
+        f"  torch.cuda.memory_reserved: {torch.cuda.memory_reserved() / 1024**2:.0f} MiB"
+    )
+    # This is the key one — total GPU memory vs. what's free
+    free, total = torch.cuda.mem_get_info()
+    print(f"  GPU total: {total / 1024**2:.0f} MiB, free: {free / 1024**2:.0f} MiB")
+    print(
+        f"  Used by other processes/NCCL/KvikIO: {(total - free) / 1024**2 - torch.cuda.memory_reserved() / 1024**2:.0f} MiB"
+    )
+
+
 def edit_tag(d, prefix=None, postfix=None):
     """Update dictionary keys with prefix and postfix tags, avoiding duplicates."""
     res = {}
@@ -194,7 +222,7 @@ def save_model_and_config(
             "epoch": epoch,
             "model_state_dict": state_dict,
             "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
             "loss": val_loss,
         },
         f"{cfg.output_path}/ckp.pth",
@@ -209,7 +237,7 @@ def save_model_and_config(
                 "epoch": epoch,
                 "model_state_dict": state_dict,
                 "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
                 "loss": val_loss,
             },
             best_path,
@@ -683,6 +711,39 @@ def get_linear_burn_in_fn(
     return func
 
 
+def get_cyclical_annealing_fn(
+    start: float,
+    end: float,
+    start_fraction: float,
+    end_fraction: float,
+    n_cycles: int = 4,
+    ratio: float = 0.5,
+):
+    """Cyclical annealing schedule (Fu et al., NAACL 2019).
+
+    Repeats a linear ramp from ``start`` to ``end`` for ``n_cycles`` times
+    within the [start_fraction, end_fraction] training window.  Each cycle
+    spends ``ratio`` of its length ramping up and ``1 - ratio`` holding at
+    ``end``.  Before ``start_fraction`` the value is ``start``; after
+    ``end_fraction`` it is ``end``.
+    """
+
+    def func(progress_remaining: float) -> float:
+        progress = 1.0 - progress_remaining  # 0 → 1
+        if progress < start_fraction:
+            return start
+        if progress > end_fraction:
+            return end
+        # normalise to [0, 1] within the active window
+        active = (progress - start_fraction) / (end_fraction - start_fraction)
+        cycle_progress = (active * n_cycles) % 1.0
+        if cycle_progress < ratio:
+            return start + (end - start) * (cycle_progress / ratio)
+        return end
+
+    return func
+
+
 def remainig_progress(cur_step, total_steps):
     """Compute remaining progress fraction."""
     return 1.0 - (cur_step / total_steps)
@@ -779,6 +840,8 @@ def memory_cleanup(device=None, aggressive=False):
     # aggressive cleanup
     if aggressive:
         gc.collect()
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
         if torch.cuda.is_available() and device is not None:
             # force sync
             torch.cuda.synchronize(device)

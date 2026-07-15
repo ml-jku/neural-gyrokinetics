@@ -1,21 +1,13 @@
-from typing import Dict, Optional, Tuple, List, Callable
+from typing import Dict, Optional, Tuple, Callable
 
 import os
 import pickle
-import os.path as osp
-import sys
-import hydra
-import warnings
-from omegaconf import OmegaConf
 
-import h5py
-import numpy as np
 import torch
 from torch import nn
 import torch.distributed as dist
 from omegaconf import DictConfig
 
-from neugk.utils import RunningMeanStd, filter_config_subset, filter_cli_priority
 from neugk.dataset.augment import reverse_ifft, de_normalize
 from neugk.pinc.peft_utils import create_lora_model_wrapper
 from neugk.pinc.autoencoders import get_autoencoder
@@ -48,7 +40,11 @@ def train_step_autoencoder(
 
     # model prediction
     # for ae we only use df
-    x_preds = model(xs["df"], condition=condition)
+    return_latents = False
+    for key in loss_wrap.active_losses:
+        if key in ["vicreg_variance", "vicreg_covariance", "logdet"]:
+            return_latents = True
+    x_preds = model(xs["df"], condition=condition, return_latent=return_latents)
 
     if cfg.dataset.augment.mask_modes.active:
         assert (
@@ -90,8 +86,8 @@ def masked_spectral_loss(y_hat, y, mask, zf_separated, de_normalize_fn, file_idx
     y_hat = de_normalize(y_hat, file_idx, de_normalize_fn)
     y = de_normalize(y, file_idx, de_normalize_fn)
     # FFT to spectral space
-    y_hat_k = reverse_ifft(y_hat, zf_separated=zf_separated)
-    y_k = reverse_ifft(y, zf_separated=zf_separated)
+    y_hat_k = reverse_ifft(y_hat.float(), zf_separated=zf_separated)
+    y_k = reverse_ifft(y.float(), zf_separated=zf_separated)
 
     # Isolate masked modes
     masked_pred = (1.0 - mask) * y_hat_k
@@ -164,7 +160,10 @@ def load_autoencoder(
     # TODO latest or best?
     if os.path.isdir(ckp_path):
         ckp_path = os.path.join(ckp_path, "best.pth")
-    loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
+    try:
+        loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=True)
+    except pickle.UnpicklingError:
+        loaded_ckpt = torch.load(ckp_path, map_location=device, weights_only=False)
     state_dict = loaded_ckpt["model_state_dict"]
 
     config = None
@@ -190,9 +189,6 @@ def load_autoencoder(
         config = dict_to_namespace(cfg_dict)
 
         problem_dim = len(config.dataset.active_keys)
-        # Attempt to get resolution from config if available, otherwise fallback
-        # In this project, resolution is usually fixed by the physics but can be inferred
-        # from other config fields if necessary. For now, we use the one from config.dataset if present
         res = getattr(config.dataset, "resolution", (32, 8, 16, 85, 32))
 
         class DummyDataset:
@@ -214,8 +210,10 @@ def load_autoencoder(
         state_dict = {"module." + k: v for k, v in state_dict.items()}
 
     # Check if it is a PEFT checkpoint
-    is_peft_checkpoint = loaded_ckpt.get("stage") == "peft"
     has_peft_params = any("lora_A" in k or "lora_B" in k for k in state_dict.keys())
+    # some PEFT checkpoints omit the explicit stage marker; the lora_A/lora_B params are
+    # the definitive signal, so treat the checkpoint as PEFT whenever they are present.
+    is_peft_checkpoint = loaded_ckpt.get("stage") == "peft" or has_peft_params
 
     if is_peft_checkpoint and has_peft_params:
         if load_peft:
@@ -267,210 +265,109 @@ def load_autoencoder(
                 f"{len(state_dict)} parameters (removed PEFT parameters)"
             )
 
-    model.load_state_dict(
-        state_dict,
-        strict=not (is_peft_checkpoint and has_peft_params and not load_peft),
-    )
+    # Remap old conditioning keys to new ones if necessary
+    remapped_state_dict = {}
+    did_remap = False
+
+    # Pre-detect if we are loading into an architecture that might have changed (e.g. missing modulation)
+    # If the state dict has dit keys but the model doesn't, we'll need strict=False
+    has_dit_in_ckpt = any(".dit." in k for k in state_dict.keys())
+    has_modulation_in_ckpt = any(".modulation." in k for k in state_dict.keys())
+
+    def get_base_model(m):
+        return m.module if hasattr(m, "module") else m
+
+    base_model = get_base_model(model)
+    has_dit_in_model = any(".dit." in n for n, _ in model.named_parameters())
+
+    if (has_dit_in_ckpt or has_modulation_in_ckpt) and not has_dit_in_model:
+        print("Architecture mismatch (modulation). Enabling relaxed loading.")
+        did_remap = True
+
+    for k, v in state_dict.items():
+        new_k = k.replace("encoder_cond_embed", "enc_cond_embed").replace(
+            "decoder_cond_embed", "dec_cond_embed"
+        )
+        if new_k != k:
+            did_remap = True
+
+        # Handle the very old 'cond_embed' name (pre-split)
+        if new_k.startswith("cond_embed."):
+            suffix = new_k[len("cond_embed.") :]
+
+            enc_attr = getattr(base_model, "enc_cond_embed", None)
+            dec_attr = getattr(base_model, "dec_cond_embed", None)
+
+            mapped = False
+            # Check if shapes match before mapping to avoid RuntimeError
+            if enc_attr is not None:
+                # Get the parameter shape from the actual module to be sure
+                try:
+                    target_param = (
+                        enc_attr.get_parameter(suffix)
+                        if hasattr(enc_attr, "get_parameter")
+                        else None
+                    )
+                    if target_param is None:
+                        # Fallback to dict lookup
+                        target_param = dict(enc_attr.named_parameters()).get(suffix)
+
+                    if target_param is not None and target_param.shape == v.shape:
+                        remapped_state_dict[f"enc_cond_embed.{suffix}"] = v
+                        did_remap = True
+                        mapped = True
+                except Exception:
+                    pass
+
+            if dec_attr is not None:
+                try:
+                    target_param = (
+                        dec_attr.get_parameter(suffix)
+                        if hasattr(dec_attr, "get_parameter")
+                        else None
+                    )
+                    if target_param is None:
+                        target_param = dict(dec_attr.named_parameters()).get(suffix)
+
+                    if target_param is not None and target_param.shape == v.shape:
+                        remapped_state_dict[f"dec_cond_embed.{suffix}"] = v
+                        did_remap = True
+                        mapped = True
+                except Exception:
+                    pass
+
+            # If we didn't map to either, keep the original key if strict=False might save us
+            if not mapped:
+                remapped_state_dict[new_k] = v
+        else:
+            remapped_state_dict[new_k] = v
+
+    state_dict = remapped_state_dict
+
+    # Check if we have an eflux_head in the model but not in the state_dict
+    has_eflux_head_in_model = getattr(base_model, "eflux_head", None)
+    has_eflux_head_in_ckpt = any("eflux_head" in k for k in state_dict.keys())
+
+    # Set strict=False if we did remapping or if we are missing the eflux head
+    strict = not did_remap
+    if has_eflux_head_in_model and not has_eflux_head_in_ckpt:
+        print(
+            "Model has eflux_head but checkpoint does not. Loading with strict=False."
+        )
+        strict = False
+
+    # Force strict=False if loading a base model from a PEFT checkpoint (already handled by filtering usually)
+    if is_peft_checkpoint and not load_peft:
+        strict = False
+
+    model.load_state_dict(state_dict, strict=strict)
+
     resume_epoch = loaded_ckpt["epoch"]
     print(f"Loading model {ckp_path} (stopped at epoch {resume_epoch}) ")
     if config is None:
         return model, loaded_ckpt
     else:
         return model, loaded_ckpt, config
-
-
-def restart_config_autoencoder():
-    config = hydra.compose("main", overrides=sys.argv[1:])
-
-    if config.get("ae_checkpoint") is not None:
-        checkpoint_path = osp.abspath(config.ae_checkpoint)
-        config_path = osp.join(checkpoint_path, "config.yaml")
-
-        # Determine correct weights file
-        if getattr(config.training, "use_latest_checkpoint", False):
-            checkpoint_path = osp.join(checkpoint_path, "ckp.pth")
-        else:
-            checkpoint_path = osp.join(checkpoint_path, "best.pth")
-
-        if os.path.isfile(checkpoint_path) and os.path.isfile(config_path):
-            if config.stage == "peft":
-                print(f"PEFT stage: Will load model weights from {checkpoint_path}")
-            else:
-                checkpoint_config = OmegaConf.load(config_path)
-
-                # Remove CLI args related to autoencoder to avoid conflicts
-                try:
-                    aecli_idx = ["autoencoder" in c for c in sys.argv].index(True)
-                    aecli = sys.argv.pop(aecli_idx)
-                    warnings.warn(
-                        f"CLI arg '{aecli}' ignored in favor of checkpoint config."
-                    )
-                except ValueError:
-                    pass
-
-                # Copy dataset settings
-                config.dataset.spatial_ifft = checkpoint_config.dataset.spatial_ifft
-                config.dataset.separate_zf = checkpoint_config.dataset.separate_zf
-                config.dataset.real_potens = checkpoint_config.dataset.real_potens
-
-                # Clean config to allow merge
-                if "autoencoder" in checkpoint_config:
-                    for key in ["loss_scheduler", "loss_weights", "extra_loss_weights"]:
-                        if key in checkpoint_config.model:
-                            del checkpoint_config.model[key]
-
-                filter_cli_priority(sys.argv[1:], checkpoint_config)
-                filter_config_subset(config, checkpoint_config)
-                config = OmegaConf.merge(config, checkpoint_config)
-                config.ae_checkpoint = checkpoint_path
-                print(f"Loaded config from checkpoint '{config_path}'")
-        else:
-            raise ValueError(f"{checkpoint_path} does not exist!")
-    return config
-
-
-def aggregate_dataset_stats(file_paths: List[str]) -> Dict[str, float]:
-    """
-    Aggregate statistics across multiple dataset files to get true dataset-wide statistics.
-    This is the correct way to handle statistics for multi-file datasets.
-    """
-
-    # Initialize running statistics
-    phi_stats = RunningMeanStd((1,))
-    flux_stats = RunningMeanStd((1,))
-
-    total_samples = 0
-
-    for file_path in file_paths:
-        phi_mean, phi_std = None, None
-        flux_mean, flux_std = None, None
-        n_samples = 0
-
-        # standard h5
-        try:
-            with h5py.File(file_path, "r") as f:
-                if "metadata" not in f:
-                    continue
-
-                metadata = f["metadata"]
-
-                if "data" in f:
-                    n_samples = len(
-                        [k for k in f["data"].keys() if k.startswith("timestep_")]
-                    )
-                else:
-                    n_samples = len(metadata["timesteps"][()])
-
-                if "phi_mean" in metadata and "phi_std" in metadata:
-                    phi_mean = metadata["phi_mean"][()]
-                    phi_std = metadata["phi_std"][()]
-
-                if "flux_mean" in metadata and "flux_std" in metadata:
-                    flux_mean = metadata["flux_mean"][()]
-                    flux_std = metadata["flux_std"][()]
-
-        except Exception as h5_err:
-            # kvikio pkl fallback
-            try:
-                meta_path = os.path.join(file_path, "metadata.pkl")
-                with open(meta_path, "rb") as mf:
-                    metadata = pickle.load(mf)
-
-                data_dir = os.path.join(file_path, "data")
-                if os.path.exists(data_dir):
-                    n_samples = len(
-                        [
-                            k
-                            for k in os.listdir(data_dir)
-                            if k.startswith("timestep_") and k.endswith(".bin")
-                        ]
-                    )
-                else:
-                    n_samples = len(metadata["timesteps"])
-
-                if "phi_mean" in metadata and "phi_std" in metadata:
-                    phi_mean = metadata["phi_mean"]
-                    phi_std = metadata["phi_std"]
-
-                if "flux_mean" in metadata and "flux_std" in metadata:
-                    flux_mean = metadata["flux_mean"]
-                    flux_std = metadata["flux_std"]
-
-            except Exception as pkl_err:
-                print(
-                    f"Warning: Could not process {file_path}.\n"
-                    f"H5 Error: {h5_err}\n  -> Pickle Error: {pkl_err}"
-                )
-                continue
-
-        if n_samples == 0:
-            continue
-
-        total_samples += n_samples
-
-        if phi_mean is not None and phi_std is not None:
-            phi_var = phi_std**2
-
-            # phi has shape (2, 1, 1, 1) for [real, imaginary] channels
-            # For integral loss normalization, use the magnitude (combined statistics)
-            if (
-                hasattr(phi_mean, "shape")
-                and len(phi_mean.shape) > 0
-                and phi_mean.shape[0] == 2
-            ):
-                # Compute magnitude statistics: sqrt(real^2 + imag^2)
-                # For mean: use RMS of both channels
-                phi_mean_combined = np.sqrt(np.mean(phi_mean**2))
-                # For variance: combine variances assuming independence
-                phi_var_combined = np.mean(phi_var)  # average variance across channels
-            else:
-                phi_mean_combined = (
-                    float(phi_mean) if np.isscalar(phi_mean) else float(phi_mean.item())
-                )
-                phi_var_combined = (
-                    float(phi_var) if np.isscalar(phi_var) else float(phi_var.item())
-                )
-
-            # Update running statistics (weighted by number of samples)
-            phi_stats.update_from_moments(
-                batch_mean=np.array([phi_mean_combined]),
-                batch_var=np.array([phi_var_combined]),
-                batch_min=np.array([phi_mean_combined]),  # Using mean as min/max
-                batch_max=np.array([phi_mean_combined]),
-                batch_count=float(n_samples),
-            )
-
-        if flux_mean is not None and flux_std is not None:
-            flux_var = flux_std**2
-
-            flux_mean = (
-                float(flux_mean) if np.isscalar(flux_mean) else float(flux_mean.item())
-            )
-            flux_var = (
-                float(flux_var) if np.isscalar(flux_var) else float(flux_var.item())
-            )
-
-            flux_stats.update_from_moments(
-                batch_mean=np.array([flux_mean]),
-                batch_var=np.array([flux_var]),
-                batch_min=np.array([flux_mean]),  # Using mean as min/max
-                batch_max=np.array([flux_mean]),
-                batch_count=float(n_samples),
-            )
-
-    # Extract final aggregated statistics
-    aggregated_stats = {}
-    if phi_stats.count > 0:
-        aggregated_stats["phi_mean"] = float(phi_stats.mean.item())
-        aggregated_stats["phi_std"] = float(np.sqrt(phi_stats.var).item())
-
-    if flux_stats.count > 0:
-        aggregated_stats["flux_mean"] = float(flux_stats.mean.item())
-        aggregated_stats["flux_std"] = float(np.sqrt(flux_stats.var).item())
-
-    # print(f"Aggregated statistics from {len(file_paths)} files, {total_samples} total samples")
-
-    return aggregated_stats
 
 
 def zeropower_via_newtonschulz5(G, steps: int):

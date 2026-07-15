@@ -4,6 +4,7 @@ from einops import rearrange
 
 import os
 import io
+import tempfile
 import pywt
 import zfpy
 from sklearn.decomposition import PCA
@@ -77,7 +78,10 @@ def pca_recon(df: torch.Tensor, n_components: int = 2, level: int = 1):
         }
         compressed.append(compressed_version)
         compressed_size += (
-            transformed.nbytes + pca.mean_.nbytes + pca.explained_variance_.nbytes
+            transformed.nbytes
+            + pca.mean_.nbytes
+            + pca.explained_variance_.nbytes
+            + pca.components_.nbytes
         )
 
     pca_df = np.stack(pca_results, axis=0)
@@ -115,6 +119,33 @@ def pca_recon(df: torch.Tensor, n_components: int = 2, level: int = 1):
     # compression_ratio = df.nbytes / compressed_size
     # print(f"PCA compression ratio: {compression_ratio:.2f}x")
     return torch.from_numpy(pca_df), compressed, compressed_size
+
+
+def sz3_recon(df: torch.Tensor, error_bound: float = 2500.0):
+    try:
+        from pysz import sz, szConfig, szErrorBoundMode
+    except ImportError as e:
+        raise ImportError(
+            "sz3_recon requires the SZ3 python binding `pysz`. "
+            "Install it with `pip install pysz` (see https://pypi.org/project/pysz/)."
+        ) from e
+
+    vp, s = df.shape[1], df.shape[3]
+    df = rearrange(df, "c vp vm s x y -> c (vp vm) (s y) x").cpu().numpy()
+    df = np.ascontiguousarray(df, dtype=np.float32)
+
+    config = szConfig()
+    config.errorBoundMode = szErrorBoundMode.ABS
+    config.absErrorBound = error_bound
+
+    compressed, _ = sz.compress(df, config)
+    sz_df, _ = sz.decompress(compressed, np.float32, df.shape)
+    sz_df = rearrange(sz_df, "c (vp vm) (s y) x -> c vp vm s x y", vp=vp, s=s)
+
+    compressed_size = compressed.nbytes
+    # compression_ratio = df.nbytes / compressed_size
+    # print(f"SZ3 compression ratio: {compression_ratio:.2f}x")
+    return torch.from_numpy(sz_df), compressed, compressed_size
 
 
 def quantization_recon(df: torch.Tensor, num_bits: int = 8):
@@ -167,24 +198,23 @@ def jpeg2000_recon(df: torch.Tensor, quality: float = 0.2):
 
         img_uint16 = (norm_slice * 65535).astype(np.uint16)
 
-        # NOTE: does not work with tempfile or io buffer for some reason
-        try:
-            os.remove("/tmp/df.jp2")
-        except OSError:
-            pass
-        glymur.Jp2k("/tmp/df.jp2", data=img_uint16, cratios=[100.0 / quality])
+        # unique path per call: a fixed name races across parallel eval workers and
+        # yields a half-written stream (InvalidJp2kError). glymur needs a real filename
+        # (not io/tempfile buffer), so we mint a unique one and remove it after.
+        fd, tmp = tempfile.mkstemp(suffix=".jp2")
+        os.close(fd)
+        os.remove(tmp)  # glymur writes the file fresh
+        glymur.Jp2k(tmp, data=img_uint16, cratios=[100.0 / quality])
         compressed_data.append({"bytes": None, "min": mn, "max": mx})
-        compressed_size += os.path.getsize("/tmp/df.jp2")
-        jp2 = glymur.Jp2k("/tmp/df.jp2")
+        compressed_size += os.path.getsize(tmp)
+        jp2 = glymur.Jp2k(tmp)
         recon_uint16 = jp2[:]
         recon_norm = recon_uint16.astype(np.float32) / 65535.0
         recon_flat[ch] = recon_norm * (mx - mn) + mn
         try:
-            os.remove("/tmp/df.jp2")
+            os.remove(tmp)
         except OSError:
             pass
 
-    recon_np = rearrange(
-        recon_flat, "c (vp vm s) (x y) -> c vp vm s x y", vp=vp, vm=vm, x=x
-    )
+    recon_np = rearrange(recon_flat, "c (vp vm s) (x y) -> c vp vm s x y", vp=vp, vm=vm, x=x)
     return torch.from_numpy(recon_np), compressed_data, compressed_size

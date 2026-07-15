@@ -1,0 +1,63 @@
+transition_windows: /system/user/galletti/git/neural-gyrokinetics-gitlab/transition_windows.json
+# PINC revival: train one neural field per (test trajectory, timestep) over the
+# held-out evaluation set (~1k snapshots). No grid search — uses the best NF
+# configuration from the PINC paper (MLP, dim 64, 5 layers, discrete embedding,
+# int+diag+mono physics losses). The pinc.eval package scores the checkpoints.
+#
+# Run:  python -m neugk.pinc.nf_main config=configs/pinc_revival/nf_train.yaml
+mode: default
+ckp_path: nf_ckps_transition/
+
+# data (kvikio GPU-direct backend)
+path: /local00/bioinf/galletti/preprocessed_kvikio
+backend: kvikio
+normalization: zscore
+norm_axes: [-4]          # keep per-(channel, mu) stats (decoupled mu)
+use_flux_fields: false
+
+# training schedule
+epochs: 20               # density (MSE) warmup
+lr: 7e-3                 # bumped for batch 4096 (was 5e-3 @ 2048)
+batch_size: 4096
+density_eval_every: 0    # skip the (expensive) density eval entirely
+pinc_epochs: 100
+pinc_lr: 5e-4
+pinc_lr_sched: true
+min_lr: 1e-8
+pinc_eval_every: 2       # physics-aware model selection every 2 PINC epochs
+# keep "df" so the PINC phase keeps fitting the reconstruction (avoids
+# catastrophic forgetting of df while the physics losses pull the model).
+physical_losses: ["df", "int", "diag"]
+
+# best PINC-paper neural field
+name: mlp
+dim: 64
+n_layers: 5
+skips: true
+embed_type: discrete
+act_fn: silu
+
+# 6 of 8 B300s (skip GPU 1 and 2). throttling=2 -> two NFs per GPU (each ~8.5GB,
+# the B300 has plenty of room). Override `gpus` at launch to avoid colliding with
+# a concurrent tuning job (e.g. gpus=[0,6,7] while the subagent holds 3,4,5).
+gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+throttling: 1
+
+# downsampled turbulent window; missing snapshots are skipped per trajectory
+timesteps: [90, 100, 110, 120, 130, 140, 150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260]
+
+# the 60 held-out turbulent test trajectories (disjoint from train/val)
+trajectory: [
+  iteration_0.h5, iteration_8.h5, iteration_20.h5, iteration_36.h5, iteration_41.h5,
+  iteration_48.h5, iteration_55.h5, iteration_65.h5, iteration_73.h5, iteration_79.h5,
+  iteration_85.h5, iteration_94.h5, iteration_100.h5, iteration_104.h5, iteration_108.h5,
+  iteration_113.h5, iteration_117.h5, iteration_121.h5, iteration_125.h5, iteration_130.h5,
+  iteration_134.h5, iteration_138.h5, iteration_142.h5, iteration_146.h5, iteration_151.h5,
+  iteration_155.h5, iteration_159.h5, iteration_163.h5, iteration_168.h5, iteration_172.h5,
+  iteration_176.h5, iteration_180.h5, iteration_185.h5, iteration_189.h5, iteration_193.h5,
+  iteration_197.h5, iteration_202.h5, iteration_206.h5, iteration_210.h5, iteration_214.h5,
+  iteration_218.h5, iteration_223.h5, iteration_227.h5, iteration_231.h5, iteration_235.h5,
+  iteration_240.h5, iteration_244.h5, iteration_248.h5, iteration_252.h5, iteration_257.h5,
+  iteration_261.h5, iteration_265.h5, iteration_269.h5, iteration_274.h5, iteration_278.h5,
+  iteration_282.h5, iteration_286.h5, iteration_291.h5, iteration_295.h5, iteration_299.h5,
+]

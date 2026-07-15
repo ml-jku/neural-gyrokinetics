@@ -1,0 +1,32 @@
+# @package _global_
+# PINC revival: basic generalizing autoencoder (continuous latent).
+# Run:  python main.py experiment=pinc_revival/ae
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/ae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_ae
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+# paper AE training schedule (see configs/training/default.yaml for the rest)
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity

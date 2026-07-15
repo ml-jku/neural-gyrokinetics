@@ -1,0 +1,80 @@
+# @package _global_
+# PINC revival: generalizing AE, TWO-STAGE physics losses -- STAGE 2 (PEFT finetune).
+#
+# physics_mode=two_stage stage 2: load the df-pretrained AE checkpoint, attach
+# LoRA/EVA adapters (peft block below), freeze the base weights, and fine-tune ONLY
+# the adapters against the PINC physics losses (flux/phi integral + spectral).
+# main.py merges the AE architecture from the checkpoint's config.yaml, keeping the
+# peft / loss_weights / loss_scheduler defined here.
+#
+# Run:
+#   python main.py experiment=pinc_revival/ae_two_stage_peft \
+#       ae_checkpoint=/path/to/stage1_run   # dir or best.pth
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/ae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_ae_two_stage_peft
+workflow: pinc_peft
+stage: peft
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+ae_checkpoint: ???   # REQUIRED: stage-1 pretrain run (dir or best.pth)
+
+model:
+  peft:
+    method: "lora"   # "lora" or "eva"
+    lora:
+      r: 64
+      lora_alpha: 1
+      lora_dropout: 0.0
+      bias: "none"
+      strategy: "attention_mlp"
+    eva:
+      r: 64
+      lora_alpha: 1
+      lora_dropout: 0.0
+      bias: "none"
+      strategy: "attention_mlp"
+      rho: 2.0
+      tau: 0.99
+      use_label_mask: true
+      whiten: false
+      adjust_scaling_factors: true
+    save:
+      save_lora_only: true
+      save_full_model: false
+  # physics losses the adapters are fine-tuned against
+  loss_weights:
+    df: 1.0
+  extra_loss_weights:
+    phi_int: 1.0
+    flux_int: 1.0
+    qspec: 1.0
+    kyspec: 1.0
+  loss_scheduler: {}
+
+training:
+  physics_mode: two_stage
+  n_epochs: 100
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: relative_l1
+  spectral_loss_type: relative_l1
+  eval_loss_type: mse
+  eval_integral_loss_type: mse
+  eval_spectral_loss_type: l1
+
+amp:
+  enable: false   # integrals/FFT in the physics losses need full precision
+
+dataset:
+  input_fields: ["df", "phi", "flux"]
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity

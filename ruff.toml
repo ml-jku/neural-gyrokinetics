@@ -1,0 +1,10 @@
+# Project lint config. Relaxed for scientific/torch code.
+line-length = 100
+
+[lint]
+ignore = [
+    "E731",  # assign a lambda (e.g. `amp = lambda: ...`) — fine for tiny helpers
+    "E741",  # ambiguous names (l, I, O) — common as physics indices
+    "E402",  # module import not at top — scripts/notebooks do sys.path first
+    "E501",  # line too long — handled by the formatter, not worth failing on
+]

@@ -1,0 +1,81 @@
+# @package _global_
+# PINC revival: generalizing AE, SCHEDULED physics losses (single stage, no finetune).
+#
+# physics_mode=scheduled: one stage=autoencoder run. The df reconstruction loss is
+# active from the start; the PINC physics losses (flux/phi integral + spectral) are
+# held at weight 0 until start_fraction of training, then linearly ramped to their
+# target weight by end_fraction. This is driven by the loss_scheduler block below,
+# which the runner turns into per-step weight functions (get_linear_burn_in_fn).
+#
+# Run:  python main.py experiment=pinc_revival/ae_scheduled
+defaults:
+    - override /dataset: pinc
+    - override /model: pinc/ae
+    - override /logging: wandb
+    - override /validation: default
+
+experiment_id: pinc_revival_ae_scheduled
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+model:
+    # physics terms must be present in the weight dict for the scheduler to drive them
+    loss_weights:
+        df: 1.0
+    extra_loss_weights:
+        phi_int: 1.0
+        flux_int: 1.0
+        qspec: 1.0
+        kyspec: 1.0
+    # keep physics at 0 for the first 50% of training, ramp to full by 70%
+    loss_scheduler:
+        phi_int:
+            type: linear
+            start: 0.0
+            end: 1.0
+            start_fraction: 0.5
+            end_fraction: 0.7
+        flux_int:
+            type: linear
+            start: 0.0
+            end: 1.0
+            start_fraction: 0.5
+            end_fraction: 0.7
+        qspec:
+            type: linear
+            start: 0.0
+            end: 1.0
+            start_fraction: 0.7
+            end_fraction: 0.9
+        kyspec:
+            type: linear
+            start: 0.0
+            end: 1.0
+            start_fraction: 0.7
+            end_fraction: 0.9
+
+training:
+    physics_mode: scheduled
+    n_epochs: 400
+    batch_size: 16
+    learning_rate: 3e-4
+    integral_loss_type: relative_l1
+    spectral_loss_type: relative_l1
+    eval_loss_type: mse
+    eval_integral_loss_type: mse
+    eval_spectral_loss_type: l1
+
+amp:
+    enable: false # integrals/FFT in the physics losses need full precision
+
+# physics integrals require phi + flux targets from the dataset
+dataset:
+    input_fields: ["df", "phi", "flux"]
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity

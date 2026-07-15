@@ -10,7 +10,8 @@ defaults:
 
 # Experiment settings
 experiment_id: test_pincae
-workflow: pinc_autoencoder
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
 seed: 0
 
 logging:

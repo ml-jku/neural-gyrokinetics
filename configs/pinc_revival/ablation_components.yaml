@@ -1,0 +1,76 @@
+# PINC component-contribution ablation (paper table).
+# Grid sweep over `physical_losses`: density-only and data-only baselines, the
+# full PINC objective, and leave-one-out (drop int / diag / mono) to attribute
+# each physics term. `df` stays in every PINC variant as the reconstruction
+# anchor (dropping it causes catastrophic forgetting). Ranked by training-eval
+# metrics -> grid_search_mlp_pinc.csv (df/phi psnr, flux loss per combo).
+#
+# Run:  python -m neugk.pinc.nf_main config=configs/pinc_revival/ablation_components.yaml
+# (override `gpus` to whatever is free, e.g. gpus=[0,6,7])
+mode: grid
+ckp_path: nf_ckps_ablation/
+# warm-start each (traj, timestep) from the pretrained density-only base NF (best_mlp_*),
+# skipping the density phase. base NFs cover all 60 trajs x timesteps 90..260 at x1167.
+pinc_init_from: /system/user/galletti/git/neural-gyrokinetics-gitlab/nf_ckps_revival
+
+path: /local00/bioinf/galletti/preprocessed_kvikio
+backend: gds
+normalization: zscore
+norm_axes: [-4]
+use_flux_fields: false
+
+epochs: 20
+lr: 7e-3
+batch_size: 4096
+density_eval_every: 0
+pinc_epochs: 100
+pinc_lr: 5e-4
+pinc_lr_sched: true
+min_lr: 1e-8
+pinc_eval_every: 2
+
+# best PINC-paper neural field
+name: mlp
+dim: 64
+n_layers: 5
+skips: true
+embed_type: discrete
+act_fn: silu
+
+gpus: [0, 3, 4, 5, 6, 7]
+throttling: 2
+
+# ~20% coverage for a fair ablation: all 60 test trajectories, 4 snapshots each
+# (timesteps spread across the turbulent regime). Staged on gorilla under the same path.
+timesteps: [110, 160, 210, 260]
+trajectory: [
+  iteration_0.h5, iteration_8.h5, iteration_20.h5, iteration_36.h5, iteration_41.h5,
+  iteration_48.h5, iteration_55.h5, iteration_65.h5, iteration_73.h5, iteration_79.h5,
+  iteration_85.h5, iteration_94.h5, iteration_100.h5, iteration_104.h5, iteration_108.h5,
+  iteration_113.h5, iteration_117.h5, iteration_121.h5, iteration_125.h5, iteration_130.h5,
+  iteration_134.h5, iteration_138.h5, iteration_142.h5, iteration_146.h5, iteration_151.h5,
+  iteration_155.h5, iteration_159.h5, iteration_163.h5, iteration_168.h5, iteration_172.h5,
+  iteration_176.h5, iteration_180.h5, iteration_185.h5, iteration_189.h5, iteration_193.h5,
+  iteration_197.h5, iteration_202.h5, iteration_206.h5, iteration_210.h5, iteration_214.h5,
+  iteration_218.h5, iteration_223.h5, iteration_227.h5, iteration_231.h5, iteration_235.h5,
+  iteration_240.h5, iteration_244.h5, iteration_248.h5, iteration_252.h5, iteration_257.h5,
+  iteration_261.h5, iteration_265.h5, iteration_269.h5, iteration_274.h5, iteration_278.h5,
+  iteration_282.h5, iteration_286.h5, iteration_291.h5, iteration_295.h5, iteration_299.h5,
+]
+
+# grid axis: each inner list is one ablation row (a ListConfig of lists -> swept).
+# full power set of the physics terms {int, diag, mono} on top of the df anchor, so the
+# table shows every reasonable combination and isolates what each term does. df stays in
+# every row (dropping it causes catastrophic forgetting). All rows measured the SAME way
+# (warm-start from base NF + grid eval), so they are directly comparable.
+# density-only ([], no PINC phase) is the separate pre-PINC baseline = base NFs -> metrics_NF.json.
+physical_losses: [
+  [df],
+  [df, int],
+  [df, diag],
+  [df, mono],
+  [df, int, diag],
+  [df, int, mono],
+  [df, diag, mono],
+  [df, int, diag, mono],
+]

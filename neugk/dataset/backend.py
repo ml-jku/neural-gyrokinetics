@@ -12,7 +12,110 @@ import numpy as np
 import torch
 
 
-def read_cupy_bin(file: str, shape: tuple, rank: int = 0, use_kvikio: bool = True):
+_BF16_SUFFIX = ".bf16.bin"
+
+
+def _flatten_meta(meta):
+    flat = {}
+    for k, v in meta.items():
+        if k == "geometry" and isinstance(v, dict):
+            for gk, gv in v.items():
+                flat[f"geometry/{gk}"] = np.asarray(gv)
+        else:
+            flat[k] = np.asarray(v)
+    return flat
+
+
+def _unflatten_meta(z):
+    meta, geom = {}, {}
+    for k in z.files:
+        v = z[k]
+        if k.startswith("geometry/"):
+            geom[k[len("geometry/"):]] = v
+        elif k == "resolution":
+            meta["resolution"] = tuple(int(x) for x in np.atleast_1d(v))
+        else:
+            meta[k] = v
+    if geom:
+        meta["geometry"] = geom
+    return meta
+
+
+def _meta_ext(base):
+    if os.path.exists(base + ".npz"):
+        return ".npz"
+    if os.path.exists(base + ".pkl"):
+        return ".pkl"
+    return None
+
+
+def load_meta(base):
+    ext = _meta_ext(base)
+    if ext == ".npz":
+        with np.load(base + ".npz", allow_pickle=False) as z:
+            return _unflatten_meta(z)
+    if ext == ".pkl":
+        with open(base + ".pkl", "rb") as f:
+            return pickle.load(f)
+    return None
+
+
+def save_meta(base, meta, ext):
+    if ext == ".npz":
+        np.savez(base + ".npz", **_flatten_meta(meta))
+    else:
+        with open(base + ".pkl", "wb") as f:
+            pickle.dump(meta, f)
+
+
+def _bf16_sibling(fp32_path: str) -> str:
+    """``foo.bin`` -> ``foo.bf16.bin`` (the side-by-side quantized shard)."""
+    if fp32_path.endswith(".bin"):
+        return fp32_path[:-4] + _BF16_SUFFIX
+    return fp32_path + _BF16_SUFFIX
+
+
+def _resolve_dtyped_path(fp32_path: str, prefer_dtype):
+    """Pick path to read, falling back to fp32 silently; prefer_dtype in ("bf16", None, "fp32"); returns (path, mode)."""
+    if prefer_dtype == "bf16":
+        cand = _bf16_sibling(fp32_path)
+        if os.path.exists(cand):
+            return cand, "bf16"
+    return fp32_path, "fp32"
+
+
+def read_cupy_bin(
+    file: str,
+    shape: tuple,
+    rank: int = 0,
+    use_kvikio: bool = True,
+    prefer_dtype=None,
+):
+    """Read flat .bin into tensor; prefer_dtype="bf16" reads .bf16.bin sibling (no upcast to f32; speedup preserved); else fallback to fp32 silently."""
+    path, mode = _resolve_dtyped_path(file, prefer_dtype)
+
+    if mode == "bf16":
+        n_elements = int(np.prod(shape))
+        if use_kvikio:
+            import cupy as cp
+            import kvikio
+
+            # read u16, bitcast to bf16 via dlpack (cupy has no native bf16) and zero-copy bitcast u16 -> bf16
+            with cp.cuda.Device(rank):
+                gpu_u16 = cp.empty(n_elements, dtype=cp.uint16)
+                with kvikio.CuFile(path, "r") as f:
+                    f.read(gpu_u16)
+            t = torch.from_dlpack(gpu_u16.reshape(shape))
+            return t.view(torch.bfloat16)
+        else:
+            from ml_dtypes import bfloat16
+
+            # ml_dtypes.bf16 -> torch.bf16 via u16 bitcast
+            cpu_bf16 = np.fromfile(path, dtype=bfloat16)
+            t = torch.from_numpy(cpu_bf16.view(np.uint16).reshape(shape))
+            return t.view(torch.bfloat16)
+
+    # fp32: when bf16 requested but sibling absent, downcast to bf16 for uniform batch dtype; eval uses prefer_dtype=None for full precision
     if use_kvikio:
         import cupy as cp
         import kvikio
@@ -20,13 +123,16 @@ def read_cupy_bin(file: str, shape: tuple, rank: int = 0, use_kvikio: bool = Tru
         n_elements = np.prod(shape)
         with cp.cuda.Device(rank):
             gpu_array = cp.empty(n_elements, dtype=cp.float32)
-            with kvikio.CuFile(file, "r") as f:
+            with kvikio.CuFile(path, "r") as f:
                 f.read(gpu_array)
-        return torch.from_dlpack(gpu_array.reshape(shape))
-
+        out = torch.from_dlpack(gpu_array.reshape(shape))
     else:
-        cpu_array = np.fromfile(file, dtype=np.float32)
-        return torch.from_numpy(cpu_array.reshape(shape))
+        cpu_array = np.fromfile(path, dtype=np.float32)
+        out = torch.from_numpy(cpu_array.reshape(shape))
+
+    if prefer_dtype == "bf16":
+        out = out.to(torch.bfloat16)
+    return out
 
 
 class DataBackend(ABC):
@@ -126,7 +232,7 @@ class H5Backend(DataBackend):
         meta = {}
         with h5py.File(path, "r", swmr=True) as f:
             meta["timesteps"] = f["metadata/timesteps"][:]
-            meta["fluxes"] = f["metadata/fluxes"][:]
+            meta["flux"] = f["metadata/flux"][:]
             meta["ion_temp_grad"] = f["metadata/ion_temp_grad"][:]
             meta["density_grad"] = f["metadata/density_grad"][:]
             meta["s_hat"] = f["metadata/s_hat"][:]
@@ -213,10 +319,20 @@ class H5Backend(DataBackend):
 
 
 class KvikIOBackend(DataBackend):
-    def __init__(self, rank: int = 0, use_kvikio: bool = True):
+    def __init__(
+        self,
+        rank: int = 0,
+        use_kvikio: bool = True,
+        prefer_dtype=None,
+        load_bf16: bool = False,
+    ):
         super().__init__(rank)
 
         self.use_kvikio = use_kvikio
+        # back-compat: load_bf16=True -> prefer_dtype="bf16"; None/"fp32" read fp32; "bf16" prefer .bf16.bin sibling, fallback to fp32 silently if absent
+        if load_bf16 and not prefer_dtype:
+            prefer_dtype = "bf16"
+        self.prefer_dtype = prefer_dtype or "fp32"
 
     def _strip_h5(self, path: str) -> str:
         return path.removesuffix("/").removesuffix(".h5")
@@ -227,7 +343,9 @@ class KvikIOBackend(DataBackend):
 
     def exists(self, path: str) -> bool:
         path = self._strip_h5(path)
-        return os.path.exists(os.path.join(path, "metadata.pkl"))
+        # a trajectory is present if it has full or lightweight metadata, in either npz or pkl
+        return any(_meta_ext(os.path.join(path, n)) is not None
+                   for n in ("metadata", "metadata_light"))
 
     def format_path(
         self,
@@ -248,17 +366,44 @@ class KvikIOBackend(DataBackend):
         return path
 
     def read_metadata(
-        self, path: str, input_fields: Sequence[str] = ["df"]
+        self,
+        path: str,
+        input_fields: Sequence[str] = ["df"],
+        lightweight: bool = False,
     ) -> Dict[str, Any]:
-        _ = input_fields
         path = self._strip_h5(path)
-        with open(os.path.join(path, "metadata.pkl"), "rb") as mf:
-            meta = pickle.load(mf)
-            if "geometry" in meta:
-                for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
-                    if k not in meta["geometry"]:
-                        meta["geometry"][k] = np.array(1.0, dtype=np.float64)
-            return meta
+
+        # metadata is stored as npz (safe, no pickle) or pkl; prefer npz, and fall back to the
+        # lightweight file when the full one is absent (published datasets ship only the light one)
+        light_base = os.path.join(path, "metadata_light")
+        full_base = os.path.join(path, "metadata")
+
+        if (lightweight or _meta_ext(full_base) is None) and _meta_ext(light_base) is not None:
+            meta = load_meta(light_base)
+        else:
+            meta = load_meta(full_base)
+            if lightweight:
+                drop_keys = {
+                    "df_min",
+                    "df_max",
+                    "df_var",
+                    "df_mean",
+                    "df_std",
+                    "phi_min",
+                    "phi_max",
+                    "phi_var",
+                }
+                meta = {k: v for k, v in meta.items() if k not in drop_keys}
+                try:
+                    save_meta(light_base, meta, _meta_ext(full_base))
+                except OSError:
+                    pass
+
+        if "geometry" in meta:
+            for k in ["adiabatic", "de", "beta", "nlapar", "nlbpar"]:
+                if k not in meta["geometry"]:
+                    meta["geometry"][k] = np.array(1.0, dtype=np.float64)
+        return meta
 
     @contextlib.contextmanager
     def open(self, path: str):
@@ -277,7 +422,9 @@ class KvikIOBackend(DataBackend):
         active_keys: Optional[Sequence[str]] = None,
     ):
         filepath = os.path.join(f_dir, "data", f"timestep_{timestamp}.bin")
-        k = read_cupy_bin(filepath, shape, self.rank, self.use_kvikio)
+        k = read_cupy_bin(
+            filepath, shape, self.rank, self.use_kvikio, self.prefer_dtype
+        )
 
         if all(active_keys == np.array([0, 1])):
             return k
@@ -285,7 +432,9 @@ class KvikIOBackend(DataBackend):
 
     def read_phi(self, f_dir: str, timestamp: str, shape: Sequence[int]):
         filepath = os.path.join(f_dir, "data", f"poten_{timestamp}.bin")
-        return read_cupy_bin(filepath, shape, self.rank, self.use_kvikio)
+        return read_cupy_bin(
+            filepath, shape, self.rank, self.use_kvikio, self.prefer_dtype
+        )
 
     def write_df(self, f_dir: str, timestamp: str, df: np.ndarray):
         data_dir = os.path.join(f_dir, "data")

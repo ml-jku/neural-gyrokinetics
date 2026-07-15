@@ -1,0 +1,91 @@
+# @package _global_
+# PINC revival ablation: 1000x AE, SCHEDULED physics (single stage, no fine-tune); all physics losses are RELATIVE L1 (O(1) regardless of raw scale), uniform weight 1.0, scheduler ramps each from 0 to 1 over same window
+# Run: python main.py --config-dir configs/pinc_revival experiment=ae_1000x_scheduled
+defaults:
+    - override /dataset: pinc
+    - override /model: pinc/ae
+    - override /logging: wandb
+    - override /validation: default
+
+experiment_id: pinc_revival_ae_1000x_scheduled
+workflow: pinc # get_data dispatches on full workflow == "pinc"; stage distinguishes
+stage: autoencoder
+logging:
+    project: pinc_revival
+    entity: null # use the authed wandb account's default entity
+seed: 0
+mode: train
+eval: true
+device: cuda
+validation:
+    model_selection_metric: phi_int # select best.pth on potential fidelity (stable physics metric, not the volatile spectra)
+load_ckpt: false
+output_path: /system/user/publicwork/galletti/pinc_revival # checkpoints land here (home is only 50GB)
+
+model:
+    # 1000x architecture: matches ae_1000x.yaml (~1005x measured)
+    patch:
+        patch_size: [4, 0, 4, 5, 4]
+    vit:
+        num_heads: [16]
+        depth: [8]
+    bottleneck:
+        dim: 154
+    # uniform weights: relative L1 makes all terms commensurate
+    loss_weights:
+        df: 1.0
+    extra_loss_weights:
+        phi_int: 1.0
+        flux_int: 1.0
+        qspec: 1.0
+        kyspec: 1.0
+    # staged introduction: train df-only first, ramp integral losses (phi/flux, stable) over 50-80%, spectral losses (kyspec/qspec, risky) over 70-90%
+    loss_scheduler:
+        phi_int:
+            {
+                type: linear,
+                start: 0.0,
+                end: 1.0,
+                start_fraction: 0.5,
+                end_fraction: 0.8,
+            }
+        flux_int:
+            {
+                type: linear,
+                start: 0.0,
+                end: 1.0,
+                start_fraction: 0.5,
+                end_fraction: 0.8,
+            }
+        qspec:
+            {
+                type: linear,
+                start: 0.0,
+                end: 1.0,
+                start_fraction: 0.7,
+                end_fraction: 0.9,
+            }
+        kyspec:
+            {
+                type: linear,
+                start: 0.0,
+                end: 1.0,
+                start_fraction: 0.7,
+                end_fraction: 0.9,
+            }
+
+training:
+    physics_mode: scheduled
+    n_epochs: 400
+    batch_size: 16
+    learning_rate: 3e-4
+    integral_loss_type: relative_l1
+    spectral_loss_type: log_std_l1 # per-mode log1p-std normalized (served stats)
+    eval_loss_type: mse
+
+amp:
+    enable: true   # bf16 training data needs autocast; physics integrals self-guard to f32/f64 internally
+    bfloat: true
+
+dataset:
+    input_fields: ["df", "phi", "flux"]

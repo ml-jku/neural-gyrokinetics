@@ -85,6 +85,7 @@ def get_model(cfg, dataset):
             from neugk.gyroswin.models.gyroswin import GyroSwin
         from neugk.models.layers import ContinuousConditionEmbed
 
+        norm_layer = getattr(torch.nn, getattr(cfg.model.swin, "norm_fn", "LayerNorm"))
         df_patch_size = cfg.model.swin.patch_size
         phi_patch_size = cfg.model.swin.phi_patch_size
         df_window_size = cfg.model.swin.window_size
@@ -109,7 +110,7 @@ def get_model(cfg, dataset):
             if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
         ]
         assert (
-            len([k for k in outputs if k.startswith("flux")]) == 1
+            len([k for k in outputs if k.startswith("flux")]) <= 1
         ), "Cannot have multiple flux targets!"
         swin_bottleneck = cfg.model.swin.swin_bottleneck
         use_rpb = cfg.model.swin.use_rpb
@@ -118,16 +119,23 @@ def get_model(cfg, dataset):
         flux_reduce = cfg.model.swin.flux_reduce
         flux_num_heads = cfg.model.swin.flux_num_heads
         flux_depth = cfg.model.swin.flux_depth
+        qk_norm = getattr(cfg.model.swin, "qk_norm", False)
+        cosine_attn = getattr(cfg.model.swin, "cosine_attn", False)
+        gated_attention = getattr(cfg.model.swin, "gated_attention", False)
+        detach_phi_cross_latents = getattr(
+            cfg.model.swin, "detach_phi_cross_latents", False
+        )
 
         cond_fn = None
         conditioning = cfg.model.conditioning
         n_cond = len(conditioning)
         if n_cond > 0:
             cond_fn = ContinuousConditionEmbed(128, n_cond)
-            if cfg.model.swin.flux_conditioning:
-                flux_cond_fn = ContinuousConditionEmbed(128, n_cond)
-            else:
-                flux_cond_fn = None
+        flux_n_cond = (
+            n_cond
+            if (n_cond > 0 and getattr(cfg.model.swin, "flux_conditioning", False))
+            else 0
+        )
 
         if cfg.model.bundle_seq_length > 1:
             raise NotImplementedError
@@ -164,11 +172,17 @@ def get_model(cfg, dataset):
             latent_cross_attn=latent_cross_attn,
             separate_zf=separate_zf,
             detach_flux_latents=cfg.model.swin.detach_flux_latents,
+            detach_phi_cross_latents=detach_phi_cross_latents,
             real_potens=cfg.dataset.real_potens,
             flux_reduce=flux_reduce,
             flux_num_heads=flux_num_heads,
             flux_depth=flux_depth,
-            flux_cond_embed=flux_cond_fn,
+            flux_n_cond=flux_n_cond,
+            flux_cond_embed_dim=128,
+            norm_layer=norm_layer,
+            qk_norm=qk_norm,
+            cosine_attn=cosine_attn,
+            gated_attention=gated_attention,
         )
 
     if "fno" in cfg.model.name:

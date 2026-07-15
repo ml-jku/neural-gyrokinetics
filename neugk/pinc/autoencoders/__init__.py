@@ -62,20 +62,27 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         num_layers = len(depth)
         assert num_layers == len(num_heads)
 
-        cond_fn = None
         conditioning = getattr(ae_cfg, "conditioning", [])
-        n_cond = len(conditioning)
-        if n_cond > 0:
-            cond_fn = ContinuousConditionEmbed(32, n_cond)
+        enc_conditioning = getattr(ae_cfg, "encoder_conditioning", conditioning)
+        dec_conditioning = getattr(ae_cfg, "decoder_conditioning", conditioning)
+
+        enc_cond_fn = None
+        if len(enc_conditioning) > 0:
+            enc_cond_fn = ContinuousConditionEmbed(32, len(enc_conditioning))
+
+        dec_cond_fn = None
+        if len(dec_conditioning) > 0:
+            dec_cond_fn = ContinuousConditionEmbed(32, len(dec_conditioning))
 
         # VAE/VQ-VAE configs
         model_kwargs = {}
         if model_type == "vae":
             model_kwargs["beta_vae"] = getattr(ae_cfg, "beta_vae", 1.0)
+            model_kwargs["logvar_clamp"] = getattr(ae_cfg, "logvar_clamp", None)
         elif model_type == "vqvae":
-            vq_config = {}
             if hasattr(ae_cfg, "vq"):
                 vq_config = {
+                    "quantizer": getattr(ae_cfg.vq, "quantizer", "vq"),
                     "codebook_size": getattr(ae_cfg.vq, "codebook_size", 8192),
                     "embedding_dim": getattr(ae_cfg.vq, "embedding_dim", 256),
                     "commitment_weight": getattr(ae_cfg.vq, "commitment_weight", 0.25),
@@ -84,9 +91,19 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
                     "threshold_ema_dead_code": getattr(
                         ae_cfg.vq, "threshold_ema_dead_code", 2
                     ),
+                    # FSQ
+                    "levels": list(getattr(ae_cfg.vq, "levels", [8, 8, 8, 5, 5, 5])),
+                    # LFQ
+                    "entropy_loss_weight": getattr(
+                        ae_cfg.vq, "entropy_loss_weight", 0.1
+                    ),
+                    "diversity_gamma": getattr(ae_cfg.vq, "diversity_gamma", 1.0),
+                    # RVQ
+                    "num_quantizers": getattr(ae_cfg.vq, "num_quantizers", 4),
                 }
             else:
                 vq_config = {
+                    "quantizer": "vq",
                     "codebook_size": 8192,
                     "embedding_dim": 256,
                     "commitment_weight": 0.25,
@@ -98,6 +115,10 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
         elif model_type == "simsiam":
             model_kwargs["use_simae_decoder"] = ae_cfg.bottleneck.use_simae_decoder
             model_kwargs["vit_predictor"] = ae_cfg.bottleneck.vit_predictor
+
+        # flux head config
+        if hasattr(ae_cfg, "flux_head") and getattr(ae_cfg.flux_head, "enable", False):
+            model_kwargs["flux_head_config"] = ae_cfg.flux_head
 
         ae = AE(
             dim=latent_dim,
@@ -122,9 +143,13 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
             unmerging_depth=unmerging_depth,
             merging_hidden_ratio=patching_hidden_ratio,
             unmerging_hidden_ratio=unmerging_hidden_ratio,
-            cond_embed=cond_fn,
+            enc_cond_embed=enc_cond_fn,
+            dec_cond_embed=dec_cond_fn,
+            encoder_conditioning=enc_conditioning,
+            decoder_conditioning=dec_conditioning,
             init_weights=ae_cfg.init_weights,
             patching_init_weights=ae_cfg.patching_init_weights,
+            cond_init_weights=ae_cfg.cond_init_weights,
             act_fn=act_fn,
             use_rpb=use_rpb,
             use_rope=use_rope,
@@ -146,9 +171,19 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
 
     if rank == 0 or rank is None:
         params_m = sum(p.numel() for p in ae.parameters()) / 1e6
-        print(f"AE parameters: {params_m:.1f}M")
+        if model_type == "vae":
+            print(f"VAE parameters: {params_m:.1f}M")
+        elif model_type == "vqvae":
+            print(f"VQ-VAE parameters: {params_m:.1f}M")
+        else:
+            print(f"AE parameters: {params_m:.1f}M")
+
         if hasattr(ae, "get_compression_info"):
             c_info = ae.get_compression_info()
-            print(f"Compression: {c_info['rate']:.1f}x (type: {c_info['type']})")
+            print(
+                f"Compression: {c_info['rate']:.1f}x (type: {c_info['type']}). "
+                f"({c_info['input_channels']}, *{c_info['input_shape']}) -> "
+                f"({c_info['latent_channels']}, *{c_info['latent_shape']})"
+            )
 
     return ae

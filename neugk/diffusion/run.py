@@ -4,13 +4,16 @@ from typing import Dict
 
 import os
 from collections import defaultdict
+from functools import partial
 from time import perf_counter_ns
 
 import torch
+import numpy as np
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.cuda import reset_peak_memory_stats, max_memory_allocated
+from torch.utils.data import DataLoader
 from torch.utils._pytree import tree_map
 from diffusers import DDPMScheduler
 from torch.distributions import Normal, StudentT, Laplace
@@ -38,14 +41,50 @@ class DDPMRunner(BaseRunner):
             if not ckp_path or not os.path.exists(ckp_path):
                 raise ValueError(f"AE not found at {ckp_path} (latent diffusion).")
             self.autoencoder, _, _ = load_autoencoder(ckp_path, device=self.device)
+            self.autoencoder.checkpoint_path = os.path.abspath(str(ckp_path))
+
+            # dedicated loader so worker dataset copies are not initialized
+            # before precomputed latents are available
+            precompute_loader = DataLoader(
+                self.trainset,
+                batch_size=self.cfg.training.batch_size,
+                num_workers=0,
+                shuffle=False,
+                collate_fn=self.trainset.collate,
+                pin_memory=False,
+                sampler=self.trainloader.sampler if self.use_ddp else None,
+                drop_last=getattr(self.trainloader, "drop_last", False),
+            )
             self.trainset.precompute_latents(
                 self.rank,
-                dataloader=self.trainloader,
+                dataloader=precompute_loader,
                 autoencoder=self.autoencoder,
                 device=self.device,
             )
             # compute scale
-            self.latent_scale = 1.0 / (self.trainset.latent_stats.var**0.5).item()
+            latent_var = np.asarray(self.trainset.latent_stats.var, dtype=np.float64)
+            scaling_mode = getattr(self.trainset, "latent_scaling_mode", "global")
+            if scaling_mode == "global":
+                latent_std = float(np.sqrt(np.maximum(np.mean(latent_var), 1e-12)))
+                self.latent_scale = 1.0 / latent_std
+                if self.rank == 0:
+                    print(
+                        f"latent stats -> mean(var): {float(np.mean(latent_var)):.6e}, "
+                        f"latent_scale [global]: {self.latent_scale:.6f}"
+                    )
+            else:
+                # per-sample stats shape (e.g. (C,1,...) or (C,*spatial)); add batch dim
+                latent_std = np.sqrt(np.maximum(latent_var, 1e-12)).astype(np.float32)
+                scale = (1.0 / latent_std).astype(np.float32)
+                self.latent_scale = torch.from_numpy(scale).unsqueeze(0).to(self.device)
+                if self.rank == 0:
+                    s = self.latent_scale
+                    print(
+                        f"latent stats -> mean(var): {float(np.mean(latent_var)):.6e}, "
+                        f"latent_scale [{scaling_mode}]: shape={tuple(s.shape)}, "
+                        f"mean={s.mean().item():.6f}, "
+                        f"min={s.min().item():.6f}, max={s.max().item():.6f}"
+                    )
         else:
             # pixel-space
             self.autoencoder = DummyAE()
@@ -74,6 +113,7 @@ class DDPMRunner(BaseRunner):
             prediction_type=diff_cfg.get("prediction_type", "epsilon"),
         )
 
+        self.latent_shape = self.model.latent_shape  # cache before DDP wraps the module
         if self.use_ddp:
             self.model = DDP(self.model, device_ids=[self.rank])
 
@@ -145,7 +185,11 @@ class DDPMRunner(BaseRunner):
         timesteps = torch.randint(0, n_timesteps, (bs,), device=self.device).long()
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
         # model inference
-        model_output = self.model(noisy_latents, tstep=timesteps, condition=condition)
+        model_output = self.model(
+            noisy_latents,
+            tstep=timesteps.to(noisy_latents.dtype),
+            condition=condition,
+        )
         # compute loss
         pred_type = self.noise_scheduler.config.prediction_type
         if pred_type == "epsilon":
@@ -189,7 +233,6 @@ class DDPMRunner(BaseRunner):
             idx_data = {
                 k: getattr(sample, k).to(device=self.device) for k in self.idx_keys
             }
-            geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
 
             # apply augmentations
             if self.augmentations:
@@ -226,10 +269,7 @@ class DDPMRunner(BaseRunner):
             self.cur_update_step += 1.0
             loss_logs["loss"].append(loss.item())
 
-            # # memory management
-            # if (self.cur_update_step % 100) == 0:
-            #     del xs, condition, idx_data, geometry, loss
-            #     memory_cleanup(self.device, aggressive=True)
+            del xs, condition, idx_data, loss
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)
@@ -241,32 +281,43 @@ class DDPMRunner(BaseRunner):
 
     @torch.no_grad()
     def sample(
-        self,
-        condition: torch.Tensor,
+        self, condition: torch.Tensor, latent_only: bool = False, steps: int = None
     ):
         """Generate samples from noise via iterative denoising."""
         self.model.eval()
         bs = condition.shape[0]
         # start with noise
-        latents = torch.randn((bs, *self.model.latent_shape), device=self.device)
-        n_train_steps = self.noise_scheduler.config.num_train_timesteps
-        self.noise_scheduler.set_timesteps(n_train_steps)
+        latents = torch.randn((bs, *self.latent_shape), device=self.device)
+        n_steps = steps or self.noise_scheduler.config.num_train_timesteps
+        self.noise_scheduler.set_timesteps(n_steps)
 
         # denoise loop
         for t in self.noise_scheduler.timesteps:
             t_batch = torch.full((bs,), t, device=self.device, dtype=torch.long)
-            pred = self.model(latents, tstep=t_batch, condition=condition)
+            pred = self.model(
+                latents,
+                tstep=t_batch.to(latents.dtype),
+                condition=condition,
+            )
             step_output = self.noise_scheduler.step(pred, t, latents)
             latents = step_output.prev_sample
 
         # decode result
         latents = latents / self.latent_scale
+        if latent_only:
+            self.model.train()
+            return latents
+
         decoded = self.autoencoder.decode(latents, condition=condition)
         self.model.train()
         return decoded
 
-    def evaluate(self, epoch):
+    def evaluate(self, epoch, evaluate_probing: bool = True, no_save: bool = False):
         """Execute evaluation pipeline and log results."""
+        eval_steps = getattr(self.cfg.validation, "eval_sample_steps", None)
+        sample_fn = (
+            partial(self.sample, steps=eval_steps) if eval_steps else self.sample
+        )
         return self.evaluator(
             rank=self.rank,
             world_size=self.world_size,
@@ -276,7 +327,10 @@ class DDPMRunner(BaseRunner):
             epoch=epoch,
             device=self.device,
             loss_val_min=self.loss_val_min,
-            sample_fn=self.sample,
+            sample_fn=sample_fn,
+            trainloader=self.trainloader,
+            evaluate_probing=evaluate_probing,
+            no_save=no_save,
         )
 
 
@@ -301,7 +355,11 @@ class StudentTRunner(DDPMRunner):
         n_timesteps = self.noise_scheduler.config.num_train_timesteps
         timesteps = torch.randint(0, n_timesteps, (bs,), device=self.device).long()
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
-        model_output = self.model(noisy_latents, tstep=timesteps, condition=condition)
+        model_output = self.model(
+            noisy_latents,
+            tstep=timesteps.to(noisy_latents.dtype),
+            condition=condition,
+        )
         # compute loss
         loss = F.mse_loss(model_output, noise, reduction="none")
         loss = loss.flatten(1).mean(1)
@@ -320,23 +378,32 @@ class StudentTRunner(DDPMRunner):
         self,
         condition: torch.Tensor,
         num_inference_steps: int = 100,
+        latent_only: bool = False,
     ):
         """Generate samples using iterative denoising with heavy-tailed priors."""
         self.model.eval()
         bs = condition.shape[0]
 
-        latents = self.distr.sample((bs, *self.model.latent_shape)).to(self.device)
+        latents = self.distr.sample((bs, *self.latent_shape)).to(self.device)
 
         # denoising loop
         self.noise_scheduler.set_timesteps(num_inference_steps)
         for t in self.noise_scheduler.timesteps:
             t_batch = torch.full((bs,), t, device=self.device, dtype=torch.long)
-            pred = self.model(latents, tstep=t_batch, condition=condition)
+            pred = self.model(
+                latents,
+                tstep=t_batch.to(latents.dtype),
+                condition=condition,
+            )
             step_output = self.noise_scheduler.step(pred, t, latents)
             latents = step_output.prev_sample
 
         # finalize output
         latents = latents / getattr(self, "latent_scale", 1.0)
+        if latent_only:
+            self.model.train()
+            return latents
+
         decoded = self.autoencoder.decode(latents, condition=condition)
         self.model.train()
         return decoded
@@ -413,10 +480,7 @@ class EDMRunner(DDPMRunner):
         ) ** self.rho
         sigmas = torch.cat([sigmas, torch.zeros_like(sigmas[:1])])
         # start with noise
-        x = (
-            torch.randn((bs, *self.model.latent_shape), device=self.device)
-            * self.sigma_max
-        )
+        x = torch.randn((bs, *self.latent_shape), device=self.device) * self.sigma_max
         # iterate solver
         for i in range(len(sigmas) - 1):
             sigma_hat = sigmas[i]
@@ -496,8 +560,16 @@ class FlowMatchingRunner(DDPMRunner):
                 x0_flat = x0.view(bs, -1)
                 x1_flat = x1.view(bs, -1)
                 cost_matrix = torch.cdist(x0_flat, x1_flat).cpu().numpy()
-                row_ind, _ = scipy.optimize.linear_sum_assignment(cost_matrix)
-                x0 = x0[torch.tensor(row_ind, device=self.device)]
+                # scipy.optimize.linear_sum_assignment returns (row_ind, col_ind)
+                # where ``row_ind`` is always identity for a square cost
+                # matrix — ``x0[row_ind]`` was therefore a no-op, silently
+                # disabling minibatch OT for the whole training run. The
+                # optimal pairing is (i, col_ind[i]); reorder x0 so the new
+                # ``x0[i]`` is the OT-match for the original ``x1[i]``,
+                # which is ``x0[argsort(col_ind)]``.
+                _row_ind, col_ind = scipy.optimize.linear_sum_assignment(cost_matrix)
+                perm = np.argsort(col_ind)
+                x0 = x0[torch.tensor(perm, device=self.device)]
 
         # sample time
         if getattr(self.cfg.model.diffusion, "continuous_time", True):
@@ -511,38 +583,79 @@ class FlowMatchingRunner(DDPMRunner):
         # compute velocity
         xt = t * x1 + (1.0 - t) * x0
         target_v = x1 - x0
-        pred = self.model(xt, tstep=tstep, condition=condition)
+        pred = self.model(xt, tstep=tstep.to(xt.dtype), condition=condition)
         return F.mse_loss(pred, target_v)
 
     @torch.no_grad()
     def sample(
-        self, condition: torch.Tensor, steps: int = 50, latent_only: bool = False
+        self,
+        condition: torch.Tensor,
+        steps: int = 50,
+        latent_only: bool = False,
+        solver: str = "euler",
+        rtol: float = 1e-3,
+        atol: float = 1e-4,
     ):
-        """Generate samples by integrating the velocity field using Euler's method."""
+        """Integrate the learned velocity field 0 -> 1 to produce samples.
+
+        Parameters
+        ----------
+        steps : int
+            Step count for the fixed-grid Euler solver. For adaptive solvers
+            this becomes the number of *output points* on the [0, 1] grid;
+            the solver internally takes as many sub-steps as needed.
+        solver : str
+            ``"euler"`` (default) for the original fixed-step integration, or
+            any torchdiffeq method (``"dopri5"``, ``"rk4"``, ``"adaptive_heun"``,
+            ``"bosh3"``, ...). Adaptive methods require ``continuous_time=True``
+            because they evaluate the velocity field at arbitrary t.
+        rtol, atol : float
+            Adaptive-solver tolerances forwarded to ``torchdiffeq.odeint``.
+            Ignored by ``"euler"`` and other fixed-step methods.
+        """
         self.model.eval()
         bs = condition.shape[0]
-        x = self._get_prior((bs, *self.model.latent_shape)).to(self.device)
-        t_steps = torch.linspace(0.0, 1.0, steps + 1, device=self.device)
+        x = self._get_prior((bs, *self.latent_shape)).to(self.device)
+        continuous = getattr(self.cfg.model, "continuous_time", True)
 
-        # integrate ODE
-        for i in range(steps):
-            t_curr = t_steps[i]
-            t_next = t_steps[i + 1]
-            dt = t_next - t_curr
-
-            if getattr(self.cfg.model, "continuous_time", True):
-                t_batch = torch.full((bs,), t_curr.item(), device=self.device)
-            else:
-                n_train_steps = self.noise_scheduler.config.num_train_timesteps
-                t_batch = torch.full(
-                    (bs,),
-                    int(t_curr.item() * (n_train_steps - 1)),
-                    device=self.device,
-                    dtype=torch.long,
+        if solver == "euler":
+            t_steps = torch.linspace(0.0, 1.0, steps + 1, device=self.device)
+            for i in range(steps):
+                t_curr = t_steps[i]
+                t_next = t_steps[i + 1]
+                dt = t_next - t_curr
+                if continuous:
+                    t_batch = torch.full((bs,), t_curr.item(), device=self.device)
+                else:
+                    n_train_steps = self.noise_scheduler.config.num_train_timesteps
+                    t_batch = torch.full(
+                        (bs,),
+                        int(t_curr.item() * (n_train_steps - 1)),
+                        device=self.device,
+                        dtype=torch.long,
+                    )
+                v_pred = self.model(x, tstep=t_batch.to(x.dtype), condition=condition)
+                x = x + v_pred * dt
+        else:
+            if not continuous:
+                raise ValueError(
+                    f"solver={solver!r} needs continuous_time=True; the discrete "
+                    "scheduler can only be integrated by 'euler'."
                 )
+            try:
+                from torchdiffeq import odeint
+            except ImportError as e:
+                raise ImportError(
+                    f"solver={solver!r} requires torchdiffeq. `pip install torchdiffeq`."
+                ) from e
 
-            v_pred = self.model(x, tstep=t_batch, condition=condition)
-            x = x + v_pred * dt
+            def _velocity(t_scalar, x_state):
+                t_batch = t_scalar.expand(bs).to(x_state.dtype)
+                return self.model(x_state, tstep=t_batch, condition=condition)
+
+            t_grid = torch.linspace(0.0, 1.0, max(steps, 2), device=self.device)
+            traj = odeint(_velocity, x, t_grid, method=solver, rtol=rtol, atol=atol)
+            x = traj[-1]
 
         # decode
         pred = x / getattr(self, "latent_scale", 1.0)
@@ -586,7 +699,7 @@ class JiTRunner(DDPMRunner):
         xt = self.noise_scheduler.add_noise(x0, noise, tstep)
 
         # model predicts x0 directly
-        pred_x0 = self.model(xt, tstep=tstep, condition=condition)
+        pred_x0 = self.model(xt, tstep=tstep.to(xt.dtype), condition=condition)
 
         # compute loss on x0 prediction
         loss = F.mse_loss(pred_x0, x0, reduction="none")
@@ -613,7 +726,7 @@ class JiTRunner(DDPMRunner):
         n_train_steps = self.noise_scheduler.config.num_train_timesteps
 
         # start with pure noise
-        xt = torch.randn((bs, *self.model.latent_shape), device=self.device)
+        xt = torch.randn((bs, *self.latent_shape), device=self.device)
 
         # few-step iterative refinement
         t_indices = torch.linspace(n_train_steps - 1, 0, steps)
@@ -622,7 +735,7 @@ class JiTRunner(DDPMRunner):
             t_batch = torch.full((bs,), t_val, device=self.device, dtype=torch.long)
 
             # predict x0
-            x0_pred = self.model(xt, tstep=t_batch, condition=condition)
+            x0_pred = self.model(xt, tstep=t_batch.to(xt.dtype), condition=condition)
 
             if i < steps - 1:
                 # move to next timestep (re-noise)
@@ -638,3 +751,135 @@ class JiTRunner(DDPMRunner):
             pred = self.autoencoder.decode(pred, condition=condition)
         self.model.train()
         return pred
+
+
+class ARRunner(DDPMRunner):
+    """Runner for autoregressive discrete-token prediction on VQVAE latents."""
+
+    def setup_components(self):
+        """Load VQVAE, precompute indices, build AR model and optimizer."""
+        ckp_path = self.cfg.ae_checkpoint
+        if not ckp_path or not os.path.exists(ckp_path):
+            raise ValueError(f"VQVAE checkpoint not found at {ckp_path}.")
+
+        self.autoencoder, _, _ = load_autoencoder(ckp_path, device=self.device)
+        self.autoencoder.checkpoint_path = os.path.abspath(str(ckp_path))
+
+        # precompute VQ indices (CycloneVQVAEDataset handles this)
+        precompute_loader = DataLoader(
+            self.trainset,
+            batch_size=self.cfg.training.batch_size,
+            num_workers=0,
+            shuffle=False,
+            collate_fn=self.trainset.collate,
+            pin_memory=False,
+            sampler=self.trainloader.sampler if self.use_ddp else None,
+            drop_last=getattr(self.trainloader, "drop_last", False),
+        )
+        self.trainset.precompute_latents(
+            self.rank,
+            dataloader=precompute_loader,
+            autoencoder=self.autoencoder,
+            device=self.device,
+        )
+        # discrete tokens — no latent scaling
+        self.latent_scale = 1.0
+
+        self.autoencoder.to(self.device)
+        self.autoencoder.eval()
+        self.autoencoder.requires_grad_(False)
+
+        # build AR model
+        self.model = get_diffusion_model(self.cfg, self.autoencoder, self.trainset)
+        self.model.to(self.device)
+
+        self.latent_shape = self.model.latent_shape
+        self.latent_grid_size = tuple(self.autoencoder.bottleneck_grid_size)
+        self.codebook_size = self.autoencoder.vq.codebook_size
+
+        ar_cfg = self.cfg.model.get("ar", {})
+        self.ar_temperature = ar_cfg.get("temperature", 1.0)
+        self.ar_top_k = ar_cfg.get("top_k", None)
+
+        if self.use_ddp:
+            self.model = DDP(self.model, device_ids=[self.rank])
+
+        # optimizer
+        params = [p for p in self.model.parameters() if p.requires_grad]
+        exclude = getattr(self.cfg.training, "exclude_from_wd", [])
+        if exclude:
+            groups = exclude_from_weight_decay(
+                self.model, exclude, self.cfg.training.weight_decay
+            )
+            self.opt = torch.optim.AdamW(groups, lr=self.cfg.training.learning_rate)
+        else:
+            self.opt = torch.optim.AdamW(
+                params,
+                lr=self.cfg.training.learning_rate,
+                weight_decay=self.cfg.training.weight_decay,
+            )
+
+        self.input_fields = set(self.cfg.dataset.input_fields)
+        self.idx_keys = ["file_index", "timestep_index"]
+
+        # evaluator (reuse diffusion evaluation — decode back to 5D)
+        self.loss_wrap = LossWrapper(
+            denormalize_fn=self.valsets[0].denormalize,
+            separate_zf=self.cfg.dataset.separate_zf,
+            real_potens=self.cfg.dataset.real_potens,
+        )
+        self.evaluator = DiffusionEvaluator(
+            cfg=self.cfg,
+            valsets=self.valsets,
+            valloaders=self.valloaders,
+            loss_wrap=self.loss_wrap,
+        )
+
+    def forward_step_diffusion(self, sample: Dict[str, torch.Tensor], condition):
+        """Cross-entropy loss on next-token prediction of VQ indices."""
+        indices = sample["df"].long()
+        model = self.model
+        logits = model(indices, condition=condition)  # (B, S, V)
+        label_smoothing = getattr(
+            model.module if hasattr(model, "module") else model,
+            "label_smoothing",
+            0.0,
+        )
+        return F.cross_entropy(
+            logits.reshape(-1, self.codebook_size),
+            indices.reshape(-1),
+            label_smoothing=label_smoothing,
+        )
+
+    @torch.no_grad()
+    def sample(
+        self,
+        condition: torch.Tensor,
+        latent_only: bool = False,
+        steps: int = None,
+    ):
+        """Generate samples by autoregressive token prediction + VQVAE decode."""
+        self.model.eval()
+        raw_model = self.model.module if hasattr(self.model, "module") else self.model
+        indices = raw_model.generate(
+            condition=condition,
+            temperature=self.ar_temperature,
+            top_k=self.ar_top_k,
+            device=self.device,
+        )  # (B, seq_len) int64
+
+        if latent_only:
+            # return codebook embeddings for probing
+            codebook = self.autoencoder.vq.codebook.detach()
+            z = F.embedding(indices, codebook)
+            z = z.view(z.shape[0], *self.latent_grid_size, -1)
+            self.model.train()
+            return z
+
+        decoded = self.autoencoder.decode_from_indices(indices, condition=condition)
+        self.model.train()
+        return decoded
+
+    def evaluate(self, epoch, evaluate_probing: bool = True, no_save: bool = False):
+        """AR evaluation — probing disabled (generation too slow for full trainset)."""
+        return super().evaluate(epoch, evaluate_probing=False, no_save=no_save)

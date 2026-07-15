@@ -1,7 +1,6 @@
 import pytest
 import torch
 import numpy as np
-import os
 import contextlib
 from unittest.mock import MagicMock, patch, mock_open
 from neugk.dataset.cyclone import CycloneDataset, CycloneSample, LinearCycloneDataset
@@ -19,7 +18,7 @@ class MockBackend(DataBackend):
     def format_path(self, path, *args, **kwargs):
         return path
 
-    def read_metadata(self, path, fields=None):
+    def read_metadata(self, path, fields=None, lightweight=False):
         return {
             "timesteps": np.arange(10),
             "resolution": (8, 4, 4, 4, 4),
@@ -35,7 +34,7 @@ class MockBackend(DataBackend):
             "flux_std": np.ones(1),
             "flux_min": -np.ones(1),
             "flux_max": np.ones(1),
-            "fluxes": np.random.randn(10),
+            "flux": np.random.randn(10),
             "ion_temp_grad": np.array([1.0]),
             "density_grad": np.array([1.0]),
             "s_hat": np.array([1.0]),
@@ -71,9 +70,9 @@ class MockBackend(DataBackend):
 @pytest.fixture
 def mock_dataset():
     backend = MockBackend()
-    with patch(
-        "neugk.dataset.cyclone.os.listdir", return_value=["traj1", "traj2"]
-    ), patch("neugk.dataset.cyclone.os.path.exists", return_value=True):
+    with patch("neugk.dataset.cyclone.os.listdir", return_value=["traj1", "traj2"]), patch(
+        "neugk.dataset.cyclone.os.path.exists", return_value=True
+    ):
 
         ds = CycloneDataset(
             backend=backend,
@@ -104,17 +103,15 @@ def test_dataset_getitem(mock_dataset):
 
 
 def test_recompute_stats(mock_dataset):
-    mock_stats = RunningMeanStd(shape=(2, 8, 4, 4, 4, 4))
+    mock_stats = RunningMeanStd(shape=(2, 1, 1, 1, 1, 1))
     with patch("neugk.dataset.cyclone.os.path.exists", return_value=False), patch(
         "neugk.dataset.cyclone.os.replace"
-    ), patch("pickle.dump"), patch(
-        "pickle.load", return_value={"df": mock_stats}
-    ), patch(
+    ), patch("pickle.dump"), patch("pickle.load", return_value={"df": mock_stats}), patch(
         "builtins.open", mock_open()
     ):
         stats_dict = mock_dataset._recompute_stats(keys=["df"])
         assert "df" in stats_dict
-        assert stats_dict["df"].mean.shape == (2, 8, 4, 4, 4, 4)
+        assert stats_dict["df"].mean.shape == (2, 1, 1, 1, 1, 1)
 
 
 def test_dataset_separate_zf(mock_dataset):
@@ -162,8 +159,7 @@ def test_h5_backend_format_path():
 
     # spatial_ifft=True, real_potens=True
     assert (
-        backend.format_path(path, spatial_ifft=True, real_potens=True)
-        == "test_ifft_realpotens.h5"
+        backend.format_path(path, spatial_ifft=True, real_potens=True) == "test_ifft_realpotens.h5"
     )
 
     # spatial_ifft=True, split_into_bands=2
@@ -181,7 +177,4 @@ def test_kvikio_backend_format_path():
     assert backend.format_path(path, spatial_ifft=False) == "test"
 
     # spatial_ifft=True, real_potens=True
-    assert (
-        backend.format_path(path, spatial_ifft=True, real_potens=True)
-        == "test_ifft_realpotens"
-    )
+    assert backend.format_path(path, spatial_ifft=True, real_potens=True) == "test_ifft_realpotens"
