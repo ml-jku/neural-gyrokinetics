@@ -29,7 +29,6 @@ from neugk.pinc.autoencoders.ae_utils import load_autoencoder
 from neugk.pinc.autoencoders.gk_autoencoders import Swin5DVAE, Swin5DVQVAE
 from neugk.physics.integrals import FluxIntegral
 from neugk.utils import recombine_zf
-from neugk.plot_utils import plot_nd
 
 
 KEY_MAP = {
@@ -378,7 +377,9 @@ def evaluate_ground_truth(metadata, trajectory, train_cfg, inf_cfg, device, inte
     geometry = get_geometry(metadata)
     gt_path = os.path.join(inf_cfg["root"], trajectory, "data")
     timesteps = [f for f in sorted(os.listdir(gt_path)) if f.startswith("timestep")]
-    timesteps = timesteps[train_cfg.dataset.offset :]
+    # skip the transient unless the trajectory is shorter than the offset
+    _off = train_cfg.dataset.offset
+    timesteps = timesteps[_off:] if len(timesteps) > _off else timesteps
 
     df_batch = []
     for ts in tqdm(timesteps, desc=f"Loading GT for {trajectory}", unit="timestep"):

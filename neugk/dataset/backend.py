@@ -76,11 +76,17 @@ def _bf16_sibling(fp32_path: str) -> str:
 
 
 def _resolve_dtyped_path(fp32_path: str, prefer_dtype):
-    """Pick path to read, falling back to fp32 silently; prefer_dtype in ("bf16", None, "fp32"); returns (path, mode)."""
+    """Pick path to read, falling back to fp32 silently; prefer_dtype in ("bf16", None, "fp32"); returns (path, mode).
+
+    An fp32 request whose shard was replaced by its bf16 sibling reads the sibling (``"bf16_up"``,
+    upcast to float32).
+    """
     if prefer_dtype == "bf16":
         cand = _bf16_sibling(fp32_path)
         if os.path.exists(cand):
             return cand, "bf16"
+    elif not os.path.exists(fp32_path) and os.path.exists(_bf16_sibling(fp32_path)):
+        return _bf16_sibling(fp32_path), "bf16_up"
     return fp32_path, "fp32"
 
 
@@ -93,6 +99,10 @@ def read_cupy_bin(
 ):
     """Read flat .bin into tensor; prefer_dtype="bf16" reads .bf16.bin sibling (no upcast to f32; speedup preserved); else fallback to fp32 silently."""
     path, mode = _resolve_dtyped_path(file, prefer_dtype)
+
+    if mode == "bf16_up":
+        # exact upcast of the stored bf16 values
+        return read_cupy_bin(file, shape, rank, use_kvikio, "bf16").float()
 
     if mode == "bf16":
         n_elements = int(np.prod(shape))

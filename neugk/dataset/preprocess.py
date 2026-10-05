@@ -139,6 +139,15 @@ def convert_trajs_to_bf16(
     )
 
 
+def read_k_spectral(path: str, resolution) -> tuple:
+    """A raw GKW K dump as float32 ``(2, *resolution)`` and as the ky-shifted complex64 spectrum."""
+    with open(path, "rb") as fid:
+        ff = np.fromfile(fid, dtype=np.float64)
+    knth = np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
+    spec = np.moveaxis(knth, 0, -1).copy().view(dtype=np.complex64)
+    return knth, np.fft.fftshift(spec, axes=(3,))
+
+
 def do_ifft(knth):
     # inverse FFT along kx, ky; extract real/imag channels
     knth = np.fft.ifftn(knth, axes=(3, 4), norm="forward")
@@ -191,9 +200,302 @@ def phi_fft_to_real(fft, out_shape, norm="forward"):
     else:
         nkx, _, nky = fft.shape
         padded = fft
-    phi = np.fft.fftshift(padded, axes=(0,))
+    # ifftshift inverts the kx-centring of phi_to_spc (fftshift is off by one bin for odd nkx)
+    phi = np.fft.ifftshift(padded, axes=(0,))
     phi_ifft = np.fft.irfftn(phi, axes=(0, 2), norm=norm, s=[nkx, nky])
     return phi_ifft
+
+
+def field_solve_phi(df: np.ndarray, geometry) -> np.ndarray:
+    """Real-space potential (x, s, y) solved from a real-space df, as in the evaluation."""
+    from neugk.physics.integrals import FluxIntegral
+
+    dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    geom = {k: torch.as_tensor(g).unsqueeze(0).to(dev) for k, g in geometry.items()}
+    phi, _ = FluxIntegral(real_potens=True, flux_fields=True)(geom, torch.as_tensor(df).unsqueeze(0).to(dev))
+    return phi.squeeze(0).cpu().numpy().astype(np.float32)
+
+
+def resolve_traj_dirs(root_dir, spec):
+    """Trajectory dirs under root_dir from basenames or one brace pattern (default: all *_ifft_realpotens)."""
+    import re as _re
+
+    if spec is None:
+        return sorted(
+            os.path.join(root_dir, n)
+            for n in os.listdir(root_dir)
+            if n.endswith("_ifft_realpotens")
+            and os.path.isdir(os.path.join(root_dir, n))
+        )
+    if isinstance(spec, list) and len(spec) != 1:
+        return [os.path.join(root_dir, n) for n in spec]
+    s = spec[0] if isinstance(spec, list) else spec
+    m = _re.match(r"^(.*?)\{([^}]+)\}(.*?)$", s)
+    if not m:
+        return [os.path.join(root_dir, s)]
+    prefix, ranges_str, suffix = m.groups()
+    nums = []
+    for part in ranges_str.split(","):
+        if "-" in part:
+            lo, hi = map(int, part.split("-"))
+            nums.extend(range(lo, hi + 1))
+        else:
+            nums.append(int(part))
+    return [os.path.join(root_dir, f"{prefix}{n}{suffix}") for n in nums]
+
+
+def rewrite_poten(traj_dir: str, backup_dir: str) -> str:
+    """Overwrite poten_*.bin of a preprocessed kvikio trajectory with the field solve of its df.
+
+    The originals and both metadata files are copied to backup_dir/<name> first; the per-trajectory
+    phi statistics are recomputed. Resumable: trajectories with a DONE marker are skipped.
+    """
+    import glob
+    import pickle
+    import shutil
+
+    torch.set_num_threads(2)
+    name = os.path.basename(traj_dir.rstrip("/"))
+    bdir = os.path.join(backup_dir, name)
+    if os.path.exists(os.path.join(bdir, "DONE")):
+        return f"{name}: skip (done)"
+    os.makedirs(bdir, exist_ok=True)
+    data = os.path.join(traj_dir, "data")
+    potens = sorted(glob.glob(os.path.join(data, "poten_*.bin")))
+    for p in potens + [os.path.join(traj_dir, m) for m in ("metadata.pkl", "metadata_light.pkl")]:
+        b = os.path.join(bdir, os.path.basename(p))
+        if os.path.exists(p) and not os.path.exists(b):
+            shutil.copy2(p, b)
+
+    from neugk.pinc.neural_fields.data import CycloneNFDataset
+
+    t0 = int(os.path.basename(potens[0])[6:11])
+    nf = CycloneNFDataset(name.replace("_ifft_realpotens", ""), timesteps=[t0], normalize=None,
+                          path=os.path.dirname(traj_dir.rstrip("/")), backend="kvikio", realpotens=True)
+    shape = tuple(nf.full_df.shape[-6:]) if nf.full_df.ndim > 6 else tuple(nf.full_df.shape)
+    stats = RunningMeanStd()
+    for p in potens:
+        idx = os.path.basename(p)[6:11]
+        df = np.fromfile(os.path.join(data, f"timestep_{idx}.bin"), dtype=np.float32).reshape(shape)
+        with torch.no_grad():
+            phi = field_solve_phi(df, nf.geom)
+        assert phi.nbytes == os.path.getsize(p), (p, phi.shape)
+        phi.tofile(p + ".tmp")
+        os.replace(p + ".tmp", p)
+        stats.update(phi, np.zeros_like(phi), phi, phi)
+
+    new = {"phi_mean": stats.mean, "phi_var": stats.var, "phi_std": np.sqrt(stats.var),
+           "phi_min": stats.min, "phi_max": stats.max}
+    for m in ("metadata.pkl", "metadata_light.pkl"):
+        mp = os.path.join(traj_dir, m)
+        if os.path.exists(mp):
+            meta = pickle.load(open(mp, "rb"))
+            for k in [k for k in new if k in meta]:
+                meta[k] = np.asarray(new[k], dtype=np.asarray(meta[k]).dtype)
+            with open(mp + ".tmp", "wb") as f:
+                pickle.dump(meta, f)
+            os.replace(mp + ".tmp", mp)
+    open(os.path.join(bdir, "DONE"), "w").write(f"{len(potens)}\n")
+    return f"{name}: rewrote {len(potens)} potentials"
+
+
+def restore_fp32(
+    traj_dir: str, out_root: str, timesteps: Sequence[int], raw_root: str
+) -> str:
+    """Rebuild the fp32 df shards of a bf16-only trajectory at ``timesteps`` under ``out_root``.
+
+    Each shard is redone from the raw GKW K dump with the preprocess transform and must round to
+    the stored bf16 sibling bit for bit; metadata and potentials are symlinked from ``traj_dir``.
+    Resumable: existing shards are skipped.
+    """
+    import pickle
+
+    from ml_dtypes import bfloat16
+
+    name = os.path.basename(traj_dir.rstrip("/"))
+    raw = os.path.join(raw_root, name.replace("_ifft_realpotens", ""))
+    out = os.path.join(out_root, name)
+    os.makedirs(os.path.join(out, "data"), exist_ok=True)
+    for m in ("metadata.pkl", "metadata_light.pkl"):
+        if os.path.exists(os.path.join(traj_dir, m)) and not os.path.lexists(os.path.join(out, m)):
+            os.symlink(os.path.join(traj_dir, m), os.path.join(out, m))
+    meta = pickle.load(open(os.path.join(traj_dir, "metadata_light.pkl"), "rb"))
+    resolution = tuple(int(r) for r in meta["resolution"])
+    ks = K_files(raw)
+    n_new = 0
+    for t in timesteps:
+        dst = os.path.join(out, "data", f"timestep_{int(t):05d}.bin")
+        stored = os.path.join(traj_dir, "data", f"timestep_{int(t):05d}{_BF16_SUFFIX}")
+        if int(t) >= len(ks) or not os.path.exists(stored):
+            continue
+        for p in (f"poten_{int(t):05d}.bin", f"poten_{int(t):05d}{_BF16_SUFFIX}"):
+            src = os.path.join(traj_dir, "data", p)
+            if os.path.exists(src) and not os.path.lexists(os.path.join(out, "data", p)):
+                os.symlink(src, os.path.join(out, "data", p))
+        if os.path.exists(dst):
+            continue
+        df = do_ifft(read_k_spectral(os.path.join(raw, ks[int(t)]), resolution)[1])
+        ref = np.fromfile(stored, dtype=np.uint16)
+        if not np.array_equal(df.astype(bfloat16).ravel().view(np.uint16), ref):
+            raise RuntimeError(f"{name} t={t}: rebuilt df does not round to the stored bf16 shard")
+        df.tofile(dst + ".tmp")
+        os.replace(dst + ".tmp", dst)
+        n_new += 1
+    return f"{name}: {n_new} fp32 shards rebuilt"
+
+
+def solver_df_to_realspace(df_spec: np.ndarray) -> np.ndarray:
+    """gyaradax spectral df (vpar,mu,s,kx,ky) -> cyclone real-space (2,vpar,mu,s,x,y).
+
+    Exact inverse of the generate-side ``model_space_to_solver_df`` (fftshift over
+    kx, inverse spatial FFT over (kx,ky)). The df is stored raw/unscaled, in the
+    same amplitude convention as the GKW-preprocessed data (so a model-generated
+    df integrates to the correct flux). The gyaradax/GKW flux discrepancy lives in
+    the geometry ``parseval`` factor, which is corrected there, not on the df.
+    """
+    un = np.fft.fftshift(df_spec, axes=(3,))
+    phys = np.fft.ifftn(un, axes=(3, 4), norm="forward")
+    return np.stack([phys.real, phys.imag]).astype("float32")
+
+
+def preprocess_gyaradax(
+    traj_dir: str,
+    backend: DataBackend,
+    target_dir: str = "/local00/bioinf/galletti",
+    out_name: str = None,
+    metadata_only: bool = False,
+    verify: bool = True,
+    flux_atol: float = 1.0,
+    show_tqdm: bool = False,
+    device: str = "cpu",
+):
+    """Convert a gyaradax run folder (step_*.npz + config.yaml + geometry.pkl) into
+    the cyclone/kvikio format (real-space 2-channel df, real phi, metadata).
+
+    The df is scaled to the neugk integral convention and its flux is verified
+    against the gyaradax-reported heat flux. Spectra (kyspec/fluxspec) and stats
+    are recomputed consistently. Returns the output path.
+    """
+    import glob
+    import pickle
+
+    import torch
+    from omegaconf import OmegaConf
+
+    from neugk.physics.integrals import FluxIntegral
+
+    traj_dir = str(traj_dir)
+    name = out_name or os.path.basename(os.path.normpath(traj_dir))
+    if isinstance(backend, KvikIOBackend):
+        dir_out = f"{target_dir}/preprocessed_kvikio"
+    else:
+        dir_out = f"{target_dir}/preprocessed"
+    os.makedirs(dir_out, exist_ok=True)
+    out_path = backend.format_path(
+        os.path.join(dir_out, name), spatial_ifft=True, split_into_bands=None, real_potens=True
+    )
+
+    cfg = OmegaConf.load(os.path.join(traj_dir, "config.yaml"))
+    with open(os.path.join(traj_dir, "geometry.pkl"), "rb") as fh:
+        np_geom = pickle.load(fh)
+
+    # electrostatic adiabatic switches, which the computed geometry omits
+    adiabatic = 1.0 if bool(cfg.grid.get("adiabatic_electrons", True)) else 0.0
+    np_geom["adiabatic"] = np.array(adiabatic, dtype=np.float64)
+    np_geom["beta"] = np.array(float(cfg.physics.get("beta", 0.0)), dtype=np.float64)
+    np_geom["nlapar"] = np.array(0.0, dtype=np.float64)
+    np_geom["nlbpar"] = np.array(0.0, dtype=np.float64)
+
+    ints = np.asarray(np_geom["ints"])
+    nvpar = len(np.asarray(np_geom["intvp"]))
+    nmu = len(np.asarray(np_geom["intmu"]))
+    ns = len(ints)
+    nkx = len(np.asarray(np_geom["kxrh"]))
+    nky = len(np.asarray(np_geom["krho"]))
+
+    # gkw parseval convention: [1, 2ns, 2ns, ...] where gyaradax stores [1, 2, 2, ...]
+    parseval = np.asarray(np_geom["parseval"], dtype=np.float64).copy()
+    parseval[1:] *= float(ns)
+    np_geom["parseval"] = parseval
+    resolution = (nvpar, nmu, ns, nkx, nky)
+    sgrid = np.asarray(np_geom["sgrid"]).ravel()
+    ds = float(sgrid[1] - sgrid[0]) if sgrid.size > 1 else 1.0 / ns
+
+    steps = sorted(glob.glob(os.path.join(traj_dir, "step_*.npz")))
+    if not steps:
+        raise FileNotFoundError(f"no step_*.npz dumps in {traj_dir}")
+
+    # torch geometry for the neugk flux integral (+ ES adiabatic defaults it omits)
+    geom_t = {
+        k: torch.as_tensor(np.asarray(v), dtype=torch.float64)
+        for k, v in np_geom.items()
+        if np.asarray(v).dtype.kind in "fiu"
+    }
+    for k, val in {"adiabatic": 1.0, "beta": 0.0, "nlapar": 0.0, "nlbpar": 0.0, "de": 1.0}.items():
+        geom_t.setdefault(k, torch.tensor(val, dtype=torch.float64))
+    integrator = FluxIntegral(real_potens=True, spectral_potens=False, flux_fields=True).to(device)
+    geom_b = {k: g.unsqueeze(0).to(device) for k, g in geom_t.items()}
+
+    times, fluxes, kyspecs, fluxspecs = [], [], [], []
+    df_stats, phi_stats, flux_stats = RunningMeanStd(), RunningMeanStd(), RunningMeanStd()
+
+    with backend.create(out_path) as f:
+        iterator = enumerate(steps)
+        if show_tqdm:
+            iterator = tqdm(iterator, total=len(steps), desc=name, leave=False)
+        for idx, step_path in iterator:
+            d = np.load(step_path)
+            df_real = solver_df_to_realspace(d["df"])
+            dft = torch.as_tensor(df_real).unsqueeze(0).to(device)
+            phi_r, (pflux, eflux, vflux) = integrator(geom_b, df=dft)
+            eflux = eflux[0]  # (vpar,mu,s,kx,ky) per-mode
+            eflux_total = float(eflux.sum().item())
+            reported = float(d["fluxes"][1])
+            if verify and not np.isclose(eflux_total, reported, rtol=0.0, atol=flux_atol):
+                warnings.warn(
+                    f"{name} step {int(d['step'])}: flux {eflux_total:.4f} != reported "
+                    f"{reported:.4f}"
+                )
+            # per-ky heat flux spectrum: sum the per-mode flux over all but the ky axis
+            fluxspec = np.asarray(
+                eflux.sum(dim=tuple(range(eflux.ndim - 1))).cpu(), dtype=np.float32
+            )
+            kyspecs.append(np.asarray(d["ky_spec"], dtype=np.float32))
+            fluxspecs.append(fluxspec)
+            times.append(float(d["time"]))
+            fluxes.append(reported)
+
+            phi = np.asarray(phi_r[0].cpu(), dtype=np.float32)
+            df_stats.update(df_real, np.zeros_like(df_real), df_real, df_real)
+            phi_stats.update(phi, np.zeros_like(phi), phi, phi)
+            flux_stats.update(
+                np.float32(reported), np.float32(0.0), np.float32(reported), np.float32(reported)
+            )
+            if not metadata_only:
+                backend.write_df(f, str(idx).zfill(5), df=df_real)
+                backend.write_phi(f, str(idx).zfill(5), phi=phi)
+
+        metadata = {
+            "timesteps": np.asarray(times),
+            "resolution": resolution,
+            "ds": ds,
+            "ion_temp_grad": np.array([float(cfg.physics.rlt)]),
+            "density_grad": np.array([float(cfg.physics.rln)]),
+            "flux": np.clip(np.asarray(fluxes), a_min=0.0, a_max=None),
+            "s_hat": np.array([float(cfg.geometry.shat)]),
+            "q": np.array([float(cfg.geometry.q)]),
+            "geometry": np_geom,
+            "kyspec": np.asarray(kyspecs),
+            "fluxspec": np.asarray(fluxspecs),
+            "df_mean": df_stats.mean, "df_var": df_stats.var, "df_std": np.sqrt(df_stats.var),
+            "df_min": df_stats.min, "df_max": df_stats.max,
+            "phi_mean": phi_stats.mean, "phi_var": phi_stats.var, "phi_std": np.sqrt(phi_stats.var),
+            "phi_min": phi_stats.min, "phi_max": phi_stats.max,
+            "flux_mean": flux_stats.mean, "flux_var": flux_stats.var,
+            "flux_std": np.sqrt(flux_stats.var), "flux_min": flux_stats.min, "flux_max": flux_stats.max,
+        }
+        backend.write_metadata(f, metadata)
+    return out_path
 
 
 def preprocess(
@@ -369,19 +671,11 @@ def preprocess(
 
             for idx, (k, pot) in enumerate(innter_pbar):
                 # load distribution function
-                with open(f"{dir_in}/{k}", "rb") as fid:
-                    ff = np.fromfile(fid, dtype=np.float64)
-
-                knth = (
-                    np.reshape(ff, (2, *resolution), order="F").astype("float32").copy()
-                )
-                orig_knth = knth.copy()
+                orig_knth, spec = read_k_spectral(f"{dir_in}/{k}", resolution)
+                knth = orig_knth.copy()
 
                 if spatial_ifft:
-                    # move channels axis to end, view as complex, shift FFT
-                    knth = np.moveaxis(knth, 0, -1).copy()
-                    knth = knth.view(dtype=np.complex64)
-                    knth = np.fft.fftshift(knth, axes=(3,))
+                    knth = spec
                     separated_modes = []
                     if separate_zf:
                         # separate zero-flow (ky=0) from turbulent modes
@@ -448,6 +742,10 @@ def preprocess(
                     assert np.isclose(
                         eflux.sum().item(), orig_fluxes[idx], rtol=0.0, atol=1.0
                     ), "strong deviation for flux"
+                    # the stored potential must be the field solve of the stored df
+                    phi_int = field_solve_phi(knth, geometry)
+                    rel = np.linalg.norm(phi - phi_int) / np.linalg.norm(phi_int)
+                    assert rel < 1e-2, f"poten {pot} does not match the field solve of {k} (rel-L2 {rel:.3e})"
 
                 # accumulate statistics
                 df_stats.update(knth, np.zeros_like(knth), knth, knth)
@@ -528,6 +826,13 @@ if __name__ == "__main__":
         help="Number of iterations to process (iteration_0 .. iteration_N-1).",
     )
     parser.add_argument(
+        "--trajs_file",
+        type=str,
+        default=None,
+        help="File with one trajectory name per line; overrides --num_iterations "
+        "(used to exclude zero-flux / config-excluded trajectories).",
+    )
+    parser.add_argument(
         "--to_bf16",
         action="store_true",
         help="Skip the full raw->fp32 pipeline; instead write .bf16.bin siblings "
@@ -547,39 +852,118 @@ if __name__ == "__main__":
         action="store_true",
         help="Overwrite existing .bf16.bin siblings.",
     )
+    parser.add_argument(
+        "--restore_fp32",
+        type=str,
+        default=None,
+        help="Output root: rebuild the fp32 df shards of the --bf16_trajs at --restore_timesteps "
+        "from the raw dumps there (checked bit for bit against the stored bf16 shards).",
+    )
+    parser.add_argument(
+        "--restore_timesteps", type=int, nargs="+", default=None, help="Frame indices to restore."
+    )
+    parser.add_argument(
+        "--restore_windows",
+        type=str,
+        default=None,
+        help="Transition windows json: restore t0..t1 (step 2) of each trajectory instead.",
+    )
+    parser.add_argument(
+        "--rewrite_poten",
+        action="store_true",
+        help="Overwrite poten_*.bin of already-preprocessed trajectories (see --bf16_trajs) with the "
+        "field solve of their df, backing up the originals to --poten_backup. Resumable.",
+    )
+    parser.add_argument(
+        "--poten_backup",
+        type=str,
+        default=None,
+        help="Backup directory for --rewrite_poten (required).",
+    )
+    parser.add_argument(
+        "--source",
+        type=str,
+        choices=["gkw", "gyaradax"],
+        default="gkw",
+        help="Raw format: 'gkw' (K-files/input.dat/geom.dat) or 'gyaradax' "
+        "(step_*.npz + config.yaml + geometry.pkl).",
+    )
+    parser.add_argument(
+        "--gyaradax_dirs",
+        type=str,
+        nargs="+",
+        default=None,
+        help="gyaradax run folders to convert when --source gyaradax (absolute paths).",
+    )
     args = parser.parse_args()
+
+    # gyaradax -> cyclone conversion path
+    if args.source == "gyaradax":
+        if not args.gyaradax_dirs:
+            print("--source gyaradax requires --gyaradax_dirs", file=sys.stderr)
+            sys.exit(1)
+        backend = KvikIOBackend(use_kvikio=False) if args.backend == "kvikio" else H5Backend()
+        for traj_dir in args.gyaradax_dirs:
+            out = preprocess_gyaradax(
+                traj_dir,
+                backend=backend,
+                target_dir=args.target_dir,
+                metadata_only=args.metadata_only,
+            )
+            meta = backend.read_metadata(out)
+            print(
+                f"{out}: {len(meta['timesteps'])} steps, "
+                f"df mean/std {meta['df_mean'].mean():.3e}/{meta['df_std'].mean():.3e}, "
+                f"flux mean {float(np.mean(meta['flux'])):.3f}",
+                flush=True,
+            )
+        sys.exit(0)
+
+    # fp32 df shards of bf16-only trajectories, rebuilt from the raw dumps into another root
+    if args.restore_fp32:
+        from multiprocessing import get_context
+
+        import json
+
+        root_dir = os.path.join(args.target_dir, "preprocessed_kvikio")
+        raw_root = os.path.join(args.root, args.raw_subdir)
+        if args.restore_windows:
+            # per-trajectory onset windows t0..t1, step 2 (the transition set of nf_main)
+            windows = json.load(open(args.restore_windows))
+            jobs = [
+                (os.path.join(root_dir, f"{k}_ifft_realpotens"), list(range(int(v["t0"]), int(v["t1"]) + 1, 2)))
+                for k, v in windows.items()
+                if not v.get("bad", False)
+            ]
+        else:
+            jobs = [(d, args.restore_timesteps) for d in resolve_traj_dirs(root_dir, args.bf16_trajs)]
+        with get_context("spawn").Pool(args.num_workers) as pool:
+            results = [
+                pool.apply_async(restore_fp32, (d, args.restore_fp32, ts, raw_root)) for d, ts in jobs
+            ]
+            for r in results:
+                print(r.get(), flush=True)
+        sys.exit(0)
+
+    # potential rewrite path (only poten_*.bin and the phi stats change)
+    if args.rewrite_poten:
+        from multiprocessing import get_context
+
+        if not args.poten_backup:
+            print("--rewrite_poten requires --poten_backup", file=sys.stderr)
+            sys.exit(1)
+        root_dir = os.path.join(args.target_dir, "preprocessed_kvikio")
+        traj_dirs = resolve_traj_dirs(root_dir, args.bf16_trajs)
+        with get_context("spawn").Pool(args.num_workers) as pool:
+            for msg in pool.imap_unordered(partial(rewrite_poten, backup_dir=args.poten_backup), traj_dirs):
+                print(msg, flush=True)
+        sys.exit(0)
 
     # bf16 sibling conversion path (does not touch fp32 originals)
     if args.to_bf16:
         root_dir = os.path.join(args.target_dir, "preprocessed_kvikio")
 
-        def _resolve_bf16_trajs(spec):
-            import re as _re
-
-            if spec is None:
-                return sorted(
-                    os.path.join(root_dir, n)
-                    for n in os.listdir(root_dir)
-                    if n.endswith("_ifft_realpotens")
-                    and os.path.isdir(os.path.join(root_dir, n))
-                )
-            if isinstance(spec, list) and len(spec) != 1:
-                return [os.path.join(root_dir, n) for n in spec]
-            s = spec[0] if isinstance(spec, list) else spec
-            m = _re.match(r"^(.*?)\{([^}]+)\}(.*?)$", s)
-            if not m:
-                return [os.path.join(root_dir, s)]
-            prefix, ranges_str, suffix = m.groups()
-            nums = []
-            for part in ranges_str.split(","):
-                if "-" in part:
-                    lo, hi = map(int, part.split("-"))
-                    nums.extend(range(lo, hi + 1))
-                else:
-                    nums.append(int(part))
-            return [os.path.join(root_dir, f"{prefix}{n}{suffix}") for n in nums]
-
-        traj_dirs = _resolve_bf16_trajs(args.bf16_trajs)
+        traj_dirs = resolve_traj_dirs(root_dir, args.bf16_trajs)
         convert_trajs_to_bf16(
             traj_dirs, num_workers=args.num_workers, force=args.bf16_force
         )
@@ -589,7 +973,11 @@ if __name__ == "__main__":
     separate_zf = False
     split_into_bands = None
 
-    datasets = [f"iteration_{i}" for i in range(args.num_iterations)]
+    if args.trajs_file:
+        with open(args.trajs_file) as fh:
+            datasets = [line.strip() for line in fh if line.strip()]
+    else:
+        datasets = [f"iteration_{i}" for i in range(args.num_iterations)]
 
     if args.backend == "kvikio":
         backend = KvikIOBackend(use_kvikio=False)
