@@ -331,6 +331,40 @@ def train_run(
     return summary
 
 
+def shared_init_path(cfg: DictConfig, trajectory: str) -> str:
+    return os.path.join(getattr(cfg, "shared_init_dir", "nf_shared_init"), f"{trajectory.replace('.h5', '')}.pth")
+
+
+def train_shared_init(cfg: DictConfig, trajectory: str, timesteps: Sequence[int], device: torch.device):
+    """Density-fit one field cycled over the snapshots of a trajectory; it initializes all of its fields.
+
+    ``shared_init_rounds`` rounds of ``shared_init_epochs`` epochs per snapshot, with a constant
+    ``shared_init_lr``, saved to ``shared_init_path``.
+    """
+    snaps = [build_data(cfg, trajectory, int(t)) for t in timesteps]
+    model = get_model(cfg, snaps[0][0])
+    opt = optim.AdamW(model.parameters(), getattr(cfg, "shared_init_lr", 5e-3))
+    sched = optim.lr_scheduler.LambdaLR(opt, lambda _: 1.0)
+    for _ in range(getattr(cfg, "shared_init_rounds", 4)):
+        for data, loader in snaps:
+            model, *_ = train_density(
+                model,
+                n_epochs=getattr(cfg, "shared_init_epochs", 2),
+                data=data,
+                loader=loader,
+                optim=opt,
+                sched=sched,
+                device=device,
+                eval_every=0,
+                use_tqdm=False,
+                use_print=False,
+                use_compile=False,
+            )
+    path = shared_init_path(cfg, trajectory)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save(model.state_dict(), path)
+
+
 # --------------------------------------------------------------------------- #
 # multi-GPU orchestration                                                      #
 # --------------------------------------------------------------------------- #
@@ -350,11 +384,11 @@ def worker(cfg: DictConfig, traj: str, timesteps: Sequence, gpu: int):
     # with the mask, the assigned GPU is the only device -> local index 0.
     os.environ["CUDA_VISIBLE_DEVICES"] = str(int(gpu))
     torch.cuda.set_device(0)
-    shared_init = (
-        f"nf_shared_init/{traj.replace('.h5', '')}.pth"
-        if getattr(cfg, "use_shared_init", False)
-        else None
-    )
+    if cfg.mode == "shared_init":
+        if not os.path.exists(shared_init_path(cfg, traj)):
+            train_shared_init(cfg, traj, timesteps, torch.device("cuda:0"))
+        return
+    shared_init = shared_init_path(cfg, traj) if getattr(cfg, "use_shared_init", False) else None
     for t in timesteps:
         if is_complete(cfg, traj, int(t)):  # resumable: skip already-finished dumps
             continue
@@ -522,7 +556,7 @@ if __name__ == "__main__":
     print(OmegaConf.to_yaml(cfg))
     print("#" * 88)
 
-    if cfg.mode == "default":
+    if cfg.mode in ("default", "shared_init"):
         main(cfg)
     elif cfg.mode == "grid":
         grid(cfg)

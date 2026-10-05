@@ -1,0 +1,50 @@
+# PINC revival: neural fields for the representation-interpolation experiment. A shared
+# initialization per trajectory (mode=shared_init) is density-fit over the extremes, then every
+# extreme is trained from it with the nf_train_intdiag recipe (mode=default), so that the fields of a
+# trajectory are aligned for weight-space interpolation (scripts/pinc/run_interp.py).
+#
+# Run:  python -m neugk.pinc.nf_main config=configs/pinc_revival/nf_train_interp.yaml mode=shared_init
+#       python -m neugk.pinc.nf_main config=configs/pinc_revival/nf_train_interp.yaml
+mode: default
+ckp_path: nf_ckps_interp/
+shared_init_dir: nf_shared_init_interp/
+use_shared_init: true
+shared_init_rounds: 4
+shared_init_epochs: 2
+shared_init_lr: 5e-3
+
+# restored fp32 evaluation snapshots
+path: /system/user/publicwork/galletti/pinc_revival_eval
+backend: kvikio
+normalization: zscore
+norm_axes: [-4]
+use_flux_fields: false
+
+# nf_train_intdiag recipe
+epochs: 20
+lr: 7e-3
+batch_size: 4096
+density_eval_every: 0
+pinc_epochs: 100
+pinc_lr: 5e-4
+pinc_lr_sched: true
+min_lr: 1e-8
+pinc_eval_every: 2
+physical_losses: ["df", "int", "diag"]
+name: mlp
+dim: 64
+n_layers: 5
+skips: true
+embed_type: discrete
+act_fn: silu
+
+gpus: [5]
+throttling: 3
+
+# extremes 20 apart; the midpoints (t + 10) are the interpolation targets
+timesteps: [100, 120, 140, 160, 180, 200]
+# every sixth held-out test trajectory
+trajectory: [
+  iteration_0.h5, iteration_55.h5, iteration_100.h5, iteration_125.h5, iteration_151.h5,
+  iteration_176.h5, iteration_202.h5, iteration_227.h5, iteration_252.h5, iteration_278.h5,
+]
