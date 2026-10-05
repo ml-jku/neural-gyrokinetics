@@ -1,0 +1,27 @@
+# must match the dataset the ae was trained with (see configs/dataset/cyclone_ae.yaml)
+# preprocessed dataset root (required): export NEUGK_DATA or pass dataset.path=...
+path: ${oc.env:NEUGK_DATA}
+backend: kvikio
+training_trajectories: iteration_{0-3}
+validation_trajectories: iteration_{4-4}
+input_fields: [df]
+conditions: [itg, dg, s_hat, q]
+separate_zf: true
+offset: 80
+# part of the latent cache file name
+norm_decouple_mu: true
+normalization:
+  df:
+    type: zscore
+    agg_axes: [0, 1, 3, 4, 5]
+normalization_scope: dataset
+normalization_stats: ${dataset.path}/diff_df_flux_phi_offset80_mu_57f5caf2_stats.pkl
+# explicit latent caches (else <path>/diff_<split>_latents_..._ae<run>.pkl is built or reused)
+latents_cache_train: null
+latents_cache_val: null
+training_cond_filters:
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]
+eval_cond_filters:
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]

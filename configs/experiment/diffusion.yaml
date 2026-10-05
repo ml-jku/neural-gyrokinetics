@@ -1,0 +1,17 @@
+# @package _global_
+# latent flow matching on a frozen ae:
+#   python main.py experiment=diffusion ae_checkpoint=<ae_run_dir> [validation.eval_sampling=true]
+# the dataset section must match the one the ae was trained with (zf layout, offset, normalization).
+defaults:
+  - override /model: diff/flow_matching
+  - override /dataset: cyclone_diff
+  - override /training: diffusion
+
+workflow: diffusion
+# true for an ae trained with the doubled swin residual whose config lacks the key
+ae_legacy_swin_shortcut: false
+# sampler latent scale; null computes 1 / std of the train latents (saved to config and checkpoint)
+latent_scale: null
+model:
+  # dit conditioning: a subset of dataset.conditions
+  conditioning: [itg, dg, s_hat, q]

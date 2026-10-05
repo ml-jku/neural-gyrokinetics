@@ -1,244 +1,113 @@
-"""
-Hydra entry point for GyroSwin and PINC.
+"""Hydra entry point for the JAX/Equinox port.
+
+Reads the Hydra config, builds (or, with ``load_ckpt``, reuses) the output
+directory and hands off to the workflow runner, which saves the resolved config.
+Distributed setup reads SLURM / torchrun env vars
+(``neugk_jax.training.ddp.init_distributed``); every process shares the run id of
+process 0.
+
+Usage (one experiment preset per workflow, see ``configs/experiment``)::
+
+    python main.py                                   # ae (default preset)
+    python main.py experiment=diffusion ae_checkpoint=/path/to/ae_run_dir
+    python main.py experiment=gyroswin
+    python main.py experiment=pinc_revival ae_checkpoint=/path/to/pretrained_ae_run
+    python main.py experiment=vqvae model.vq.quantizer=fsq
+    python main.py experiment=ae training.n_epochs=1 logging=wandb
+    python main.py load_ckpt=true output_path=/path/to/run_dir   # resume in place
+    torchrun --nproc_per_node=2 main.py experiment=ae   # batch_size is per device
 """
 
-import gc
+from __future__ import annotations
+
 import os
-import os.path as osp
-import sys
-import traceback
-from datetime import datetime
-import subprocess
 import random
-
-import torch
-import yaml
+from datetime import datetime
+from pathlib import Path
 
 import hydra
+import numpy as np
 from hydra.core.hydra_config import HydraConfig
 from omegaconf import DictConfig, OmegaConf
-import torch.multiprocessing as mp
-
-from neugk.utils import compress_src, filter_cli_priority, find_free_port
-
-from neugk.gyroswin import GyroSwinRunner
-from neugk.pinc import PINCRunner
-from neugk.diffusion import get_diffusion_runner
 
 
-def dispatch_runner(rank, config, world_size):
-    workflow = config.get("workflow", "gyroswin")
-    # get base workflow name (handle pinc_autoencoder, pinc_peft,...)
-    base_workflow = workflow.split("_")[0] if "_" in workflow else workflow
-
-    if base_workflow == "gyroswin":
-        GyroSwinRunner(rank, config, world_size=world_size)()
-    elif base_workflow == "pinc":
-        PINCRunner(rank, config, world_size=world_size)()
-    elif workflow == "diffusion":
-        get_diffusion_runner(rank, config, world_size=world_size)()
+def dispatch_runner(cfg: DictConfig) -> None:
+    """Workflow → runner dispatch."""
+    workflow = cfg.get("workflow", "ae")
+    base = workflow.split("_")[0]
+    vq = (cfg.get("model") or {}).get("model_type") == "vqvae"
+    if base == "pinc" and cfg.get("stage") == "peft":
+        from neugk_jax.pinc.peft import PINCPEFTRunner as Runner
+    elif base == "vqvae" or (base in ("ae", "pinc") and vq):
+        from neugk_jax.pinc.runner import VQVAERunner as Runner
+    elif base in ("ae", "pinc"):
+        from neugk_jax.pinc.runner import AERunner as Runner
+    elif base == "diffusion":
+        from neugk_jax.diffusion.runner import FlowMatchingRunner as Runner
+    elif base == "gyroswin":
+        from neugk_jax.gyroswin import GyroSwinRunner as Runner
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"unknown workflow: {workflow}")
+    Runner(cfg, output_path=cfg.output_path)()
+
+
+def _drop_cli_overridden(cli: list[str], source: DictConfig, prefix: str = "") -> None:
+    keys = {c.split("=")[0].lstrip("+~") for c in cli}
+    for k in list(source.keys()):
+        path = f"{prefix}.{k}" if prefix else str(k)
+        if path in keys:
+            del source[k]
+        elif OmegaConf.is_dict(source[k]):
+            _drop_cli_overridden(cli, source[k], path)
+
+
+def resume_config(cfg: DictConfig) -> DictConfig:
+    """Config for resuming ``cfg.output_path`` in place: its saved config, CLI overrides on top."""
+    run = Path(cfg.output_path or "")
+    if not (run / "ckp.eqx").exists():
+        raise FileNotFoundError(f"load_ckpt=true but {run}/ckp.eqx does not exist")
+    saved = OmegaConf.load(run / "config.yaml")
+    cli = list(HydraConfig.get().overrides.task) if HydraConfig.initialized() else []
+    _drop_cli_overridden(cli, saved)
+    return OmegaConf.merge(cfg, saved)
+
+
+def run_id() -> str:
+    """``YYYYmmdd_HHMMSS_<rand>`` of process 0, identical on every process."""
+    from neugk_jax.training.ddp import init_distributed
+
+    dist = init_distributed()
+    now = datetime.today()
+    stamp = np.asarray(
+        [int(now.strftime("%Y%m%d")), int(now.strftime("%H%M%S")), random.randint(0, 999)], np.int32
+    )
+    if dist.num_processes > 1:
+        from jax.experimental import multihost_utils
+
+        stamp = np.asarray(multihost_utils.broadcast_one_to_all(stamp))
+    day, time, rand = (int(v) for v in stamp)
+    return f"{day:08d}_{time:06d}_{rand:03d}"
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="main")
-def main(config: DictConfig):
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-    os.environ["HYDRA_FULL_ERROR"] = "1"
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-    # os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-    # os.environ["NCCL_BUFFSIZE"] = "1048576"
-    # os.environ["NCCL_P2P_DISABLE"] = "0"
+def main(cfg: DictConfig) -> None:
+    os.environ.setdefault("HYDRA_FULL_ERROR", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-    rand_suffix = random.randint(0, 999)
-    print("#" * 88, "\nStarting Cyclone with configs:")
-    print(OmegaConf.to_yaml(config))
-    print("#" * 88, "\n")
-
-    workflow = config.get("workflow")
-    dict_config = OmegaConf.to_container(config)
-    date_and_time = datetime.today().strftime("%Y%m%d_%H%M%S")
-    date_and_time = f"{date_and_time}_{rand_suffix:03d}"
-    if HydraConfig.initialized():
-        dict_config["choices"] = HydraConfig.get().runtime.choices
-
-    if workflow == "gyroswin" and config.get("load_ckpt"):
-        assert os.path.exists(
-            config.output_path
-        ), "Output path does not exist, cannot load ckpt"
-        assert os.path.exists(
-            f"{config.output_path}/ckp.pth"
-        ), "Output path does not contain checkpoint"
-
-        loaded_conf = OmegaConf.load(f"{config.output_path}/config.yaml")
-        filter_cli_priority(sys.argv[1:], loaded_conf)
-        config = OmegaConf.merge(config, loaded_conf)
-
-        config.logging.run_id = f"{config.model.name}_{date_and_time}"
-        dict_config = OmegaConf.to_container(config)
+    if cfg.get("load_ckpt"):
+        cfg = resume_config(cfg)
     else:
-        if config.output_path is None:
-            dict_config["output_path"] = osp.join("outputs", date_and_time)
-        else:
-            # TODO ignores if there are checkpoints in there
-            dict_config["output_path"] = osp.join(
-                dict_config["output_path"], date_and_time
-            )
+        cfg.output_path = str(Path(cfg.get("output_path") or "outputs") / run_id())
+    Path(cfg.output_path).mkdir(parents=True, exist_ok=True)
+    print("#" * 88)
+    print("Starting neugk-jax with configs:")
+    print(OmegaConf.to_yaml(cfg))
+    print("#" * 88)
+    dispatch_runner(cfg)
+    import jax
 
-        if not os.path.exists(dict_config["output_path"]):
-            os.makedirs(dict_config["output_path"], exist_ok=True)
-
-        compress_src(dict_config["output_path"])
-        config = OmegaConf.create(dict_config)
-
-    # peft logic (pinc only)
-    if workflow == "pinc" and config.get("stage") == "peft":
-        if dict_config.get("ae_checkpoint"):
-            try:
-                ae_checkpoint_path = dict_config["ae_checkpoint"]
-                # Determine config path
-                ae_config_path = (
-                    osp.join(osp.dirname(ae_checkpoint_path), "config.yaml")
-                    if os.path.isfile(ae_checkpoint_path)
-                    else osp.join(ae_checkpoint_path, "config.yaml")
-                )
-
-                print(f"Loading autoencoder config from: {ae_config_path}")
-
-                if os.path.exists(ae_config_path):
-                    with open(ae_config_path, "r") as f:
-                        checkpoint_config = yaml.safe_load(f)
-
-                    checkpoint_ae_config = checkpoint_config.get("model", {})
-
-                    current_peft = dict_config["model"].get("peft", {})
-                    current_loss = dict_config["model"].get("loss_weights", {})
-                    current_extra = dict_config["model"].get("extra_loss_weights", {})
-                    current_sched = dict_config["model"].get("loss_scheduler", {})
-
-                    dict_config["model"] = checkpoint_ae_config.copy()
-                    dict_config["model"]["peft"] = current_peft
-                    if current_loss:
-                        dict_config["model"]["loss_weights"] = current_loss
-                    if current_extra:
-                        dict_config["model"]["extra_loss_weights"] = current_extra
-                    if current_sched:
-                        dict_config["model"]["loss_scheduler"] = current_sched
-
-                    print("Merged config from checkpoint with PEFT settings")
-                    config = OmegaConf.create(dict_config)
-                else:
-                    raise FileNotFoundError(f"Config not found: {ae_config_path}")
-            except Exception as e:
-                print(f"ERROR loading model config for PEFT: {e}")
-                raise
-        else:
-            raise ValueError("PEFT stage requires ae_checkpoint parameter")
-
-    if workflow == "pinc":
-        if config.model.get("loss_weights") is None:
-            config.model.loss_weights = {}
-        if config.model.get("extra_loss_weights") is None:
-            config.model.extra_loss_weights = {}
-
-    # generate id
-    if config.logging.run_id is None:
-        if workflow == "gyroswin":
-            name = config.model.name
-        else:
-            # set training style for pinc
-            workflow = config.get("workflow", "unknown")
-            stage = config.get("stage", "autoencoder")
-            config.stage = stage
-            if stage == "autoencoder":
-                name = f"{stage}_{config.model.name}"
-            elif stage == "peft":
-                ae_type = config.get("model", {}).get("name", "unknown")
-                name = f"peft_{ae_type}"
-            elif stage == "diffusion":
-                model = config.model.model_type
-                name = f"{stage}_{model}"
-            else:
-                name = "experiment"
-
-        config.logging.run_id = f"{name}_{date_and_time}"
-
-    try:
-        is_ddp = config.ddp.enable
-        is_torchrun = "RANK" in os.environ
-        is_slurm = "SLURM_JOB_ID" in os.environ
-        if is_torchrun and is_slurm:
-            # set wandb directory to prevent distructive symlinks from wandb
-            job_id = os.environ.get("SLURM_JOB_ID")
-            os.environ["WANDB_DIR"] = f"{dict_config['output_path']}/wandb_{job_id}"
-
-        if is_ddp:
-            world_size = config.ddp.n_nodes * torch.cuda.device_count()
-            if not is_torchrun and is_slurm:
-                overrides = HydraConfig.get().overrides.task
-                overrides = [
-                    o for o in overrides if not o.startswith("hydra/launcher=")
-                ]
-                if config.ddp.n_nodes == 1:
-                    # should be run with torchrun
-                    cmd = [
-                        "torchrun",
-                        f"--nproc_per_node={torch.cuda.device_count()}",
-                        "main.py",
-                    ] + overrides
-                else:
-                    # multinode setup
-                    cmd = [
-                        "torchrun",
-                        f"--nnodes={config.ddp.n_nodes}",
-                        f"--nproc_per_node={torch.cuda.device_count()}",
-                        f"--rdzv_backend={os.environ['RDZV_BACKEND']}",
-                        f"--rdzv_id={os.environ['RDZV_ID']}",
-                        f"--rdzv_endpoint={os.environ['HEAD_NODE_IP']}:29501",
-                        "main.py",
-                    ] + overrides
-
-                print(f"DDP job with command: {' '.join(cmd)}")
-                subprocess.check_call(cmd)
-                return
-            elif is_torchrun and not is_slurm or is_torchrun and is_slurm:
-                rank = int(os.environ["RANK"])
-                conf = torch.cuda.memory_stats()
-                # This will show 'expandable_segments' in the output if supported/active
-                print(f"Alloc Conf: {torch.cuda.get_allocator_backend()}")
-                dispatch_runner(rank, config, world_size=world_size)
-            else:
-                # here we revert to mp.spawn to allow "normal" DDP startup
-                print(f"Local DDP with mp.spawn (nprocs={torch.cuda.device_count()})")
-                os.environ["MASTER_ADDR"] = "localhost"
-                os.environ["MASTER_PORT"] = str(find_free_port())
-                if "NCCL_SOCKET_IFNAME" in os.environ:
-                    del os.environ["NCCL_SOCKET_IFNAME"]
-
-                mp.spawn(
-                    dispatch_runner,
-                    args=(config, world_size),
-                    nprocs=torch.cuda.device_count(),
-                    join=True,
-                )
-        else:
-            # single gpu
-            rank = 0
-            dispatch_runner(rank, config, world_size=1)
-
-    except BaseException as e:
-        traceback.print_exc(file=sys.stderr)
-        if "out of memory" in str(e):
-            print("| WARNING: OUT OF MEMORY |")
-            # This gives a detailed table of blocks, holes, and reserved memory
-            print(torch.cuda.memory_summary(device=None, abbreviated=False))
-            torch.cuda.empty_cache()
-        raise e
-    finally:
-        sys.stdout.flush()
-        sys.stderr.flush()
-        gc.collect()
+    if jax.distributed.is_initialized():
+        jax.distributed.shutdown()
 
 
 if __name__ == "__main__":

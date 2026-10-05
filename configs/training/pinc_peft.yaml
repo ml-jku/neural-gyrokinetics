@@ -1,0 +1,9 @@
+defaults:
+  - ae@_here_
+  - _self_
+
+batch_size: 24  # per device
+n_epochs: 100
+learning_rate: 1.0e-4
+exclude_from_wd: [cond]
+num_workers: 8

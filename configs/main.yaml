@@ -1,25 +1,26 @@
+# entry point: python main.py [experiment=ae|diffusion|gyroswin|pinc_revival|vqvae] [key=...]
+#   python main.py                                                  # ae preset
+#   python main.py experiment=diffusion ae_checkpoint=<ae_run_dir>  # latent flow matching
+#   python main.py experiment=gyroswin                              # next-step gyroswin
+#   python main.py experiment=pinc_revival ae_checkpoint=<ae_run>   # pinc-ae lora fine-tune
+#   python main.py load_ckpt=true output_path=<run_dir>             # resume a run in place
+# the experiment presets (configs/experiment) pick the model/dataset/training groups per workflow.
 defaults:
   - _self_
-  - dataset: cyclone
-  - model: multi
-  - logging: no_logging
-  - training: default
+  - model: ae/swin5d_ae
+  - dataset: cyclone_ae
+  - training: ae
   - validation: default
-  - optional experiment: null
+  - logging: none
+  - experiment: ae
 
-experiment_id: test
+workflow: ae
 seed: 0
-output_path: /system/user/publicwork/galletti/checkpoints
-ddp:
-  enable: false
-  n_nodes: 1
-amp: 
-  enable: true  # set to false when using rope or integrals in training (complex / fft)
-  bfloat: true  # set to false for fno
-mode: "train"
-eval: true
-device: "cuda"
+output_path: null
 load_ckpt: false
-workflow: "gyroswin" # "gyroswin", "pinc", "diffusion"
-stage: null  # training style, eg. "autoencoder", "peft"
+# trained ae run directory (or checkpoint file) for workflow=diffusion and workflow=pinc stage=peft
 ae_checkpoint: null
+# workflow=pinc: peft fine-tunes lora adapters of ae_checkpoint, else plain ae training
+stage: null
+# persistent xla compilation cache directory; null disables it
+jax_compilation_cache_dir: null

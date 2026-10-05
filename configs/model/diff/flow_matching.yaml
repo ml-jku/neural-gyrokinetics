@@ -1,0 +1,8 @@
+latent_dim: 512
+conditioning: [itg, dg, s_hat, q]
+minibatch_ot: true
+vit:
+  num_heads: 8
+  depth: 4
+  mlp_ratio: 2.0
+  drop_path: 0.1

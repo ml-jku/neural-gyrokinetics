@@ -1,0 +1,8 @@
+# @package _global_
+# next-step multi-task gyroswin: python main.py experiment=gyroswin [model.loss_weights.flux=1.0]
+defaults:
+  - override /model: gyroswin/large_pretraining
+  - override /dataset: cyclone_gyroswin
+  - override /training: gyroswin
+
+workflow: gyroswin

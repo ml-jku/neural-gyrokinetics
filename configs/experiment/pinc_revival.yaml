@@ -1,0 +1,13 @@
+# @package _global_
+# pinc-ae peft: lora adapters on the frozen decoder-conditioned ae, trained on df + physics losses
+#   python main.py experiment=pinc_revival ae_checkpoint=<pretrained ae run dir or file>
+defaults:
+  - override /model: ae/pinc_ae
+  - override /dataset: cyclone_pinc
+  - override /training: pinc_peft
+
+workflow: pinc
+stage: peft
+validation:
+  validate_every_n_epochs: 5
+  eval_integrals: true

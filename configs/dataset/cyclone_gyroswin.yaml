@@ -1,0 +1,32 @@
+# preprocessed dataset root (required): export NEUGK_DATA or pass dataset.path=...
+path: ${oc.env:NEUGK_DATA}
+backend: kvikio
+training_trajectories: iteration_{0-3}
+validation_trajectories: iteration_{4-4}
+# model inputs; next-step targets for every active output are loaded on top
+input_fields: [df]
+separate_zf: true
+real_potens: true
+offset: 80
+normalization:
+  df:
+    type: zscore
+    agg_axes: [1, 2, 3, 4, 5]
+  phi:
+    type: zscore
+    agg_axes: [0, 1, 2]
+  flux:
+    type: zscore
+    agg_axes: null
+  fluxavg:
+    type: zscore
+    agg_axes: null
+normalization_scope: dataset
+# must carry every normalized target: df_flux_phi for flux, df_fluxavg_phi for fluxavg
+normalization_stats: ${dataset.path}/df_flux_phi_offset80_mu_57f5caf2_stats.pkl
+training_cond_filters:
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]
+eval_cond_filters:
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]

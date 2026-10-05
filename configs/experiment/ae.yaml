@@ -1,0 +1,8 @@
+# @package _global_
+# swin5d autoencoder on df: python main.py experiment=ae [training.n_epochs=...]
+defaults:
+  - override /model: ae/swin5d_ae
+  - override /dataset: cyclone_ae
+  - override /training: ae
+
+workflow: ae

@@ -1,0 +1,26 @@
+# decoder-conditioned 1000x swin5d ae of the pinc_revival two-stage runs
+defaults:
+  - ae/swin5d_ae@_here_
+  - _self_
+
+decoder_conditioning: [itg, dg, s_hat, q]
+# the base checkpoint was trained with the doubled swin residual
+legacy_swin_shortcut: true
+vit:
+  modulation: dit
+  gradient_checkpoint: true
+bottleneck:
+  dim: 154
+loss_weights:
+  df: 1.0
+extra_loss_weights:
+  phi_int: 1.0
+  flux_int: 1.0
+  kyspec: 1.0
+  qspec: 1.0
+peft:
+  lora:
+    r: 8
+    lora_alpha: 0.125
+    # attention qkv/proj and every mlp linear (116 adapters)
+    strategy: attention_mlp

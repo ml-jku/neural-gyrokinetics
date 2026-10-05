@@ -1,0 +1,17 @@
+# decoder-conditioned swin5d vq-vae (VQVAE_decCond architecture)
+defaults:
+  - ae/swin5d_ae@_here_
+  - _self_
+
+name: vqvae
+model_type: vqvae
+norm_fn: RMSNorm
+decoder_conditioning: [itg, dg, s_hat, q]
+vit:
+  modulation: dit
+vq:
+  quantizer: vq  # vq (ema codebook) | fsq (levels) | lfq (entropy_loss_weight, diversity_gamma)
+loss_weights:
+  df: 1.0
+  vq_commit: 1.0
+extra_loss_weights: {}

@@ -1,0 +1,10 @@
+# @package _global_
+# swin5d vq-vae on df: python main.py experiment=vqvae [model.vq.quantizer=fsq ...]
+defaults:
+  - override /model: ae/vqvae
+  - override /dataset: cyclone_ae
+  - override /training: ae
+
+workflow: vqvae
+training:
+  loss_type: mse  # mse | l1 | relative_mse | relative_l1
