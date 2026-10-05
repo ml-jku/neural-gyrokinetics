@@ -36,12 +36,6 @@ class GroundTruth(Reconstructor):
         return dfs, None
 
 
-# does a codec's CR grow with its knob? (fixed per method, so we never probe the slow
-# grid endpoints just to learn direction). tolerance/threshold/error_bound up -> more loss
-# -> higher CR; jpeg2000 quality up and pca n_components up -> less compression -> lower CR.
-_KNOB_INCREASES_CR = {"zfp": True, "wavelet": True, "sz3": True, "jpeg2000": False, "pca": False}
-
-
 def _encode_at_cr(name, df, target_cr, warm=None, tol=0.02, max_iter=14):
     """Encode df with a traditional codec at ~target_cr by searching its knob, so every
     snapshot lands at the same CR as the (fixed-rate) learned methods. Secant search in
@@ -49,13 +43,11 @@ def _encode_at_cr(name, df, target_cr, warm=None, tol=0.02, max_iter=14):
     previous snapshot's knob so consecutive frames need ~2-4 encodes. Returns (recon,
     size_bytes, knob)."""
     import math
-    from neugk.pinc.eval.discovery import TRAD
+    from neugk.pinc.eval.trad import CODECS
 
-    fn, knob, grid = TRAD[name]
-    disc = knob == "n_components"
-    gvals = [float(x) for x in grid]
-    lo, hi = min(gvals), max(gvals)
-    inc = _KNOB_INCREASES_CR[name]
+    codec = CODECS[name]
+    fn, knob, disc = codec.fn, codec.knob, codec.discrete
+    lo, hi, inc = codec.lo, codec.hi, codec.increases_cr
     nbytes = df.nbytes
     cache = {}
 
@@ -105,8 +97,9 @@ def _encode_at_cr(name, df, target_cr, warm=None, tol=0.02, max_iter=14):
         lca, lcb = math.log(ca), math.log(cb)
         if abs(lcb - lca) < 1e-9 or abs(math.log(khigh) - math.log(klow)) < 1e-4:
             break  # secant degenerate or bracket collapsed (quantized plateau) -> stop
-        m = math.exp(math.log(kb) + (lt - lcb) * (math.log(kb) - math.log(ka)) / (lcb - lca))
-        m = min(max(m, min(klow, khigh)), max(klow, khigh))
+        # clamp the secant step in log space
+        lm = math.log(kb) + (lt - lcb) * (math.log(kb) - math.log(ka)) / (lcb - lca)
+        m = math.exp(min(max(lm, math.log(min(klow, khigh))), math.log(max(klow, khigh))))
         ka, ca = kb, cb
         kb, cb = probe(m)
     return best[1]
@@ -284,25 +277,18 @@ class PIGS(Reconstructor):
 def traditional_suite(
     error_args: Optional[Dict[str, dict]] = None,
 ) -> List[Traditional]:
-    """Build the traditional baselines (skips SZ3 if `pysz` is unavailable)."""
-    from neugk.pinc.eval import trad
+    """Build the traditional baselines at their default knobs (skips SZ3 if `pysz` is unavailable)."""
+    from neugk.pinc.eval.trad import CODECS
 
     error_args = error_args or {}
     suite = []
-    for name, fn in [
-        ("ZFP", trad.zfp_recon),
-        ("Wavelet", trad.wavelet_recon),
-        ("PCA", trad.pca_recon),
-        ("JPEG2000", trad.jpeg2000_recon),
-    ]:
-        suite.append(Traditional(name, fn))
-    if hasattr(trad, "sz3_recon"):
-        try:
-            import pysz  # noqa: F401
-
-            suite.append(Traditional("SZ3", trad.sz3_recon))
-        except Exception:
-            pass
+    for name, codec in CODECS.items():
+        if name == "sz3":
+            try:
+                import pysz  # noqa: F401
+            except ImportError:
+                continue
+        suite.append(Traditional(name.upper(), codec.fn))
     return suite
 
 
@@ -398,18 +384,12 @@ def traditional_scaling_reconstructors(
     Returns one ``Traditional`` reconstructor per parameter value, named ``ZFP_tol{N}`` etc.
     """
     from functools import partial
-    from neugk.pinc.eval import trad
+    from neugk.pinc.eval.trad import CODECS
 
-    fn_map = {
-        "ZFP": trad.zfp_recon,
-        "Wavelet": trad.wavelet_recon,
-        "PCA": trad.pca_recon,
-        "JPEG2000": trad.jpeg2000_recon,
-    }
-    if method not in fn_map:
-        raise ValueError(f"Unknown traditional method: {method}. Choose from {list(fn_map)}.")
+    if method.lower() not in CODECS:
+        raise ValueError(f"Unknown traditional method: {method}. Choose from {list(CODECS)}.")
 
-    base_fn = fn_map[method]
+    base_fn = CODECS[method.lower()].fn
     results = []
     for val in param_values:
         fn = partial(base_fn, **{param_name: val})

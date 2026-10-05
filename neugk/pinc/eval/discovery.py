@@ -21,15 +21,8 @@ from neugk.physics.diagnostics import velocity_moment_errors
 # NF checkpoint prefixes: density-only warmup vs PINC-trained (physics losses).
 NF_PREFIX = {"nf": "best_mlp", "nf-pinc": "best_int_mlp"}
 
-# traditional method -> (fn, knob name, monotone grid of knob values).
-# CR increases along the grid order (so we can pick the value closest to target).
-TRAD = {
-    "zfp": (trad.zfp_recon, "tolerance", np.logspace(0, 6, 30)),
-    "wavelet": (trad.wavelet_recon, "threshold", np.logspace(-1, 3, 30)),
-    "pca": (trad.pca_recon, "n_components", list(range(40, 0, -1))),
-    "jpeg2000": (trad.jpeg2000_recon, "quality", np.logspace(1.7, -2, 30)),
-    "sz3": (trad.sz3_recon, "error_bound", np.logspace(0, 6, 30)),
-}
+# traditional method -> (fn, knob name, knob grid over the codec's search range)
+TRAD = {k: (c.fn, c.knob, np.geomspace(c.lo, c.hi, 30)) for k, c in trad.CODECS.items()}
 
 
 def discover(ckpt_dir, prefix):
@@ -47,10 +40,11 @@ def discover(ckpt_dir, prefix):
 def calibrate(name, df, target_cr):
     """Pick the knob value whose CR is closest to target_cr (log distance)."""
     fn, knob, grid = TRAD[name]
+    disc = trad.CODECS[name].discrete
     best = None
     for v in grid:
         try:
-            _, _, size = fn(df, **{knob: (int(v) if knob == "n_components" else float(v))})
+            _, _, size = fn(df, **{knob: (int(v) if disc else float(v))})
         except Exception:
             continue
         if not size or size <= 0:  # e.g. wavelet threshold so high all coeffs vanish
@@ -62,7 +56,7 @@ def calibrate(name, df, target_cr):
     if best is None:
         return None
     _, v, cr = best
-    return partial(fn, **{knob: (int(v) if knob == "n_components" else float(v))}), cr, v
+    return partial(fn, **{knob: (int(v) if disc else float(v))}), cr, v
 
 
 def metrics_for(pred, gt, geom, csize):
