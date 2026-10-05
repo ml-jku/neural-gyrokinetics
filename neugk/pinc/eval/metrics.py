@@ -101,7 +101,8 @@ def spectral_diagnostics(
     """Turbulence spectra (kxspec/kyspec/qspec) for one snapshot, as on-device tensors."""
     integ = FluxIntegral(real_potens=True, flux_fields=True, spectral_potens=True)
     phi_spec, (_, eflux, _) = integ(_batch_geom(geom), df.unsqueeze(0))
-    d = diagnostics(phi_spec.squeeze(), eflux.squeeze(), ds=ds)
+    # gkw convention: spectra summed over the whole field line (diagnos_fields output_fieldspec_kykx)
+    d = diagnostics(phi_spec.squeeze(), eflux.squeeze(), ds=ds, aggregate="mean")
     d.update(_zonal_profiles(phi_spec.squeeze(), geom))
     return {k: v.detach() for k, v in d.items()}
 
@@ -144,10 +145,10 @@ def temporal_epe(gt_dfs: Sequence[torch.Tensor], pred_dfs: Sequence[torch.Tensor
     """End-point error of the optical flow over a snapshot sequence (>=2 frames)."""
     if len(gt_dfs) < 2:
         return float("nan")
-    # stack on-device; optical_flow_5d is torch/GPU (was scipy-CPU, minutes/traj).
+    # (c, t, *5d): optical_flow_5d averages channels on dim 0 and differences time on dim 1
     dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    g = torch.stack([d.to(dev, torch.float32) for d in gt_dfs])
-    p = torch.stack([d.to(dev, torch.float32) for d in pred_dfs])
+    g = torch.stack([d.to(dev, torch.float32) for d in gt_dfs], dim=1)
+    p = torch.stack([d.to(dev, torch.float32) for d in pred_dfs], dim=1)
     return float(endpoint_error(g, p, optical_flow_5d))
 
 

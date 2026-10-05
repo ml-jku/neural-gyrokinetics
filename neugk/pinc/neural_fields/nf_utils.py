@@ -1,7 +1,5 @@
-from typing import Optional, Sequence, Tuple, Callable
+from typing import Optional, Tuple, Callable
 
-import numpy as np
-from itertools import product
 from copy import deepcopy
 
 from einops import rearrange
@@ -10,7 +8,6 @@ import torch.nn as nn
 from neugk.utils import recombine_zf
 from zipnn import ZipNN
 import zfpy
-from scipy.ndimage import convolve
 
 
 ACTS = {
@@ -267,4 +264,4 @@ def optical_flow_5d(
 def endpoint_error(x1, x2, optical_flow_fn: Callable):
     """Endpoint error (EPE) between optical flow fields of two sequences."""
     d = optical_flow_fn(x1) - optical_flow_fn(x2)
-    return float((d**2).mean())
+    return float(d.norm(dim=0).mean())
