@@ -100,7 +100,8 @@ class PINCLossWrapper(LossWrapper):
         self.integrator_spec = FluxIntegral(
             real_potens=real_potens,
             flux_fields=True,
-            spectral_df=True,
+            spectral_df=False,
+            spectral_potens=True,
             integral_precision=integral_precision,
         )
 
@@ -136,10 +137,10 @@ class PINCLossWrapper(LossWrapper):
                 # df_delta is already added to _data_losses by the base class;
                 # no extra loss keys needed here.
                 name = "df_delta"  # for weight registration and logging
-                if not "df_delta" in self.weights:
+                if "df_delta" not in self.weights:
                     self.weights.setdefault("df_delta", 1.0)
             else:
-                if not name in self.weights:
+                if name not in self.weights:
                     self.weights.setdefault(name, 1.0)
                 self._augmentation_losses.append(name)
 
@@ -333,10 +334,8 @@ class PINCLossWrapper(LossWrapper):
             ):
                 pred_df = self.denormalize_fn(0, df=preds["df"])
                 pred_phi = self.denormalize_fn(0, phi=preds["phi"]) if "phi" in preds else None
-                tgt_phi = self.denormalize_fn(0, phi=tgts["phi"])
-                tgt_eflux = self.denormalize_fn(0, flux=tgts["flux"])
             else:
-                pred_df, pred_phi, tgt_phi, tgt_eflux = [], [], [], []
+                pred_df, pred_phi = [], []
                 for b, f in enumerate(idx_data["file_index"].tolist()):
                     pred_df.append(self.denormalize_fn(f, df=preds["df"][b]))
                     if "phi" in preds:
@@ -346,37 +345,28 @@ class PINCLossWrapper(LossWrapper):
                             else preds["phi"][b]
                         )
                         pred_phi.append(self.denormalize_fn(f, phi=p_phi))
-                    t_phi = (
-                        tgts["phi"][b].unsqueeze(0) if tgts["phi"][b].ndim == 2 else tgts["phi"][b]
-                    )
-                    tgt_phi.append(self.denormalize_fn(f, phi=t_phi))
-                    tgt_eflux.append(self.denormalize_fn(f, flux=tgts["flux"][b]))
-
-                pred_df, tgt_phi, tgt_eflux = (
-                    torch.stack(pred_df),
-                    torch.stack(tgt_phi),
-                    torch.stack(tgt_eflux),
-                )
+                pred_df = torch.stack(pred_df)
                 pred_phi = torch.stack(pred_phi) if pred_phi else None
         else:
-            pred_df, pred_phi, tgt_phi, tgt_eflux = (
-                preds["df"],
-                preds.get("phi"),
-                tgts["phi"],
-                tgts["flux"],
-            )
-            if tgt_phi.ndim == 5 and tgt_phi.shape[1] == 1:
-                tgt_phi = tgt_phi.squeeze(1)
+            pred_df, pred_phi = preds["df"], preds.get("phi")
+
+        # targets are solved from the target df with the same operator as the prediction
+        if self.training and getattr(self.dataset, "normalization_scope", None) != "dataset":
+            files = idx_data["file_index"].tolist()
+            tgt_df = torch.stack([self.denormalize_fn(f, df=tgts["df"][b]) for b, f in enumerate(files)])
+        elif self.training:
+            tgt_df = self.denormalize_fn(0, df=tgts["df"])
+        else:
+            tgt_df = tgts["df"]
 
         if self.separate_zf and pred_df.shape[1] > 2:
             pred_df = recombine_zf(pred_df, dim=1)
+        if self.separate_zf and tgt_df.shape[1] > 2:
+            tgt_df = recombine_zf(tgt_df, dim=1)
 
         pphi_int, (pflux, eflux, _) = self.integrator(geometry, pred_df, pred_phi)
-
-        # tgt_phi can carry a singleton channel dim [B,1,x,s,y]; squeeze it so it matches
-        # pphi_int [B,x,s,y] instead of broadcasting into a [B,B,...] cross-batch tensor
-        if tgt_phi.ndim == pphi_int.ndim + 1 and tgt_phi.shape[1] == 1:
-            tgt_phi = tgt_phi.squeeze(1)
+        with torch.no_grad():
+            tgt_phi, (_, tgt_eflux, _) = self.integrator(geometry, tgt_df, None)
 
         monitor = {
             "phi_int_mse": F.mse_loss(pphi_int, tgt_phi).detach(),
@@ -400,48 +390,51 @@ class PINCLossWrapper(LossWrapper):
 
         return int_losses, monitor, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
 
-    def compute_spectral_losses(self, preds, tgts, geometry):
+    def _spectral_df(self, x, idx_data=None):
+        # validation already passes denormalized, recombined df
+        if self.training and self.denormalize_fn is not None:
+            if getattr(self.dataset, "normalization_scope", None) == "dataset" or idx_data is None:
+                x = self.denormalize_fn(0, df=x)
+            else:
+                files = idx_data["file_index"].tolist()
+                x = torch.stack([self.denormalize_fn(f, df=x[b]) for b, f in enumerate(files)])
+        if self.separate_zf and x.shape[1] > 2:
+            x = recombine_zf(x, dim=1)
+        return x.float()
+
+    def _batched_spectra(self, geometry, df):
+        phi_k, (_, ef, _) = self.integrator_spec(geometry, df, None)
+        diag = physics.diagnostics(phi_k, ef, self.ds, aggregate="mean")
+        # (B, species, vpar, mu, s, x, ky) -> (B, ky)
+        return {"kxspec": diag["kxspec"], "kyspec": diag["kyspec"], "qspec": ef.flatten(1, -2).sum(1)}
+
+    def compute_spectral_losses(self, preds, tgts, geometry, idx_data=None):
         spec_losses = {}
         if self.ds is None or "df" not in preds or "df" not in tgts:
             return spec_losses
 
         loss_type = self._get_current_loss_types()["spec"]
-
-        def prep(d):
-            x = d["df"]
-            if self.separate_zf and x.shape[1] > 2:
-                x = torch.cat([x[:, 0::2].sum(1, True), x[:, 1::2].sum(1, True)], dim=1)
-            return x.float(), d.get("phi")
-
-        p_df, p_phi_raw = prep(preds)
-        t_df, t_phi_raw = prep(tgts)
-
-        p_phi, (_, p_ef, _) = self.integrator_spec(geometry, p_df, p_phi_raw)
-        t_phi, (_, t_ef, _) = self.integrator_spec(geometry, t_df, t_phi_raw)
-
-        p_fft = physics.phi_fft(preds.get("phi", p_phi))
-        t_fft = physics.phi_fft(tgts.get("phi", t_phi))
-        p_diag = physics.diagnostics(p_fft, p_ef, self.ds, aggregate="mean")
-        t_diag = physics.diagnostics(t_fft, t_ef, self.ds, aggregate="mean")
+        p_df = self._spectral_df(preds["df"], idx_data)
+        t_df = self._spectral_df(tgts["df"], idx_data)
+        p_diag = self._batched_spectra(geometry, p_df)
+        with torch.no_grad():
+            t_diag = self._batched_spectra(geometry, t_df)
 
         # per-mode log1p std of the served GT spectra (kyspec / fluxspec=>qspec)
         std_by_key = {
             "kyspec": self.dataset_stats.get("kyspec_std"),
             "qspec": self.dataset_stats.get("qspec_std"),
         }
-        for k in ["kxspec", "kyspec", "qspec", "phi_zf"]:
-            if k in p_diag and k in t_diag:
-                spec_losses[k] = self.compute_spectral_loss(
-                    p_diag[k], t_diag[k], loss_type, mode_std=std_by_key.get(k)
-                )
+        for k in ("kxspec", "kyspec", "qspec"):
+            spec_losses[k] = self.compute_spectral_loss(
+                p_diag[k], t_diag[k], loss_type, mode_std=std_by_key.get(k)
+            )
 
-        # sort-based monotonicity on the un-aggregated spectra (shared with the NF path)
-        p_diag_f = physics.diagnostics(p_fft, p_ef, self.ds, aggregate="none")
-        mono = physics.monotonicity_loss(p_diag_f, keys=("qspec", "kyspec"))
+        mono = physics.monotonicity_loss(p_diag, keys=("qspec", "kyspec"))
         for k in ("qspec", "kyspec"):
             spec_losses[f"{k}_monotonicity"] = mono[f"{k} monotonicity loss"]
 
-        spec_losses["mass"] = physics.mass_loss(p_df, t_df)
+        spec_losses["mass"] = (p_df.flatten(1).sum(1) - t_df.flatten(1).sum(1)).abs().mean()
         return spec_losses
 
     def forward(
@@ -479,7 +472,7 @@ class PINCLossWrapper(LossWrapper):
             sum([self.weights.get(k, 0.0) for k in self._spectral_losses]) > 0
             or (not self.training and compute_integrals)
         ) and geometry is not None:
-            losses.update(self.compute_spectral_losses(preds, tgts, geometry))
+            losses.update(self.compute_spectral_losses(preds, tgts, geometry, idx_data))
 
         if self.training and sum([self.weights.get(k, 0.0) for k in self._simsiam_losses]) > 0:
             losses.update(self.compute_simsiam_loss(preds))
@@ -487,7 +480,7 @@ class PINCLossWrapper(LossWrapper):
         # 3. Augmentation losses (VICReg, etc.)
         if self.training:
             for name in self._augmentation_losses:
-                if "vicreg" in name and not "latent" in preds:
+                if "vicreg" in name and "latent" not in preds:
                     warnings.warn(f"Latents not found in predictions for augmentation loss: {name}")
                     continue
                 if name != "df_delta":

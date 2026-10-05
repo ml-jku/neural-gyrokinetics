@@ -1,5 +1,5 @@
 # @package _global_
-# PINC revival ablation: 1000x AE, TWO-STAGE STAGE 2 (PEFT fine-tune); load df-pretrained AE, freeze, attach LoRA/EVA adapters, fine-tune only adapters against physics losses; all physics terms RELATIVE L1, uniform weight 1.0 (scale-free)
+# PINC revival: 1000x AE, two-stage stage 2 (PEFT fine-tune); load the df-pretrained AE, freeze, attach LoRA adapters, fine-tune only adapters against physics losses; per-snapshot relative L1 integrals, log-std spectra, uniform weight 1.0; targets solved from the GT df
 # Run: python main.py --config-dir configs/pinc_revival experiment=ae_1000x_two_stage_peft ae_checkpoint=/path/to/ae_1000x_two_stage_pretrain_run
 defaults:
   - override /dataset: pinc
@@ -16,6 +16,7 @@ eval: true
 device: cuda
 validation:
   model_selection_metric: phi_int   # PEFT optimizes physics: select best.pth on potential fidelity, not df recon
+  validate_every_n_epochs: 5
 load_ckpt: false
 output_path: /system/user/publicwork/galletti/pinc_revival   # checkpoints land here (home is only 50GB)
 ae_checkpoint: ???   # REQUIRED: stage-1 pretrain run (dir or best.pth)
@@ -26,7 +27,8 @@ logging:
 model:
   peft:
     method: "lora"   # "lora" or "eva"
-    lora: {r: 64, lora_alpha: 1, lora_dropout: 0.0, bias: "none", strategy: "attention_mlp"}
+    # alpha / r = 1 / 64
+    lora: {r: 8, lora_alpha: 0.125, lora_dropout: 0.0, bias: "none", strategy: "attention_mlp"}
     eva:
       r: 64
       lora_alpha: 1
@@ -51,9 +53,11 @@ model:
 training:
   physics_mode: two_stage
   n_epochs: 100
-  batch_size: 16
+  batch_size: 24   # per rank, 4 ranks for the global 96
+  num_workers: 8
   learning_rate: 1e-4   # adapter finetune, below the 3e-4 pretrain lr
-  integral_loss_type: relative_l1
+  integral_loss_type: relative_l1_snap   # per-snapshot denominators
+  ds: 0.0625   # s-grid spacing; enables the spectral losses
   spectral_loss_type: log_std_l1   # per-mode log1p-std normalized (served stats)
   eval_loss_type: mse
 
@@ -63,3 +67,4 @@ amp:
 
 dataset:
   input_fields: ["df", "phi", "flux"]
+  gds_override: false   # cpu-side loading
