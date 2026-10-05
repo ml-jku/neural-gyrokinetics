@@ -186,4 +186,7 @@ def get_autoencoder(cfg, dataset, rank: Optional[int] = 0):
                 f"({c_info['latent_channels']}, *{c_info['latent_shape']})"
             )
 
-    return ae
+    from neugk.models.nd_vit.swin_layers import set_legacy_swin_shortcut
+
+    # no key: the doubled residual
+    return set_legacy_swin_shortcut(ae, getattr(ae_cfg, "legacy_swin_shortcut", True))

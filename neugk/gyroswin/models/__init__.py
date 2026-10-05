@@ -269,4 +269,7 @@ def get_model(cfg, dataset):
         except Exception as e:
             print("Could not print model summary, exception occurred:", e)
 
-    return model
+    from neugk.models.nd_vit.swin_layers import set_legacy_swin_shortcut
+
+    # no key: the doubled residual
+    return set_legacy_swin_shortcut(model, getattr(cfg.model, "legacy_swin_shortcut", True))

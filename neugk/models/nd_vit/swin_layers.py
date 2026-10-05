@@ -23,6 +23,14 @@ from neugk.models.nd_vit.patching import unpad, pad_to_blocks
 from neugk.models.layers import Film, seq_weight_init, MLP, DiT, Gate
 
 
+def set_legacy_swin_shortcut(model: nn.Module, legacy: bool) -> nn.Module:
+    """Set the doubled post-attention residual on every plain (unconditioned) swin block of ``model``."""
+    for m in model.modules():
+        if isinstance(m, SwinTransformerBlock) and not isinstance(m, DiTSwinTransformerBlock):
+            m.legacy_double_shortcut = bool(legacy)
+    return model
+
+
 def window_partition(x, window_size):
     """Window partition operation is n- dimensions.
 
@@ -340,7 +348,12 @@ class SwinTransformerBlock(nn.Module):
         norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
         use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
         act_fn (callable): Activation function. Default is nn.GELU.
+
+    ``legacy_double_shortcut`` (default True, set with :func:`set_legacy_swin_shortcut`) adds the
+    post-attention residual twice, ``2 * x + mlp(x)``; False is the single residual ``x + mlp(x)``.
     """
+
+    legacy_double_shortcut: bool = True
 
     def __init__(
         self,
@@ -504,6 +517,8 @@ class SwinTransformerBlock(nn.Module):
             x = checkpoint.checkpoint(self.forward_part2, x, use_reentrant=False)
         else:
             x = self.forward_part2(x)
+        if self.legacy_double_shortcut:
+            x = x + shortcut
         x = shortcut + x
         return x
 
