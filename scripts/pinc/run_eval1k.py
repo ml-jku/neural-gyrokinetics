@@ -37,7 +37,14 @@ from neugk.pinc.eval.discovery import discover, calibrate, TRAD, NF_PREFIX, Cycl
 # method id -> kind. trad ids match TRAD keys; ae ids map to run_ae_eval.AE_CKPTS labels.
 NF_METHODS = ("nf", "nf-pinc")
 TRAD_METHODS = ("sz3", "jpeg2000", "zfp", "pca", "wavelet")
-AE_METHODS = {"ae": "AE-PRETRAIN", "ae-pinc": "PINC-AE"}
+AE_METHODS = {
+    "ae": "AE-PRETRAIN",
+    "ae-pinc": "PINC-AE",
+    "ae-pinc-jax": "PINC-AE-JAX",
+    "vqvae": "VQ-VAE-77K",
+    "vqvae-pinc": "PINC-VQ-VAE-77K",
+    "ae-pinc-joint": "PINC-AE-JOINT",
+}
 ALL_METHODS = NF_METHODS + TRAD_METHODS + tuple(AE_METHODS) + ("pigs",)
 
 
@@ -302,13 +309,18 @@ def main():
     weights = [int(w) for w in args.weights.split(",")] if args.weights else [1] * len(gpus)
     if len(weights) != len(gpus):
         raise SystemExit(f"--weights ({len(weights)}) must match --gpus ({len(gpus)})")
-    # weighted round-robin: a GPU with weight w gets ~w/sum(w) of the items (faster/free GPUs
-    # carry more). slots expands each GPU by its weight, then work is dealt over the slots.
-    slots = [g for g, w in zip(gpus, weights) for _ in range(max(1, w))]
-    buckets = {g: [] for g in gpus}
+    # weighted round-robin over worker processes, one per --gpus entry (repeat an id for more)
+    devs = list(dict.fromkeys(gpus))
+    reps = {g: gpus.count(g) for g in devs}
+    wmap = {}
+    for g, w in zip(gpus, weights):
+        wmap[g] = max(1, w)
+    procs = [(g, r) for g in devs for r in range(reps[g])]
+    slots = [i for i, (g, _) in enumerate(procs) for _ in range(wmap[g])]
+    buckets = {i: [] for i in range(len(procs))}
     for i, item in enumerate(work):
         buckets[slots[i % len(slots)]].append(item)
-    shards = [(g, buckets[g]) for g in gpus if buckets[g]]
+    shards = [(procs[i][0], buckets[i]) for i in range(len(procs)) if buckets[i]]
     print(
         f"sharding {len(work)} items over {len(shards)} GPU(s) "
         f"(weights {dict(zip(gpus, weights))}): {[(g, len(s)) for g, s in shards]}",

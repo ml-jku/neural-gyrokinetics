@@ -3,26 +3,27 @@ per-trajectory val dataset sharing the checkpoint's TRAINING normalization stats
 up with the NF / traditional / PIGS rows). Kept out of the drivers so the AE wiring lives in one place.
 """
 
+import os
+
 from neugk.dataset.cyclone_diff import CycloneAEDataset
 from neugk.dataset.backend import H5Backend, KvikIOBackend
 
+# raw (unaggregated) df/phi/flux stats of the training set of the pinc_revival AEs
+PINC_REVIVAL_STATS = "diff_df_flux_phi_offset80_mu_d0253e25_stats.pkl"
+
+# checkpoint root, PINC_CKPT_ROOT overrides it
+CKPT_ROOT = os.environ.get("PINC_CKPT_ROOT", "/system/user/publicwork/galletti")
+
 # AE checkpoints to evaluate: label -> (checkpoint path, load_peft, vqvae)
 AE_CKPTS = {
-    "AE-PRETRAIN": (
-        "/system/user/publicwork/galletti/pinc_revival/AE1k_PRE/best.pth",
-        False,
-        False,
-    ),
-    "PINC-AE": (
-        "/system/user/publicwork/galletti/pinc_revival/20260606_215226_877/best.pth",
-        True,
-        False,
-    ),
-    "PINC-AE-LAST": (
-        "/system/user/publicwork/galletti/pinc_revival/20260606_215226_877/ckp.pth",
-        True,
-        False,
-    ),
+    "AE-PRETRAIN": (f"{CKPT_ROOT}/pinc_revival/AE1k_PRE/best.pth", False, False),
+    "PINC-AE": (f"{CKPT_ROOT}/pinc_revival/20260606_215226_877/best.pth", True, False),
+    "PINC-AE-LAST": (f"{CKPT_ROOT}/pinc_revival/20260606_215226_877/ckp.pth", True, False),
+    # jax runs exported to torch (scripts/export_pinc_torch.py in neugk-jax), adapters merged
+    "PINC-AE-JAX": (f"{CKPT_ROOT}/pinc_jax/export/pinc_ae/best.pth", False, False),
+    "VQ-VAE-77K": (f"{CKPT_ROOT}/pinc_jax/export/vqvae/best.pth", False, True),
+    "PINC-VQ-VAE-77K": (f"{CKPT_ROOT}/pinc_jax/export/pinc_vqvae/best.pth", False, True),
+    "PINC-AE-JOINT": (f"{CKPT_ROOT}/pinc_jax/export/pinc_ae_joint/best.pth", False, False),
 }
 
 
@@ -31,7 +32,27 @@ def _ns_get(ns, key, default=None):
     return getattr(ns, key, default)
 
 
-def build_make_val_dataset(config, path, backend):
+def training_stats(path, stats_file, normalization):
+    """``{field: {"full": moments}}`` of a raw stats pickle, aggregated over each field's ``agg_axes``."""
+    import os
+    import pickle as _pickle
+
+    import numpy as _np
+
+    raw = _pickle.load(open(os.path.join(path, stats_file), "rb"))
+    out = {}
+    for fld, r in raw.items():
+        axes = (normalization.get(fld) or {}).get("agg_axes")
+        mean, var, mn, mx = r.mean, r.var, r.min, r.max
+        if axes:
+            mean, var, mn, mx = r.aggregate_stats(mean, var, mn, mx, agg_axes=tuple(axes))
+            if fld == "phi":
+                mean, var, mn, mx = (_np.expand_dims(a, 0) for a in (mean, var, mn, mx))
+        out[fld] = {"full": {"mean": mean, "std": _np.sqrt(var), "min": mn, "max": mx}}
+    return out
+
+
+def build_make_val_dataset(config, path, backend, stats_file=PINC_REVIVAL_STATS):
     """Return make_val_dataset(traj)->CycloneAEDataset sharing the checkpoint's TRAINING
     normalization stats.
 
@@ -84,20 +105,11 @@ def build_make_val_dataset(config, path, backend):
         # val without gds (get_data does the same: KvikIOBackend(rank, use_kvikio=False))
         return KvikIOBackend(0, use_kvikio=False)
 
-    # dataset-scope stats: prefer the cached agg-stats pkl directly (the 235-traj recompute is a
-    # multi-hour job on network mounts). fall back to building the train set only if no cache.
     import os
-    import glob as _glob
-    import pickle as _pickle
-    import numpy as _np
 
-    _cache = sorted(_glob.glob(os.path.join(path, "*df01345_phi012_agg_stats.pkl")))
-    if _cache:
-        _rms = _pickle.load(open(_cache[-1], "rb"))  # {field: RunningMeanStd}
-        train_stats = {
-            fld: {"full": {"mean": r.mean, "std": _np.sqrt(r.var), "min": r.min, "max": r.max}}
-            for fld, r in _rms.items()
-        }
+    # the checkpoint's own training stats; rebuilding the train set is a multi-hour fallback
+    if stats_file and os.path.exists(os.path.join(path, stats_file)):
+        train_stats = training_stats(path, stats_file, normalization)
     else:
         train = CycloneAEDataset(
             backend=make_backend(),
