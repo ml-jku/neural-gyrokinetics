@@ -49,6 +49,17 @@ def compute_data_loss(
     if loss_type == "relative_l1":
         # global ratio ||pred-target||_1 / ||target||_1; per-element divides by near-zero phi and blows up
         return torch.sum(torch.abs(pred - target)) / (torch.sum(torch.abs(target)) + eps)
+    if loss_type in ("relative_l1_snap", "relative_mse_snap"):
+        # nf-semantics ratio: normalize each batch element by its own field norm, then mean.
+        # per-snapshot denominators are whole-field norms, so the per-element blowup does not apply
+        dims = tuple(range(1, pred.ndim))
+        if "l1" in loss_type:
+            num = torch.abs(pred - target).sum(dims) if dims else torch.abs(pred - target)
+            den = torch.abs(target).sum(dims) if dims else torch.abs(target)
+        else:
+            num = ((pred - target) ** 2).sum(dims) if dims else (pred - target) ** 2
+            den = (target**2).sum(dims) if dims else target**2
+        return (num / (den + eps)).mean()
     if loss_type == "log_error":
         return F.mse_loss(
             torch.log(torch.abs(pred) + eps),
@@ -85,7 +96,7 @@ def compute_integral_loss(
     """Integral-quantity loss; supports dataset-normalised and adaptive variants."""
     if loss_type == "mse":
         return F.mse_loss(pred, target)
-    if loss_type in ["relative_mse", "relative_l1", "log_error"]:
+    if loss_type in ["relative_mse", "relative_l1", "relative_l1_snap", "relative_mse_snap", "log_error"]:
         return compute_data_loss(pred, target, loss_type=loss_type, eps=eps)
 
     if loss_type == "adaptive_relative":
