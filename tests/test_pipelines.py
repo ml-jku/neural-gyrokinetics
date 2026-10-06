@@ -41,6 +41,10 @@ class MockDataset:
     def denormalize(self, **kwargs):
         return kwargs
 
+    def get_batch_geometry(self, file_indices, dtype=torch.float32):
+        n = len(file_indices)
+        return {k: torch.stack([v.squeeze(0).to(dtype)] * n) for k, v in self.geometry.items()}
+
     def __len__(self):
         return 1
 
@@ -58,7 +62,6 @@ class MockDataset:
             dg=torch.randn(1),
             s_hat=torch.randn(1),
             q=torch.randn(1),
-            geometry={k: v.clone() for k, v in self.geometry.items()},
         )
         n_cond = len(self.cfg.model.conditioning)
         sample.conditioning = torch.randn(n_cond)
@@ -91,7 +94,6 @@ def get_mock_dataloader(dataset):
             setattr(mock_sample, k, v)
         mock_sample.file_index = torch.stack([b.file_index for b in batch])
         mock_sample.timestep_index = torch.stack([b.timestep_index for b in batch])
-        mock_sample.geometry = elem.geometry
         return mock_sample
 
     return MagicMock(
@@ -280,7 +282,7 @@ def test_dataset_pipeline(mock_exists, mock_listdir):
         def format_path(self, path, *args, **kwargs):
             return path
 
-        def read_metadata(self, path, fields=None):
+        def read_metadata(self, path, fields=None, **kwargs):
             return {
                 "timesteps": np.arange(10),
                 "resolution": (8, 4, 4, 4, 4),
@@ -296,7 +298,7 @@ def test_dataset_pipeline(mock_exists, mock_listdir):
                 "flux_std": np.ones(1),
                 "flux_min": -np.ones(1),
                 "flux_max": np.ones(1),
-                "fluxes": np.zeros(10),
+                "flux": np.zeros(10),
                 "ion_temp_grad": np.array([1.0]),
                 "density_grad": np.array([1.0]),
                 "s_hat": np.array([1.0]),

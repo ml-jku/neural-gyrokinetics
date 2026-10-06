@@ -840,8 +840,9 @@ def memory_cleanup(device=None, aggressive=False):
     # aggressive cleanup
     if aggressive:
         gc.collect()
-        cp.get_default_memory_pool().free_all_blocks()
-        cp.get_default_pinned_memory_pool().free_all_blocks()
+        if torch.cuda.is_available():
+            cp.get_default_memory_pool().free_all_blocks()
+            cp.get_default_pinned_memory_pool().free_all_blocks()
         if torch.cuda.is_available() and device is not None:
             # force sync
             torch.cuda.synchronize(device)

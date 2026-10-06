@@ -153,10 +153,10 @@ class BaseRunner:
                     )
         if self.cfg.dataset.augment.mask_modes.active:
             weights["df_delta"] = self.cfg.dataset.augment.mask_modes.df_delta_weight
-        if self.cfg.dataset.augment.vicreg_variance.active:
-            weights["vicreg_variance"] = self.cfg.dataset.augment.vicreg_variance.weight
-        if self.cfg.dataset.augment.logdet.active:
-            weights["logdet"] = self.cfg.dataset.augment.logdet.weight
+        for key in ("vicreg_variance", "logdet"):
+            term = self.cfg.dataset.augment.get(key)
+            if term is not None and term.active:
+                weights[key] = term.weight
         return weights
 
     def setup_scheduler(self):
