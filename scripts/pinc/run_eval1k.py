@@ -44,6 +44,8 @@ AE_METHODS = {
     "vqvae": "VQ-VAE-77K",
     "vqvae-pinc": "PINC-VQ-VAE-77K",
     "ae-pinc-joint": "PINC-AE-JOINT",
+    "ae-pinc-joint-last": "PINC-AE-JOINT-LAST",
+    "ae-pinc-w2": "PINC-AE-W2",
 }
 ALL_METHODS = NF_METHODS + TRAD_METHODS + tuple(AE_METHODS) + ("pigs",)
 

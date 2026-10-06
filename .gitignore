@@ -12,5 +12,6 @@ upload_changed_py.sh
 cache/
 .env
 nf_ckps_*/
+nf_shared_init*/
 pinc_eval_results/
 interp_exploration/

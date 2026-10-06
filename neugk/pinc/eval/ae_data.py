@@ -24,6 +24,8 @@ AE_CKPTS = {
     "VQ-VAE-77K": (f"{CKPT_ROOT}/pinc_jax/export/vqvae/best.pth", False, True),
     "PINC-VQ-VAE-77K": (f"{CKPT_ROOT}/pinc_jax/export/pinc_vqvae/best.pth", False, True),
     "PINC-AE-JOINT": (f"{CKPT_ROOT}/pinc_jax/export/pinc_ae_joint/best.pth", False, False),
+    "PINC-AE-JOINT-LAST": (f"{CKPT_ROOT}/pinc_jax/export/pinc_ae_joint_last/best.pth", False, False),
+    "PINC-AE-W2": (f"{CKPT_ROOT}/pinc_jax/export/pinc_ae_w2/best.pth", False, False),
 }
 
 
