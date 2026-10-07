@@ -1,9 +1,12 @@
+import os
+import torch
 from torch.utils.data.dataloader import DataLoader
 
 from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import torch.multiprocessing as mp
 import resource
+from omegaconf import OmegaConf
 
 from neugk.dataset.augment import noise_transform
 from neugk.dataset.cyclone import (
@@ -13,6 +16,8 @@ from neugk.dataset.cyclone import (
 )
 from neugk.dataset.cyclone_diff import (
     CycloneAEDataset,
+    CycloneVAEDataset,
+    CycloneVQVAEDataset,
     CycloneSimSiamDataset,
     CycloneAESample,
 )
@@ -21,7 +26,7 @@ from neugk.dataset.augment import mask_modes
 
 
 def set_ulimit(limit: int = 65536):
-    # os.system(f"ulimit -n {limit}")
+    # increase file descriptor limit
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
         if soft < limit:
@@ -31,13 +36,29 @@ def set_ulimit(limit: int = 65536):
         pass
 
 
+def bind_worker_to_numa_node():
+    # bind worker to same NUMA node as parent
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is not None:
+        try:
+            import ctypes
+
+            libnuma = ctypes.CDLL("libnuma.so.1", use_errno=True)
+            if libnuma.numa_available() != -1:
+                libnuma.numa_set_preferred.argtypes = [ctypes.c_int]
+                libnuma.numa_set_preferred(int(local_rank))
+        except (OSError, AttributeError):
+            pass
+
+
 def _worker_init_fn(worker_id):
     _ = worker_id
+    bind_worker_to_numa_node()
     set_ulimit()
 
 
 def check_partial_holdouts(dataset_cfg):
-    # check that each trajectory in partial holdouts also appears in training
+    # ensure each trajectory in partial holdouts also appears in training
     for entry in dataset_cfg.partial_holdouts:
         file = entry.trajectory
         if file not in dataset_cfg.training_trajectories:
@@ -47,8 +68,31 @@ def check_partial_holdouts(dataset_cfg):
     return
 
 
+def _ae_model_name(cfg) -> str:
+    ckp_path = getattr(cfg, "ae_checkpoint", None)
+    if not ckp_path or not os.path.exists(ckp_path):
+        return ""
+    cfg_path = os.path.join(str(ckp_path), "config.yaml")
+    if not os.path.exists(cfg_path):
+        return ""
+    try:
+        ae_cfg = OmegaConf.load(cfg_path)
+    except Exception:
+        return ""
+    return str(getattr(ae_cfg.model, "name", "")).lower()
+
+
+def _is_vqvae_checkpoint(cfg) -> bool:
+    return "vqvae" in _ae_model_name(cfg)
+
+
+def _is_vae_checkpoint(cfg) -> bool:
+    name = _ae_model_name(cfg)
+    return "vae" in name and "vqvae" not in name
+
+
 def get_data(cfg, rank: int = 0):
-    # increase file descriptor limit for CUDA IPC and shared memory handles
+    # increase file descriptor limit for CUDA IPC
     set_ulimit()
     assert cfg.dataset.name in ["cyclone"]
     backend = getattr(cfg.dataset, "backend", "h5")
@@ -72,17 +116,15 @@ def get_data(cfg, rank: int = 0):
                 if cfg.model.loss_weights[k] > 0.0 or cfg.model.loss_scheduler[k]
             ]
         )
-        # exclude fields not in dataset
-        # input_fields = input_fields.intersection({"df", "phi", "flux"})
-        if input_fields.union({"df", "phi", "flux"}) != {"df", "phi", "flux"}:
+        if not input_fields.issubset({"df", "phi", "flux", "fluxavg"}):
             raise ValueError(f"{input_fields} contains unknown values")
         if cfg.model.name in ["pointnet", "transolver", "transformer"]:
             input_fields.add("position")
         assert not (
             "flux" in input_fields and "fluxavg" in input_fields
         ), "Cannot predict both fluxavg and flux..."
-        train_input_fields = val_input_fields = input_fields
-        # NOTE: for autoregressive evaluation, crop end of trajectory
+        train_input_fields = val_input_fields = sorted(input_fields)
+        # crop end of trajectory for autoregressive evaluation
         train_kwargs = {}
         val_kwargs = {"tail_offset": cfg.validation.n_eval_steps}
         if cfg.model.name in ["pointnet", "transolver", "transformer"]:
@@ -93,11 +135,24 @@ def get_data(cfg, rank: int = 0):
         else:
             dataset_class = CycloneDataset
     elif cfg.workflow == "pinc":
-        use_kvikio_train = True
+        # GPU-direct (kvikio) loading returns CUDA tensors; with num_workers>0 those cross the
+        # worker->main CUDA-IPC path, which needs pidfd_getfd and fails under kernel ptrace_scope>=2.
+        # respect gds_override (default False -> CPU-side load) so DataLoader workers ship CPU tensors.
+        use_kvikio_train = getattr(cfg.dataset, "gds_override", False)
         train_input_fields = ["df", "phi", "flux"]
         val_input_fields = ["df", "phi", "flux"]
-        train_kwargs = {"conditions": list(cfg.model.conditioning)}
-        val_kwargs = {"conditions": list(cfg.model.conditioning)}
+        # serve GT spectra (kyspec/fluxspec) when gated in dataset.input_fields
+        for _sk in ("kyspec", "fluxspec"):
+            if _sk in set(getattr(cfg.dataset, "input_fields", []) or []):
+                train_input_fields.append(_sk)
+                val_input_fields.append(_sk)
+
+        enc_cond = getattr(cfg.model, "encoder_conditioning", [])
+        dec_cond = getattr(cfg.model, "decoder_conditioning", [])
+        conditioning = sorted(list(set(enc_cond) | set(dec_cond)))
+
+        train_kwargs = {"conditions": conditioning}
+        val_kwargs = {"conditions": conditioning}
         if cfg.stage == "simsiam":
             dataset_class = CycloneSimSiamDataset
         else:
@@ -107,28 +162,81 @@ def get_data(cfg, rank: int = 0):
         use_kvikio_train = getattr(cfg.dataset, "gds_override", False)
         train_input_fields = ["df", "phi", "flux"]  # cfg.dataset.input_fields
         val_input_fields = ["df", "phi", "flux"]
-        train_kwargs = {"conditions": list(cfg.model.conditioning)}
-        val_kwargs = {"conditions": list(cfg.model.conditioning)}
-        dataset_class = CycloneAEDataset
+
+        use_vqvae_latents = _is_vqvae_checkpoint(cfg)
+        use_vae_latents = _is_vae_checkpoint(cfg)
+
+        if use_vqvae_latents:
+            dataset_class = CycloneVQVAEDataset
+        elif use_vae_latents:
+            dataset_class = CycloneVAEDataset
+        else:
+            dataset_class = CycloneAEDataset
+        train_kwargs = {"conditions": sorted(cfg.model.conditioning)}
+        val_kwargs = {"conditions": sorted(cfg.model.conditioning)}
+
+        if use_vae_latents:
+            latent_sampling_mode = getattr(cfg.dataset, "latent_sampling_mode", "stochastic")
+            val_latent_sampling_mode = getattr(
+                cfg.dataset, "val_latent_sampling_mode", latent_sampling_mode
+            )
+            train_kwargs["latent_sampling_mode"] = latent_sampling_mode
+            val_kwargs["latent_sampling_mode"] = val_latent_sampling_mode
+
+        # latent_scaling_mode: "global", "per_channel", "per_token"
+        latent_scaling_mode = getattr(cfg.dataset, "latent_scaling_mode", "global")
+        train_kwargs["latent_scaling_mode"] = latent_scaling_mode
+        val_kwargs["latent_scaling_mode"] = latent_scaling_mode
+
+        if rank == 0:
+            latent_type = "VQVAE" if use_vqvae_latents else "VAE" if use_vae_latents else "AE"
+            print(f"Diffusion latent dataset mode: {latent_type}")
+
+        # load AE cfg for normalization stats
+        ae_checkpoint = getattr(cfg, "ae_checkpoint", None)
+        ae_cfg = None
+        if ae_checkpoint and os.path.isdir(str(ae_checkpoint)):
+            ae_cfg_path = os.path.join(str(ae_checkpoint), "config.yaml")
+            if os.path.exists(ae_cfg_path):
+                ae_cfg = OmegaConf.load(ae_cfg_path)
+                if rank == 0:
+                    print(f"Loaded AE config for normalization from {ae_cfg_path}")
+        train_kwargs["ae_cfg"] = ae_cfg
     else:
         raise NotImplementedError
 
     if not rank:
         print(f"Loading {train_input_fields} in dataset")
 
+    # bf16 train: prefer bf16 shards, uniform bf16 batch (fast reads converted, f32 downcast otherwise); val always f32; default unchanged f32
+    _prefer_dtype = getattr(cfg.dataset, "prefer_dtype", None)
+    if _prefer_dtype == "bf16":
+        # bf16 inputs need bf16 autocast downstream; without it the model runs f32 on bf16 tensors -> silent
+        # dtype mismatch / precision loss. fail loudly rather than train on an inconsistent setup.
+        _amp = getattr(cfg, "amp", None)
+        if not (
+            _amp is not None and getattr(_amp, "enable", False) and getattr(_amp, "bfloat", False)
+        ):
+            raise ValueError(
+                "dataset.prefer_dtype='bf16' requires amp.enable=true and amp.bfloat=true "
+                "(bf16 data must be paired with bf16 autocast)."
+            )
+    _train_dtype = torch.bfloat16 if _prefer_dtype == "bf16" else torch.float32
+
     # dataloading backend
     if backend == "h5":
         train_backend = H5Backend(rank)
         val_backend = H5Backend(rank)
     elif backend == "gds":
-        train_backend = KvikIOBackend(rank, use_kvikio=use_kvikio_train)
+        train_backend = KvikIOBackend(rank, use_kvikio=use_kvikio_train, prefer_dtype=_prefer_dtype)
         # NOTE: for validation load without gds, save space, slow is acceptable
-        val_backend = KvikIOBackend(rank, use_kvikio=False)
+        val_backend = KvikIOBackend(rank, use_kvikio=False, prefer_dtype=_prefer_dtype)
 
     trainset = dataset_class(
         backend=train_backend,
         active_keys=cfg.dataset.active_keys,
         fields_to_load=train_input_fields,
+        probe_targets=cfg.validation.probe.targets,
         path=cfg.dataset.path,
         split="train",
         random_seed=cfg.seed,
@@ -150,6 +258,7 @@ def get_data(cfg, rank: int = 0):
         num_workers=cfg.dataset.num_workers,
         real_potens=cfg.dataset.real_potens,
         decouple_mu=cfg.dataset.norm_decouple_mu,
+        dtype=_train_dtype,
         rank=rank,
         **train_kwargs,
     )
@@ -158,6 +267,7 @@ def get_data(cfg, rank: int = 0):
         backend=val_backend,
         active_keys=cfg.dataset.active_keys,
         fields_to_load=val_input_fields,
+        probe_targets=cfg.validation.probe.targets,
         path=cfg.dataset.path,
         split="val",
         random_seed=cfg.seed,
@@ -184,22 +294,21 @@ def get_data(cfg, rank: int = 0):
         **val_kwargs,
     )
 
-    # gpudirect storage only used if kvikio is required, oterwise raw bins
+    # gpudirect storage only used if kvikio is required, otherwise raw bins
     use_gpudirect = backend == "gds" and use_kvikio_train
-    # dataloaders
-    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
-    # NOTE: must be false when returning gpu data
+    # must be false when returning gpu data
     pin_memory = cfg.training.pin_memory and not use_gpudirect
+    prefetch_factor = min(2, cfg.training.num_workers // 2) if backend != "gds" else 1
     dataloader_kwargs = {}
     if cfg.training.num_workers > 0:
-        # increase FP limit on each subprocess (for large batch sizes)
+        # increase FD limit on each subprocess for large batch sizes
         dataloader_kwargs["worker_init_fn"] = _worker_init_fn
 
     if use_gpudirect:
-        # cannot for context to dataloader workers with gds
+        # cannot set context to dataloader workers with gds
         if cfg.training.num_workers > 0:
             dataloader_kwargs["multiprocessing_context"] = mp.get_context("spawn")
-        # keep memory requirements low
+        # keep memory low
         prefetch_factor = 1
 
     trainloader = DataLoader(
@@ -233,6 +342,7 @@ def get_data(cfg, rank: int = 0):
             backend=val_backend,
             active_keys=cfg.dataset.active_keys,
             fields_to_load=val_input_fields,
+            probe_targets=cfg.validation.probe.targets,
             path=cfg.dataset.path,
             split="val",
             random_seed=cfg.seed,
@@ -281,9 +391,7 @@ def get_data(cfg, rank: int = 0):
                     )
                 )
             elif key == "mask_modes":
-                mix_weights = getattr(
-                    cfg.dataset.augment.mask_modes, "mix_weights", None
-                )
+                mix_weights = getattr(cfg.dataset.augment.mask_modes, "mix_weights", None)
                 cutoff = getattr(cfg.dataset.augment.mask_modes, "cutoff", None)
                 augmentations.append(
                     mask_modes(
@@ -306,8 +414,12 @@ def get_data(cfg, rank: int = 0):
                             if not cfg.dataset.augment.mask_modes.is_fourier
                             else None
                         ),
+                        per_sample=getattr(cfg.dataset.augment.mask_modes, "per_sample", False),
                     )
                 )
+            elif key in ["vicreg_variance", "vicreg_covariance", "logdet"]:
+                # compute loss on latents, no augmentation function needed
+                pass
             else:
                 raise ValueError(f"Unknown augmentation: {key}")
 
@@ -321,9 +433,7 @@ def get_data(cfg, rank: int = 0):
         print(f"Holdout trajectories (val): {len(holdout_trajectories_valset)}")
 
     if partial_holdouts:
-        val_ratio = (
-            len(holdout_samples_valset) + len(holdout_trajectories_valset)
-        ) / len(trainset)
+        val_ratio = (len(holdout_samples_valset) + len(holdout_trajectories_valset)) / len(trainset)
         if rank == 0:
             print(f"Holdout samples (val): {len(holdout_samples_valset)}")
         datasets = ((trainset, holdout_trajectories_valset, holdout_samples_valset),)
@@ -332,6 +442,7 @@ def get_data(cfg, rank: int = 0):
             holdout_trajectories_valloader,
             holdout_samples_valloader,
         )
+
     if rank == 0:
         print(f"Validation ratio: {val_ratio:.2f}")
     return datasets, dataloaders, augmentations
@@ -342,5 +453,7 @@ __all__ = [
     "CycloneDataset",
     "CycloneSample",
     "CycloneAEDataset",
+    "CycloneVAEDataset",
+    "CycloneVQVAEDataset",
     "CycloneAESample",
 ]

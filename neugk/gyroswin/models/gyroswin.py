@@ -1,6 +1,6 @@
 """Neural gyrokinetics multitarget models."""
 
-from typing import Sequence, Union, Optional, Tuple, List, Dict
+from typing import Sequence, Union, Optional, Tuple, List, Dict, Type
 
 import torch
 from torch import nn
@@ -51,16 +51,24 @@ class GyroSwin(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         detach_flux_latents: bool = False,
+        detach_phi_cross_latents: bool = False,
         real_potens: bool = False,
         flux_reduce: str = "max",
         flux_num_heads: int = 8,
         flux_depth: int = 1,
-        flux_cond_embed: Optional[nn.Module] = None,
+        flux_n_cond: int = 0,
+        flux_cond_embed_dim: int = 128,
+        norm_layer: Type[nn.Module] = nn.LayerNorm,
+        qk_norm: bool = False,
+        cosine_attn: bool = False,
+        gated_attention: bool = False,
         init_weights: str = "xavier_uniform",
         patching_init_weights: str = "xavier_uniform",
         cond_init_weights: str = "normal_smallvar",
     ):
         super().__init__()
+        self.qk_norm = qk_norm
+        self.detach_phi_cross_latents = detach_phi_cross_latents
 
         self.patch_skip = patch_skip
         self.df_base_resolution = [int(r) for r in df_base_resolution]
@@ -103,9 +111,15 @@ class GyroSwin(nn.Module):
             conditioning=conditioning,
             cond_embed=cond_embed,
             act_fn=act_fn,
+            norm_layer=norm_layer,
+            qk_norm=qk_norm,
             patch_skip=patch_skip,
             decouple_mu=decouple_mu,
             swin_bottleneck=swin_bottleneck,
+            use_rpb=use_rpb,
+            use_rope=use_rope,
+            gated_attention=gated_attention,
+            cosine_attn=cosine_attn,
             init_weights=init_weights,
             cond_init_weights=cond_init_weights,
             patching_init_weights=patching_init_weights,
@@ -134,10 +148,14 @@ class GyroSwin(nn.Module):
             conditioning=conditioning,
             cond_embed=cond_embed,
             act_fn=act_fn,
+            norm_layer=norm_layer,
+            qk_norm=qk_norm,
             patch_skip=patch_skip,
             swin_bottleneck=swin_bottleneck,
             use_rpb=use_rpb,
             use_rope=use_rope,
+            gated_attention=gated_attention,
+            cosine_attn=cosine_attn,
             init_weights=init_weights,
             cond_init_weights=cond_init_weights,
             patching_init_weights=patching_init_weights,
@@ -162,7 +180,8 @@ class GyroSwin(nn.Module):
                 detach_latents=detach_flux_latents,
                 init_weights=init_weights,
                 reduction=flux_reduce,
-                cond_embed=flux_cond_embed,
+                n_cond=flux_n_cond,
+                cond_embed_dim=flux_cond_embed_dim,
             )
 
         if latent_cross_attn:
@@ -241,6 +260,9 @@ class GyroSwin(nn.Module):
                 init_weights=init_weights,
             )
 
+    def _phi_for_df(self, phi: torch.Tensor) -> torch.Tensor:
+        return phi.detach() if self.detach_phi_cross_latents else phi
+
     def forward(
         self, df: torch.Tensor, phi: Optional[torch.Tensor] = None, **kwargs
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -262,7 +284,10 @@ class GyroSwin(nn.Module):
         for i, df_blk in enumerate(self.df_down_blocks):
             if hasattr(self, "df_mix"):
                 # mix latents
-                df, phi = self.df_mix[i](df, phi), self.phi_mix[i](phi, df)
+                df, phi = (
+                    self.df_mix[i](df, self._phi_for_df(phi)),
+                    self.phi_mix[i](phi, df),
+                )
             # down blocks
             df, df_pre = df_blk(df, **df_cond)
             phi, phi_pre = self.phi_down_blocks[i](phi, **phi_cond)
@@ -278,7 +303,10 @@ class GyroSwin(nn.Module):
 
         if hasattr(self, "df_mix"):
             # mix latents
-            df, phi = self.df_mix[-1](df, phi), self.phi_mix[-1](phi, df)
+            df, phi = (
+                self.df_mix[-1](df, self._phi_for_df(phi)),
+                self.phi_mix[-1](phi, df),
+            )
 
         df = self.df_unet.middle(df, **df_cond)
         phi = self.phi_unet.middle(phi, **phi_cond)
@@ -295,7 +323,10 @@ class GyroSwin(nn.Module):
         for i, df_blk in enumerate(self.df_up_blocks):
             if hasattr(self, "df_mix_up"):
                 # mix latents
-                df, phi = self.df_mix_up[i](df, phi), self.phi_mix_up[i](phi, df)
+                df, phi = (
+                    self.df_mix_up[i](df, self._phi_for_df(phi)),
+                    self.phi_mix_up[i](phi, df),
+                )
             # up blocks
             df, df_ = df_blk(df, s=df_features[i], return_skip=True, **df_cond)
             phi, phi_ = self.phi_up_blocks[i](
@@ -360,7 +391,7 @@ class GyroSwin(nn.Module):
         # patch-space mixing
         if hasattr(self, "df_mix_unpatch"):
             # final mixing
-            zdf = self.df_mix_unpatch(zdf, zphi)
+            zdf = self.df_mix_unpatch(zdf, self._phi_for_df(zphi))
             if use_phi:
                 zphi = self.phi_mix_unpatch(zphi, zdf)
         if hasattr(self, "flux_mix_unpatch"):
@@ -522,13 +553,25 @@ class GyroSwinMultitask(GyroSwin):
         if hasattr(self.phi_unet, "middle_pe"):
             phi = self.phi_unet.middle_pe(phi)
 
-        df, phi = self.df_mix_middle(df, phi), self.phi_mix_middle(phi, df)
+        df, phi = (
+            self.df_mix_middle(df, self._phi_for_df(phi)),
+            self.phi_mix_middle(phi, df),
+        )
 
         df = self.df_unet.middle(df, **df_cond)
         phi = self.phi_middle(phi, **phi_cond)
 
+        flux_cond = None
+        if (
+            hasattr(self, "flux_head")
+            and self.flux_head is not None
+            and getattr(self.flux_head, "use_cond", False)
+        ):
+            cond_keys = self.df_unet.condition_keys
+            flux_cond = torch.cat([kwargs[k].reshape(-1, 1) for k in cond_keys], dim=-1)
+
         if hasattr(self, "flux_head") and self.flux_head is not None:
-            flux_lats.append(self.flux_head.mix(0, phi, df, **kwargs))
+            flux_lats.append(self.flux_head.mix(0, phi, df, cond=flux_cond))
 
         df = self.df_unet.middle_upscale(df)
         phi = self.phi_middle_upscale(phi)
@@ -537,7 +580,7 @@ class GyroSwinMultitask(GyroSwin):
         df_features = df_features[::-1]
         for i, (df_blk, df_mix) in enumerate(zip(self.df_up_blocks, self.df_mix_up)):
             # mix latents
-            df = df_mix(df, phi)
+            df = df_mix(df, self._phi_for_df(phi))
             phi = self.phi_mix_up[i](phi, df)
             # up blocks
             df, df_ = df_blk(df, s=df_features[i], return_skip=True, **df_cond)
@@ -549,7 +592,7 @@ class GyroSwinMultitask(GyroSwin):
                 phi_ = phi
             # multiscale flux latents
             if self.flux_head is not None:
-                flux_lats.append(self.flux_head.mix(i + 1, phi_, df_, **kwargs))
+                flux_lats.append(self.flux_head.mix(i + 1, phi_, df_, cond=flux_cond))
 
         # expand to original
         if self.patch_skip:

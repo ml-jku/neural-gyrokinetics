@@ -23,6 +23,14 @@ from neugk.models.nd_vit.patching import unpad, pad_to_blocks
 from neugk.models.layers import Film, seq_weight_init, MLP, DiT, Gate
 
 
+def set_legacy_swin_shortcut(model: nn.Module, legacy: bool) -> nn.Module:
+    """Set the doubled post-attention residual on every plain (unconditioned) swin block of ``model``."""
+    for m in model.modules():
+        if isinstance(m, SwinTransformerBlock) and not isinstance(m, DiTSwinTransformerBlock):
+            m.legacy_double_shortcut = bool(legacy)
+    return model
+
+
 def window_partition(x, window_size):
     """Window partition operation is n- dimensions.
 
@@ -289,13 +297,23 @@ class WindowAttention(nn.Module):
             else:
                 x = F.scaled_dot_product_attention(q, k, v, mask, attn_drop)
         if self.cosine_attn:
-            # swinv2 cosine similarity attention
-            attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
+            # swinv2 cosine similarity attention via sdpa:
+            # pre-normalize q,k then absorb per-head logit_scale into q so we
+            # can call F.scaled_dot_product_attention with scale=1.0 and get
+            # flash/efficient kernels instead of materializing [B,H,N,N].
             logit_scale = torch.clamp(self.logit_scale, max=self.max_logits).exp()
-            attn = attn * logit_scale
-            attn = attn + mask
-            attn = self.attn_drop(F.softmax(attn, dim=-1))
-            x = attn @ v
+            q_n = F.normalize(q, dim=-1) * logit_scale
+            k_n = F.normalize(k, dim=-1)
+            attn_drop = self.attn_drop.p if self.training else 0.0
+            if dist.is_initialized():
+                with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+                    x = F.scaled_dot_product_attention(
+                        q_n, k_n, v, attn_mask=mask, dropout_p=attn_drop, scale=1.0
+                    )
+            else:
+                x = F.scaled_dot_product_attention(
+                    q_n, k_n, v, attn_mask=mask, dropout_p=attn_drop, scale=1.0
+                )
 
         if self.gated_attention:
             # gated headwise attention before readout (https://arxiv.org/pdf/2505.06708)
@@ -330,7 +348,12 @@ class SwinTransformerBlock(nn.Module):
         norm_layer (nn.Module): Normalization layer type. Default is nn.LayerNorm.
         use_checkpoint (bool): Gradient checkpointing (saves memory). Default is False.
         act_fn (callable): Activation function. Default is nn.GELU.
+
+    ``legacy_double_shortcut`` (default True, set with :func:`set_legacy_swin_shortcut`) adds the
+    post-attention residual twice, ``2 * x + mlp(x)``; False is the single residual ``x + mlp(x)``.
     """
+
+    legacy_double_shortcut: bool = True
 
     def __init__(
         self,
@@ -354,6 +377,7 @@ class SwinTransformerBlock(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         gated_attention: bool = False,
+        cosine_attn: bool = False,
     ):
         super().__init__()
         self.space = space
@@ -388,6 +412,7 @@ class SwinTransformerBlock(nn.Module):
             use_rpb=use_rpb,
             use_rope=use_rope,
             gated_attention=gated_attention,
+            cosine_attn=cosine_attn,
         )
 
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
@@ -489,9 +514,11 @@ class SwinTransformerBlock(nn.Module):
         x = shortcut + self.drop_path(x)
         shortcut = x
         if self.use_checkpoint:
-            x = x + checkpoint.checkpoint(self.forward_part2, x, use_reentrant=False)
+            x = checkpoint.checkpoint(self.forward_part2, x, use_reentrant=False)
         else:
-            x = x + self.forward_part2(x)
+            x = self.forward_part2(x)
+        if self.legacy_double_shortcut:
+            x = x + shortcut
         x = shortcut + x
         return x
 
@@ -600,6 +627,7 @@ class SwinLayer(nn.Module):
         use_rpb: bool = True,
         use_rope: bool = False,
         gated_attention: bool = False,
+        cosine_attn: bool = False,
         depth_shifts: bool = False,
         TransformerBlockType: Type[nn.Module] = SwinTransformerBlock,
     ):
@@ -643,6 +671,7 @@ class SwinLayer(nn.Module):
         self.use_rpb = use_rpb
         self.use_rope = use_rope
         self.gated_attention = gated_attention
+        self.cosine_attn = cosine_attn
 
         assert dim % num_heads == 0
 
@@ -668,6 +697,7 @@ class SwinLayer(nn.Module):
                 use_rpb=use_rpb,
                 use_rope=use_rope,
                 gated_attention=gated_attention,
+                cosine_attn=cosine_attn,
             )
             blocks.append(swin)
         self.blocks = nn.ModuleList(blocks)
@@ -679,7 +709,8 @@ class SwinLayer(nn.Module):
         for blk in self.blocks:
             blk.reset_parameters(init_weights)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        _ = kwargs
         for blk in self.blocks:
             x = blk(x)
         return x

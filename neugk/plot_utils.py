@@ -134,9 +134,9 @@ def plot_nd(
 
                 spacer = np.full((xx.shape[0], max(1, xx.shape[1] // 15)), np.nan)
                 display_img = np.concatenate([xx, spacer, yy], axis=1)
-                im = ax.matshow(display_img, cmap=c_map, vmin=vmin, vmax=vmax)
+                ax.matshow(display_img, cmap=c_map, vmin=vmin, vmax=vmax)
             else:
-                im = ax.matshow(xx, cmap=c_map)
+                ax.matshow(xx, cmap=c_map)
 
             # Labels only on row/column boundaries for clarity
             # Y-label on the first plot of each row
@@ -258,6 +258,48 @@ def avg_flux_confidence(
     ax.set_ylim(bottom=0)
     ax.legend(frameon=True, loc="upper right")
     ax.grid(True, axis="y", alpha=0.3, ls="--")
+
+    if to_wandb:
+        return plt_to_wandb_image(fig)
+    return fig
+
+
+def plot_latent_tsne(
+    latents: torch.Tensor,
+    targets: torch.Tensor,
+    title: str = "Latent Space t-SNE (colored by flux)",
+    to_wandb: bool = True,
+):
+    """Visualize high-dimensional latents using t-SNE, colored by target values."""
+    try:
+        from sklearn.manifold import TSNE
+    except ImportError:
+        print("sklearn not found, skipping t-SNE plot.")
+        return None
+
+    # moving to cpu and numpy
+    z = latents.detach().cpu().numpy()
+    y = targets.detach().cpu().numpy().flatten()
+
+    n_samples = z.shape[0]
+    if n_samples < 5:
+        print("Too few samples for t-SNE, skipping plot.")
+        return None
+
+    # compute t-SNE
+    # Perplexity must be less than n_samples
+    perplexity = min(30, max(1, n_samples // 3))
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity)
+    z_2d = tsne.fit_transform(z)
+
+    # plot
+    fig, ax = plt.subplots(figsize=(10, 8), constrained_layout=True)
+    sc = ax.scatter(z_2d[:, 0], z_2d[:, 1], c=y, cmap="viridis", alpha=0.6, s=15)
+    plt.colorbar(sc, ax=ax, label="Flux")
+    ax.set_title(title, fontsize=14)
+    ax.set_xlabel("t-SNE 1")
+    ax.set_ylabel("t-SNE 2")
+    ax.grid(True, alpha=0.3, ls="--")
 
     if to_wandb:
         return plt_to_wandb_image(fig)

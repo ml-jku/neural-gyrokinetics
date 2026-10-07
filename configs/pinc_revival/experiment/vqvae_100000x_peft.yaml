@@ -1,0 +1,74 @@
+# @package _global_
+# PINC revival: 77369x VQ-VAE, TWO-STAGE STAGE 2 (PEFT fine-tune); load the df-pretrained 70k VQ-VAE, freeze backbone + codebook, attach LoRA adapters, fine-tune only adapters against physics losses; physics terms RELATIVE L1, uniform weight 1.0 (scale-free)
+# patch/vit MUST match vqvae_100000x so the architecture lines up with the loaded checkpoint
+# Run: python main.py --config-dir configs/pinc_revival experiment=vqvae_100000x_peft ae_checkpoint=/path/to/vqvae_100000x_run
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_100000x_peft
+workflow: pinc          # base "pinc" runner; stage=peft + ae_checkpoint route the PEFT path
+stage: peft
+seed: 0
+mode: train
+eval: true
+device: cuda
+validation:
+  model_selection_metric: phi_int   # PEFT optimizes physics: select best.pth on potential fidelity, not df recon
+load_ckpt: false
+output_path: /system/user/publicwork/galletti/pinc_revival   # checkpoints land here (home is only 50GB)
+ae_checkpoint: ???   # REQUIRED: stage-1 70k pretrain run (dir or best.pth)
+logging:
+  project: pinc_revival
+  entity: null   # use the authed wandb account's default entity
+
+model:
+  vq:
+    codebook_type: euclidean   # match the pretrain
+  patch:
+    patch_size: [4, 0, 2, 5, 2]   # 77369x grid [4,4,9,8] = 1152 tokens
+  vit:
+    num_heads: [8]
+    depth: [4]
+  peft:
+    method: "lora"   # "lora" or "eva"
+    lora: {r: 64, lora_alpha: 1, lora_dropout: 0.0, bias: "none", strategy: "attention_mlp"}
+    eva:
+      r: 64
+      lora_alpha: 1
+      lora_dropout: 0.0
+      bias: "none"
+      strategy: "attention_mlp"
+      rho: 2.0
+      tau: 0.99
+      use_label_mask: true
+      whiten: false
+      adjust_scaling_factors: true
+    save: {save_lora_only: true, save_full_model: false}
+  loss_weights:
+    df: 1.0
+    vq_commit: 1.0   # codebook frozen (EMA), but adapter-shifted encoder still commits
+  extra_loss_weights:
+    phi_int: 1.0
+    flux_int: 1.0
+    qspec: 1.0
+    kyspec: 1.0
+  loss_scheduler: {}
+
+training:
+  physics_mode: two_stage
+  n_epochs: 100
+  batch_size: 16
+  learning_rate: 1e-4   # adapter finetune, below the 3e-4 pretrain lr
+  integral_loss_type: relative_l1
+  spectral_loss_type: log_std_l1   # per-mode log1p-std normalized (served stats)
+  eval_loss_type: mse
+
+amp:
+  enable: true    # bf16 training data needs autocast; physics integrals self-guard to f32/f64 internally
+  bfloat: true
+
+dataset:
+  input_fields: ["df", "phi", "flux"]

@@ -11,7 +11,13 @@ from torch.nn import functional as F
 import torch.distributed as dist
 
 from neugk.models.nd_vit.drop import DropPath
-from neugk.models.layers import MLP, seq_weight_init, AttentionDecoder
+from neugk.models.layers import (
+    MLP,
+    seq_weight_init,
+    AttentionDecoder,
+    ContinuousConditionEmbed,
+    Film,
+)
 
 
 class MixingBlock(nn.Module):
@@ -146,6 +152,60 @@ class LatentMixingTransformer(nn.Module):
         return x
 
 
+class _CondLatentMixingTransformer(nn.Module):
+    """FiLM-conditioned LatentMixingTransformer.
+
+    Per-block `ContinuousConditionEmbed` produces a conditioning vector
+    that FiLM-modulates `left` before each `MixingBlock`. Only the last
+    block's output is returned (matches the OLD code's loop semantics —
+    typically benign because `flux_depth: 1` is the in-use setting).
+    """
+
+    def __init__(
+        self,
+        left_dim,
+        right_dim,
+        depth,
+        num_heads,
+        n_cond,
+        cond_embed_dim,
+        mlp_ratio=2.0,
+        attn_drop=0.1,
+        drop=0.0,
+    ):
+        super().__init__()
+        self.left_dim = left_dim
+        self.right_dim = right_dim
+        self.cond_embed = ContinuousConditionEmbed(dim=cond_embed_dim, n_cond=n_cond)
+        self.blocks = nn.ModuleList(
+            [
+                MixingBlock(
+                    left_dim=left_dim,
+                    right_dim=right_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=True,
+                    drop=drop,
+                    attn_drop=attn_drop,
+                    drop_path=0.0,
+                    act_fn=nn.GELU,
+                    init_weights=None,
+                )
+                for _ in range(depth)
+            ]
+        )
+        self.conditioning = nn.ModuleList(
+            [Film(self.cond_embed.cond_dim, left_dim) for _ in range(depth)]
+        )
+
+    def forward(self, left, right, cond):
+        condition = self.cond_embed(cond)
+        for blk, film in zip(self.blocks, self.conditioning):
+            left = film(left, condition)
+            x = blk(left, right)
+        return x
+
+
 class FluxDecoder(nn.Module):
     def __init__(
         self,
@@ -164,30 +224,48 @@ class FluxDecoder(nn.Module):
         detach_latents: bool = False,
         reduction: str = "max",
         cond_embed=None,
+        n_cond: int = 0,
+        cond_embed_dim: int = 128,
     ):
         super().__init__()
         self.detach_latents = detach_latents
         self.reduction = reduction
+        self.use_cond = n_cond > 0
         flux_blocks = []
         reduction_blocks = []
         flux_latent_size = 0
         for left_dim, right_dim in zip(left_dims, right_dims):
-            flux_blocks.append(
-                LatentMixingTransformer(
-                    left_dim=left_dim,
-                    right_dim=right_dim,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    drop=drop,
-                    attn_drop=attn_drop,
-                    drop_path=drop_path,
-                    norm_layer=norm_layer,
-                    act_fn=act_fn,
-                    init_weights=init_weights,
-                    depth=depth,
+            if self.use_cond:
+                flux_blocks.append(
+                    _CondLatentMixingTransformer(
+                        left_dim=left_dim,
+                        right_dim=right_dim,
+                        depth=depth,
+                        num_heads=num_heads,
+                        n_cond=n_cond,
+                        cond_embed_dim=cond_embed_dim,
+                        mlp_ratio=mlp_ratio,
+                        attn_drop=attn_drop,
+                        drop=drop,
+                    )
                 )
-            )
+            else:
+                flux_blocks.append(
+                    LatentMixingTransformer(
+                        left_dim=left_dim,
+                        right_dim=right_dim,
+                        num_heads=num_heads,
+                        mlp_ratio=mlp_ratio,
+                        qkv_bias=qkv_bias,
+                        drop=drop,
+                        attn_drop=attn_drop,
+                        drop_path=drop_path,
+                        norm_layer=norm_layer,
+                        act_fn=act_fn,
+                        init_weights=init_weights,
+                        depth=depth,
+                    )
+                )
             if self.reduction == "integral":
                 reduction_blocks.append(
                     RSpaceReduce(
@@ -202,6 +280,13 @@ class FluxDecoder(nn.Module):
         self.blocks = nn.ModuleList(flux_blocks)
         self.reductions = nn.ModuleList(reduction_blocks)
 
+        if self.use_cond:
+            # Outer cond_embed: dead in our forward (each block has its own),
+            # registered for OLD checkpoint name parity (see eval loader).
+            self.cond_embed = ContinuousConditionEmbed(
+                dim=cond_embed_dim, n_cond=n_cond
+            )
+
         self.flux_mlp = MLP(
             [flux_latent_size, flux_latent_size // 2, 1],
             # last_act_fn=nn.Softplus,
@@ -209,12 +294,20 @@ class FluxDecoder(nn.Module):
         )
 
     def mix(
-        self, i: int, left: torch.Tensor, right: Optional[torch.Tensor] = None, **kwargs
+        self,
+        i: int,
+        left: torch.Tensor,
+        right: Optional[torch.Tensor] = None,
+        cond: Optional[torch.Tensor] = None,
+        **kwargs,
     ):
         if self.detach_latents:
             left = left.detach()
             right = right.detach()
-        x = self.blocks[i].forward(left, right)
+        if self.use_cond:
+            x = self.blocks[i](left, right, cond)
+        else:
+            x = self.blocks[i].forward(left, right)
         # pool spatials
         if self.reduction == "max":
             x = x.amax(axis=list(range(1, x.ndim - 1)))
@@ -319,29 +412,29 @@ class RSpaceReduce(AttentionDecoder):
         self.register_buffer("integral_token", integral_token)
         self.out_dim = out_dim
 
-    def forward(self, phi: torch.Tensor):
-        b, *_ = phi.shape
-        phi = rearrange(phi, "b s x y c -> b (s x y) c")
+    def forward(self, x: torch.Tensor):
+        b = x.shape[0]
+        # flatten all spatial/velocity dimensions
+        x = rearrange(x, "b ... c -> b (...) c")
 
         # qkv embeddings from inputs
-        phi = phi.contiguous()
+        x = x.contiguous()
         assert (
-            phi.is_contiguous() and self.integral_token.is_contiguous()
+            x.is_contiguous() and self.integral_token.is_contiguous()
         ), "Tensors not contiguous."
         q = rearrange(self.integral_token, "b n (h c) -> b h n c", h=self.num_heads)
-        k, v = rearrange(
-            self.kv(phi), "b n (t h c) -> t b h n c", t=2, h=self.num_heads
-        )
+        k, v = rearrange(self.kv(x), "b n (t h c) -> t b h n c", t=2, h=self.num_heads)
+        q = q.expand(k.size(0), -1, -1, -1).contiguous()
         if dist.is_initialized():
             with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
-                phi = F.scaled_dot_product_attention(
+                out = F.scaled_dot_product_attention(
                     q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
                 )
         else:
-            phi = F.scaled_dot_product_attention(
+            out = F.scaled_dot_product_attention(
                 q, k, v, None, dropout_p=(self.attn_drop if self.training else 0.0)
             )
-        phi = rearrange(phi, "b k n c -> b n (k c)")
-        phi = self.proj(phi)
-        phi = self.proj_drop(phi)
-        return phi.view(b, self.out_dim)
+        out = rearrange(out, "b k n c -> b n (k c)")
+        out = self.proj(out)
+        out = self.proj_drop(out)
+        return out.view(b, self.out_dim)

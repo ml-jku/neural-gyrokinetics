@@ -403,7 +403,8 @@ class ViTLayer(nn.Module):
         for blk in self.blocks:
             blk.reset_parameters(init_weights)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, **kwargs) -> torch.Tensor:
+        _ = kwargs
         for blk in self.blocks:
             x = blk(x)
         return x

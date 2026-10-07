@@ -1,6 +1,6 @@
 batch_size: 16
 n_epochs: 400
-num_workers: 2
+num_workers: 1
 pin_memory: true
 learning_rate: 3e-4
 use_latest_checkpoint: false
@@ -9,9 +9,12 @@ weight_decay: 1e-6
 exclude_from_wd: ["cond"]
 predict_delta: false
 scheduler: "cosine"
+optimizer: "adam"  # "adam" or "muon"
+muon_lr_multiplier: 100  # Muon group lr = learning_rate * this
 clip_grad: true
 clip_to: 1.0
 gradnorm_balancer: "none"  # "none", "full", "pseudo"
+integral_precision: "float64"  # "float64" or "float32"
 params_to_include: null
 pushforward:
   epochs: [100, 130, 160]

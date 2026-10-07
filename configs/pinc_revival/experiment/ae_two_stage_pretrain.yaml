@@ -1,0 +1,44 @@
+# @package _global_
+# PINC revival: generalizing AE, TWO-STAGE physics losses -- STAGE 1 (pretrain).
+#
+# physics_mode=two_stage stage 1: train the autoencoder on the df reconstruction
+# loss ONLY (no physics terms). The resulting checkpoint is then adapted to the
+# physics losses in stage 2 (ae_two_stage_peft.yaml) via LoRA/EVA fine-tuning.
+#
+# Run:  python main.py experiment=pinc_revival/ae_two_stage_pretrain
+# then take the run's best.pth as the ae_checkpoint for stage 2.
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/ae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_ae_two_stage_pretrain
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+model:
+  loss_weights:
+    df: 1.0
+  extra_loss_weights: {}
+  loss_scheduler: {}
+
+training:
+  physics_mode: two_stage
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity

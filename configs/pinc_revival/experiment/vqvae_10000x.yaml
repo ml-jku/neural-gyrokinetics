@@ -1,0 +1,42 @@
+# @package _global_
+# PINC revival: VQ-VAE at ~10000x compression.
+# patch_size [2,0,1,5,1], one vit layer -> grid [8,8,9,16] = 9216 tokens, codes/token 1.
+# MEASURED CR = 9671x (empirical, one forward at real resolution).
+# Run:  python main.py experiment=pinc_revival/vqvae_10000x
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_10000x
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+model:
+  vq:
+    codebook_type: euclidean
+  patch:
+    patch_size: [2, 0, 1, 5, 1]
+  vit:
+    num_heads: [8]
+    depth: [4]
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity

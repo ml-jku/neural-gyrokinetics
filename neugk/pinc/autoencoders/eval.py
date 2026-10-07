@@ -1,9 +1,11 @@
 from typing import Dict, Optional, Tuple, Any, List
+import warnings
 
 import torch
 import torch.nn as nn
 import torch.distributed as dist
 from tqdm import tqdm
+import numpy as np
 
 from neugk.dataset.cyclone_diff import CycloneAESample
 from neugk.evaluate import BaseEvaluator, validation_metrics
@@ -38,6 +40,45 @@ class AutoencoderEvaluator(BaseEvaluator):
         }
         return xs, tgts, condition, idx_data
 
+    def _gather_probe_targets(
+        self,
+        sample: CycloneAESample,
+        dataset,
+        probe_targets: Optional[List[str]] = None,
+    ) -> torch.Tensor:
+        """Extract probe target values from per-file dataset metadata.
+
+        Returns a (B, n_targets) tensor.
+        """
+        file_indices = sample.file_index  # (B,)
+        timestep_indices = sample.timestep_index  # (B,)
+        batch_targets = []
+        for fi, ti in zip(file_indices.tolist(), timestep_indices.tolist()):
+            meta = dataset.metadata[fi]
+            vals = []
+            for tgt_name in probe_targets:
+                v = meta[tgt_name]
+                # time-indexed arrays (e.g. fluxes) vs per-file scalars (e.g. itg)
+                if hasattr(v, "__len__") and len(v) > 1:
+                    v = v[ti]
+                stats = dataset.stats.get(tgt_name, {})
+                mean = 0.0
+                std = 1.0
+                if len(stats):
+                    mean = stats["full"]["mean"]
+                    std = stats["full"]["std"]
+                else:
+                    warnings.warn(
+                        f"No stats found for probe target '{tgt_name}', skipping normalization."
+                    )
+                if tgt_name in ["fluxspec", "kyspec"]:
+                    v = np.log1p(v)  # log-transform spectra for stability
+                v = (v - mean) / std  # normalize
+                v_t = torch.as_tensor(v, dtype=torch.float32).reshape(-1)
+                vals.append(v_t)
+            batch_targets.append(torch.cat(vals))
+        return torch.stack(batch_targets, dim=0)
+
     @torch.no_grad()
     def collect_xy(
         self,
@@ -45,12 +86,14 @@ class AutoencoderEvaluator(BaseEvaluator):
         dataloader: torch.utils.data.DataLoader,
         model: torch.nn.Module,
         device: torch.device,
+        dataset=None,
         desc: Optional[str] = "linear probe",
+        probe_targets: Optional[List[str]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Collect model latents and target fluxes for linear probing."""
+        """Collect model latents and probe targets for linear probing."""
         model.eval()
         latents: List[torch.Tensor] = []
-        fluxes: List[torch.Tensor] = []
+        targets: List[torch.Tensor] = []
 
         # setup iterator
         use_tqdm = (not dist.is_initialized() or rank == 0) and desc
@@ -64,7 +107,6 @@ class AutoencoderEvaluator(BaseEvaluator):
                 if sample.conditioning is not None
                 else None
             )
-            flux = sample.flux.to(device, non_blocking=True)
 
             # forward pass for latents
             if hasattr(model, "encode"):
@@ -76,9 +118,12 @@ class AutoencoderEvaluator(BaseEvaluator):
             # global average pool spatially
             zpool = z.view(z.shape[0], -1, z.shape[-1]).mean(1)
             latents.append(zpool.cpu())
-            fluxes.append(flux.view(flux.shape[0], -1).cpu())
 
-        return torch.cat(latents, 0), torch.cat(fluxes, 0)
+            # gather probe targets from dataset metadata
+            y = self._gather_probe_targets(sample, dataset, probe_targets)
+            targets.append(y)
+
+        return torch.cat(latents, 0), torch.cat(targets, 0)
 
     @torch.no_grad()
     def __call__(
@@ -93,7 +138,7 @@ class AutoencoderEvaluator(BaseEvaluator):
         loss_val_min: float,
         trainloader: Optional[torch.utils.data.DataLoader] = None,
         evaluate_recon: bool = False,
-        evaluate_probing: bool = False,
+        probe_cfg: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
         """Evaluate autoencoder model on validation datasets"""
@@ -135,10 +180,6 @@ class AutoencoderEvaluator(BaseEvaluator):
                         tgts, idx_data, valset.denormalize, dataset=valset
                     )
 
-                    # cpu transfer for metric calculation
-                    tgts = {k: v.cpu() for k, v in tgts.items()}
-                    preds = {k: v.cpu() for k, v in preds.items()}
-
                     # combine zonal flow
                     if self.cfg.dataset.separate_zf:
                         if "df" in preds:
@@ -147,10 +188,11 @@ class AutoencoderEvaluator(BaseEvaluator):
                             tgts["df"] = recombine_zf(tgts["df"], dim=1)
 
                     # compute validation metrics
+                    geometry = valset.get_batch_geometry(idx_data["file_index"])
                     metrics_i, integrated_i = validation_metrics(
-                        tgts=tgts,
-                        preds=preds,
-                        geometry=sample.geometry,
+                        tgts={k: v.cpu() for k, v in tgts.items()},
+                        preds={k: v.cpu() for k, v in preds.items()},
+                        geometry=geometry,
                         loss_wrap=self.loss_wrap,
                         eval_integrals=eval_integrals,
                     )
@@ -205,28 +247,43 @@ class AutoencoderEvaluator(BaseEvaluator):
                 )
 
         # linear probing evaluation
-        if trainloader is not None and evaluate_probing:
-            # compute probe weights on trainset
-            x_train, y_train = self.collect_xy(rank, trainloader, model, device)
-            # column of ones for bias
-            x_train_b = torch.cat([x_train, torch.ones(x_train.shape[0], 1)], dim=1)
-            # solve linear system: w @ w = y
-            res = torch.linalg.lstsq(x_train_b, y_train, driver="gels")
-            w = res.solution
-            # report train RMSE on physical scale
-            y_train_pred = x_train_b @ w
-            train_rmse = torch.sqrt(torch.mean((y_train_pred - y_train) ** 2))
-            log_metric_dict["val_traj/probe_train_rmse"] = train_rmse.item()
-            # evaluate on validation sets
-            for val_idx, valloader in enumerate(self.valloaders):
-                valname = "val_traj" if val_idx == 0 else "val_samples"
-                x_val, y_val = self.collect_xy(
-                    rank, valloader, model, device, desc=None
-                )
-                x_val_b = torch.cat([x_val, torch.ones(x_val.shape[0], 1)], dim=1)
-                y_val_pred = x_val_b @ w
-                val_rmse = torch.sqrt(torch.mean((y_val_pred - y_val) ** 2))
-                log_metric_dict[f"{valname}/probe_val_rmse"] = val_rmse.item()
+        if trainloader is not None and probe_cfg is not None:
+            trainset = kwargs.get("trainset")
+            probe_targets: List[str] = probe_cfg.get("targets", ["flux"])
+
+            def _make_encode_fn(dataset):
+                def encode_fn(sample, device):
+                    sample: CycloneAESample
+                    xs = sample.df.to(device, non_blocking=True)
+                    condition = (
+                        sample.conditioning.to(device, non_blocking=True)
+                        if sample.conditioning is not None
+                        else None
+                    )
+                    # forward pass for latents
+                    if hasattr(model, "encode"):
+                        z, _ = model.encode(xs, condition=condition)
+                    else:
+                        z, _ = model.module.encode(xs, condition=condition)
+                    y = self._gather_probe_targets(sample, dataset, probe_targets)
+                    return z, y
+
+                return encode_fn
+
+            self.run_probing_evaluation(
+                rank=rank,
+                trainloader=trainloader,
+                extraction_fn=_make_encode_fn(trainset),
+                device=device,
+                epoch=epoch,
+                log_metric_dict=log_metric_dict,
+                val_plots=val_plots,
+                probe_cfg=probe_cfg,
+                probe_targets=probe_targets,
+                val_extraction_fns=[_make_encode_fn(vs) for vs in self.valsets],
+                dataset_for_stats=trainset,
+            )
+
         # save checkpoint
         loss_val_min = self._save_checkpoint(
             rank, model, opt, scheduler, epoch, log_metric_dict, loss_val_min

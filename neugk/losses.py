@@ -15,7 +15,7 @@ from conflictfree.utils import get_gradient_vector, OrderedSliceSelector
 
 from neugk.dataset.cyclone import CycloneDataset, CycloneSample
 from neugk.utils import recombine_zf
-from neugk.integrals import FluxIntegral
+from neugk.physics.integrals import FluxIntegral
 
 
 def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
@@ -33,7 +33,7 @@ def relative_norm_mse(x, y, dim_to_keep=None, squared=True):
     diff = x - y
     diff_norms = torch.linalg.norm(diff, ord=2, dim=-1)
     y_norms = torch.linalg.norm(y, ord=2, dim=-1)
-    eps = 1e-8
+    eps = 1e-4
     if squared:
         diff_norms, y_norms = diff_norms**2, y_norms**2
     # finalize loss
@@ -64,7 +64,7 @@ class LossWrapper(nn.Module):
         if masked_mode_modeling:
             self._data_losses += ["df_delta"]
             self.weights["df_delta"] = self.weights.get("df_delta", 1.0)
-        self._int_losses = ["flux_int", "phi_int", "flux_cross", "phi_cross"]
+        self._int_losses = ["flux_int", "phi_int"]
         self.integrator = FluxIntegral(real_potens=real_potens)
         self.denormalize_fn = denormalize_fn
         self.separate_zf = separate_zf
@@ -118,8 +118,6 @@ class LossWrapper(nn.Module):
         int_losses = {
             "phi_int": F.mse_loss(pphi_int.squeeze(), tgt_phi.squeeze()),
             "flux_int": (pflux**2).mean() + F.mse_loss(eflux, tgt_eflux),
-            "phi_cross": F.mse_loss(preds["phi"], pphi_int) if "phi" in preds else 0.0,
-            "flux_cross": F.mse_loss(preds["flux"], eflux) if "flux" in preds else 0.0,
         }
 
         return int_losses, {"phi": pphi_int, "pflux": pflux, "eflux": eflux}
@@ -158,8 +156,7 @@ class LossWrapper(nn.Module):
         )
 
         int_keys = [k for k in loss_keys if "int" in k]
-        cross_keys = [k for k in loss_keys if "cross" in k]
-        data_keys = list(set(loss_keys) - set(int_keys) - set(cross_keys))
+        data_keys = list(set(loss_keys) - set(int_keys))
 
         # validate inputs
         if not all([k in preds for k in data_keys]):
@@ -181,14 +178,14 @@ class LossWrapper(nn.Module):
                     losses[k] = zf_loss + other_loss
                 else:
                     if preds[k].shape != tgts[k].shape and k == "phi":
-                        preds[k] = preds[k].unsqueeze(0)
+                        tgts[k] = tgts[k].squeeze(1)
                     losses[k] = relative_norm_mse(preds[k], tgts[k])
             else:
                 if self.training:
                     losses[k] = F.l1_loss(preds[k], tgts[k].view_as(preds[k]))
                 else:
                     losses[k] = F.mse_loss(preds[k], tgts[k].view_as(preds[k]))
-        for k in int_keys + cross_keys:
+        for k in int_keys:
             if k in int_losses:
                 losses[k] = int_losses[k]
 
@@ -224,6 +221,7 @@ class GradientBalancer(nn.Module):
         clip_grad: bool = True,
         clip_to: float = 1.0,
         n_tasks: Optional[int] = None,
+        deepspeed_engine=None,
     ):
         super().__init__()
         self.optimizer = optimizer
@@ -231,6 +229,7 @@ class GradientBalancer(nn.Module):
         self.clip_grad = clip_grad
         self.scaler = scaler
         self.clip_to = clip_to
+        self.deepspeed_engine = deepspeed_engine
 
         # operator setup
         if mode == "pseudo":
@@ -240,6 +239,29 @@ class GradientBalancer(nn.Module):
             self.operator = ConFIGOperator()
 
     def forward(
+        self, model: nn.Module, weighted_loss: torch.Tensor, losses: List[torch.Tensor]
+    ):
+        """Balances multitask gradients with conflict-free IG."""
+        if self.deepspeed_engine is not None:
+            return self._forward_deepspeed(model, weighted_loss, losses)
+        return self._forward_default(model, weighted_loss, losses)
+
+    def _forward_deepspeed(
+        self, model: nn.Module, weighted_loss: torch.Tensor, losses: List[torch.Tensor]
+    ):
+        if self.mode in [None, "none"]:
+            self.deepspeed_engine.zero_grad()
+            self.deepspeed_engine.backward(weighted_loss)
+            self.deepspeed_engine.step()
+        elif self.mode == "pseudo":
+            self.deepspeed_engine.zero_grad()
+            idx, loss_i = self.loss_selector.select(1, losses)
+            self.deepspeed_engine.backward(loss_i)
+            self.operator.update_gradient(model, idx, grads=get_gradient_vector(model))
+            self.deepspeed_engine.step()
+        return model
+
+    def _forward_default(
         self, model: nn.Module, weighted_loss: torch.Tensor, losses: List[torch.Tensor]
     ):
         """Balances multitask gradients with conflict-free IG."""
@@ -280,6 +302,8 @@ def get_pushforward_fn(
     use_bf16: bool = False,
     device: str = None,
 ) -> Callable:
+    _executor = ThreadPoolExecutor(max_workers=1)
+
     def _loss_fn(
         model: nn.Module,
         inputs: Dict,
@@ -325,10 +349,9 @@ def get_pushforward_fn(
                 ts_unrolled.cpu(),
             )
 
-        executor = ThreadPoolExecutor(max_workers=1)
         with torch.no_grad():
             ts_unrolled = idx_data["timestep_index"] + (n_unrolls - 1) * ts_step
-            future = executor.submit(
+            future = _executor.submit(
                 fetch_target, dataset, idx_data["file_index"], ts_unrolled
             )
 

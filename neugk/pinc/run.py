@@ -21,11 +21,99 @@ from neugk.pinc.autoencoders.ae_utils import (
     train_step_peft,
     train_step_simsiam,
 )
-from neugk.pinc.peft_utils import setup_peft_stage
+from neugk.pinc.peft_utils import setup_peft_stage, PEFT_PARAM_KEYS
 
 
 class PINCRunner(BaseRunner):
     """PINCRunner class."""
+
+    # physics-loss keys an AE brings (integral + spectral); validate training.physics_mode
+    PHYSICS_LOSS_KEYS = (
+        "phi",
+        "flux",
+        "phi_int",
+        "flux_int",
+        "kxspec",
+        "kyspec",
+        "qspec",
+        "phi_zf",
+        "kxspec_monotonicity",
+        "kyspec_monotonicity",
+        "qspec_monotonicity",
+        "mass",
+    )
+
+    def _resolve_physics_mode(self, model_cfg):
+        """Validate the training.physics_mode knob and route accordingly.
+
+        Two ways to bring the PINC physics losses into the *generalizing* AE:
+
+        - ``two_stage``: stage 1 trains the AE on the df reconstruction loss only
+          (no physics weights active); stage 2 is the PEFT (LoRA/EVA) fine-tune
+          run with ``stage=peft`` + ``ae_checkpoint=...`` that adapts the frozen
+          AE to the physics losses. This method only sanity-checks the current
+          stage; the two stages are launched as two separate runs.
+
+        - ``scheduled``: a single ``stage=autoencoder`` run with NO fine-tuning.
+          The physics-loss weights are driven by the ``loss_scheduler`` block,
+          which keeps them at ``start`` (typically 0) until ``start_fraction`` of
+          training and then ramps them to ``end``. The scheduler machinery already
+          lives in ``setup_common_losses`` -> ``loss_scheduler_dict`` ->
+          ``PINCLossWrapper.schedulers``; this only asserts it is wired so the
+          mode actually drives the physics terms.
+
+        Default is ``scheduled`` (single-stage), which subsumes the legacy behavior
+        of "df-only unless a loss_scheduler is configured".
+        """
+        mode = getattr(self.cfg.training, "physics_mode", "scheduled")
+        if mode not in ("two_stage", "scheduled"):
+            raise ValueError(
+                f"training.physics_mode must be 'two_stage' or 'scheduled', got {mode!r}"
+            )
+
+        all_weights = {
+            **dict(model_cfg.loss_weights),
+            **dict(model_cfg.extra_loss_weights),
+        }
+        physics_in_weights = [
+            k for k in self.PHYSICS_LOSS_KEYS if all_weights.get(k, 0.0)
+        ]
+        physics_scheduled = [
+            k for k in self.PHYSICS_LOSS_KEYS if k in self.loss_scheduler_dict
+        ]
+
+        if mode == "two_stage":
+            if self.cfg.stage == "autoencoder" and physics_in_weights:
+                raise ValueError(
+                    "physics_mode=two_stage stage 1 (autoencoder) must train on the "
+                    "df reconstruction loss only; remove physics terms "
+                    f"{physics_in_weights} from loss_weights/extra_loss_weights "
+                    "(they are introduced in the stage-2 peft run)."
+                )
+            if self.cfg.stage == "peft" and self.rank in (0, None):
+                print(
+                    "[physics_mode=two_stage] stage 2: PEFT fine-tune of the frozen AE "
+                    f"against physics losses {physics_in_weights or '(none configured)'}"
+                )
+        else:  # scheduled
+            if self.cfg.stage != "autoencoder":
+                raise ValueError(
+                    f"physics_mode=scheduled is single-stage; expected stage="
+                    f"'autoencoder', got {self.cfg.stage!r}."
+                )
+            unscheduled = [k for k in physics_in_weights if k not in physics_scheduled]
+            if unscheduled and self.rank in (0, None):
+                print(
+                    f"[physics_mode=scheduled] WARNING: physics losses {unscheduled} "
+                    "have a nonzero weight but no loss_scheduler entry, so they are "
+                    "active from step 0 (not ramped in)."
+                )
+            if self.rank in (0, None):
+                print(
+                    f"[physics_mode=scheduled] ramping physics losses {physics_scheduled} "
+                    "via loss_scheduler over training."
+                )
+        return mode
 
     def setup_components(self):
         assert self.cfg.stage is not None, "stage is not set"
@@ -34,12 +122,19 @@ class PINCRunner(BaseRunner):
         model_cfg = getattr(self.cfg, model_key)
 
         weights = self.setup_common_losses(model_cfg)
-        # dataset_stats = (
-        #     aggregate_dataset_stats(self.trainset.files)
-        #     if hasattr(self.trainset, "files")
-        #     else {}
-        # )
+        self.physics_mode = self._resolve_physics_mode(model_cfg)
         dataset_stats = {}
+        # expose per-mode log1p std of the served GT spectra so the spectral
+        # loss can std-normalise (analogous to phi_std/flux_std). kyspec drives
+        # the kyspec loss, fluxspec the qspec loss.
+        for _sk, _stat_key in (("kyspec", "kyspec_std"), ("fluxspec", "qspec_std")):
+            try:
+                _st = self.trainset.get_spectral_stats(_sk)
+                dataset_stats[_stat_key] = torch.as_tensor(
+                    _st["std"], dtype=torch.float32
+                )
+            except (KeyError, AttributeError):
+                pass
         augmentations = [
             k
             for k in getattr(self.cfg.dataset, "augment", {}).keys()
@@ -69,6 +164,10 @@ class PINCRunner(BaseRunner):
             ),
             augmentations=augmentations,
             dataset=self.trainset,
+            integral_precision=getattr(
+                self.cfg.training, "integral_precision", "float64"
+            ),
+            free_bits=getattr(model_cfg, "free_bits", 0.0),
         )
 
         self.model = get_autoencoder(
@@ -77,26 +176,32 @@ class PINCRunner(BaseRunner):
 
         self._load_checkpoints()
 
-        self.simae = len(set(self.loss_wrap.active_losses).difference({"simsiam"})) > 0
-        if self.use_ddp:
-            self.model = DDP(
-                self.model,
-                device_ids=[self.local_rank],
-                # NOTE unused only if no decode
-                find_unused_parameters=(self.cfg.stage == "simsiam"),
+        # optionally freeze AE weights
+        if getattr(model_cfg, "freeze_ae", False):
+            print("freezing autoencoder weights, training only eflux_head")
+            for name, param in self.model.named_parameters():
+                if "eflux_head" not in name:
+                    param.requires_grad = False
+            trainable_params = sum(
+                p.numel() for p in self.model.parameters() if p.requires_grad
             )
+            print(f"Trainable parameters after freeze: {trainable_params/1e6:.2f}M")
+
+        self.simae = len(set(self.loss_wrap.active_losses).difference({"simsiam"})) > 0
 
         is_muon = getattr(self.cfg.training, "optimizer", "") == "muon"
+        grad_mode = self.cfg.training.gradnorm_balancer
 
-        if is_muon:
-            param_groups = self._split_muon_param_groups(self.model)
-            opt_cls = MuonWithAuxAdam if self.use_ddp else SingleDeviceMuonWithAuxAdam
-            self.opt = opt_cls(param_groups)
-            self.opt.defaults = {"lr": self.cfg.training.learning_rate}
-        elif self.cfg.training.gradnorm_balancer == "pseudo":
-            params = [p for p in self.model.parameters() if p.requires_grad]
-            self.opt = torch.optim.SGD(params, lr=self.cfg.training.learning_rate)
-        else:
+        if self.use_deepspeed:
+            assert not is_muon, (
+                "muon optimizer incompatible with DeepSpeed (dist.all_gather conflicts with ZeRO)"
+            )
+            assert grad_mode != "full", (
+                "gradient balancer 'full' mode incompatible with DeepSpeed (retain_graph conflicts with ZeRO)"
+            )
+            import deepspeed
+
+            # build optimizer for DeepSpeed
             params = [p for p in self.model.parameters() if p.requires_grad]
             if not params:
                 raise ValueError("no trainable params")
@@ -105,21 +210,82 @@ class PINCRunner(BaseRunner):
                 groups = exclude_from_weight_decay(
                     self.model, exclude, self.cfg.training.weight_decay
                 )
-                self.opt = torch.optim.Adam(groups, lr=self.cfg.training.learning_rate)
+                optimizer = torch.optim.Adam(groups, lr=self.cfg.training.learning_rate)
             else:
-                self.opt = torch.optim.Adam(
+                optimizer = torch.optim.Adam(
                     params,
                     lr=self.cfg.training.learning_rate,
                     weight_decay=self.cfg.training.weight_decay,
                 )
 
-        self.grad_balancer = PINCGradientBalancer(
-            self.opt,
-            mode=self.cfg.training.gradnorm_balancer,
-            scaler=self.scaler,
-            clip_grad=self.cfg.training.clip_grad,
-            n_tasks=len(self.loss_wrap.active_losses),
+            ds_config = self._build_deepspeed_config()
+            self.model_engine, self.opt, _, _ = deepspeed.initialize(
+                model=self.model,
+                optimizer=optimizer,
+                config=ds_config,
+            )
+            self.model = self.model_engine
+
+            self.grad_balancer = PINCGradientBalancer(
+                self.opt,
+                mode=grad_mode,
+                scaler=None,
+                clip_grad=False,  # DeepSpeed handles clipping
+                n_tasks=len(self.loss_wrap.active_losses),
+                deepspeed_engine=self.model_engine,
+            )
+        else:
+            if self.use_ddp:
+                self.model = DDP(
+                    self.model,
+                    device_ids=[self.local_rank],
+                    find_unused_parameters=(self.cfg.stage == "simsiam"),
+                )
+
+            if is_muon:
+                param_groups = self._split_muon_param_groups(self.model)
+                opt_cls = (
+                    MuonWithAuxAdam if self.use_ddp else SingleDeviceMuonWithAuxAdam
+                )
+                self.opt = opt_cls(param_groups)
+                self.opt.defaults = {"lr": self.cfg.training.learning_rate}
+            elif grad_mode == "pseudo":
+                params = [p for p in self.model.parameters() if p.requires_grad]
+                self.opt = torch.optim.SGD(params, lr=self.cfg.training.learning_rate)
+            else:
+                params = [p for p in self.model.parameters() if p.requires_grad]
+                if not params:
+                    raise ValueError("no trainable params")
+                exclude = getattr(self.cfg.training, "exclude_from_wd", [])
+                if exclude:
+                    groups = exclude_from_weight_decay(
+                        self.model, exclude, self.cfg.training.weight_decay
+                    )
+                    self.opt = torch.optim.Adam(
+                        groups, lr=self.cfg.training.learning_rate
+                    )
+                else:
+                    self.opt = torch.optim.Adam(
+                        params,
+                        lr=self.cfg.training.learning_rate,
+                        weight_decay=self.cfg.training.weight_decay,
+                    )
+
+            self.grad_balancer = PINCGradientBalancer(
+                self.opt,
+                mode=self.cfg.training.gradnorm_balancer,
+                scaler=self.scaler,
+                clip_grad=self.cfg.training.clip_grad,
+                n_tasks=len(self.loss_wrap.active_losses),
+            )
+
+        # check if integral losses need geometry on GPU
+        int_spec_keys = set(
+            self.loss_wrap._int_losses + self.loss_wrap._spectral_losses
         )
+        self._int_losses_active = any(
+            self.loss_wrap.weights.get(k, 0.0) > 0 for k in int_spec_keys
+        ) or any(k in self.loss_scheduler_dict for k in int_spec_keys)
 
         # setup evaluator
         self.evaluator = AutoencoderEvaluator(
@@ -129,6 +295,10 @@ class PINCRunner(BaseRunner):
             loss_wrap=self.loss_wrap,
         )
         self.input_fields = set(self.cfg.dataset.input_fields)
+        # Add fields required by loss weights
+        for k in self.loss_wrap.weights:
+            if self.loss_wrap.weights[k] > 0 and k in ["df", "phi", "flux"]:
+                self.input_fields.add(k)
         self.idx_keys = ["file_index", "timestep_index"]
 
     def _load_checkpoints(self):
@@ -139,6 +309,10 @@ class PINCRunner(BaseRunner):
         self.ae_ckpt_dict = {}
 
         if self.cfg.stage == "peft":
+            # load stage-1 AE weights from ae_checkpoint (run dir or .pth file); fallback to legacy output_path/../best.pth
+            ae_ckpt = getattr(self.cfg, "ae_checkpoint", None)
+            if ae_ckpt:
+                ckpt_path = ae_ckpt if os.path.isfile(ae_ckpt) else os.path.join(ae_ckpt, ckpt_name)
             if not ckpt_path or not os.path.exists(ckpt_path):
                 raise ValueError("peft requires ae_checkpoint")
 
@@ -156,10 +330,24 @@ class PINCRunner(BaseRunner):
                     ckpt_path, model=self.model, device=self.device
                 )
                 print(f"loaded base ae from epoch {self.ae_ckpt_dict['epoch']}")
-                self.model, _ = setup_peft_stage(
-                    self.model, self.cfg, dataloader=self.trainloader
+                self.model, peft_info = setup_peft_stage(self.model, self.cfg)
+                print(
+                    f"attached {peft_info['peft_method']} adapters: "
+                    f"{peft_info['trainable_parameters']/1e6:.2f}M trainable "
+                    f"({peft_info['trainable_percentage']:.2f}%)"
                 )
                 self.start_epoch = 0
+        elif getattr(self.cfg, "ae_checkpoint", None):
+            # warm-start full-model run (e.g. scheduled continuation from df-only pretrain); load weights, restart epoch=0 for scheduler
+            ae_ckpt = self.cfg.ae_checkpoint
+            wpath = ae_ckpt if os.path.isfile(ae_ckpt) else os.path.join(ae_ckpt, ckpt_name)
+            if not os.path.exists(wpath):
+                raise ValueError(f"ae_checkpoint not found: {wpath}")
+            self.model, self.ae_ckpt_dict = load_autoencoder(
+                wpath, model=self.model, device=self.device
+            )
+            print(f"warm-started full model from {wpath} (epoch reset to 0)")
+            self.start_epoch = 0
         elif ckpt_path and os.path.exists(ckpt_path):
             self.model, self.ae_ckpt_dict = load_autoencoder(
                 ckpt_path, model=self.model, device=self.device
@@ -177,10 +365,7 @@ class PINCRunner(BaseRunner):
             if not param.requires_grad:
                 continue
             if self.cfg.stage == "peft":
-                if (
-                    any(k in name for k in ["lora_A", "lora_B", "eva_"])
-                    and param.ndim >= 2
-                ):
+                if any(k in name for k in PEFT_PARAM_KEYS) and param.ndim >= 2:
                     muon.append(param)
                 else:
                     adam_decay.append(param)
@@ -254,11 +439,19 @@ class PINCRunner(BaseRunner):
         info_dict = defaultdict(list)
         t_start_data = perf_counter_ns()
 
+        # select per-stage train step; denormalize_fn only needed for mask-modes
         step_fn = {
             "autoencoder": train_step_autoencoder,
             "peft": train_step_peft,
             "simsiam": train_step_simsiam,
         }[self.cfg.stage]
+        if (
+            self.cfg.stage == "autoencoder"
+            and self.cfg.dataset.augment.mask_modes.active
+        ):
+            step_fn = partial(
+                train_step_autoencoder, denormalize_fn=self.trainset.denormalize
+            )
 
         for sample in self.pbar:
             try:
@@ -277,7 +470,9 @@ class PINCRunner(BaseRunner):
                 else None
             )
             idx_data = {k: getattr(sample, k).to(self.device) for k in self.idx_keys}
-            geometry = tree_map(lambda g: g.to(self.device), sample.geometry)
+            geometry = self.trainset.get_batch_geometry(idx_data["file_index"])
+            if self._int_losses_active:
+                geometry = tree_map(lambda g: g.to(self.device), geometry)
 
             if self.augmentations:
                 for aug_fn in self.augmentations:
@@ -289,22 +484,12 @@ class PINCRunner(BaseRunner):
             info_dict["data_ms"].append((perf_counter_ns() - t_start_data) / 1e6)
             t_start_fwd = perf_counter_ns()
 
+            if self.cfg.stage == "simsiam":
+                xs["df_aug"] = getattr(sample, "df_aug").to(self.device)
+
             with torch.autocast(
                 str(self.device), dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                # dispatch to correct step function
-                if self.cfg.stage == "autoencoder":
-                    if self.cfg.dataset.augment.mask_modes.active:
-                        step_fn = partial(
-                            train_step_autoencoder,
-                            denormalize_fn=self.trainset.denormalize,
-                        )
-                    else:
-                        step_fn = train_step_autoencoder
-                if self.cfg.stage == "peft":
-                    step_fn = train_step_peft
-                if self.cfg.stage == "simsiam":
-                    xs["df_aug"] = getattr(sample, "df_aug").to(self.device)
                 loss, losses = step_fn(
                     self.cfg,
                     self.model,
@@ -319,6 +504,7 @@ class PINCRunner(BaseRunner):
             info_dict["forward_ms"].append((perf_counter_ns() - t_start_fwd) / 1e6)
             t_start_bkd = perf_counter_ns()
 
+            # collect per-task losses for gradient balancing (exclude totals and completed tasks)
             grad_losses = [
                 v
                 for k, v in losses.items()
@@ -335,11 +521,8 @@ class PINCRunner(BaseRunner):
             self.cur_update_step += 1.0
             loss_logs["total"].append(loss.item())
             for k, v in losses.items():
-                loss_logs[k].append(v.item())
-
-            # if self.cur_update_step % 100 == 0:
-            #     del xs, condition, idx_data, geometry, loss, losses
-            #     memory_cleanup(self.device, aggressive=True)
+                loss_logs[k].append(v.item() if isinstance(v, torch.Tensor) else v)
+            del xs, condition, idx_data, geometry, loss, losses, grad_losses
 
             info_dict["backward_ms"].append((perf_counter_ns() - t_start_bkd) / 1e6)
             info_dict["memory_mb"].append(max_memory_allocated(self.device) / 1024**2)
@@ -357,7 +540,11 @@ class PINCRunner(BaseRunner):
             epoch=epoch,
             device=self.device,
             loss_val_min=self.loss_val_min,
-            trainloader=self.trainloader,
+            trainloader=(
+                self.trainloader if self.cfg.validation.get("probe", None) else None
+            ),
+            trainset=self.trainset if self.cfg.validation.get("probe", None) else None,
+            probe_cfg=self.cfg.validation.get("probe", None),
             evaluate_recon=True,  # TODO adapt
-            evaluate_probing=False,
+            evaluate_probing=True,
         )

@@ -1,0 +1,34 @@
+# @package _global_
+# Ablation: VQ-VAE with a cosine-similarity codebook (code-supported today).
+# Run:  python main.py experiment=pinc_revival/vqvae_cosine
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/vqvae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_vqvae_cosine
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+
+model:
+  vq:
+    codebook_type: cosine
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity

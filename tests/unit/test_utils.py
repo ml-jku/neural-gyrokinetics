@@ -15,13 +15,13 @@ from neugk.utils import (
 
 
 def test_is_number():
-    assert is_number("123") == True
-    assert is_number("123.45") == True
-    assert is_number("-123") == True
-    assert is_number("+123.45e-2") == True
-    assert is_number("abc") == False
-    assert is_number("123a") == False
-    assert is_number("") == False
+    assert is_number("123") is True
+    assert is_number("123.45") is True
+    assert is_number("-123") is True
+    assert is_number("+123.45e-2") is True
+    assert is_number("abc") is False
+    assert is_number("123a") is False
+    assert is_number("") is False
 
 
 def test_edit_tag():

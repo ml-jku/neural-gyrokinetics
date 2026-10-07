@@ -7,6 +7,7 @@ from collections import defaultdict
 import torch
 import numpy as np
 import torch.distributed as dist
+from tqdm import tqdm
 
 from neugk.evaluate import BaseEvaluator, validation_metrics
 from neugk.plot_utils import generate_val_plots, avg_flux_confidence
@@ -28,6 +29,9 @@ class DiffusionEvaluator(BaseEvaluator):
         device: torch.device,
         loss_val_min: float,
         sample_fn: Optional[Callable] = None,
+        trainloader: Optional[torch.utils.data.DataLoader] = None,
+        evaluate_probing: bool = False,
+        no_save: bool = False,
         **kwargs,
     ) -> Tuple[Dict[str, float], Dict[str, Any], float]:
         """Run evaluation on multiple validation sets and log metrics."""
@@ -97,10 +101,11 @@ class DiffusionEvaluator(BaseEvaluator):
                         tgts["df"] = recombine_zf(tgts["df"], dim=1)
 
                 # validation metrics
+                geometry = valset.get_batch_geometry(idx_data["file_index"])
                 metrics_i, integrated_i = validation_metrics(
                     tgts=tgts,
                     preds=preds,
-                    geometry=sample.geometry,
+                    geometry=geometry,
                     loss_wrap=self.loss_wrap,
                     eval_integrals=eval_integrals,
                 )
@@ -191,16 +196,36 @@ class DiffusionEvaluator(BaseEvaluator):
                         pred_means, pred_stds, tgt_vals, traj_ids
                     )
 
-        # store checkpoints
-        loss_val_min = self._save_checkpoint(
-            rank,
-            model,
-            opt,
-            scheduler,
-            epoch,
-            log_metric_dict,
-            loss_val_min,
-            default_metric="avg_flux_rmse",
-        )
+        # linear probing evaluation
+        if trainloader is not None and evaluate_probing:
+
+            def sample_wrap_fn(sample, device):
+                condition = sample.conditioning.to(device, non_blocking=True)
+                flux = sample.flux.to(device, non_blocking=True)
+                # generate latents from condition
+                z = sample_fn(condition, latent_only=True)
+                return z, flux
+
+            self.run_probing_evaluation(
+                rank=rank,
+                trainloader=trainloader,
+                extraction_fn=sample_wrap_fn,
+                device=device,
+                epoch=epoch,
+                log_metric_dict=log_metric_dict,
+                val_plots=val_plots,
+            )
+
+        if not no_save:
+            loss_val_min = self._save_checkpoint(
+                rank,
+                model,
+                opt,
+                scheduler,
+                epoch,
+                log_metric_dict,
+                loss_val_min,
+                default_metric="avg_flux_rmse",
+            )
 
         return log_metric_dict, val_plots, loss_val_min

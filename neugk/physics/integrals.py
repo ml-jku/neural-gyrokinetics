@@ -91,6 +91,7 @@ class FluxIntegral(nn.Module):
         spectral_potens: bool = False,
         flux_fields: bool = False,
         spectral_df: bool = False,
+        integral_precision: str = "float64",
     ):
         super().__init__()
 
@@ -98,12 +99,15 @@ class FluxIntegral(nn.Module):
         self.spectral_potens = spectral_potens
         self.flux_fields = flux_fields
         self.spectral_df = spectral_df
+        self.integral_dtype = (
+            torch.float64 if integral_precision == "float64" else torch.float32
+        )
 
     def _geom_tensors(
         self, geometry: Dict[str, torch.Tensor], dtype: torch.dtype = torch.float32
     ) -> Dict[str, torch.Tensor]:
-        # use float64 for stability
-        geometry = tree_map(lambda g: g.to(dtype=torch.float64), geometry)
+        # upcast to float64 for integral stability
+        geometry = tree_map(lambda g: g.to(dtype=self.integral_dtype), geometry)
         geom_ = {}
 
         # grid expansion for broadcasting
@@ -137,7 +141,7 @@ class FluxIntegral(nn.Module):
         geom_["nlapar"] = expand_scalar(geometry["nlapar"])
         geom_["nlbpar"] = expand_scalar(geometry["nlbpar"])
 
-        # precompute bessel and gamma functions for gyroaverage
+        # precompute bessel/gamma for gyroaverage
         kxrh = rearrange(geometry["kxrh"], "x -> 1 1 1 x 1")
         little_g = rearrange(geometry["little_g"], "s three -> three 1 1 s 1 1")
         krloc = torch.sqrt(
@@ -149,17 +153,20 @@ class FluxIntegral(nn.Module):
         bessel = torch.sqrt(2.0 * geom_["mugr"] / geom_["bn"]) / geom_["signz"]
         vthrat = geom_["vthrat"]
         bessel = geom_["mas"] * vthrat * krloc * bessel
-        geom_["bessel"] = j0(bessel)
+        # torch.special.bessel_j0/j1 fail on Blackwell; compute on CPU then move back (cost negligible: fixed per trajectory)
+        _bessel_cpu = bessel.cpu()
+        geom_["bessel"] = j0(_bessel_cpu).to(bessel.device)
         geom_["bessel_bpar"] = torch.where(
-            torch.abs(bessel) < 1e-8,
-            torch.ones_like(bessel),
-            2.0 * j1(bessel) / bessel,
-        )
+            torch.abs(_bessel_cpu) < 1e-8,
+            torch.ones_like(_bessel_cpu),
+            2.0 * j1(_bessel_cpu) / _bessel_cpu,
+        ).to(bessel.device)
 
-        # scaled i0 for zonal response
+        # scaled i0 for zonal response (also Blackwell-affected; compute on CPU)
         gamma = geom_["mas"] * vthrat * krloc
         gamma = 0.5 * (gamma / (geom_["signz"] * geom_["bn"])) ** 2
-        geom_["gamma"] = i0(gamma) * torch.exp(-gamma)
+        _gamma_cpu = gamma.cpu()
+        geom_["gamma"] = (i0(_gamma_cpu) * torch.exp(-_gamma_cpu)).to(gamma.device)
         return tree_map(lambda g: g.to(dtype=dtype), geom_)
 
     def _df_fft(self, df: torch.Tensor, norm: str = "forward"):
@@ -253,24 +260,37 @@ class FluxIntegral(nn.Module):
         apar = broadcast_field(apar)
         bpar = broadcast_field(bpar)
 
-        # generalized potential chi
-        # chi_gyro = J0*phi - 2*vth*vpar*J0*apar + 2*mu*T/Z*(2J1/z)*bpar
-        chi_gyro_conj = (
-            bessel * torch.conj(phi)
-            - 2.0 * geom["vthrat"] * vpgr * bessel * torch.conj(apar)
-            + 2.0 * mugr * geom["tmp"] / geom["signz"] * bessel_bpar * torch.conj(bpar)
-        )
+        # real-valued arithmetic on (re, im) parts instead of complex; avoids torch's nvrtc jiterator failure on Blackwell; bit-for-bit match
+        def parts(f):
+            if isinstance(f, torch.Tensor) and f.is_complex():
+                return f.real, f.imag
+            return f, 0.0  # absent field -> broadcast_field returned 0.0
+
+        df_re, df_im = parts(df)
+        phi_re, phi_im = parts(phi)
+        apar_re, apar_im = parts(apar)
+        bpar_re, bpar_im = parts(bpar)
+
+        # generalized potential chi = J0*phi - 2*vth*vpar*J0*apar + 2*mu*T/Z*(2J1/z)*bpar
+        cb = 2.0 * geom["vthrat"] * vpgr * bessel
+        cc = 2.0 * mugr * geom["tmp"] / geom["signz"] * bessel_bpar
+        chi_re = bessel * phi_re - cb * apar_re + cc * bpar_re
+        chi_im = bessel * phi_im - cb * apar_im + cc * bpar_im
+        # conjugate: negate the imaginary part
+        chi_conj_re, chi_conj_im = chi_re, -chi_im
 
         if magnitude:
-            df = -1j * torch.abs(df)
-            chi_gyro_conj = torch.abs(chi_gyro_conj)
+            df_mag = torch.sqrt(df_re**2 + df_im**2)
+            df_re, df_im = torch.zeros_like(df_mag), -df_mag  # df -> -i|df|
+            chi_mag = torch.sqrt(chi_conj_re**2 + chi_conj_im**2)
+            chi_conj_re, chi_conj_im = chi_mag, torch.zeros_like(chi_mag)
 
-        dum = parseval * ints * (efun * krho) * df
-        dum1 = dum * chi_gyro_conj
+        k = parseval * ints * (efun * krho)
+        dum_re, dum_im = k * df_re, k * df_im
+        # dum1 = imag(dum * chi_conj); dum2 = bn * dum1
+        dum1 = dum_re * chi_conj_im + dum_im * chi_conj_re
         dum2 = dum1 * bn
         d3v = ints * d2X * intmu * bn * intvp
-        dum1 = torch.imag(dum1)
-        dum2 = torch.imag(dum2)
 
         # physical normalizations (matched to GKW internal units)
         pflux = d3v * dum1 * geom["de"]
@@ -310,7 +330,7 @@ class FluxIntegral(nn.Module):
 
         cfen = torch.zeros_like(ints)
 
-        # --- Solve for phi ---
+        # solve for phi
         poisson_int = signz * de * intmu * intvp * bessel * bn
         phi_term = (1 + 0j) * poisson_int * df
         sum_dims = tuple(range(phi_term.ndim - 3))
@@ -319,7 +339,7 @@ class FluxIntegral(nn.Module):
         poisson_diag_s = torch.exp(-cfen) * (signz**2) * de * (gamma - 1.0) / tmp
         poisson_diag = poisson_diag_s.sum(dim=0, keepdim=True)
         poisson_diag[..., 0, 0] = 0.0
-        # optional adiabatic background
+        # adiabatic background term
         adiabatic_correction = -(-1.0) * torch.exp(-cfen) * 1.0 / 1.0 * adiabatic
         poisson_diag = poisson_diag - adiabatic_correction
         poisson_diag = torch.where(
@@ -329,7 +349,7 @@ class FluxIntegral(nn.Module):
         )
         poisson_diag = -1.0 / poisson_diag
 
-        # zonal flow correction (ions only)
+        # zonal-flow correction (ions only)
         s_idx = 0 if signz.shape[0] > 1 else slice(None)
         ion_signz, ion_gamma, ion_tmp, ion_de = (
             signz[s_idx],
@@ -351,33 +371,25 @@ class FluxIntegral(nn.Module):
         phi = phi + (1 + 0j) * maty * bufphi * adiabatic
         phi = (phi * poisson_diag).view(phi.shape[-3:])
 
-        # solve for apar
-        # S_A = beta * sum Z_s n_s vth_s <vpar J0 f_s>
-        # Denom = k_perp^2 + beta * sum ...
+        # solve for apar: numerator = beta * sum Z_s n_s vth_s <vpar J0 f_s>, denom = k_perp^2 + beta * sum ...
         apar_int = (
             beta * signz * de * geom["vthrat"] * intmu * intvp * vpgr * bessel * bn
         )
         apar = ((1 + 0j) * apar_int * df).sum(sum_dims, keepdim=True)
         apar_diag = krloc**2
-        # Add small term for stability if k_perp=0
+        # add small term for stability if k_perp=0
         apar_diag = torch.where(
             apar_diag == 0, torch.tensor(1.0, dtype=apar_diag.dtype), apar_diag
         )
         apar = (apar / apar_diag).view(phi.shape) * nlapar.view(-1, 1, 1)
 
-        # solve for bpar
-        # S_B = beta * sum n_s T_s <mu (2J1/z) f_s>
-        # Denom = krloc**2 / beta + sum ... (actually GKW uses bpar normalized differently?)
-        # Simplified bpar solve matched to krloc**2 / beta
+        # solve for bpar: numerator = beta * sum n_s T_s <mu (2J1/z) f_s>; GKW sign: -2.*conjg(bpar_ga)
         bpar_int = beta * de * tmp * intmu * intvp * mugr * bessel_bpar * bn
         bpar = ((1 + 0j) * bpar_int * df).sum(sum_dims, keepdim=True)
         bpar_diag = krloc**2
         bpar_diag = torch.where(
             bpar_diag == 0, torch.tensor(1.0, dtype=bpar_diag.dtype), bpar_diag
         )
-        # In GKW, the bpar sign or factor 2 might be involved.
-        # Based on diagnos_fluxes_vspace.F90: -2.*conjg(bpar_ga)
-        # So let's use -bpar_int
         bpar = ((-1.0 + 0j) * bpar).view(phi.shape) / bpar_diag * nlbpar.view(-1, 1, 1)
 
         return phi, apar, bpar
@@ -447,11 +459,23 @@ class FluxIntegral(nn.Module):
                 - eflux is the heat flux per species (batch, sp).
                 - vflux is the momentum flux per species (batch, sp).
         """
-        geom = dict(sorted(geom.items()))
-        geom_keys = {k: 0 for k in sorted(list(geom.keys()))}
-        if phi is None and apar is None and bpar is None:
-            vfwd = torch.vmap(self.forward_single, in_dims=(geom_keys, 0))
-            return vfwd(geom, df)
-        else:
-            vfwd = torch.vmap(self.forward_single, in_dims=(geom_keys, 0, 0, 0, 0))
+        # physics integrals need full precision, never AE's bf16 autocast; disable autocast, upcast real inputs to f32
+        def _up(x):
+            return x.float() if (x is not None and not torch.is_complex(x)) else x
+
+        with torch.autocast(device_type=df.device.type, enabled=False):
+            df, phi, apar, bpar = _up(df), _up(phi), _up(apar), _up(bpar)
+            geom = dict(sorted(geom.items()))
+            geom_keys = {k: 0 for k in sorted(list(geom.keys()))}
+            if phi is None and apar is None and bpar is None:
+                vfwd = torch.vmap(self.forward_single, in_dims=(geom_keys, 0))
+                return vfwd(geom, df)
+            in_dims = (
+                geom_keys,
+                0,
+                0 if phi is not None else None,
+                0 if apar is not None else None,
+                0 if bpar is not None else None,
+            )
+            vfwd = torch.vmap(self.forward_single, in_dims=in_dims)
             return vfwd(geom, df, phi, apar, bpar)

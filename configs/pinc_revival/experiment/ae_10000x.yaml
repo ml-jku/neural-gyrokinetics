@@ -1,0 +1,42 @@
+# @package _global_
+# PINC revival: continuous AE at ~10000x compression.
+# Two vit down-layers (depth [8,8]) shrink the grid to [2,2,5,2]=40 tokens,
+# bottleneck.dim 112. MEASURED CR = 9947x (empirical, one forward at real resolution).
+# Run:  python main.py experiment=pinc_revival/ae_10000x
+defaults:
+  - override /dataset: pinc
+  - override /model: pinc/ae
+  - override /logging: wandb
+  - override /validation: default
+
+experiment_id: pinc_revival_ae_10000x
+workflow: pinc          # get_data dispatches on exact workflow == "pinc"; stage distinguishes path
+stage: autoencoder
+seed: 0
+mode: train
+eval: true
+device: cuda
+load_ckpt: false
+
+model:
+  patch:
+    patch_size: [4, 0, 4, 5, 4]
+  vit:
+    num_heads: [16, 16]
+    depth: [8, 8]
+  bottleneck:
+    dim: 112
+
+training:
+  n_epochs: 400
+  batch_size: 16
+  learning_rate: 3e-4
+  integral_loss_type: complex_mse
+  eval_loss_type: mse
+
+amp:
+  enable: true
+  bfloat: true
+logging:
+  project: pinc_revival
+  entity: null   # authed wandb default entity
