@@ -213,7 +213,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--methods", default=",".join(ALL_METHODS))
     ap.add_argument("--ckpts", default="nf_ckps_revival")
-    ap.add_argument("--path", default="/local00/bioinf/galletti/preprocessed_kvikio")
+    ap.add_argument("--path", default="data/preprocessed_kvikio")
     ap.add_argument("--backend", default="kvikio")
     ap.add_argument("--gpus", default="2,3")
     ap.add_argument(
@@ -223,7 +223,7 @@ def main():
         "e.g. '2,2,1,1' gives the first two GPUs 2x the trajs. Empty = even round-robin.",
     )
     ap.add_argument(
-        "--outdir", default="/system/user/publicwork/galletti/pinc_revival/eval1k_results"
+        "--outdir", default="outputs/eval1k_results"
     )
     ap.add_argument("--max-trajs", type=int, default=0)
     ap.add_argument(

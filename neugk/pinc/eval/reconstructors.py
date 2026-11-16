@@ -305,7 +305,7 @@ def nf_scaling_reconstructors(
     include_int_only: bool = False,
     min_cr: int = 0,
     max_cr: int = 10_000_000,
-    path: str = "/local00/bioinf/galletti/preprocessed_kvikio",
+    path: str = "data/preprocessed_kvikio",
     backend: str = "gds",
 ) -> List[Tuple[int, NeuralField]]:
     """Scan ``ckp_dir`` for NF checkpoints and build one NeuralField reconstructor per CR.

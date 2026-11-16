@@ -1,4 +1,7 @@
 import os
+import pickle
+
+import numpy as np
 import torch
 from torch.utils.data.dataloader import DataLoader
 
@@ -89,6 +92,23 @@ def _is_vqvae_checkpoint(cfg) -> bool:
 def _is_vae_checkpoint(cfg) -> bool:
     name = _ae_model_name(cfg)
     return "vae" in name and "vqvae" not in name
+
+
+def load_normalization_stats(path: str):
+    """Dataset-scope normalization stats from a pickled ``{field: RunningMeanStd}`` file."""
+    with open(path, "rb") as f:
+        raw = pickle.load(f)
+    return {
+        k: {
+            "full": {
+                "mean": np.asarray(r.mean, dtype=np.float32),
+                "std": np.sqrt(np.asarray(r.var)).astype(np.float32),
+                "min": np.asarray(r.min, dtype=np.float32),
+                "max": np.asarray(r.max, dtype=np.float32),
+            }
+        }
+        for k, r in raw.items()
+    }
 
 
 def get_data(cfg, rank: int = 0):
@@ -232,7 +252,9 @@ def get_data(cfg, rank: int = 0):
         # NOTE: for validation load without gds, save space, slow is acceptable
         val_backend = KvikIOBackend(rank, use_kvikio=False, prefer_dtype=_prefer_dtype)
 
-    trainset = dataset_class(
+    # sample_only: no training set, normalization stats from dataset.normalization_file
+    sample_only = getattr(cfg.dataset, "sample_only", False)
+    trainset = None if sample_only else dataset_class(
         backend=train_backend,
         active_keys=cfg.dataset.active_keys,
         fields_to_load=train_input_fields,
@@ -273,7 +295,11 @@ def get_data(cfg, rank: int = 0):
         random_seed=cfg.seed,
         normalization=cfg.dataset.normalization,
         normalization_scope=cfg.dataset.normalization_scope,
-        normalization_stats=getattr(trainset, "stats", None),
+        normalization_stats=(
+            load_normalization_stats(cfg.dataset.normalization_file)
+            if sample_only
+            else trainset.stats
+        ),
         spatial_ifft=cfg.dataset.spatial_ifft,
         bundle_seq_length=cfg.model.bundle_seq_length,
         trajectories=cfg.dataset.validation_trajectories,
@@ -311,7 +337,7 @@ def get_data(cfg, rank: int = 0):
         # keep memory low
         prefetch_factor = 1
 
-    trainloader = DataLoader(
+    trainloader = None if sample_only else DataLoader(
         trainset,
         cfg.training.batch_size,
         num_workers=cfg.training.num_workers,
@@ -337,7 +363,10 @@ def get_data(cfg, rank: int = 0):
         **dataloader_kwargs,
     )
 
-    if partial_holdouts:
+    if sample_only:
+        trainset, trainloader = holdout_trajectories_valset, holdout_trajectories_valloader
+
+    if partial_holdouts and not sample_only:
         holdout_samples_valset = dataset_class(
             backend=val_backend,
             active_keys=cfg.dataset.active_keys,

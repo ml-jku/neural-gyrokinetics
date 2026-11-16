@@ -30,9 +30,9 @@ def create_parser():
         default="iteration_262.h5",
         choices=[
             "iteration_262.h5",
-            "iteration_135.h5",
+            "iteration_131.h5",
             "iteration_8.h5",
-            "iteration_232.h5",
+            "iteration_235.h5",
             "iteration_148.h5",
             "iteration_115.h5",
             "ood_iteration_0.h5",
@@ -64,24 +64,23 @@ def invert_df(b_xt, cfg, parser):
     return b_xt
 
 
-def main():
-    """Main execution block for Hugging Face Hub inference."""
+def main(parser=None, save_fds=True, cond_override=None, snapshot=None):
+    """Run the autoregressive rollout, write predictions and return the flux trace."""
     # login to hf
     token_path = os.path.expanduser("~/.cache/huggingface/token")
     if os.path.exists(token_path):
         with open(token_path, "r") as f:
             login(f.read().strip())
 
-    parser = create_parser()
+    parser = parser or create_parser()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_name = parser.ckpt.split("/")[-1]
 
     # download assets
-    snapshot_dir = hf_hub_download(
+    snapshot_dir = snapshot or hf_hub_download(
         repo_id="ml-jku/gyroswin_cbc_id_ood",
         filename=os.path.join("preprocessed", parser.eval_sim),
         repo_type="dataset",
-        token=True,
         cache_dir=parser.data_path,
     )
 
@@ -89,7 +88,6 @@ def main():
         repo_id="ml-jku/gyroswin_cbc_id_ood",
         filename="normalization_stats.pkl",
         repo_type="dataset",
-        token=True,
         cache_dir=parser.data_path,
     )
 
@@ -138,14 +136,17 @@ def main():
         params["s_hat"] = infile["metadata/s_hat"][:]
         params["q"] = infile["metadata/q"][:]
 
-        start_tstep = infile["metadata/timesteps"][:].item()
+        tsteps = infile["metadata/timesteps"][:]
+        # some ood files store several times, the input snapshot is at the offset
+        start_tstep = tsteps.item() if tsteps.size == 1 else 1.2 * (cfg.dataset.offset + 1)
         resolution = infile["metadata/resolution"][:]
+    params.update(cond_override or {})
 
     # temporal grid setup
     delta = 1.2
     steps = idx_end - cfg.dataset.offset
     timesteps = (
-        torch.arange(start_tstep, start_tstep + steps * delta, delta)
+        (start_tstep + delta * torch.arange(steps + 1))
         .unsqueeze(0)
         .to(device)
     )
@@ -167,11 +168,16 @@ def main():
 
     # instantiate model
     model = get_model(cfg, dataset=cfg.dataset).to(device)
+    # enc/dec_cond_embed alias cond_embed in the unets
+    for k in [k for k in state_dict if k.startswith(("df_unet.cond_embed.", "phi_unet.cond_embed."))]:
+        for alias in ("enc_cond_embed", "dec_cond_embed"):
+            state_dict.setdefault(k.replace(".cond_embed.", f".{alias}."), state_dict[k])
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 
     # prepare loop context
     fwd_time = []
+    fluxes = []
     shift_scale_dict = defaultdict(dict)
     invert_fns = {
         "df": partial(invert_df, cfg=cfg, parser=parser),
@@ -218,6 +224,8 @@ def main():
 
             # process and save results
             for key, val in outputs.items():
+                if key == "df" and not save_fds:
+                    continue
                 scale = shift_scale_dict[key]["scale"]
                 shift = shift_scale_dict[key]["shift"]
                 if scale.ndim != val.ndim:
@@ -244,6 +252,7 @@ def main():
                 print(f"writing file {f_tgt}")
 
                 if key in ["flux", "fluxavg"]:
+                    fluxes.append(float(b_xt[0]))
                     np.savetxt(f_tgt, b_xt)
                 else:
                     with open(f_tgt, "wb") as f:
@@ -253,6 +262,7 @@ def main():
     print(
         f"took {np.mean(fwd_time):.4f} +/- {np.std(fwd_time):.4f} seconds per forward pass"
     )
+    return np.array(fluxes)
 
 
 if __name__ == "__main__":

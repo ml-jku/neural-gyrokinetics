@@ -43,6 +43,11 @@ class DDPMRunner(BaseRunner):
             self.autoencoder, _, _ = load_autoencoder(ckp_path, device=self.device)
             self.autoencoder.checkpoint_path = os.path.abspath(str(ckp_path))
 
+        if is_latent and self.cfg.get("latent_scale") is not None:
+            self.latent_scale = float(self.cfg.latent_scale)
+        elif is_latent:
+            if self.cfg.dataset.get("sample_only", False):
+                raise ValueError("dataset.sample_only requires latent_scale")
             # dedicated loader so worker dataset copies are not initialized
             # before precomputed latents are available
             precompute_loader = DataLoader(

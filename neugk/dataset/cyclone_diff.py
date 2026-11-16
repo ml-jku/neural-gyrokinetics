@@ -567,7 +567,7 @@ class CycloneAEDataset(CycloneDataset):
                     if batch.phi is not None:
                         phi_i = batch.phi[i]
                         sample["phi"] = (
-                            phi_i.cpu().numpy()
+                            phi_i.float().cpu().numpy()
                             if isinstance(phi_i, torch.Tensor)
                             else np.asarray(phi_i)
                         )
@@ -576,14 +576,14 @@ class CycloneAEDataset(CycloneDataset):
 
                     flux_i = batch.flux[i]
                     sample["flux"] = (
-                        flux_i.cpu().numpy()
+                        flux_i.float().cpu().numpy()
                         if isinstance(flux_i, torch.Tensor)
                         else np.asarray(flux_i)
                     )
 
                     ts_i = batch.timestep[i]
                     sample["timestep"] = (
-                        ts_i.cpu().numpy()
+                        ts_i.float().cpu().numpy()
                         if isinstance(ts_i, torch.Tensor)
                         else np.asarray(ts_i)
                     )
@@ -591,7 +591,7 @@ class CycloneAEDataset(CycloneDataset):
                     if batch.conditioning is not None:
                         cond_i = batch.conditioning[i]
                         if isinstance(cond_i, torch.Tensor):
-                            cond_i = cond_i.cpu().numpy()
+                            cond_i = cond_i.float().cpu().numpy()
                         for j, key in enumerate(self.conditions):
                             sample[key] = cond_i[j]
 
@@ -923,7 +923,7 @@ class CycloneVAEDataset(CycloneAEDataset):
                     if batch.phi is not None:
                         phi_i = batch.phi[i]
                         sample["phi"] = (
-                            phi_i.cpu().numpy()
+                            phi_i.float().cpu().numpy()
                             if isinstance(phi_i, torch.Tensor)
                             else np.asarray(phi_i)
                         )
@@ -932,14 +932,14 @@ class CycloneVAEDataset(CycloneAEDataset):
 
                     flux_i = batch.flux[i]
                     sample["flux"] = (
-                        flux_i.cpu().numpy()
+                        flux_i.float().cpu().numpy()
                         if isinstance(flux_i, torch.Tensor)
                         else np.asarray(flux_i)
                     )
 
                     ts_i = batch.timestep[i]
                     sample["timestep"] = (
-                        ts_i.cpu().numpy()
+                        ts_i.float().cpu().numpy()
                         if isinstance(ts_i, torch.Tensor)
                         else np.asarray(ts_i)
                     )
@@ -947,7 +947,7 @@ class CycloneVAEDataset(CycloneAEDataset):
                     if batch.conditioning is not None:
                         cond_i = batch.conditioning[i]
                         if isinstance(cond_i, torch.Tensor):
-                            cond_i = cond_i.cpu().numpy()
+                            cond_i = cond_i.float().cpu().numpy()
                         for j, key in enumerate(self.conditions):
                             sample[key] = cond_i[j]
 
@@ -1391,7 +1391,7 @@ class CycloneVQVAEDataset(CycloneAEDataset):
                     if batch.phi is not None:
                         phi_i = batch.phi[i]
                         sample["phi"] = (
-                            phi_i.cpu().numpy()
+                            phi_i.float().cpu().numpy()
                             if isinstance(phi_i, torch.Tensor)
                             else np.asarray(phi_i)
                         )
@@ -1400,14 +1400,14 @@ class CycloneVQVAEDataset(CycloneAEDataset):
 
                     flux_i = batch.flux[i]
                     sample["flux"] = (
-                        flux_i.cpu().numpy()
+                        flux_i.float().cpu().numpy()
                         if isinstance(flux_i, torch.Tensor)
                         else np.asarray(flux_i)
                     )
 
                     ts_i = batch.timestep[i]
                     sample["timestep"] = (
-                        ts_i.cpu().numpy()
+                        ts_i.float().cpu().numpy()
                         if isinstance(ts_i, torch.Tensor)
                         else np.asarray(ts_i)
                     )
@@ -1415,7 +1415,7 @@ class CycloneVQVAEDataset(CycloneAEDataset):
                     if batch.conditioning is not None:
                         cond_i = batch.conditioning[i]
                         if isinstance(cond_i, torch.Tensor):
-                            cond_i = cond_i.cpu().numpy()
+                            cond_i = cond_i.float().cpu().numpy()
                         for j, key in enumerate(self.conditions):
                             sample[key] = cond_i[j]
 
