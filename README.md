@@ -15,13 +15,19 @@ Researchers at the intersection of scientific machine learning and plasma physic
 ## Models and data
 GyroSwin checkpoints are on the Hub in three sizes: [small](https://huggingface.co/ml-jku/gyroswin_small) | [medium](https://huggingface.co/ml-jku/gyroswin_medium) | [large](https://huggingface.co/ml-jku/gyroswin_large), with the in- and out-of-distribution evaluation cases at [gyroswin_cbc_id_ood](https://huggingface.co/datasets/ml-jku/gyroswin_cbc_id_ood).
 
-The PINC compression test set and model checkpoints (neural fields and autoencoders) are at [pinc_gkw](https://huggingface.co/datasets/gerkone/pinc_gkw). The complete trajectory set, with the per-trajectory GKW `input.dat` and generation config for reproducibility, is at [gyrokinetic-adiabatic-256traj](https://huggingface.co/datasets/gerkone/gyrokinetic-adiabatic-256traj).
+The PINC compression test set and model checkpoints (neural fields and autoencoders) are at [pinc_gkw](https://huggingface.co/datasets/gerkone/pinc_gkw). The complete adiabatic trajectory set (bf16 distribution functions and potentials, metadata, GKW `input.dat`) is at [🤗 cbc-gyroswin-256traj](https://huggingface.co/datasets/gerkone/cbc-gyroswin-256traj), with the held-out evaluation trajectories under `id/` and `ood/`. Download the evaluation sets only:
+```python
+from huggingface_hub import snapshot_download
+snapshot_download("gerkone/cbc-gyroswin-256traj", repo_type="dataset",
+                  allow_patterns=["id/*", "ood/*"], local_dir="data/preprocessed_kvikio")
+```
 
-GyroSwin inference from the Hub:
+## Reproducing GyroSwin
+With the evaluation sets downloaded as above, from the repository root:
 ```
-python -m neugk.gyroswin.eval.inference_from_hf
+python scripts/gyroswin/eval_gyroswin.py --ckpt ml-jku/gyroswin_large --data-root data/preprocessed_kvikio
 ```
-This fetches the data and weights and rolls out autoregressively, writing each prediction (`df`, `phi`, `flux`) to `predictions/`. Select the checkpoint with `--ckpt`.
+This rolls out the hub checkpoint (`--ckpt`, small / medium / large) on the 6 in- and 5 out-of-distribution cases of the paper and prints the time-averaged heat-flux error per case and the RMSE per split (Table 2). `--split id|ood|all` evaluates every trajectory under `id/` and `ood/` instead. Single rollouts that write each prediction (`df`, `phi`, `flux`) to `predictions/` run with `python -m neugk.gyroswin.eval.inference_from_hf --ckpt <checkpoint>`.
 
 ## Running
 Experiments use Hydra configs (`configs/{dataset,logging,model,training,validation}`); training and evaluation run through `main.py`. To sample from a trained diffusion checkpoint:
@@ -29,12 +35,7 @@ Experiments use Hydra configs (`configs/{dataset,logging,model,training,validati
 python generate_samples.py configs/generation/generate_samples.yaml
 ```
 setting `diffusion_checkpoint_dir`, `ae_checkpoint`, `data_path` and `generation.{trajectories,output_dir}` in the config. With `normalization_file` and `inference.latent_scale` set, no training data is needed.
-
-Heat-flux evaluation on the `id/` and `ood/` sets of the dataset:
-```
-python scripts/gyroflow/eval_gyroflow.py <sampling config>
-python scripts/gyroswin/eval_gyroswin.py --ckpt ml-jku/gyroswin_large --data-root <dataset root> [--split gyroswin|id|ood|all]
-```
+`scripts/gyroflow/eval_gyroflow.py <sampling config>` samples the `id/` and `ood/` sets and reports the time-averaged heat-flux error.
 
 ## Components
 
