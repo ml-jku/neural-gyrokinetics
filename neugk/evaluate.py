@@ -436,8 +436,8 @@ class BaseEvaluator:
             else:
                 zpool = z
 
-            latents.append(zpool.cpu())
-            fluxes.append(flux.view(flux.shape[0], -1).cpu())
+            latents.append(zpool.float().cpu())
+            fluxes.append(flux.view(flux.shape[0], -1).float().cpu())
 
         return torch.cat(latents, 0), torch.cat(fluxes, 0)
 

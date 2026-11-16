@@ -44,11 +44,11 @@ validation_trajectories: [
 ]
 partial_holdouts:
 training_cond_filters:
-  last_fluxes: [1., .inf]
-  first_fluxes: [1., .inf]
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]
 eval_cond_filters:
-  last_fluxes: [1., .inf]
-  first_fluxes: [1., .inf]
+  last_flux: [1., .inf]
+  first_flux: [1., .inf]
 
 augment:
   noise: 
