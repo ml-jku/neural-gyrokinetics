@@ -30,9 +30,9 @@ def create_parser():
         default="iteration_262.h5",
         choices=[
             "iteration_262.h5",
-            "iteration_135.h5",
+            "iteration_131.h5",
             "iteration_8.h5",
-            "iteration_232.h5",
+            "iteration_235.h5",
             "iteration_148.h5",
             "iteration_115.h5",
             "ood_iteration_0.h5",
@@ -81,7 +81,6 @@ def main():
         repo_id="ml-jku/gyroswin_cbc_id_ood",
         filename=os.path.join("preprocessed", parser.eval_sim),
         repo_type="dataset",
-        token=True,
         cache_dir=parser.data_path,
     )
 
@@ -89,7 +88,6 @@ def main():
         repo_id="ml-jku/gyroswin_cbc_id_ood",
         filename="normalization_stats.pkl",
         repo_type="dataset",
-        token=True,
         cache_dir=parser.data_path,
     )
 
@@ -138,14 +136,16 @@ def main():
         params["s_hat"] = infile["metadata/s_hat"][:]
         params["q"] = infile["metadata/q"][:]
 
-        start_tstep = infile["metadata/timesteps"][:].item()
+        tsteps = infile["metadata/timesteps"][:]
+        # some ood files store several times, the input snapshot is at the offset
+        start_tstep = tsteps.item() if tsteps.size == 1 else 1.2 * (cfg.dataset.offset + 1)
         resolution = infile["metadata/resolution"][:]
 
     # temporal grid setup
     delta = 1.2
     steps = idx_end - cfg.dataset.offset
     timesteps = (
-        torch.arange(start_tstep, start_tstep + steps * delta, delta)
+        (start_tstep + delta * torch.arange(steps + 1))
         .unsqueeze(0)
         .to(device)
     )
@@ -167,6 +167,10 @@ def main():
 
     # instantiate model
     model = get_model(cfg, dataset=cfg.dataset).to(device)
+    # enc/dec_cond_embed alias cond_embed in the unets
+    for k in [k for k in state_dict if ".cond_embed." in k]:
+        for alias in ("enc_cond_embed", "dec_cond_embed"):
+            state_dict.setdefault(k.replace(".cond_embed.", f".{alias}."), state_dict[k])
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 

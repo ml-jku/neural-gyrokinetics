@@ -56,6 +56,7 @@ dataset:
     noise_std: 0.0001
 model:
   name: gyroswin_multi
+  legacy_swin_shortcut: false
   bundle_seq_length: 1
   latent_dim: 512
   num_layers: 1
