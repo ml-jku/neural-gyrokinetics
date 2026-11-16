@@ -1,5 +1,5 @@
 name: cyclone
-path: /projects/u6eb/gyrokinetics/preprocessed_kvikio
+path: data/preprocessed_kvikio
 backend: gds  # gds, h5
 normalization:
   df:

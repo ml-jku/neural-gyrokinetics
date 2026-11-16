@@ -12,7 +12,7 @@ from neugk.dataset.backend import H5Backend, KvikIOBackend
 PINC_REVIVAL_STATS = "diff_df_flux_phi_offset80_mu_d0253e25_stats.pkl"
 
 # checkpoint root, PINC_CKPT_ROOT overrides it
-CKPT_ROOT = os.environ.get("PINC_CKPT_ROOT", "/system/user/publicwork/galletti")
+CKPT_ROOT = os.environ.get("PINC_CKPT_ROOT", "checkpoints")
 
 # AE checkpoints to evaluate: label -> (checkpoint path, load_peft, vqvae)
 AE_CKPTS = {

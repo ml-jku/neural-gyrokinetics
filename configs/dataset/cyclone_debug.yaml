@@ -1,5 +1,5 @@
 name: cyclone
-path: /local00/bioinf/galletti/preprocessed_kvikio
+path: data/preprocessed_kvikio
 backend: gds  # gds, h5
 normalization: 
   df: 

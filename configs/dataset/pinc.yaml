@@ -1,6 +1,6 @@
 # PINC dataset config: three-way split (train/val/test); train: 235 trajs (300 - 5 val - 60 test); val: 5 trajs for model selection; test: 60 held-out turbulent trajs for final eval (~1080 snapshots, 10x downsample); val trajs (3, 50, 150, 225, 290) removed from training brace-expansion; test trajs disjoint, used by pinc.eval scripts; reference AEs/NFs: https://huggingface.co/datasets/gerkone/pinc_gkw
 name: cyclone
-path: /local00/bioinf/galletti/preprocessed_kvikio
+path: data/preprocessed_kvikio
 backend: gds
 gds_override: true   # GPU-direct (kvikio) loading. NOTE: needs num_workers=0 under kernel ptrace_scope>=2 (CUDA-IPC/pidfd blocked)
 # training serves uniform bf16 (fast bf16 shards if converted, f32 downcast otherwise); validation always f32; null -> f32 everywhere

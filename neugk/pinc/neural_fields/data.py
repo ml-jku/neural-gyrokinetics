@@ -16,7 +16,7 @@ class CycloneNFDataset(Dataset):
         self,
         trajectory: str,
         timesteps: Union[int, Sequence[int]],
-        path: str = "/restricteddata/ukaea/gyrokinetics/preprocessed",
+        path: str = "data/preprocessed_kvikio",
         realpotens: bool = False,
         normalize: Optional[str] = None,
         normalize_coords: bool = False,
