@@ -26,9 +26,9 @@ This fetches the data and weights and rolls out autoregressively, writing each p
 ## Running
 Experiments use Hydra configs (`configs/{dataset,logging,model,training,validation}`); training and evaluation run through `main.py`. To sample from a trained diffusion checkpoint:
 ```
-python generate_samples.py --config configs/generation/generate_samples.yaml
+python generate_samples.py configs/generation/generate_samples.yaml
 ```
-setting `diffusion_checkpoint_dir`, `ae_checkpoint`, and `generation.{trajectories,output_dir}` in the config.
+setting `diffusion_checkpoint_dir`, `ae_checkpoint`, `data_path` and `generation.{trajectories,output_dir}` in the config. With `normalization_file` and `inference.latent_scale` set, no training data is needed.
 
 ## Components
 

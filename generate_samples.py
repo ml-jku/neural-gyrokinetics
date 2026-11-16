@@ -18,7 +18,7 @@ import torch
 from omegaconf import OmegaConf
 
 from neugk.diffusion import get_diffusion_runner
-from neugk.integrals import FluxIntegral
+from neugk.physics.integrals import FluxIntegral
 from neugk.utils import recombine_zf
 
 
@@ -39,14 +39,16 @@ def generate(gen_cfg_path: str) -> None:
     diff_ckpt_dir = gen_cfg.diffusion_checkpoint_dir
     diff_cfg = OmegaConf.load(os.path.join(diff_ckpt_dir, "config.yaml"))
 
-    # data path
-    # data_path overrides the checkpoint config path for BOTH training and
-    # generation data.  If generation targets live in a different directory,
-    # set data_path to that directory AND provide inference.latent_scale so
-    # that training-data access is not required.
+    # data_path overrides the checkpoint config path for training and generation data
     data_path = gen_cfg.get("data_path") or gen_cfg.get("generation_data_path")
     if data_path:
         diff_cfg.dataset.path = data_path
+    if gen_cfg.get("ae_checkpoint"):
+        diff_cfg.ae_checkpoint = gen_cfg.ae_checkpoint
+    # normalization_file + inference.latent_scale: no training data needed
+    if gen_cfg.get("normalization_file"):
+        diff_cfg.dataset.sample_only = True
+        diff_cfg.dataset.normalization_file = gen_cfg.normalization_file
 
     # override val set with generation targets
     diff_cfg.dataset.validation_trajectories = list(gen_cfg.generation.trajectories)
@@ -57,6 +59,8 @@ def generate(gen_cfg_path: str) -> None:
     diff_cfg.ddp.enable = False
     diff_cfg.training.num_workers = 2
     diff_cfg.training.pin_memory = True
+    if gen_cfg.inference.get("latent_scale") is not None:
+        diff_cfg.latent_scale = float(gen_cfg.inference.latent_scale)
 
     # runner: loads AE, precomputes/loads cached latents, builds model
     # NOTE: get_diffusion_runner calls set_seed which re-enables deterministic
@@ -156,7 +160,7 @@ def generate(gen_cfg_path: str) -> None:
         df_array = torch.cat(all_df, dim=0).numpy().astype(np.float32)  # (N, C, ...)
 
         gt_flux_series = np.array(meta["flux"], dtype=np.float32)
-        gt_avg_flux = float(np.mean(gt_flux_series[-80:]))
+        gt_avg_flux = float(np.mean(gt_flux_series[runner.cfg.dataset.offset :]))
 
         if calc_metrics and all_flux:
             pm, ps = float(np.mean(all_flux)), float(np.std(all_flux))
