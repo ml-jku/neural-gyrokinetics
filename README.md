@@ -30,6 +30,12 @@ python generate_samples.py configs/generation/generate_samples.yaml
 ```
 setting `diffusion_checkpoint_dir`, `ae_checkpoint`, `data_path` and `generation.{trajectories,output_dir}` in the config. With `normalization_file` and `inference.latent_scale` set, no training data is needed.
 
+Heat-flux evaluation on the `id/` and `ood/` sets of the dataset:
+```
+python scripts/gyroflow/eval_gyroflow.py <sampling config>
+python scripts/gyroswin/eval_gyroswin.py --ckpt ml-jku/gyroswin_large --data-root <dataset root>
+```
+
 ## Components
 
 <img src="pages/imgs/gyroswin_icon.png" alt="GyroSwin Icon" height="16px"> <strong>GyroSwin</strong> is a 5D vision transformer with shifted-window linear attention that captures the full nonlinear dynamics of gyrokinetic turbulence, predicting turbulent transport at a fraction of the simulation cost while preserving physics that quasilinear models miss. See the [blogpost](https://ml-jku.github.io/blog/2025/gyroswin/).

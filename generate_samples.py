@@ -33,8 +33,9 @@ def _traj_basename(path: str) -> str:
     return b
 
 
-def generate(gen_cfg_path: str) -> None:
-    gen_cfg = OmegaConf.load(gen_cfg_path)
+def generate(gen_cfg) -> None:
+    if isinstance(gen_cfg, str):
+        gen_cfg = OmegaConf.load(gen_cfg)
 
     diff_ckpt_dir = gen_cfg.diffusion_checkpoint_dir
     diff_cfg = OmegaConf.load(os.path.join(diff_ckpt_dir, "config.yaml"))
@@ -100,6 +101,7 @@ def generate(gen_cfg_path: str) -> None:
     output_dir = gen_cfg.generation.output_dir
     output_prefix = gen_cfg.generation.get("output_prefix", "generated")
     calc_metrics = bool(gen_cfg.generation.get("calculate_mse_metrics", True))
+    save_df = bool(gen_cfg.generation.get("save_df", True))
     separate_zf = runner.cfg.dataset.separate_zf
 
     os.makedirs(output_dir, exist_ok=True)
@@ -150,14 +152,13 @@ def generate(gen_cfg_path: str) -> None:
             if separate_zf and pred_df.shape[1] > 2:
                 pred_df = recombine_zf(pred_df, dim=1)
 
-            all_df.append(pred_df)
+            if save_df:
+                all_df.append(pred_df)
 
             if calc_metrics:
                 geom_chunk = {k: v[:bs] for k, v in full_geom.items()}
                 _, (_, eflux, _) = integrator(geom_chunk, pred_df)
                 all_flux.extend(eflux.cpu().numpy().flatten().tolist())
-
-        df_array = torch.cat(all_df, dim=0).numpy().astype(np.float32)  # (N, C, ...)
 
         gt_flux_series = np.array(meta["flux"], dtype=np.float32)
         gt_avg_flux = float(np.mean(gt_flux_series[runner.cfg.dataset.offset :]))
@@ -169,7 +170,9 @@ def generate(gen_cfg_path: str) -> None:
         # save H5
         out_path = os.path.join(output_dir, f"{output_prefix}_{traj_name}.h5")
         with h5py.File(out_path, "w") as hf:
-            hf.create_dataset("df", data=df_array, compression="gzip", compression_opts=4)
+            if save_df:
+                df_array = torch.cat(all_df, dim=0).numpy().astype(np.float32)
+                hf.create_dataset("df", data=df_array, compression="gzip", compression_opts=4)
             hf.create_dataset("gt_flux_series", data=gt_flux_series)
             if calc_metrics and all_flux:
                 hf.create_dataset(
@@ -183,7 +186,7 @@ def generate(gen_cfg_path: str) -> None:
             for k, v in zip(cond_keys, cond[0].tolist()):
                 hf.attrs[k] = v
 
-        print(f"  Saved {df_array.shape} to {out_path}")
+        print(f"  Saved {n_samples} samples to {out_path}")
 
     print(f"\nDone. {len(valset.files)} files written to {output_dir}")
 
