@@ -33,7 +33,7 @@ setting `diffusion_checkpoint_dir`, `ae_checkpoint`, `data_path` and `generation
 Heat-flux evaluation on the `id/` and `ood/` sets of the dataset:
 ```
 python scripts/gyroflow/eval_gyroflow.py <sampling config>
-python scripts/gyroswin/eval_gyroswin.py --ckpt ml-jku/gyroswin_large --data-root <dataset root>
+python scripts/gyroswin/eval_gyroswin.py --ckpt ml-jku/gyroswin_large --data-root <dataset root> [--split gyroswin|id|ood|all]
 ```
 
 ## Components

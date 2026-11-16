@@ -64,7 +64,7 @@ def invert_df(b_xt, cfg, parser):
     return b_xt
 
 
-def main(parser=None, save_fds=True, cond_override=None):
+def main(parser=None, save_fds=True, cond_override=None, snapshot=None):
     """Run the autoregressive rollout, write predictions and return the flux trace."""
     # login to hf
     token_path = os.path.expanduser("~/.cache/huggingface/token")
@@ -77,7 +77,7 @@ def main(parser=None, save_fds=True, cond_override=None):
     model_name = parser.ckpt.split("/")[-1]
 
     # download assets
-    snapshot_dir = hf_hub_download(
+    snapshot_dir = snapshot or hf_hub_download(
         repo_id="ml-jku/gyroswin_cbc_id_ood",
         filename=os.path.join("preprocessed", parser.eval_sim),
         repo_type="dataset",
