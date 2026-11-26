@@ -7,14 +7,14 @@ the moment it finishes, so an interruption never loses completed fits and a re-l
 stopped (skips rows already on disk unless --overwrite). The per-method aggregate eval1k_<LABEL>.json is
 (re)built from whatever rows exist -- run with --aggregate-only to refresh it without computing.
 
-Methods: nf, nf-pinc, sz3, jpeg2000, zfp, ae, ae-pinc, pigs.
+Methods: nf, nf-pinc, sz3, jpeg2000, zfp, ae, ae-pinc.
 
   # everything on the free B300s, resumable:
-  python scripts/run_eval1k.py --methods nf,nf-pinc,sz3,jpeg2000,zfp,ae,ae-pinc,pigs --gpus 2,3
-  # just resume PIGS (long pole):
-  python scripts/run_eval1k.py --methods pigs --gpus 2,3
+  python scripts/run_eval1k.py --methods nf,nf-pinc,sz3,jpeg2000,zfp,ae,ae-pinc --gpus 2,3
+  # just resume one method:
+  python scripts/run_eval1k.py --methods nf-pinc --gpus 2,3
   # rebuild aggregates from on-disk rows without recomputing:
-  python scripts/run_eval1k.py --methods pigs --aggregate-only
+  python scripts/run_eval1k.py --methods nf-pinc --aggregate-only
 """
 
 import os
@@ -30,7 +30,7 @@ import torch.multiprocessing as mp
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from neugk.pinc.eval.reconstructors import NeuralField, Traditional, Autoencoder, PIGS
+from neugk.pinc.eval.reconstructors import NeuralField, Traditional, Autoencoder
 from neugk.pinc.eval.runner import evaluate_method
 from neugk.pinc.eval.discovery import discover, calibrate, TRAD, NF_PREFIX, CycloneNFDataset
 
@@ -47,7 +47,7 @@ AE_METHODS = {
     "ae-pinc-joint-last": "PINC-AE-JOINT-LAST",
     "ae-pinc-w2": "PINC-AE-W2",
 }
-ALL_METHODS = NF_METHODS + TRAD_METHODS + tuple(AE_METHODS) + ("pigs",)
+ALL_METHODS = NF_METHODS + TRAD_METHODS + tuple(AE_METHODS)
 
 
 def label_of(method):
@@ -56,8 +56,6 @@ def label_of(method):
         return method.upper()
     if method in AE_METHODS:
         return AE_METHODS[method]
-    if method == "pigs":
-        return "PIGS"
     return method  # nf, nf-pinc
 
 
@@ -120,8 +118,6 @@ def get_recon(method, cache, ctx, dev):
         model = model.to(dev).eval()
         mk = build_make_val_dataset(config, ctx["path"], ctx["backend"])
         rec = Autoencoder(AE_METHODS[method], model, mk, vqvae=vqvae, vapor=False)
-    elif method == "pigs":
-        rec = PIGS("PIGS", ctx["path"], ctx["backend"], ctx["nf_cr"])
     else:
         raise ValueError(f"unknown method {method!r}")
     cache[method] = rec
@@ -292,7 +288,7 @@ def main():
     )
 
     # flat (method, traj) work list, resume-filtered, round-robin sharded so the expensive
-    # method (PIGS) is balanced evenly across GPUs.
+    # methods are balanced evenly across GPUs.
     work = [(m, t) for m in methods for t in trajs]
     if not args.overwrite:
         skip = sum(1 for m, t in work if os.path.exists(rowfile(rowdir, label_of(m), t)))

@@ -1,6 +1,6 @@
 """Autoencoder eval support: the trained AE checkpoints to score, and a builder that returns a
 per-trajectory val dataset sharing the checkpoint's TRAINING normalization stats (so AE rows line
-up with the NF / traditional / PIGS rows). Kept out of the drivers so the AE wiring lives in one place.
+up with the NF / traditional rows). Kept out of the drivers so the AE wiring lives in one place.
 """
 
 import os
