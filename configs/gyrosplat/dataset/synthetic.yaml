@@ -1,0 +1,5 @@
+# The synthetic snapshot used by the tests and the quick start.
+shape: [8, 4, 6, 16, 16]
+n_species: 1
+seed: 0
+band: [1, 2, 3, 4]

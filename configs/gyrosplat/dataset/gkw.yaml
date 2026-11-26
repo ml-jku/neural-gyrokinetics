@@ -1,0 +1,7 @@
+# GKW cyclone snapshots in the preprocessed layout (see neugk/gyrosplat/datasets/gkw.py).
+# Pass these as `data.<key>=<value>` overrides.  The supervised and evaluated flux band
+# defaults to the recipe's `band`; `band_lo` / `band_hi` override it ([lo, hi)).
+root: /path/to/preprocessed_snapshots
+trajectory: iteration_13
+timestep: 100
+raw_root: null        # the raw runs, for the parallel grid spacing; otherwise it is read from the metadata

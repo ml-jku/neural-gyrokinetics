@@ -1,0 +1,14 @@
+# The recipe on the synthetic snapshot, every stage switched on at a small size: physics fit,
+# Gabor groups with shared envelopes, the potential-aware amplitude solve, the routed co-fit, the Gauss-Newton and
+# 16-bit parameters.  Runs on a CPU in seconds.
+n_equiv: 40
+normalize: zonal
+init: {method: field, sigma_cells: 2.0}
+fit: {steps: 40, lr_scale: 1.0, loss: huber, warm_start: true, polish_steps: 2, chunk: 4096}
+varpro: {ridge: 1.0e-3, per_column: false, after_fit: false, potential_weight: 1.0}
+physics: {epochs: 5, field_weight: 1.0, potential_weight: 1.0, flux_weight: 0.0}
+carriers: {kind: tied_gabor, fraction: 0.4, tied_k: 3, share_envelopes: true, tail_bins: [2, 3, 4], sigma_y_cells: 1.5, residual_solve: true, flux_gate: 0.0, cofit: routed, routed_steps: 5, routed_steps_hard: 8, hard_ratio: 50.0}
+gn: {steps: 5, mu: 1.0e-4, carriers_only: true}
+baselines: {wavelet: haar, wavelet_level: 1, objective_warmup: 20, objective_relative_damping: 1.0e-8}
+band: [1, 5]
+storage_bits: 16

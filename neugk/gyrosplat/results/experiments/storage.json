@@ -1,0 +1,79 @@
+{
+ "archived_gyrosplat_file_bytes": {
+  "142": 631948,
+  "302": 300172
+ },
+ "payload_bytes": {
+  "142": {
+   "fourier": 626688,
+   "fourier_objective": 626688,
+   "gyrosplat": 626692,
+   "neural_field": 627736,
+   "neural_field_physics": 627736,
+   "pca": 621656,
+   "splats": 626640,
+   "sz3": 624196,
+   "wavelet_bior4.4": 626688,
+   "wavelet_haar": 626688,
+   "wavelet_haar_objective": 626688,
+   "zfp": 615200
+  },
+  "302": {
+   "autoencoder": 294912,
+   "fourier": 294924,
+   "fourier_objective": 294924,
+   "gyrosplat": 294928,
+   "neural_field": 295324,
+   "neural_field_physics": 295324,
+   "pca": 294440,
+   "splats": 294928,
+   "sz3": 296336,
+   "vae": 294912,
+   "vqvae": 294912,
+   "wavelet_bior4.4": 294928,
+   "wavelet_haar": 294928,
+   "wavelet_haar_objective": 294928,
+   "zfp": 292400
+  }
+ },
+ "rate_distortion_budgets": {
+  "100": {
+   "bytes": 891332,
+   "gyrosplat_stored_values": 222833
+  },
+  "1000": {
+   "bytes": 89188,
+   "gyrosplat_stored_values": 22297
+  },
+  "142": {
+   "bytes": 626692,
+   "gyrosplat_stored_values": 156673
+  },
+  "200": {
+   "bytes": 445672,
+   "gyrosplat_stored_values": 111418
+  },
+  "302": {
+   "bytes": 294928,
+   "gyrosplat_stored_values": 73732
+  },
+  "450": {
+   "bytes": 198084,
+   "gyrosplat_stored_values": 49521
+  },
+  "600": {
+   "bytes": 148568,
+   "gyrosplat_stored_values": 37142
+  },
+  "800": {
+   "bytes": 111380,
+   "gyrosplat_stored_values": 27845
+  }
+ },
+ "raw_snapshot_bytes": 89128960,
+ "shared_decoder_parameters": {
+  "autoencoder": 217632352,
+  "vae": 217894752,
+  "vqvae": 230029025
+ }
+}

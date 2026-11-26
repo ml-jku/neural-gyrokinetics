@@ -1,0 +1,9 @@
+{"construct_peak_gb": 0.864346624, "construct_seconds": 2.7253410816192627, "geometry_bytes": 3607296, "snapshot": "extra_iteration_0_t150", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}
+{"construct_peak_gb": 0.864346624, "construct_seconds": 2.426163911819458, "geometry_bytes": 3607296, "snapshot": "extra_iteration_15_t150", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}
+{"construct_peak_gb": 0.859681792, "construct_seconds": 2.438735246658325, "geometry_bytes": 2944, "snapshot": "iteration_100_t150", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}
+{"construct_peak_gb": 0.859681792, "construct_seconds": 2.417898654937744, "geometry_bytes": 2944, "snapshot": "iteration_13_t100", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}
+{"construct_peak_gb": 0.864343552, "construct_seconds": 2.374239444732666, "geometry_bytes": 3605872, "snapshot": "iteration_204_t32", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}
+{"construct_peak_gb": 0.864343552, "construct_seconds": 2.61201548576355, "geometry_bytes": 3605872, "snapshot": "iteration_50_t32", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}
+{"construct_peak_gb": 0.864343552, "construct_seconds": 2.664052724838257, "geometry_bytes": 3605872, "snapshot": "iteration_5_t20", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}
+{"construct_peak_gb": 0.864343552, "construct_seconds": 3.1112112998962402, "geometry_bytes": 3605872, "snapshot": "iteration_877_t20", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}
+{"construct_peak_gb": 0.864343552, "construct_seconds": 2.5077250003814697, "geometry_bytes": 3605872, "snapshot": "iteration_893_t32", "snapshot_field_bytes": 89128960, "truth_target_bytes": 223171072}

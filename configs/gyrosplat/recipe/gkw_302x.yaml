@@ -1,0 +1,57 @@
+# The 302x recipe of the paper: 4337 atom equivalents, a quarter of them spent on groups of
+# seven Gabor carriers with one shared envelope per group (3,254 base splats + 526 groups =
+# 73,732 stored reals with the four normalization values, CR 302.2x on the GKW snapshots).
+# Zonal-split normalisation, importance placement with a closed-form amplitude warm start, a
+# 1000-step Huber descent with a two-step polish, 40 epochs of the physics fit (field +
+# potential, flux off), the Gabor groups seeded at the binormal modes 1, 6, 11, 16, 21, 26, 31
+# with a residual amplitude solve, the potential-aware amplitude solve, the routed co-fit (60
+# epochs, 120 where the potential is placement-bound) and 8 Gauss-Newton steps on the carrier
+# amplitudes against the heat-flux spectrum of every nonzero mode (band [1, 32)).
+# `storage_bits=16` adds the half-precision round trip of the parameters as a last row.
+n_equiv: 4337
+normalize: zonal
+init:
+  method: field
+  sigma_cells: 2.0
+fit:
+  steps: 1000
+  lr_scale: 1.0
+  loss: huber
+  warm_start: true
+  polish_steps: 2
+  chunk: 16384
+varpro:
+  ridge: 1.0e-3
+  per_column: false
+  after_fit: false
+  potential_weight: 1.0
+physics:
+  epochs: 40
+  field_weight: 1.0
+  potential_weight: 1.0
+  flux_weight: 0.0
+carriers:
+  kind: tied_gabor
+  fraction: 0.25
+  tied_k: 7
+  share_envelopes: true
+  tail_bins: [1, 6, 11, 16, 21, 26, 31]
+  sigma_y_cells: 1.5
+  residual_solve: true
+  flux_gate: 5.0
+  cofit: routed
+  routed_steps: 60
+  routed_steps_hard: 120
+  hard_ratio: 50.0
+gn:
+  steps: 8
+  mu: 1.0e-4
+  carriers_only: true
+baselines:
+  wavelet_level: 1
+  nf: {width: 131, layers: 5, zscore_axis: 1}   # PINC's network at this tier, z-scored per mu
+  objective_warmup: 400       # the Fourier control: Adam on field, potential and flux, then the Gauss-Newton
+                              # (gn.steps of them, on the raw coefficients, almost undamped)
+  objective_relative_damping: 1.0e-8
+band: [1, 32]
+storage_bits: 32
